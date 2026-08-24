@@ -35,6 +35,8 @@ from qvc.hubble.cuts import (
     LOG_F_FE_UV_3000_MAX,
     REL_APPARENT_MAG_2500_ERR_MAX,
     add_light_curve_point_count_column,
+    build_sdss_target_selection_mask,
+    normalize_sdss_target_selection,
 )
 from qvc.hubble.hubble_cut_config import (
     build_agn_cuts,
@@ -1052,7 +1054,9 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
                   plot_diagnostics=True,
                   *,
                   magnitude_convention,
-                  completeness_magnitude="dereddened"):
+                  completeness_magnitude="dereddened",
+                  sdss_target_selection="all",
+                  completeness_stratification="none"):
     if (
         not isinstance(magnitude_convention, str)
         or magnitude_convention not in {"dereddened", "attenuated"}
@@ -1461,6 +1465,70 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         if 'alpha_lambda' not in df.columns:
             raise ValueError("spectra_fit_h5 not provided and spectral fields not found in agn h5 file")
             #raise ValueError("spectra_fit_h5 must be provided if alpha_lambda not in agn h5 file")
+
+    sdss_target_selection = normalize_sdss_target_selection(sdss_target_selection)
+    target_mask, target_criterion = build_sdss_target_selection_mask(
+        df, sdss_target_selection
+    )
+    target_before = len(df)
+    df = _record_cut(
+        "sample:sdss_target_selection",
+        f"{sdss_target_selection}: {target_criterion}",
+        df,
+        target_mask,
+    )
+    df.attrs["sdss_target_selection"] = sdss_target_selection
+    print(
+        "SDSS target selection "
+        f"{sdss_target_selection!r}: kept {len(df)}/{target_before} objects "
+        f"({target_criterion})."
+    )
+
+    # Completeness stratification is a population definition, not a quality
+    # cut. It therefore remains active with --no-cuts and is applied before
+    # df_all captures the pre-quality-cut parent population.
+    from qvc.hubble.completeness_strata import (
+        COMPLETENESS_STRATUM_CODE_COL,
+        COMPLETENESS_STRATUM_COL,
+        assign_completeness_strata,
+        normalize_completeness_stratification,
+    )
+
+    completeness_stratification = normalize_completeness_stratification(
+        completeness_stratification
+    )
+    stratum_assignment = assign_completeness_strata(
+        df, completeness_stratification
+    )
+    if stratum_assignment is not None:
+        strat_before = len(df)
+        df = df.copy()
+        df[COMPLETENESS_STRATUM_COL] = stratum_assignment.labels.astype(str)
+        df[COMPLETENESS_STRATUM_CODE_COL] = stratum_assignment.codes.astype(
+            np.int16
+        )
+        names_and_counts = ", ".join(
+            f"{name}={count}"
+            for name, count in zip(
+                stratum_assignment.stratum_names,
+                stratum_assignment.counts,
+            )
+        )
+        df = _record_cut(
+            "sample:completeness_stratification",
+            f"{completeness_stratification}: {names_and_counts}",
+            df,
+            stratum_assignment.retained_mask,
+        )
+        df.attrs["completeness_stratification"] = completeness_stratification
+        df.attrs["completeness_stratification_definition"] = (
+            stratum_assignment.definition_json
+        )
+        print(
+            "Completeness stratification "
+            f"{completeness_stratification!r}: kept {len(df)}/{strat_before} "
+            f"objects ({names_and_counts})."
+        )
 
     magnitude_columns = {
         "dereddened": (

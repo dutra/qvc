@@ -34,6 +34,10 @@ z_pivot_agn = 1.5
 DEFAULT_COMPLETENESS_SIM_FILE = None
 DEFAULT_COMPLETENESS_FOOTPRINT_AREA_DEG2 = 5.0
 
+from qvc.hubble.cuts import (
+    SDSS_TARGET_SELECTION_CHOICES,
+    normalize_sdss_target_selection,
+)
 from qvc.hubble.hubble_utils import (
     compare_models_by_log_evidence_all,
     compute_alpha_ox,
@@ -117,6 +121,17 @@ from qvc.hubble.hubble_completeness_refactored import (
     make_dm_function,
     normalize_completeness_magnitude,
     prepare_completeness_magnitude_columns,
+)
+from qvc.hubble.completeness_strata import (
+    COMPLETENESS_STRATIFICATION_CHOICES,
+    COMPLETENESS_STRATUM_CODE_COL,
+    COMPLETENESS_STRATUM_COL,
+    StratifiedCompletenessBundle,
+    build_completeness_params as build_completeness_params_for_strata,
+    get_completeness_stratification_preset,
+    make_stratified_dm_function,
+    normalize_completeness_stratification,
+    write_completeness_stratum_counts,
 )
 from qvc.hubble.completeness_mock_catalog import (
     COSMO as COMPLETENESS_MOCK_COSMO,
@@ -630,6 +645,7 @@ def make_run_tag(
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
     use_redshift_mu_term=False,
+    completeness_stratification="none",
 ):
     speed = normalize_speed(speed)
     zmin, zmax = z_range
@@ -643,6 +659,18 @@ def make_run_tag(
         if completeness
         else "_disable_completeness"
     )
+    completeness_stratification = normalize_completeness_stratification(
+        completeness_stratification
+    )
+    if completeness_stratification != "none" and (not completeness or only_sna):
+        raise ValueError(
+            "Completeness stratification requires completeness and an AGN likelihood."
+        )
+    stratification_tag = (
+        f"_cstrat-{completeness_stratification}"
+        if completeness and completeness_stratification != "none"
+        else ""
+    )
     ceph_tag = "_nocephdist_planckh0" if disable_ceph_dist_calibration else ""
     planck_h0_tag = "_planckh0" if use_planck_h0_prior and not disable_ceph_dist_calibration else ""
     planck_om_tag = "_planckom" if use_planck_om_prior else ""
@@ -652,7 +680,7 @@ def make_run_tag(
     muz_tag = "_muz" if use_redshift_mu_term else ""
     return (
         f"{cosmo_model}_{_fit_mode_label(only_sna, only_agn)}_{speed}_{n_tag}_{z_tag}"
-        f"{completeness_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}{muz_tag}"
+        f"{completeness_tag}{stratification_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}{muz_tag}"
     )
 
 
@@ -686,6 +714,124 @@ def _checkpoint_string_tuple(value, *, field_name, checkpoint_file):
         else str(item)
         for item in arr.tolist()
     )
+
+
+def _checkpoint_scalar_string(value, *, field_name, checkpoint_file):
+    items = _checkpoint_string_tuple(
+        value, field_name=field_name, checkpoint_file=checkpoint_file
+    )
+    if len(items) != 1:
+        raise RuntimeError(
+            f"Checkpoint '{checkpoint_file}' field {field_name!r} must contain "
+            "exactly one string."
+        )
+    return items[0]
+
+
+def _completeness_stratification_checkpoint_payload(stratification, df_agn):
+    """Serialize the immutable preset and the ordered fitted assignments."""
+
+    normalized = normalize_completeness_stratification(stratification)
+    payload = {"completeness_stratification": normalized}
+    preset = get_completeness_stratification_preset(normalized)
+    if preset is None:
+        return payload
+    missing = {
+        COMPLETENESS_STRATUM_COL,
+        COMPLETENESS_STRATUM_CODE_COL,
+    } - set(df_agn.columns)
+    if missing:
+        raise KeyError(
+            "Cannot checkpoint stratified completeness without dataframe "
+            f"columns {sorted(missing)}."
+        )
+    payload.update(
+        completeness_stratification_definition=preset.canonical_json(),
+        completeness_stratum_names=np.asarray(
+            [item.name for item in preset.strata], dtype=str
+        ),
+        completeness_stratum_codes_fit_selection=df_agn[
+            COMPLETENESS_STRATUM_CODE_COL
+        ].to_numpy(dtype=np.int16),
+    )
+    return payload
+
+
+def _validate_completeness_stratification_checkpoint(
+    results,
+    *,
+    checkpoint_file,
+    expected_stratification="none",
+    expected_codes=None,
+):
+    """Reject resume across different presets, definitions, or assignments."""
+
+    expected = normalize_completeness_stratification(expected_stratification)
+    if "completeness_stratification" not in results:
+        if expected == "none":
+            return
+        raise RuntimeError(
+            f"Checkpoint '{checkpoint_file}' predates completeness stratification "
+            f"metadata and cannot be resumed as {expected!r}."
+        )
+    stored = normalize_completeness_stratification(
+        _checkpoint_scalar_string(
+            results["completeness_stratification"],
+            field_name="completeness_stratification",
+            checkpoint_file=checkpoint_file,
+        )
+    )
+    if stored != expected:
+        raise RuntimeError(
+            f"Checkpoint '{checkpoint_file}' completeness stratification differs: "
+            f"stored={stored!r}, expected={expected!r}."
+        )
+    if expected == "none":
+        return
+
+    required = {
+        "completeness_stratification_definition",
+        "completeness_stratum_names",
+        "completeness_stratum_codes_fit_selection",
+    }
+    missing = sorted(required - set(results))
+    if missing:
+        raise RuntimeError(
+            f"Checkpoint '{checkpoint_file}' is missing stratification metadata: {missing}."
+        )
+    preset = get_completeness_stratification_preset(expected)
+    stored_definition = _checkpoint_scalar_string(
+        results["completeness_stratification_definition"],
+        field_name="completeness_stratification_definition",
+        checkpoint_file=checkpoint_file,
+    )
+    if stored_definition != preset.canonical_json():
+        raise RuntimeError(
+            f"Checkpoint '{checkpoint_file}' uses a changed definition for "
+            f"completeness preset {expected!r}."
+        )
+    stored_names = _checkpoint_string_tuple(
+        results["completeness_stratum_names"],
+        field_name="completeness_stratum_names",
+        checkpoint_file=checkpoint_file,
+    )
+    expected_names = tuple(item.name for item in preset.strata)
+    if stored_names != expected_names:
+        raise RuntimeError(
+            f"Checkpoint '{checkpoint_file}' has incompatible completeness stratum order."
+        )
+    if expected_codes is not None:
+        stored_codes = np.asarray(
+            results["completeness_stratum_codes_fit_selection"], dtype=np.int16
+        )
+        current_codes = np.asarray(expected_codes, dtype=np.int16)
+        if stored_codes.shape != current_codes.shape or not np.array_equal(
+            stored_codes, current_codes
+        ):
+            raise RuntimeError(
+                f"Checkpoint '{checkpoint_file}' completeness assignments do not "
+                "match the current metadata-derived fitted sample."
+            )
 
 
 def _checkpoint_reference_object_id_tuple(
@@ -859,6 +1005,8 @@ def validate_resume_checkpoint(
     *,
     expected_model_labels=None,
     expected_use_redshift_mu_term=None,
+    expected_completeness_stratification="none",
+    expected_completeness_stratum_codes=None,
 ):
     required_keys = {
         "flat_samples",
@@ -912,6 +1060,13 @@ def validate_resume_checkpoint(
                 f"setting does not match the current run."
             )
 
+    _validate_completeness_stratification_checkpoint(
+        results,
+        checkpoint_file=checkpoint_file,
+        expected_stratification=expected_completeness_stratification,
+        expected_codes=expected_completeness_stratum_codes,
+    )
+
     for key in ("dmi_max_w", "integrals_max_w"):
         value = np.asarray(results[key])
         if value.ndim == 0:
@@ -956,6 +1111,7 @@ def _validate_resume_replot_checkpoint_params(
     *,
     expected_model_labels=None,
     expected_use_redshift_mu_term=None,
+    expected_completeness_stratification="none",
 ):
     if "flat_samples" not in results:
         raise RuntimeError(
@@ -988,6 +1144,12 @@ def _validate_resume_replot_checkpoint_params(
             raise RuntimeError(
                 f"Resume-replot checkpoint '{checkpoint_file}' mean-redshift-evolution setting does not match."
             )
+    _validate_completeness_stratification_checkpoint(
+        results,
+        checkpoint_file=checkpoint_file,
+        expected_stratification=expected_completeness_stratification,
+        expected_codes=None,
+    )
 
 
 def _remap_resume_replot_checkpoint(
@@ -998,6 +1160,7 @@ def _remap_resume_replot_checkpoint(
     *,
     expected_model_labels=None,
     expected_use_redshift_mu_term=None,
+    expected_completeness_stratification="none",
 ):
     """Return checkpoint payload remapped to the current cut AGN fit selection."""
 
@@ -1007,6 +1170,7 @@ def _remap_resume_replot_checkpoint(
         ndim,
         expected_model_labels=expected_model_labels,
         expected_use_redshift_mu_term=expected_use_redshift_mu_term,
+        expected_completeness_stratification=expected_completeness_stratification,
     )
     if "object_id_fit_selection" not in results:
         raise RuntimeError(
@@ -1054,6 +1218,7 @@ def _remap_resume_replot_checkpoint(
         "dmi_posterior_sigma",
         "integrals_max_w",
         "dmi_selection_sigma_posterior_median",
+        "completeness_stratum_codes_fit_selection",
     )
     required_per_object = {
         "dmi_max_w",
@@ -1079,6 +1244,17 @@ def _remap_resume_replot_checkpoint(
         out[key] = value[remap_idx]
     if "dmi_posterior_median" not in out:
         out["dmi_posterior_median"] = out["dmi_max_w"]
+    expected_codes = (
+        df_agn_fit_selection[COMPLETENESS_STRATUM_CODE_COL].to_numpy(dtype=np.int16)
+        if expected_completeness_stratification != "none"
+        else None
+    )
+    _validate_completeness_stratification_checkpoint(
+        out,
+        checkpoint_file=checkpoint_file,
+        expected_stratification=expected_completeness_stratification,
+        expected_codes=expected_codes,
+    )
     return out
 
 
@@ -1522,6 +1698,7 @@ def _prepare_shared_agn_pivot_context(
     resume_stage,
     prefix,
     completeness_magnitude="dereddened",
+    completeness_stratification="none",
     resume_replot_with_cuts=False,
 ):
     """Build once, or strictly load once, for cosmologies sharing a fit sample."""
@@ -1559,6 +1736,7 @@ def _prepare_shared_agn_pivot_context(
             use_eta_sigma_term=use_eta_sigma_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
             use_redshift_mu_term=use_redshift_mu_term,
+            completeness_stratification=completeness_stratification,
         )
         checkpoint_paths = _build_checkpoint_paths(prefix, run_tag)
         apply_two_pass = (
@@ -1629,73 +1807,77 @@ def _build_completeness_params(
     completeness_sim_file,
     plot_path,
     plot=False,
+    completeness_stratification="none",
 ):
     if not completeness:
         return None
-
-    missing_magnitude_columns = {
-        COMPLETENESS_MAG_COL,
-        COMPLETENESS_MAG_ERR_COL,
-    } - set(df_agn_completeness.columns)
-    if missing_magnitude_columns:
-        raise KeyError(
-            "Completeness requires prepared 2500-A magnitude columns: "
-            f"{sorted(missing_magnitude_columns)}."
-        )
-
-    if completeness_mode in ("3d_fhost", "4d_fhost_alpha"):
-        if COMPLETENESS_FHOST_COL not in df_agn_completeness.columns:
+    if normalize_completeness_stratification(completeness_stratification) == "none":
+        missing_magnitude_columns = {
+            COMPLETENESS_MAG_COL,
+            COMPLETENESS_MAG_ERR_COL,
+        } - set(df_agn_completeness.columns)
+        if missing_magnitude_columns:
             raise KeyError(
-                f"completeness_mode={completeness_mode!r} requires "
-                f"df_agn_completeness[{COMPLETENESS_FHOST_COL!r}]."
+                "Completeness requires prepared 2500-A magnitude columns: "
+                f"{sorted(missing_magnitude_columns)}."
             )
-        bad_fhost = ~np.isfinite(
-            df_agn_completeness[COMPLETENESS_FHOST_COL].to_numpy(dtype=float)
-        )
-        if np.any(bad_fhost):
-            raise ValueError(
-                f"completeness_mode={completeness_mode!r} requires finite "
-                f"{COMPLETENESS_FHOST_COL} for all AGN used to estimate the "
-                "completeness map; "
-                f"found {np.count_nonzero(bad_fhost)} non-finite rows."
+        if completeness_mode in ("3d_fhost", "4d_fhost_alpha"):
+            if COMPLETENESS_FHOST_COL not in df_agn_completeness.columns:
+                raise KeyError(
+                    f"completeness_mode={completeness_mode!r} requires "
+                    f"df_agn_completeness[{COMPLETENESS_FHOST_COL!r}]."
+                )
+            bad_fhost = ~np.isfinite(
+                df_agn_completeness[COMPLETENESS_FHOST_COL].to_numpy(dtype=float)
             )
-    if completeness_mode == "4d_fhost_alpha":
-        if "alpha_lambda" not in df_agn_completeness.columns:
-            raise KeyError(
-                "completeness_mode='4d_fhost_alpha' requires "
-                "df_agn_completeness['alpha_lambda']."
+            if np.any(bad_fhost):
+                raise ValueError(
+                    f"completeness_mode={completeness_mode!r} requires finite "
+                    f"{COMPLETENESS_FHOST_COL} for all AGN used to estimate "
+                    "the completeness map."
+                )
+        if completeness_mode == "4d_fhost_alpha":
+            if "alpha_lambda" not in df_agn_completeness.columns:
+                raise KeyError(
+                    "completeness_mode='4d_fhost_alpha' requires alpha_lambda."
+                )
+            if not np.all(
+                np.isfinite(
+                    df_agn_completeness["alpha_lambda"].to_numpy(dtype=float)
+                )
+            ):
+                raise ValueError(
+                    "completeness_mode='4d_fhost_alpha' requires finite alpha_lambda."
+                )
+            return get_completeness_function_4d_fhost_alpha(
+                df_agn_completeness,
+                sim_file=completeness_sim_file,
+                plot=plot,
+                plot_path=plot_path,
+                df_agn_fhost_population=df_agn_all,
             )
-        bad_alpha = ~np.isfinite(
-            df_agn_completeness["alpha_lambda"].to_numpy(dtype=float)
-        )
-        if np.any(bad_alpha):
-            raise ValueError(
-                "completeness_mode='4d_fhost_alpha' requires finite alpha_lambda "
-                "for all AGN used to estimate the completeness map; "
-                f"found {np.count_nonzero(bad_alpha)} non-finite rows."
+        if completeness_mode == "3d_fhost":
+            return get_completeness_function_3d_fhost(
+                df_agn_completeness,
+                sim_file=completeness_sim_file,
+                plot=plot,
+                plot_path=plot_path,
+                df_agn_fhost_population=df_agn_all,
             )
-
-    if completeness_mode == "4d_fhost_alpha":
-        return get_completeness_function_4d_fhost_alpha(
+        return get_completeness_function_2d(
             df_agn_completeness,
             sim_file=completeness_sim_file,
             plot=plot,
             plot_path=plot_path,
-            df_agn_fhost_population=df_agn_all,
         )
-    if completeness_mode == "3d_fhost":
-        return get_completeness_function_3d_fhost(
-            df_agn_completeness,
-            sim_file=completeness_sim_file,
-            plot=plot,
-            plot_path=plot_path,
-            df_agn_fhost_population=df_agn_all,
-        )
-    return get_completeness_function_2d(
+    return build_completeness_params_for_strata(
         df_agn_completeness,
-        sim_file=completeness_sim_file,
+        df_agn_all,
+        completeness_mode=completeness_mode,
+        completeness_sim_file=completeness_sim_file,
         plot=plot,
         plot_path=plot_path,
+        stratification=completeness_stratification,
     )
 
 
@@ -2068,6 +2250,7 @@ def _run_fit_stage(
     prefix,
     completeness_sim_file,
     completeness_mode,
+    completeness_stratification,
     compare_sigma_only,
     minimal_plots=False,
     disable_ceph_dist_calibration,
@@ -2117,6 +2300,7 @@ def _run_fit_stage(
         checkpoint_file_override=checkpoint_file_override,
         completeness_sim_file=completeness_sim_file,
         completeness_mode=completeness_mode,
+        completeness_stratification=completeness_stratification,
         completeness_magnitude=df_agn_fit_selection.attrs.get(
             "completeness_magnitude",
             "dereddened",
@@ -2237,6 +2421,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       checkpoint_file_override=None,
                       completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
                       completeness_mode="2d",
+                      completeness_stratification="none",
                       completeness_magnitude="dereddened",
                       N=None,
                       compare_sigma_only=False,
@@ -2255,6 +2440,13 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       df_agn_completeness=None,
                       ):
     validate_completeness_mode(completeness_mode)
+    completeness_stratification = normalize_completeness_stratification(
+        completeness_stratification
+    )
+    if completeness_stratification != "none" and (not completeness or only_sna):
+        raise ValueError(
+            "Completeness stratification requires completeness and an AGN likelihood."
+        )
     completeness_magnitude = normalize_completeness_magnitude(
         df_agn.attrs.get("completeness_magnitude", completeness_magnitude)
     )
@@ -2312,6 +2504,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         use_redshift_mu_term=use_redshift_mu_term,
+        completeness_stratification=completeness_stratification,
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -2360,6 +2553,39 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     if df_agn_completeness is None:
         df_agn_completeness = df_agn
 
+    active_stratification = get_completeness_stratification_preset(
+        completeness_stratification
+    )
+    if active_stratification is not None:
+        required_strata = {
+            COMPLETENESS_STRATUM_COL,
+            COMPLETENESS_STRATUM_CODE_COL,
+        }
+        for frame_name, frame in (
+            ("fit", df_agn),
+            ("completeness", df_agn_completeness),
+            ("parent", df_agn_all),
+        ):
+            missing = required_strata - set(frame.columns)
+            if missing:
+                raise KeyError(
+                    f"Stratified completeness {frame_name} dataframe is missing "
+                    f"{sorted(missing)}."
+                )
+        fit_codes = set(
+            df_agn[COMPLETENESS_STRATUM_CODE_COL].to_numpy(dtype=int).tolist()
+        )
+        expected_codes = set(range(len(active_stratification.strata)))
+        if fit_codes != expected_codes:
+            missing_names = [
+                active_stratification.strata[code].name
+                for code in sorted(expected_codes - fit_codes)
+            ]
+            raise ValueError(
+                "Fitted AGN selection must contain every active completeness "
+                f"stratum; missing={missing_names}. Increase --N or use the full sample."
+            )
+
     if completeness and not resume_replot_with_cuts:
         if completeness_sim_file is None:
             completeness_area_deg2 = estimate_sky_box_area_deg2(df_agn_all)
@@ -2376,6 +2602,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             completeness_sim_file=completeness_sim_file,
             plot_path=plot_path,
             plot=not (compare_sigma_only or minimal_plots),
+            completeness_stratification=completeness_stratification,
         )
     else:
         completeness_params = None
@@ -2388,6 +2615,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     agn_fields += ('apparent_mag_2500', 'apparent_mag_2500_err', 'z', 'z_err', 'object_id')
     if completeness:
         agn_fields += (COMPLETENESS_MAG_COL, COMPLETENESS_MAG_ERR_COL)
+    if active_stratification is not None:
+        agn_fields += (COMPLETENESS_STRATUM_COL, COMPLETENESS_STRATUM_CODE_COL)
     if COMPLETENESS_FHOST_COL in df_agn.columns:
         agn_fields += (COMPLETENESS_FHOST_COL,)
     if 'alpha_lambda' in df_agn.columns:
@@ -2445,6 +2674,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     ndim,
                     expected_model_labels=model_labels,
                     expected_use_redshift_mu_term=use_redshift_mu_term,
+                    expected_completeness_stratification=completeness_stratification,
                 )
                 print(
                     "Resume-replot with cuts: loaded posterior samples and remapped "
@@ -2458,6 +2688,12 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     n_agn=len(agn_data["z"]),
                     expected_model_labels=model_labels,
                     expected_use_redshift_mu_term=use_redshift_mu_term,
+                    expected_completeness_stratification=completeness_stratification,
+                    expected_completeness_stratum_codes=(
+                        df_agn[COMPLETENESS_STRATUM_CODE_COL].to_numpy(dtype=np.int16)
+                        if active_stratification is not None
+                        else None
+                    ),
                 )
             if not only_sna:
                 if stored_pivot_context != agn_pivot_context:
@@ -2693,6 +2929,11 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             checkpoint_payload.update(
                 _agn_pivot_checkpoint_payload(agn_pivot_context)
             )
+        checkpoint_payload.update(
+            _completeness_stratification_checkpoint_payload(
+                completeness_stratification, df_agn
+            )
+        )
         save_chains(checkpoint_file, **checkpoint_payload)
 
         # Bin dmi in redshift
@@ -2703,22 +2944,30 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         if completeness
         else df_agn["apparent_mag_2500"]
     )
-    dm_interp = make_dm_function(
-        debias_magnitude.values,
-        df_agn['z'].values,
-        dmi_posterior_median,
-        f_host_2500_psf=df_agn[COMPLETENESS_FHOST_COL].values if COMPLETENESS_FHOST_COL in df_agn.columns else None,
-        alpha_lambda=df_agn["alpha_lambda"].values if "alpha_lambda" in df_agn.columns else None,
-    )
+    if active_stratification is not None:
+        dm_interp = make_stratified_dm_function(df_agn, dmi_posterior_median)
+    else:
+        dm_interp = make_dm_function(
+            debias_magnitude,
+            agn_data["z"],
+            dmi_posterior_median,
+            f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL),
+            alpha_lambda=agn_data.get("alpha_lambda"),
+        )
     dmi_selection_sigma_interp = None
     if dmi_selection_sigma_posterior_median is not None:
-        dmi_selection_sigma_interp = make_dm_function(
-            df_agn[COMPLETENESS_MAG_COL].values,
-            df_agn['z'].values,
-            dmi_selection_sigma_posterior_median,
-            f_host_2500_psf=df_agn[COMPLETENESS_FHOST_COL].values if COMPLETENESS_FHOST_COL in df_agn.columns else None,
-            alpha_lambda=df_agn["alpha_lambda"].values if "alpha_lambda" in df_agn.columns else None,
-        )
+        if active_stratification is not None:
+            dmi_selection_sigma_interp = make_stratified_dm_function(
+                df_agn, dmi_selection_sigma_posterior_median
+            )
+        else:
+            dmi_selection_sigma_interp = make_dm_function(
+                df_agn[COMPLETENESS_MAG_COL],
+                df_agn["z"],
+                dmi_selection_sigma_posterior_median,
+                f_host_2500_psf=df_agn.get(COMPLETENESS_FHOST_COL),
+                alpha_lambda=df_agn.get("alpha_lambda"),
+            )
 
     if compare_sigma_only or minimal_plots:
         print("Skipping completeness diagnostics plots.")
@@ -2731,6 +2980,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             integrals_max_w,
             plot_path=plot_path,
             z_range=z_range,
+            completeness_strata=agn_data.get(COMPLETENESS_STRATUM_COL),
         )
 
     return (
@@ -2759,6 +3009,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                prefix="default", uniform_redshift_distribution=False,
                completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
                completeness_mode="2d",
+               completeness_stratification="none",
                completeness_magnitude="dereddened",
                compare_sigma_only=False,
                minimal_plots=False,
@@ -2774,6 +3025,19 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                resume_replot_with_cuts=False,
                agn_pivot_context=None):
     use_redshift_mu_term = bool(use_redshift_mu_term and not only_sna)
+    completeness_stratification = normalize_completeness_stratification(
+        completeness_stratification
+    )
+    if completeness_stratification != "none" and (not completeness or only_sna):
+        raise ValueError(
+            "Completeness stratification requires completeness and an AGN likelihood."
+        )
+    stored_target_selection = df_agn.attrs.get("sdss_target_selection", "all")
+    if completeness_stratification != "none" and stored_target_selection != "all":
+        raise ValueError(
+            "Completeness stratification requires an unrestricted "
+            "sdss_target_selection='all' parent sample."
+        )
     validate_completeness_mode(completeness_mode)
     completeness_magnitude = normalize_completeness_magnitude(
         completeness_magnitude
@@ -2807,6 +3071,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         use_redshift_mu_term=use_redshift_mu_term,
+        completeness_stratification=completeness_stratification,
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -2960,6 +3225,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 completeness_sim_file=completeness_sim_file,
                 plot_path=plot_path,
                 plot=False,
+                completeness_stratification=completeness_stratification,
             )
         return direct_completeness_params
 
@@ -3043,6 +3309,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 prefix=prefix,
                 completeness_sim_file=completeness_sim_file,
                 completeness_mode=completeness_mode,
+                completeness_stratification=completeness_stratification,
                 compare_sigma_only=compare_sigma_only,
                 minimal_plots=minimal_plots,
                 disable_ceph_dist_calibration=disable_ceph_dist_calibration,
@@ -3267,6 +3534,14 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                         use_redshift_mu_term=use_redshift_mu_term,
                     )[1],
                     expected_use_redshift_mu_term=use_redshift_mu_term,
+                    expected_completeness_stratification=completeness_stratification,
+                    expected_completeness_stratum_codes=(
+                        expected_pass1_fit_selection[
+                            COMPLETENESS_STRATUM_CODE_COL
+                        ].to_numpy(dtype=np.int16)
+                        if completeness_stratification != "none"
+                        else None
+                    ),
                 )
                 pass2_warm_start_flat_samples = selected_resume_results["flat_samples"]
             _write_sigma_clip_diagnostics(
@@ -3329,6 +3604,17 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         raise RuntimeError(
             "Sigma-clipped pass 2 is configured for warm-start mode, but no pass-1 posterior samples are available."
         )
+    stratum_counts = write_completeness_stratum_counts(
+        preset_name=completeness_stratification,
+        before_cuts=df_agn_all,
+        after_quality_cuts=df_agn_full_sample_preclip,
+        fitted=df_agn_pass2_fit_selection,
+        output_path=Path(plot_path) / "completeness_strata_summary.csv",
+        cut_summary_path=Path("plots/hubble") / prefix / "cut_summary.txt",
+    )
+    if stratum_counts is not None:
+        print("Completeness stratum counts:")
+        print(stratum_counts.to_string(index=False))
     (
         flat_samples,
         model_labels,
@@ -3363,6 +3649,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         checkpoint_file_override=pass2_checkpoint_file if apply_two_pass_sigma_clip else single_checkpoint_file,
         completeness_sim_file=completeness_sim_file,
         completeness_mode=completeness_mode,
+        completeness_stratification=completeness_stratification,
         compare_sigma_only=compare_sigma_only,
         minimal_plots=minimal_plots,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
@@ -4332,6 +4619,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             prefix="default", result_prefix="", uniform_redshift_distribution=False,
             completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
             completeness_mode="2d",
+            completeness_stratification="none",
             completeness_magnitude="dereddened",
             compare_sigma_only=False,
             disable_ceph_dist_calibration=False,
@@ -4349,6 +4637,9 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     completeness_magnitude = normalize_completeness_magnitude(
         completeness_magnitude
     )
+    completeness_stratification = normalize_completeness_stratification(
+        completeness_stratification
+    )
     speed = normalize_speed(speed)
     if only_agn:
         print("Running full model comparison in AGN-only mode; SNe-only comparison branch is disabled.")
@@ -4362,6 +4653,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         if completeness
         else "_disable_completeness"
     )
+    if completeness and completeness_stratification != "none":
+        completeness_tag += f"_cstrat-{completeness_stratification}"
     ceph_tag = "_nocephdist_planckh0" if disable_ceph_dist_calibration else ""
     planck_h0_tag = "_planckh0" if use_planck_h0_prior and not disable_ceph_dist_calibration else ""
     planck_om_tag = "_planckom" if use_planck_om_prior else ""
@@ -4397,6 +4690,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         completeness=completeness,
         completeness_mode=completeness_mode,
         completeness_magnitude=completeness_magnitude,
+        completeness_stratification=completeness_stratification,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
@@ -4426,6 +4720,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution,
                        completeness_sim_file=completeness_sim_file,
                        completeness_mode=completeness_mode,
+                       completeness_stratification=completeness_stratification,
                        completeness_magnitude=completeness_magnitude,
                        compare_sigma_only=compare_sigma_only,
                        minimal_plots=minimal_plots,
@@ -4464,6 +4759,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                            prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution,
                            completeness_sim_file=completeness_sim_file,
                            completeness_mode=completeness_mode,
+                           completeness_stratification="none",
                            completeness_magnitude=completeness_magnitude,
                            compare_sigma_only=compare_sigma_only,
                            minimal_plots=minimal_plots,
@@ -4696,6 +4992,18 @@ if __name__ == "__main__":
         help="Optional SDSS_RUN2D filter for spectra-matched AGN rows. Applies only when cuts are enabled.",
     )
     parser.add_argument(
+        "--sdss-target-selection",
+        "--sdss_target_selection",
+        dest="sdss_target_selection",
+        type=normalize_sdss_target_selection,
+        choices=SDSS_TARGET_SELECTION_CHOICES,
+        default="all",
+        help=(
+            "SDSS targeting population to fit. Unlike quality cuts, this sample "
+            "definition remains active with --no-cuts."
+        ),
+    )
+    parser.add_argument(
         "--no-cuts",
         "--no_cuts",
         dest="no_cuts",
@@ -4762,6 +5070,18 @@ if __name__ == "__main__":
         choices=list(VALID_COMPLETENESS_MODES),
         default="2d",
         help="Completeness model to use: 2D p(det|m,z), 3D p(det|m,z,f_host_2500_psf), or 4D p(det|m,z,f_host_2500_psf,alpha_lambda).",
+    )
+    parser.add_argument(
+        "--completeness-stratification",
+        "--completeness_stratification",
+        dest="completeness_stratification",
+        type=normalize_completeness_stratification,
+        choices=COMPLETENESS_STRATIFICATION_CHOICES,
+        default="none",
+        help=(
+            "Fit one completeness map per named SDSS targeting stratum while "
+            "sharing the cosmology and AGN standardization relation."
+        ),
     )
     parser.add_argument(
         "--completeness_magnitude",
@@ -4840,6 +5160,27 @@ if __name__ == "__main__":
     resume_by_model = normalize_resume_by_model(args.resume, args.cosmo_models)
     if args.only_sna and args.only_agn:
         raise ValueError("--only_sna and --only_agn cannot be used together.")
+    if args.completeness_stratification != "none":
+        if args.disable_completeness:
+            raise ValueError(
+                "--completeness-stratification requires completeness; remove "
+                "--disable_completeness."
+            )
+        if args.sdss_target_selection != "all":
+            raise ValueError(
+                "--completeness-stratification requires --sdss-target-selection all "
+                "because the preset defines the retained parent population."
+            )
+        if args.only_sna:
+            raise ValueError(
+                "--completeness-stratification requires an AGN likelihood and "
+                "cannot be used with --only_sna."
+            )
+        print(
+            "Warning: log-evidence values should not be compared across different "
+            "completeness-stratification presets because their selection "
+            "normalizations can differ by parameter-independent constants."
+        )
     validate_plot_mode_args(args)
 
     if args.disable_full_covariance:
@@ -4875,6 +5216,8 @@ if __name__ == "__main__":
                            magnitude_convention=args.magnitude_convention,
                            completeness_magnitude=args.completeness_magnitude,
                            spectra_sdss_run2d=args.spectra_sdss_run2d,
+                           sdss_target_selection=args.sdss_target_selection,
+                           completeness_stratification=args.completeness_stratification,
                            correct_sigma_uv_host=args.correct_sigma_uv_host,
                            z_range=tuple(args.z_range), plot_path=agn_plot_path,
                            cut_report_path=cut_report_path,
@@ -4912,6 +5255,7 @@ if __name__ == "__main__":
             completeness=not args.disable_completeness,
             completeness_mode=args.completeness_mode,
             completeness_magnitude=args.completeness_magnitude,
+            completeness_stratification=args.completeness_stratification,
             disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
             use_planck_h0_prior=effective_use_planck_h0_prior,
             use_planck_om_prior=args.use_planck_om_prior,
@@ -4938,6 +5282,7 @@ if __name__ == "__main__":
                 prefix=args.prefix,
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
+                completeness_stratification=args.completeness_stratification,
                 completeness_magnitude=args.completeness_magnitude,
                 only_sna=args.only_sna,
                 only_agn=args.only_agn,
@@ -4951,6 +5296,7 @@ if __name__ == "__main__":
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
                 use_redshift_mu_term=args.fit_redshift_mu_term,
                 early_de_guard=args.early_de_guard,
+                completeness_closure_test=args.completeness_closure_test,
                 agn_pivot_context=agn_pivot_context,
             )
     elif args.run == "single": # default
@@ -4968,6 +5314,7 @@ if __name__ == "__main__":
             completeness=not args.disable_completeness,
             completeness_mode=args.completeness_mode,
             completeness_magnitude=args.completeness_magnitude,
+            completeness_stratification=args.completeness_stratification,
             disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
             use_planck_h0_prior=effective_use_planck_h0_prior,
             use_planck_om_prior=args.use_planck_om_prior,
@@ -4994,6 +5341,7 @@ if __name__ == "__main__":
                 prefix=args.prefix,
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
+                completeness_stratification=args.completeness_stratification,
                 completeness_magnitude=args.completeness_magnitude,
                 compare_sigma_only=args.compare_sigma_only,
                 minimal_plots=args.minimal_plots,
@@ -5021,6 +5369,8 @@ if __name__ == "__main__":
             if not args.disable_completeness
             else "_disable_completeness"
         )
+        if not args.disable_completeness and args.completeness_stratification != "none":
+            completeness_tag += f"_cstrat-{args.completeness_stratification}"
         ceph_tag = "_nocephdist_planckh0" if args.disable_ceph_dist_calibration else ""
         planck_h0_tag = "_planckh0" if effective_use_planck_h0_prior and not args.disable_ceph_dist_calibration else ""
         planck_om_tag = "_planckom" if args.use_planck_om_prior else ""
@@ -5059,6 +5409,7 @@ if __name__ == "__main__":
                 prefix=args.prefix, result_prefix=args.result_prefix, uniform_redshift_distribution=args.uniform_redshift_distribution,
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
+                completeness_stratification=args.completeness_stratification,
                 completeness_magnitude=args.completeness_magnitude,
                 compare_sigma_only=args.compare_sigma_only,
                 minimal_plots=args.minimal_plots,

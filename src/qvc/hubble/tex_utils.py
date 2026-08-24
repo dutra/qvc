@@ -9,6 +9,7 @@ from qvc.hubble.hubble_completeness_refactored import (
     evaluate_dm_interp,
     resolve_completeness_magnitude_column,
 )
+from qvc.hubble.completeness_strata import COMPLETENESS_STRATUM_COL
 
 
 REQUIRED_AGN_TABLE_COLUMNS = (
@@ -83,6 +84,11 @@ def _resolve_table_debias_values(agn_df, *, dm_interp=None, dmi_values=None):
         agn_df[magnitude_col],
         f_host_2500_psf=agn_df[COMPLETENESS_FHOST_COL] if COMPLETENESS_FHOST_COL in agn_df.columns else None,
         alpha_lambda=agn_df["alpha_lambda"] if "alpha_lambda" in agn_df.columns else None,
+        completeness_stratum=(
+            agn_df[COMPLETENESS_STRATUM_COL]
+            if COMPLETENESS_STRATUM_COL in agn_df.columns
+            else None
+        ),
     )
     if dmi_interp.shape != (len(agn_df),):
         raise ValueError(

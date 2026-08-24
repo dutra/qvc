@@ -18,6 +18,10 @@ from qvc.hubble.hubble_completeness_refactored import (
     COMPLETENESS_MAG_COL,
     COMPLETENESS_MAG_ERR_COL,
 )
+from qvc.hubble.completeness_strata import (
+    COMPLETENESS_STRATUM_CODE_COL,
+    StratifiedCompletenessBundle,
+)
 
 _LOG_2PI = np.log(2.0 * np.pi)
 _INV_SQRT_2PI = 1.0 / np.sqrt(2.0 * np.pi)
@@ -349,6 +353,104 @@ def completeness_loglike(
 def empty_blob(N_obj):
     # FIX: always return (3, N_obj) float array
     return np.zeros((3, N_obj), dtype=float)
+
+
+def completeness_loglike_for_data(
+    *,
+    completeness_params,
+    agn_data,
+    m_obs,
+    m_obs_err,
+    m_model,
+    mu_err,
+    z,
+):
+    """Evaluate legacy or per-stratum completeness in original object order."""
+
+    n_objects = len(np.asarray(z))
+    if completeness_params is None:
+        return 0.0, empty_blob(n_objects)
+
+    f_host = agn_data.get(COMPLETENESS_FHOST_COL)
+    alpha = agn_data.get("alpha_lambda")
+    if not isinstance(completeness_params, StratifiedCompletenessBundle):
+        completeness_model = completeness_params[0]
+        mag_centers = completeness_params[1]
+        magnitude_support = getattr(
+            completeness_model,
+            "magnitude_support",
+            (float(mag_centers[0]), float(mag_centers[-1])),
+        )
+        return completeness_loglike(
+            m_obs=m_obs,
+            m_obs_err=m_obs_err,
+            m_model=m_model,
+            mu_err=mu_err,
+            z=z,
+            completeness_model=completeness_model,
+            m_grid=mag_centers,
+            magnitude_support=magnitude_support,
+            sigma_completeness=0.0,
+            f_host_2500_psf=f_host,
+            alpha_lambda=alpha,
+        )
+
+    if COMPLETENESS_STRATUM_CODE_COL not in agn_data:
+        raise KeyError(
+            "Stratified completeness requires per-object field "
+            f"{COMPLETENESS_STRATUM_CODE_COL!r}."
+        )
+    codes = np.asarray(agn_data[COMPLETENESS_STRATUM_CODE_COL], dtype=int)
+    if codes.shape != (n_objects,):
+        raise ValueError(
+            f"Completeness stratum codes have shape {codes.shape}, expected {(n_objects,)}."
+        )
+    invalid = (codes < 0) | (codes >= len(completeness_params.stratum_names))
+    if np.any(invalid):
+        raise ValueError(
+            f"Found {np.count_nonzero(invalid)} invalid completeness stratum code(s)."
+        )
+
+    blob = empty_blob(n_objects)
+    total = 0.0
+    arrays = {
+        "m_obs": np.asarray(m_obs),
+        "m_obs_err": np.asarray(m_obs_err),
+        "m_model": np.asarray(m_model),
+        "mu_err": np.asarray(mu_err),
+        "z": np.asarray(z),
+    }
+    for code, params in enumerate(completeness_params.params_by_stratum):
+        mask = codes == code
+        if not np.any(mask):
+            raise ValueError(
+                "Fitted sample contains no object for completeness stratum "
+                f"{completeness_params.stratum_names[code]!r}."
+            )
+        model, mag_centers = params[:2]
+        support = getattr(
+            model,
+            "magnitude_support",
+            (float(mag_centers[0]), float(mag_centers[-1])),
+        )
+        group_loglike, group_blob = completeness_loglike(
+            m_obs=arrays["m_obs"][mask],
+            m_obs_err=arrays["m_obs_err"][mask],
+            m_model=arrays["m_model"][mask],
+            mu_err=arrays["mu_err"][mask],
+            z=arrays["z"][mask],
+            completeness_model=model,
+            m_grid=mag_centers,
+            magnitude_support=support,
+            sigma_completeness=0.0,
+            f_host_2500_psf=(
+                np.asarray(f_host)[mask] if f_host is not None else None
+            ),
+            alpha_lambda=np.asarray(alpha)[mask] if alpha is not None else None,
+        )
+        total += float(group_loglike)
+        blob[:, mask] = group_blob
+    return total, blob
 
 
 def pantheon_distance_modulus(cosmo, z_hd, z_hel):
@@ -746,24 +848,14 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     ll_completeness = 0.0
     comp_blob = empty_blob(N_obj)
     if completeness_params is not None:
-        completeness_model = completeness_params[0]
-        mag_centers = completeness_params[1]
-        magnitude_support = getattr(
-            completeness_model,
-            "magnitude_support",
-            (float(mag_centers[0]), float(mag_centers[-1])),
-        )
-        ll_completeness, comp_blob = completeness_loglike(
+        ll_completeness, comp_blob = completeness_loglike_for_data(
+            completeness_params=completeness_params,
+            agn_data=agn_data,
             m_obs=prediction["selection_magnitude"],
             m_obs_err=prediction["selection_magnitude_error"],
             m_model=prediction["selection_model_magnitude"],
             mu_err=prediction["selection_total_error"],
             z=z,
-            completeness_model=completeness_model, m_grid=mag_centers,
-            magnitude_support=magnitude_support,
-            sigma_completeness=0.0,
-            f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL),
-            alpha_lambda=agn_data.get("alpha_lambda"),
         )
 
     # ll_cmb, _ = loglike_cmb_theta_simple(cosmo)
@@ -1015,13 +1107,6 @@ def log_likelihood_nearbylcs(
     ll_completeness = 0.0
     comp_blob = empty_blob(N_obj)
     if completeness_params is not None and np.any(mask_noncal):
-        completeness_model = completeness_params[0]
-        mag_centers = completeness_params[1]
-        magnitude_support = getattr(
-            completeness_model,
-            "magnitude_support",
-            (float(mag_centers[0]), float(mag_centers[-1])),
-        )
         # model-predicted magnitude for non-calibrators (cosmo-anchored for selection)
         m_model_nc = M_pred_nc + mu_model_nc
         agn_data_nc = {
@@ -1040,18 +1125,16 @@ def log_likelihood_nearbylcs(
             hubble_model_magnitude=m_model_nc,
             hubble_total_error=mu_err_nc,
         )
-        ll_completeness, comp_blob = completeness_loglike(
+        ll_completeness, noncal_blob = completeness_loglike_for_data(
+            completeness_params=completeness_params,
+            agn_data=agn_data_nc,
             m_obs=selection_magnitude_nc,
             m_obs_err=selection_magnitude_error_nc,
             m_model=selection_model_magnitude_nc,
             mu_err=selection_total_error_nc,
             z=z_nc,
-            completeness_model=completeness_model, m_grid=mag_centers,
-            magnitude_support=magnitude_support,
-            sigma_completeness=0.0,
-            f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL, None)[mask_noncal] if agn_data.get(COMPLETENESS_FHOST_COL, None) is not None else None,
-            alpha_lambda=agn_data.get("alpha_lambda", None)[mask_noncal] if agn_data.get("alpha_lambda", None) is not None else None,
         )
+        comp_blob[:, mask_noncal] = noncal_blob
 
     # ========================
     # 4) Total

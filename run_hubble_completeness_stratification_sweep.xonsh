@@ -1,0 +1,73 @@
+#!/usr/bin/env xonsh
+
+from pathlib import Path
+
+valid_presets = (
+    "none",
+    "sdss-survey",
+    "sdss-survey-var",
+    "sdss-survey-var-no-boss",
+    "sdss-clean-var-core",
+)
+requested = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_STRATIFICATIONS",
+    ",".join(valid_presets),
+)
+presets = tuple(
+    item.strip().lower().replace("_", "-")
+    for item in requested.split(",")
+    if item.strip()
+)
+if not presets:
+    raise ValueError(
+        "QVC_HUBBLE_COMPLETENESS_STRATIFICATIONS must contain at least one preset."
+    )
+invalid = [item for item in presets if item not in valid_presets]
+if invalid:
+    raise ValueError(
+        f"Unknown completeness stratification(s) {invalid}; "
+        f"valid values are {list(valid_presets)}."
+    )
+if len(set(presets)) != len(presets):
+    raise ValueError(
+        "QVC_HUBBLE_COMPLETENESS_STRATIFICATIONS contains duplicate presets."
+    )
+if __xonsh__.env.get("QVC_HUBBLE_RESUME", "").strip() and len(presets) != 1:
+    raise ValueError(
+        "QVC_HUBBLE_RESUME cannot be shared across completeness-stratification "
+        "presets. Select one sweep member and use its own checkpoint."
+    )
+
+runner = Path(__file__).resolve().parent / "run_hubble.xonsh"
+if not runner.is_file():
+    raise FileNotFoundError(f"Hubble runner not found: {runner}")
+
+speed = __xonsh__.env.get("QVC_HUBBLE_SPEED", "quick")
+prefix_stem = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_STRATIFICATION_PREFIX_STEM",
+    "aug23d_tightcuts_completeness_stratification_fixedz_h5aug23_1256pm_psflogit_"
+    "specaug230925am_n8000",
+)
+
+# Fix the scientific inputs and population range for a controlled comparison.
+$QVC_HUBBLE_LIGHT_CURVE_H5 = (
+    "results/data/aug23_1256pm_erlang_legacy_svithennuts_psflogitnormal_iters3_svi4000w250s250_stonechisq_specaug230925am_n8000_dd61211_chisq_7k.h5"
+)
+$QVC_HUBBLE_SPECTRA_FIT_H5 = (
+    "results/data/aug23_0925am_spectrafit_dd61211_nested_N8000_"
+    "rhat_reprocessed_sdss_metadata.h5"
+)
+$QVC_HUBBLE_Z_MIN = "0.44"
+$QVC_HUBBLE_Z_MAX = "3.16"
+$QVC_HUBBLE_SDSS_TARGET_SELECTION = "all"
+$RAISE_SUBPROC_ERROR = True
+
+for preset in presets:
+    run_prefix = f"{prefix_stem}_{preset}_{speed}"
+    $QVC_HUBBLE_COMPLETENESS_STRATIFICATION = preset
+    $QVC_HUBBLE_PREFIX = run_prefix
+    print(
+        f"Running completeness-stratification sweep member {preset!r} "
+        f"with 0.44 <= z <= 3.16 and prefix {run_prefix!r}."
+    )
+    xonsh @(str(runner))

@@ -8,6 +8,168 @@ import numpy as np
 import pandas as pd
 
 
+SDSS_TARGET_SELECTION_CHOICES = (
+    "all",
+    "legacy-sdss",
+    "boss",
+    "eboss",
+    "eboss-var-s82-inclusive",
+    "eboss-non-var-s82",
+    "eboss-var-s82-only",
+    "eboss-var-s82-core-only",
+)
+SDSS_EBOSS_QSO_REASON_BITS = tuple(
+    list(range(9, 20)) + list(range(22, 32)) + list(range(35, 38))
+)
+SDSS_EBOSS_VAR_S82_BIT = 9
+SDSS_EBOSS_CORE_BIT = 10
+SDSS_TARGET_SELECTION_REQUIRED_COLUMNS = (
+    "SDSS_EBOSS_TARGET0",
+    "SDSS_EBOSS_TARGET1",
+    "SDSS_EBOSS_TARGET2",
+)
+
+
+def normalize_sdss_target_selection(value):
+    """Normalize a named SDSS targeting-sample preset."""
+
+    normalized = str(value).strip().lower().replace("_", "-")
+    if normalized not in SDSS_TARGET_SELECTION_CHOICES:
+        choices = ", ".join(SDSS_TARGET_SELECTION_CHOICES)
+        raise ValueError(
+            f"Unknown SDSS target selection {value!r}; choose one of: {choices}."
+        )
+    return normalized
+
+
+def _nonnegative_integer_mask_values(series):
+    """Return exact integer targeting masks plus a validity mask."""
+
+    values = np.zeros(len(series), dtype=np.uint64)
+    valid = np.zeros(len(series), dtype=bool)
+    for index, raw_value in enumerate(series.to_numpy(dtype=object)):
+        if pd.isna(raw_value):
+            continue
+        try:
+            if isinstance(raw_value, (float, np.floating)):
+                if not np.isfinite(raw_value) or not float(raw_value).is_integer():
+                    continue
+            parsed = int(raw_value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if parsed < 0 or parsed > np.iinfo(np.uint64).max:
+            continue
+        values[index] = parsed
+        valid[index] = True
+    return values, valid
+
+
+def _normalized_survey_value(value):
+    if isinstance(value, (bytes, np.bytes_)):
+        value = value.decode("utf-8", errors="replace")
+    return str(value).strip().lower()
+
+
+def _matched_sdss_rows(df):
+    if "SDSS_SPECOBJ_MATCHED" not in df.columns:
+        return np.ones(len(df), dtype=bool)
+    truthy = {"1", "true", "t", "yes", "y"}
+    return np.asarray(
+        [
+            False if pd.isna(value) else _normalized_survey_value(value) in truthy
+            for value in df["SDSS_SPECOBJ_MATCHED"].to_numpy(dtype=object)
+        ],
+        dtype=bool,
+    )
+
+
+def build_sdss_target_selection_mask(df, selection="all"):
+    """Build a targeting mask and human-readable criterion for an AGN table."""
+
+    selection = normalize_sdss_target_selection(selection)
+    if selection == "all":
+        return np.ones(len(df), dtype=bool), "all SDSS targeting selections"
+
+    if "SDSS_SURVEY" not in df.columns:
+        raise ValueError(
+            f"SDSS target selection {selection!r} requires spectra metadata column "
+            "'SDSS_SURVEY'. Use the *_sdss_metadata.h5 spectra catalog and rerun."
+        )
+
+    normalized_survey = np.asarray(
+        [_normalized_survey_value(value) for value in df["SDSS_SURVEY"]],
+        dtype=object,
+    )
+    matched = _matched_sdss_rows(df)
+    if selection == "legacy-sdss":
+        criterion = "Legacy SDSS survey rows (SDSS_SURVEY in sdss/segue1/segue2)"
+        return matched & np.isin(normalized_survey, ("sdss", "segue1", "segue2")), criterion
+    if selection == "boss":
+        return matched & (normalized_survey == "boss"), "BOSS survey rows"
+    if selection == "eboss":
+        return matched & (normalized_survey == "eboss"), "eBOSS survey rows"
+
+    missing = [
+        column for column in SDSS_TARGET_SELECTION_REQUIRED_COLUMNS
+        if column not in df.columns
+    ]
+    if missing:
+        raise ValueError(
+            f"SDSS target selection {selection!r} requires spectra metadata columns "
+            f"{missing}. Use the *_sdss_metadata.h5 spectra catalog (or populate "
+            "SDSS_EBOSS_TARGET0/1/2) and rerun."
+        )
+
+    survey_is_eboss = normalized_survey == "eboss"
+    target0, target0_valid = _nonnegative_integer_mask_values(
+        df["SDSS_EBOSS_TARGET0"]
+    )
+    target1, target1_valid = _nonnegative_integer_mask_values(
+        df["SDSS_EBOSS_TARGET1"]
+    )
+    target2, target2_valid = _nonnegative_integer_mask_values(
+        df["SDSS_EBOSS_TARGET2"]
+    )
+    valid = (
+        survey_is_eboss
+        & target0_valid
+        & target1_valid
+        & target2_valid
+        & matched
+    )
+
+    var_s82_mask = 1 << SDSS_EBOSS_VAR_S82_BIT
+    if selection == "eboss-var-s82-inclusive":
+        criterion = (
+            "eBOSS rows with EBOSS_TARGET1 bit 9 (VAR_S82) set; other targeting "
+            "bits are allowed"
+        )
+        return valid & ((target1 & np.uint64(var_s82_mask)) != 0), criterion
+    if selection == "eboss-non-var-s82":
+        criterion = (
+            "eBOSS rows without EBOSS_TARGET1 bit 9 (VAR_S82); all other "
+            "targeting reasons are allowed"
+        )
+        return valid & ((target1 & np.uint64(var_s82_mask)) == 0), criterion
+
+    qso_reason_mask = sum(1 << bit for bit in SDSS_EBOSS_QSO_REASON_BITS)
+    allowed_reason_mask = var_s82_mask
+    if selection == "eboss-var-s82-core-only":
+        allowed_reason_mask |= 1 << SDSS_EBOSS_CORE_BIT
+    criterion = (
+        "eBOSS rows with QSO-reason bits exactly "
+        f"{sorted(bit for bit in SDSS_EBOSS_QSO_REASON_BITS if allowed_reason_mask & (1 << bit))}, "
+        "EBOSS_TARGET0 == 0, and EBOSS_TARGET2 == 0"
+    )
+    mask = (
+        valid
+        & (target0 == 0)
+        & (target2 == 0)
+        & ((target1 & np.uint64(qso_reason_mask)) == np.uint64(allowed_reason_mask))
+    )
+    return mask, criterion
+
+
 def _cut_env_float(name, default):
     """Return an optional numeric cut override from the environment.
 

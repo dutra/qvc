@@ -97,6 +97,7 @@ def evaluate_dm_interp(
     f_host_2500_psf=None,
     f_host_2500=None,
     alpha_lambda=None,
+    completeness_stratum=None,
 ):
     """Evaluate debias correction using the richest available feature set."""
     z = np.asarray(z, dtype=float)
@@ -113,7 +114,22 @@ def evaluate_dm_interp(
     finite = np.all(np.isfinite(pts), axis=1)
     out = np.full(pts.shape[0], np.nan, dtype=float)
     if np.any(finite):
-        out[finite] = np.asarray(dm_interp(pts[finite]), dtype=float)
+        if hasattr(dm_interp, "evaluate_stratified"):
+            if completeness_stratum is None:
+                raise ValueError(
+                    "Stratified debias interpolation requires completeness_stratum labels."
+                )
+            strata = np.asarray(completeness_stratum).astype(str)
+            if strata.shape != (pts.shape[0],):
+                raise ValueError(
+                    "completeness_stratum must match the interpolation object axis."
+                )
+            out[finite] = np.asarray(
+                dm_interp.evaluate_stratified(pts[finite], strata[finite]),
+                dtype=float,
+            )
+        else:
+            out[finite] = np.asarray(dm_interp(pts[finite]), dtype=float)
     return out
 
 

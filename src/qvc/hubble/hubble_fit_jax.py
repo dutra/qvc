@@ -71,6 +71,7 @@ from qvc.hubble.hubble_fit import (
     SPEED_CHOICES,
     VALID_COMPLETENESS_MODES,
     _select_agn_fit_selection,
+    _completeness_stratification_checkpoint_payload,
     estimate_sky_box_area_deg2,
     generate_fresh_completeness_sim_file,
     make_run_tag,
@@ -80,10 +81,25 @@ from qvc.hubble.hubble_fit import (
     z_pivot_agn,
     z_pivot_sna,
 )
+from qvc.hubble.completeness_strata import (
+    COMPLETENESS_STRATIFICATION_CHOICES,
+    COMPLETENESS_STRATUM_CODE_COL,
+    COMPLETENESS_STRATUM_COL,
+    StratifiedCompletenessBundle,
+    build_completeness_params as build_completeness_params_for_strata,
+    get_completeness_stratification_preset,
+    make_stratified_dm_function,
+    normalize_completeness_stratification,
+    write_completeness_stratum_counts,
+)
 from qvc.hubble.hubble_likelihood import (
     _magnitude_integration_grid,
     _validate_observed_magnitude_support,
     log_likelihood,
+)
+from qvc.hubble.completeness_closure import (
+    simulate_hubble_posterior_closure,
+    write_completeness_closure_diagnostics,
 )
 from qvc.hubble.hubble_model import (
     AgnPivotContext,
@@ -108,6 +124,10 @@ from qvc.hubble.hubble_plotting import (
     plot_predicted_L2500_vs_sigmahat,
     plot_redshift_histograms,
     plot_sigma_uv_mpred_correction,
+)
+from qvc.hubble.cuts import (
+    SDSS_TARGET_SELECTION_CHOICES,
+    normalize_sdss_target_selection,
 )
 from qvc.hubble.hubble_utils import (
     compute_age_universe_with_error,
@@ -263,6 +283,38 @@ def _prepare_completeness_for_jax(
 ):
     if completeness_params is None:
         return None
+    if isinstance(completeness_params, StratifiedCompletenessBundle):
+        prepared = [
+            _prepare_completeness_for_jax(
+                params,
+                selection_magnitude=selection_magnitude,
+            )
+            for params in completeness_params.params_by_stratum
+        ]
+        reference = prepared[0]
+        for other in prepared[1:]:
+            if other["mode"] != reference["mode"]:
+                raise ValueError("Completeness strata have incompatible JAX modes.")
+            for key in (
+                "mag_centers",
+                "z_centers",
+                "fhost_centers",
+                "alpha_centers",
+                "magnitude_support",
+                "integration_mag_grid",
+            ):
+                if key in reference and not np.allclose(
+                    np.asarray(reference[key]), np.asarray(other[key])
+                ):
+                    raise ValueError(
+                        f"Completeness strata have incompatible JAX grid {key!r}."
+                    )
+        return {
+            **reference,
+            "cube": jnp.stack([item["cube"] for item in prepared], axis=0),
+            "sigma": jnp.stack([item["sigma"] for item in prepared], axis=0),
+            "stratified": True,
+        }
     model = completeness_params[0]
     magnitude_grid = np.asarray(completeness_params[1], dtype=float)
     magnitude_support = getattr(
@@ -427,7 +479,15 @@ def _interp_regular_4d(x, y, z, w, x_grid, y_grid, z_grid, w_grid, values):
     return jnp.where(valid, jnp.clip(out, 0.0, 1.0), 0.0)
 
 
-def _completeness_loglike_jax(m_model, mu_err, z, completeness, f_host_2500_psf, alpha_lambda):
+def _completeness_loglike_jax(
+    m_model,
+    mu_err,
+    z,
+    completeness,
+    f_host_2500_psf,
+    alpha_lambda,
+    stratum_codes=None,
+):
     if completeness is None:
         return 0.0
     m_grid = completeness.get("integration_mag_grid", completeness["mag_centers"])
@@ -436,38 +496,51 @@ def _completeness_loglike_jax(m_model, mu_err, z, completeness, f_host_2500_psf,
         completeness["mag_centers"][0],
         completeness["mag_centers"][-1],
     )
-    sigma = completeness["sigma"]
-    sig = jnp.sqrt(mu_err[:, None] ** 2 + sigma**2)
-    if completeness["mode"] == "4d_fhost_alpha":
-        p_det = _interp_regular_4d(
-            map_m_grid[None, :],
-            z[:, None],
-            f_host_2500_psf[:, None],
-            alpha_lambda[:, None],
-            completeness["mag_centers"],
-            completeness["z_centers"],
-            completeness["fhost_centers"],
-            completeness["alpha_centers"],
-            completeness["cube"],
-        )
-    elif completeness["mode"] == "3d_fhost":
-        p_det = _interp_regular_3d(
-            map_m_grid[None, :],
-            z[:, None],
-            f_host_2500_psf[:, None],
-            completeness["mag_centers"],
-            completeness["z_centers"],
-            completeness["fhost_centers"],
-            completeness["cube"],
-        )
+    is_stratified = bool(completeness.get("stratified", False))
+    if is_stratified:
+        if stratum_codes is None:
+            raise ValueError("Stratified JAX completeness requires stratum codes.")
+        stratum_codes = jnp.asarray(stratum_codes, dtype=jnp.int32)
+        sigma = completeness["sigma"][stratum_codes, None]
     else:
-        p_det = _interp_regular_2d(
+        sigma = completeness["sigma"]
+    sig = jnp.sqrt(mu_err[:, None] ** 2 + sigma**2)
+
+    def interpolate(cube):
+        if completeness["mode"] == "4d_fhost_alpha":
+            return _interp_regular_4d(
+                map_m_grid[None, :],
+                z[:, None],
+                f_host_2500_psf[:, None],
+                alpha_lambda[:, None],
+                completeness["mag_centers"],
+                completeness["z_centers"],
+                completeness["fhost_centers"],
+                completeness["alpha_centers"],
+                cube,
+            )
+        if completeness["mode"] == "3d_fhost":
+            return _interp_regular_3d(
+                map_m_grid[None, :],
+                z[:, None],
+                f_host_2500_psf[:, None],
+                completeness["mag_centers"],
+                completeness["z_centers"],
+                completeness["fhost_centers"],
+                cube,
+            )
+        return _interp_regular_2d(
             map_m_grid[None, :],
             z[:, None],
             completeness["mag_centers"],
             completeness["z_centers"],
-            completeness["cube"],
+            cube,
         )
+    if is_stratified:
+        p_det_all = jax.vmap(interpolate)(completeness["cube"])
+        p_det = p_det_all[stratum_codes, jnp.arange(z.shape[0]), :]
+    else:
+        p_det = interpolate(completeness["cube"])
     pdf_model = jnp.exp(_normal_logpdf(m_grid[None, :], m_model[:, None], sig))
     Z = _trapz_jax(pdf_model * p_det, m_grid, axis=1)
     return jnp.sum(jnp.log(jnp.clip(Z, 1e-300)))
@@ -480,8 +553,16 @@ def _prepare_agn_arrays(
 ) -> dict[str, jnp.ndarray]:
     if agn_pivot_context is None:
         raise ValueError("AGN array preparation requires an explicit AgnPivotContext.")
-    out = {k: jnp.asarray(v) for k, v in agn_data.items() if k != "object_id"}
+    out = {
+        k: jnp.asarray(v)
+        for k, v in agn_data.items()
+        if k not in {"object_id", COMPLETENESS_STRATUM_COL}
+    }
     out["object_id"] = np.asarray(agn_data["object_id"]).astype(str)
+    if COMPLETENESS_STRATUM_COL in agn_data:
+        out[COMPLETENESS_STRATUM_COL] = np.asarray(
+            agn_data[COMPLETENESS_STRATUM_COL]
+        ).astype(str)
     obs = jnp.stack([out[k] for k in agn_model_req_obs], axis=0)
     err_numpy = np.stack(
         [np.asarray(agn_data[k], dtype=float) for k in agn_model_req_errs],
@@ -662,6 +743,7 @@ def _log_likelihood_jax(
             completeness_jax,
             f_host_2500_psf,
             agn_data_jax.get("alpha_lambda"),
+            agn_data_jax.get(COMPLETENESS_STRATUM_CODE_COL),
         )
     else:
         ll_comp = 0.0
@@ -850,6 +932,7 @@ def run_single_jax(
     prefix="default_jax",
     completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
     completeness_mode="2d",
+    completeness_stratification="none",
     completeness_magnitude="dereddened",
     only_sna=False,
     N=None,
@@ -863,10 +946,26 @@ def run_single_jax(
     use_redshift_log_f_term=False,
     use_redshift_mu_term=False,
     early_de_guard=False,
+    completeness_closure_test=False,
     seed=42,
     agn_pivot_context=None,
 ):
     use_redshift_mu_term = bool(use_redshift_mu_term and not only_sna)
+    completeness_stratification = normalize_completeness_stratification(
+        completeness_stratification
+    )
+    if completeness_stratification != "none" and (not completeness or only_sna):
+        raise ValueError(
+            "Completeness stratification requires completeness and an AGN likelihood."
+        )
+    if (
+        completeness_stratification != "none"
+        and df_agn.attrs.get("sdss_target_selection", "all") != "all"
+    ):
+        raise ValueError(
+            "Completeness stratification requires an unrestricted "
+            "sdss_target_selection='all' parent sample."
+        )
     _require_jax_stack()
     if use_alpha_lambda_term:
         raise NotImplementedError("run_single_jax does not support --fit_alpha_lambda_term yet.")
@@ -908,6 +1007,7 @@ def run_single_jax(
         use_alpha_lambda_term=False,
         use_eta_sigma_term=False,
         use_redshift_mu_term=use_redshift_mu_term,
+        completeness_stratification=completeness_stratification,
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -925,6 +1025,40 @@ def run_single_jax(
         N=N,
         uniform_redshift_distribution=uniform_redshift_distribution,
     )
+    active_stratification = get_completeness_stratification_preset(
+        completeness_stratification
+    )
+    if active_stratification is not None:
+        for frame_name, frame in (("fit", df_agn_fit), ("parent", df_agn_all)):
+            missing = {
+                COMPLETENESS_STRATUM_COL,
+                COMPLETENESS_STRATUM_CODE_COL,
+            } - set(frame.columns)
+            if missing:
+                raise KeyError(
+                    f"Stratified JAX completeness {frame_name} dataframe is "
+                    f"missing {sorted(missing)}."
+                )
+        fit_codes = set(
+            df_agn_fit[COMPLETENESS_STRATUM_CODE_COL]
+            .to_numpy(dtype=int)
+            .tolist()
+        )
+        expected_codes = set(range(len(active_stratification.strata)))
+        if fit_codes != expected_codes:
+            raise ValueError(
+                "Fitted JAX sample must contain every active completeness stratum."
+            )
+        stratum_counts = write_completeness_stratum_counts(
+            preset_name=completeness_stratification,
+            before_cuts=df_agn_all,
+            after_quality_cuts=df_agn,
+            fitted=df_agn_fit,
+            output_path=Path(plot_path) / "completeness_strata_summary.csv",
+            cut_summary_path=Path("plots/hubble") / prefix / "cut_summary.txt",
+        )
+        print("Completeness stratum counts:")
+        print(stratum_counts.to_string(index=False))
     if uniform_redshift_distribution:
         plot_redshift_histograms(df_pantheon, df_agn_fit, xscale="linear", plot_path=plot_path, only_agn=only_agn)
     else:
@@ -961,26 +1095,15 @@ def run_single_jax(
                 area_deg2=completeness_area_deg2,
                 seed=seed,
             )
-        if completeness_mode == "4d_fhost_alpha":
-            completeness_params = get_completeness_function_4d_fhost_alpha(
-                df_agn_fit,
-                sim_file=completeness_sim_file,
-                plot=True,
-                plot_path=plot_path,
-                df_agn_fhost_population=df_agn_all,
-            )
-        elif completeness_mode == "3d_fhost":
-            completeness_params = get_completeness_function_3d_fhost(
-                df_agn_fit,
-                sim_file=completeness_sim_file,
-                plot=True,
-                plot_path=plot_path,
-                df_agn_fhost_population=df_agn_all,
-            )
-        else:
-            completeness_params = get_completeness_function_2d(
-                df_agn_fit, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
-            )
+        completeness_params = build_completeness_params_for_strata(
+            df_agn_fit,
+            df_agn_all,
+            completeness_mode=completeness_mode,
+            completeness_sim_file=completeness_sim_file,
+            plot=True,
+            plot_path=plot_path,
+            stratification=completeness_stratification,
+        )
     else:
         completeness_params = None
 
@@ -988,6 +1111,8 @@ def run_single_jax(
     agn_fields += ("apparent_mag_2500", "apparent_mag_2500_err", "z", "z_err", "object_id")
     if completeness:
         agn_fields += (COMPLETENESS_MAG_COL, COMPLETENESS_MAG_ERR_COL)
+    if active_stratification is not None:
+        agn_fields += (COMPLETENESS_STRATUM_COL, COMPLETENESS_STRATUM_CODE_COL)
     if COMPLETENESS_FHOST_COL in df_agn_fit.columns:
         agn_fields += (COMPLETENESS_FHOST_COL,)
     if "alpha_lambda" in df_agn_fit.columns:
@@ -1120,7 +1245,46 @@ def run_single_jax(
             agn_pivot_reference_object_ids=agn_pivot_context.reference_object_ids,
             agn_pivot_rule=agn_pivot_context.rule,
         )
+    checkpoint_payload.update(
+        _completeness_stratification_checkpoint_payload(
+            completeness_stratification, df_agn_fit
+        )
+    )
     save_chains(checkpoint_file, **checkpoint_payload)
+
+    if completeness_closure_test and completeness and not only_sna:
+        closure_bin_width = 0.2
+        closure_z_lo = closure_bin_width * np.floor(z_range[0] / closure_bin_width)
+        closure_z_hi = closure_bin_width * np.ceil(z_range[1] / closure_bin_width)
+        closure_result = simulate_hubble_posterior_closure(
+            posterior_samples=flat_samples,
+            agn_data=df_agn_fit,
+            cosmo_model=cosmo_model,
+            z_pivot_agn=z_pivot_agn,
+            agn_pivot_context=agn_pivot_context,
+            completeness_params=completeness_params,
+            redshift_bins=np.arange(
+                closure_z_lo,
+                closure_z_hi + 0.5 * closure_bin_width,
+                closure_bin_width,
+            ),
+            seed=seed + 7679,
+            max_posterior_draws=100,
+            max_abs_mean_zscore=4.0,
+            min_detected_per_bin=25,
+            only_agn=only_agn,
+            use_planck_h0_prior=use_planck_h0_prior,
+            use_planck_om_prior=use_planck_om_prior,
+            use_redshift_mu_term=use_redshift_mu_term,
+        )
+        closure_paths = write_completeness_closure_diagnostics(
+            closure_result, plot_path
+        )
+        print(
+            "Completeness posterior-predictive closure: "
+            f"{'PASS' if closure_result.all_bins_pass else 'FAIL'}; "
+            f"summary={closure_paths['summary_csv']}"
+        )
 
     display_results_summary(
         flat_samples,
@@ -1145,22 +1309,31 @@ def run_single_jax(
         if completeness
         else agn_data["apparent_mag_2500"]
     )
-    dm_interp = make_dm_function(
-        debias_magnitude,
-        agn_data["z"],
-        dmi_posterior_median,
-        f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL),
-        alpha_lambda=agn_data.get("alpha_lambda"),
-    )
-    dmi_selection_sigma_interp = None
-    if dmi_selection_sigma_posterior_median is not None:
-        dmi_selection_sigma_interp = make_dm_function(
-            agn_data[COMPLETENESS_MAG_COL],
+    if active_stratification is not None:
+        dm_interp = make_stratified_dm_function(df_agn_fit, dmi_posterior_median)
+    else:
+        dm_interp = make_dm_function(
+            debias_magnitude,
             agn_data["z"],
-            dmi_selection_sigma_posterior_median,
+            dmi_posterior_median,
             f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL),
             alpha_lambda=agn_data.get("alpha_lambda"),
         )
+    dmi_selection_sigma_interp = None
+    if dmi_selection_sigma_posterior_median is not None:
+        if active_stratification is not None:
+            dmi_selection_sigma_interp = make_stratified_dm_function(
+                df_agn_fit,
+                dmi_selection_sigma_posterior_median,
+            )
+        else:
+            dmi_selection_sigma_interp = make_dm_function(
+                agn_data[COMPLETENESS_MAG_COL],
+                agn_data["z"],
+                dmi_selection_sigma_posterior_median,
+                f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL),
+                alpha_lambda=agn_data.get("alpha_lambda"),
+            )
 
     plot_cosmo_corner(
         None,
@@ -1395,6 +1568,7 @@ def run_single_jax(
         integrals_max_w,
         plot_path=plot_path,
         z_range=z_range,
+        completeness_strata=agn_data.get(COMPLETENESS_STRATUM_COL),
     )
     return flat_samples, model_labels, logZ, logZerr, age, age_err
 
@@ -1414,6 +1588,18 @@ def main():
     parser.add_argument("--cosmo_model", type=str, default="Flatw0waCDM", choices=["FlatLambdaCDM", "FlatwCDM", "Flatw0waCDM", "FlatwpwaCDM"])
     parser.add_argument("--speed", type=str, choices=SPEED_CHOICES, default="production")
     parser.add_argument("--spectra_fit_h5", type=str, nargs="+", required=True)
+    parser.add_argument(
+        "--sdss-target-selection",
+        "--sdss_target_selection",
+        dest="sdss_target_selection",
+        type=normalize_sdss_target_selection,
+        choices=SDSS_TARGET_SELECTION_CHOICES,
+        default="all",
+        help=(
+            "SDSS targeting population to fit. Unlike quality cuts, this sample "
+            "definition remains active with --no-cuts."
+        ),
+    )
     parser.add_argument(
         "--magnitude-convention",
         type=str,
@@ -1448,12 +1634,23 @@ def main():
     )
     parser.add_argument("--completeness_mode", type=str, choices=list(VALID_COMPLETENESS_MODES), default="2d")
     parser.add_argument(
+        "--completeness-stratification",
+        "--completeness_stratification",
+        dest="completeness_stratification",
+        type=normalize_completeness_stratification,
+        choices=COMPLETENESS_STRATIFICATION_CHOICES,
+        default="none",
+    )
+    parser.add_argument(
         "--completeness_magnitude",
         type=str,
         choices=list(VALID_COMPLETENESS_MAGNITUDES),
         default="dereddened",
     )
     parser.add_argument("--correct-sigma-uv-host", action="store_true", default=False)
+    parser.add_argument(
+        "--completeness-closure-test", action="store_true", default=False
+    )
     parser.add_argument(
         "--no-cuts",
         "--no_cuts",
@@ -1467,6 +1664,19 @@ def main():
     args.speed = normalize_speed(args.speed)
     if args.only_sna and args.only_agn:
         raise ValueError("--only_sna and --only_agn cannot be used together.")
+    if args.completeness_stratification != "none":
+        if args.disable_completeness:
+            raise ValueError(
+                "--completeness-stratification requires completeness."
+            )
+        if args.sdss_target_selection != "all":
+            raise ValueError(
+                "--completeness-stratification requires --sdss-target-selection all."
+            )
+        if args.only_sna:
+            raise ValueError(
+                "--completeness-stratification requires an AGN likelihood."
+            )
     effective_use_planck_h0_prior = args.use_planck_h0_prior or args.disable_ceph_dist_calibration
 
     _require_jax_stack()
@@ -1478,9 +1688,12 @@ def main():
         spectra_fit_h5=args.spectra_fit_h5,
         magnitude_convention=args.magnitude_convention,
         completeness_magnitude=args.completeness_magnitude,
+        sdss_target_selection=args.sdss_target_selection,
+        completeness_stratification=args.completeness_stratification,
         correct_sigma_uv_host=args.correct_sigma_uv_host,
         z_range=tuple(args.z_range),
         plot_path=agn_plot_path,
+        cut_report_path=Path(agn_plot_path) / "cut_summary.txt",
     )
     run_single_jax(
         df_agn,
@@ -1496,6 +1709,7 @@ def main():
         prefix=args.prefix,
         completeness_sim_file=args.completeness_sim_file,
         completeness_mode=args.completeness_mode,
+        completeness_stratification=args.completeness_stratification,
         completeness_magnitude=args.completeness_magnitude,
         only_sna=args.only_sna,
         only_agn=args.only_agn,
@@ -1506,6 +1720,7 @@ def main():
         use_planck_om_prior=args.use_planck_om_prior,
         early_de_guard=args.early_de_guard,
         use_redshift_mu_term=args.fit_redshift_mu_term,
+        completeness_closure_test=args.completeness_closure_test,
         seed=args.seed,
     )
 

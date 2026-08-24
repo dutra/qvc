@@ -10,6 +10,11 @@ import numpy as np
 import pandas as pd
 
 from qvc.hubble.hubble_completeness_refactored import COMPLETENESS_FHOST_COL
+from qvc.hubble.completeness_strata import (
+    COMPLETENESS_STRATUM_CODE_COL,
+    COMPLETENESS_STRATUM_COL,
+    StratifiedCompletenessBundle,
+)
 from qvc.hubble.hubble_likelihood import (
     agn_selection_prediction,
     completeness_loglike,
@@ -289,6 +294,16 @@ def _optional_data_column(data, name):
     return None if value is None else np.asarray(value, dtype=float)
 
 
+def _data_column(data, name):
+    if hasattr(data, "columns"):
+        if name not in data.columns:
+            raise KeyError(name)
+        return np.asarray(data[name])
+    if name not in data:
+        raise KeyError(name)
+    return np.asarray(data[name])
+
+
 def simulate_hubble_posterior_closure(
     *,
     posterior_samples,
@@ -343,6 +358,50 @@ def simulate_hubble_posterior_closure(
         model_draws.append(prediction["selection_model_magnitude"])
         sigma_draws.append(prediction["selection_total_error"])
 
+    if isinstance(completeness_params, StratifiedCompletenessBundle):
+        codes = _data_column(agn_data, COMPLETENESS_STRATUM_CODE_COL).astype(int)
+        redshift = _data_column(agn_data, "z").astype(float)
+        f_host = _optional_data_column(agn_data, COMPLETENESS_FHOST_COL)
+        alpha = _optional_data_column(agn_data, "alpha_lambda")
+        summaries = []
+        all_pass = True
+        for code, (name, params) in enumerate(
+            zip(
+                completeness_params.stratum_names,
+                completeness_params.params_by_stratum,
+            )
+        ):
+            mask = codes == code
+            if not np.any(mask):
+                raise ValueError(
+                    f"Completeness closure has no fitted objects in stratum {name!r}."
+                )
+            completeness_model, magnitude_grid = params[:2]
+            stratum_result = simulate_completeness_closure(
+                model_magnitude_draws=np.asarray(model_draws, dtype=float)[:, mask],
+                sigma_draws=np.asarray(sigma_draws, dtype=float)[:, mask],
+                redshift=redshift[mask],
+                completeness_model=completeness_model,
+                magnitude_grid=magnitude_grid,
+                f_host_2500_psf=None if f_host is None else f_host[mask],
+                alpha_lambda=None if alpha is None else alpha[mask],
+                redshift_bins=redshift_bins,
+                seed=int(seed) + code,
+                max_abs_mean_zscore=max_abs_mean_zscore,
+                min_detected_per_bin=min_detected_per_bin,
+            )
+            summary = stratum_result.summary.copy()
+            summary.insert(0, COMPLETENESS_STRATUM_COL, name)
+            summary.insert(0, COMPLETENESS_STRATUM_CODE_COL, code)
+            summaries.append(summary)
+            all_pass = all_pass and stratum_result.all_bins_pass
+        return CompletenessClosureResult(
+            summary=pd.concat(summaries, ignore_index=True),
+            all_bins_pass=bool(all_pass),
+            seed=int(seed),
+            n_posterior_draws=int(len(selected_samples)),
+        )
+
     completeness_model, magnitude_grid = completeness_params[:2]
     return simulate_completeness_closure(
         model_magnitude_draws=np.asarray(model_draws, dtype=float),
@@ -370,6 +429,16 @@ def write_completeness_closure_diagnostics(result, plot_path):
     metadata_path = diagnostics_dir / "completeness_closure_metadata.json"
     plot_file = diagnostics_dir / "completeness_closure.pdf"
     result.summary.to_csv(summary_path, index=False)
+    per_stratum_verdicts = (
+        {
+            str(name): bool(group["bin_pass"].all())
+            for name, group in result.summary.groupby(
+                COMPLETENESS_STRATUM_COL, sort=False
+            )
+        }
+        if COMPLETENESS_STRATUM_COL in result.summary.columns
+        else {}
+    )
     metadata_path.write_text(
         json.dumps(
             {
@@ -378,6 +447,7 @@ def write_completeness_closure_diagnostics(result, plot_path):
                 "seed": int(result.seed),
                 "n_bins": int(len(result.summary)),
                 "n_bins_passed": int(result.summary["bin_pass"].sum()),
+                "per_stratum_verdicts": per_stratum_verdicts,
             },
             indent=2,
             sort_keys=True,
@@ -385,57 +455,93 @@ def write_completeness_closure_diagnostics(result, plot_path):
         + "\n"
     )
 
-    summary = result.summary
-    z_mid = 0.5 * (
-        summary["z_lo"].to_numpy(dtype=float)
-        + summary["z_hi"].to_numpy(dtype=float)
-    )
-    fig, (ax_residual, ax_chi2) = plt.subplots(
-        2,
-        1,
-        figsize=(8.0, 7.5),
-        sharex=True,
-    )
-    ax_residual.plot(
-        z_mid,
-        summary["mean_raw_residual"],
-        color="tab:blue",
-        marker="o",
-        label="Selected, uncorrected",
-    )
-    ax_residual.errorbar(
-        z_mid,
-        summary["mean_corrected_residual"],
-        yerr=summary["mean_corrected_residual_err"],
-        color="tab:red",
-        marker="o",
-        capsize=3,
-        label="Selected, corrected",
-    )
-    ax_residual.axhline(0.0, color="black", linewidth=1.0)
-    ax_residual.set_ylabel("Mean residual (mag)")
-    ax_residual.legend(frameon=False)
-    ax_residual.grid(alpha=0.25)
+    def write_plot(summary, output_file, title):
+        z_mid = 0.5 * (
+            summary["z_lo"].to_numpy(dtype=float)
+            + summary["z_hi"].to_numpy(dtype=float)
+        )
+        fig, (ax_residual, ax_chi2) = plt.subplots(
+            2, 1, figsize=(8.0, 7.5), sharex=True
+        )
+        ax_residual.plot(
+            z_mid,
+            summary["mean_raw_residual"],
+            color="tab:blue",
+            marker="o",
+            label="Selected, uncorrected",
+        )
+        ax_residual.errorbar(
+            z_mid,
+            summary["mean_corrected_residual"],
+            yerr=summary["mean_corrected_residual_err"],
+            color="tab:red",
+            marker="o",
+            capsize=3,
+            label="Selected, corrected",
+        )
+        ax_residual.axhline(0.0, color="black", linewidth=1.0)
+        ax_residual.set_ylabel("Mean residual (mag)")
+        ax_residual.legend(frameon=False)
+        ax_residual.grid(alpha=0.25)
+        ax_chi2.plot(
+            z_mid,
+            summary["reduced_chi2_corrected"],
+            color="tab:red",
+            marker="o",
+        )
+        ax_chi2.axhline(1.0, color="magenta", linewidth=1.2)
+        ax_chi2.set_xlabel("Redshift-bin midpoint")
+        ax_chi2.set_ylabel(r"Corrected $\chi^2_\nu$")
+        ax_chi2.grid(alpha=0.25)
+        fig.suptitle(title)
+        fig.tight_layout()
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_file, dpi=200, bbox_inches="tight")
+        plt.close(fig)
 
-    ax_chi2.plot(
-        z_mid,
-        summary["reduced_chi2_corrected"],
-        color="tab:red",
-        marker="o",
-    )
-    ax_chi2.axhline(1.0, color="magenta", linewidth=1.2)
-    ax_chi2.set_xlabel("Redshift-bin midpoint")
-    ax_chi2.set_ylabel(r"Corrected $\chi^2_\nu$")
-    ax_chi2.grid(alpha=0.25)
-    fig.suptitle(
-        "Completeness posterior-predictive closure: "
-        + ("PASS" if result.all_bins_pass else "FAIL")
-    )
-    fig.tight_layout()
-    fig.savefig(plot_file, dpi=200, bbox_inches="tight")
-    plt.close(fig)
+    summary = result.summary
+    per_stratum_plots = {}
+    if COMPLETENESS_STRATUM_COL in summary.columns:
+        # The top-level PDF is a compact aggregate view; detailed closure
+        # verdicts remain independent in the per-stratum directories.
+        aggregate = summary.groupby("bin_index", sort=True, as_index=False).agg(
+            z_lo=("z_lo", "first"),
+            z_hi=("z_hi", "first"),
+            mean_raw_residual=("mean_raw_residual", "mean"),
+            mean_corrected_residual=("mean_corrected_residual", "mean"),
+            mean_corrected_residual_err=("mean_corrected_residual_err", "mean"),
+            reduced_chi2_corrected=("reduced_chi2_corrected", "mean"),
+        )
+        write_plot(
+            aggregate,
+            plot_file,
+            "Stratified completeness posterior-predictive closure: "
+            + ("PASS" if result.all_bins_pass else "FAIL"),
+        )
+        for name, group in summary.groupby(COMPLETENESS_STRATUM_COL, sort=False):
+            stratum_plot = (
+                diagnostics_dir
+                / "strata"
+                / str(name)
+                / "completeness_closure.pdf"
+            )
+            stratum_pass = bool(group["bin_pass"].all())
+            write_plot(
+                group,
+                stratum_plot,
+                f"Completeness closure: {name} ({'PASS' if stratum_pass else 'FAIL'})",
+            )
+            per_stratum_plots[str(name)] = stratum_plot
+    else:
+        write_plot(
+            summary,
+            plot_file,
+            "Completeness posterior-predictive closure: "
+            + ("PASS" if result.all_bins_pass else "FAIL"),
+        )
     return {
         "summary_csv": summary_path,
         "metadata_json": metadata_path,
         "plot_pdf": plot_file,
+        "per_stratum_plot_pdfs": per_stratum_plots,
     }

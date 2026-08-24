@@ -31,7 +31,9 @@ from qvc.hubble.cuts import (  # noqa: E402
     REL_APPARENT_MAG_2500_ERR_MAX,
     SPECTRAL_RHAT_MAX,
     add_light_curve_point_count_column,
+    build_sdss_target_selection_mask,
     light_curve_point_count_series,
+    normalize_sdss_target_selection,
 )
 from qvc.hubble.hubble_cut_config import build_agn_cuts, build_dlog_amp_blr_cuts  # noqa: E402
 from qvc.hubble.hubble_utils import (  # noqa: E402
@@ -53,6 +55,88 @@ def _write_spectra_h5(path, rows):
         np.full((len(frame), 64, 5), np.nan, dtype=np.float32),
         np.zeros(len(frame), dtype=np.int16),
     )
+
+
+def _sdss_target_selection_frame():
+    bit = lambda index: 1 << index
+    return pd.DataFrame(
+        {
+            "SDSS_SURVEY": [
+                "eBOSS", b" EBOSS ", "eboss", "eboss",
+                "boss", "eboss", "eboss", "eboss",
+            ],
+            "SDSS_EBOSS_TARGET0": [0, 0, 0, 0, 0, 0, 0, 0],
+            "SDSS_EBOSS_TARGET1": [
+                bit(9), bit(9) | bit(10), bit(9) | bit(14), bit(9),
+                bit(9), -1, bit(9), 0,
+            ],
+            "SDSS_EBOSS_TARGET2": [0, 0, 0, bit(20), 0, 0, 0, 0],
+            "SDSS_SPECOBJ_MATCHED": [True, True, True, True, True, True, False, True],
+        }
+    )
+
+
+def test_sdss_target_selection_presets_handle_overlap_and_invalid_rows():
+    frame = _sdss_target_selection_frame()
+
+    all_mask, _ = build_sdss_target_selection_mask(frame, "all")
+    inclusive, _ = build_sdss_target_selection_mask(
+        frame, " EBOSS_VAR_S82_INCLUSIVE "
+    )
+    non_var, _ = build_sdss_target_selection_mask(frame, "eboss-non-var-s82")
+    var_only, _ = build_sdss_target_selection_mask(frame, "eboss-var-s82-only")
+    var_core_only, _ = build_sdss_target_selection_mask(
+        frame, "eboss-var-s82-core-only"
+    )
+
+    assert np.flatnonzero(all_mask).tolist() == list(range(len(frame)))
+    assert np.flatnonzero(inclusive).tolist() == [0, 1, 2, 3]
+    assert np.flatnonzero(non_var).tolist() == [7]
+    assert np.flatnonzero(var_only).tolist() == [0]
+    assert np.flatnonzero(var_core_only).tolist() == [1]
+
+
+def test_sdss_target_selection_survey_presets_are_disjoint_and_normalized():
+    frame = pd.DataFrame(
+        {
+            "SDSS_SURVEY": [" SDSS ", "segue1", "BOSS", "eBOSS", "unknown"],
+            "SDSS_SPECOBJ_MATCHED": [True, True, True, True, True],
+        }
+    )
+
+    legacy, _ = build_sdss_target_selection_mask(frame, "legacy_sdss")
+    boss, _ = build_sdss_target_selection_mask(frame, "boss")
+    eboss, _ = build_sdss_target_selection_mask(frame, "eboss")
+
+    assert np.flatnonzero(legacy).tolist() == [0, 1]
+    assert np.flatnonzero(boss).tolist() == [2]
+    assert np.flatnonzero(eboss).tolist() == [3]
+    np.testing.assert_array_equal(
+        legacy.astype(int) + boss.astype(int) + eboss.astype(int),
+        [1, 1, 1, 1, 0],
+    )
+
+
+def test_sdss_target_selection_survey_presets_require_only_survey_metadata():
+    frame = pd.DataFrame({"SDSS_SURVEY": ["boss", "eboss"]})
+    boss, _ = build_sdss_target_selection_mask(frame, "boss")
+    eboss, _ = build_sdss_target_selection_mask(frame, "eboss")
+    np.testing.assert_array_equal(boss, [True, False])
+    np.testing.assert_array_equal(eboss, [False, True])
+
+
+def test_sdss_target_selection_requires_enriched_spectra_metadata():
+    with np.testing.assert_raises_regex(ValueError, "\\*_sdss_metadata.h5"):
+        build_sdss_target_selection_mask(
+            pd.DataFrame({"SDSS_SURVEY": ["eboss"]}),
+            "eboss-var-s82-only",
+        )
+
+
+def test_normalize_sdss_target_selection_rejects_unknown_name():
+    assert normalize_sdss_target_selection(" EBOSS_VAR_S82_ONLY ") == "eboss-var-s82-only"
+    with np.testing.assert_raises_regex(ValueError, "Unknown SDSS target selection"):
+        normalize_sdss_target_selection("not-a-selection")
 
 
 def test_build_agn_cuts_contains_only_fiducial_profile():

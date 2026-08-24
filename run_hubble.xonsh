@@ -46,6 +46,17 @@ magnitude_convention = __xonsh__.env.get("QVC_HUBBLE_MAGNITUDE_CONVENTION", "der
 completeness_magnitude = __xonsh__.env.get(
     "QVC_HUBBLE_COMPLETENESS_MAGNITUDE", "attenuated"
 )
+spectra_sdss_run2d = __xonsh__.env.get(
+    "QVC_HUBBLE_SPECTRA_SDSS_RUN2D", "all"
+)
+sdss_target_selection = __xonsh__.env.get(
+    "QVC_HUBBLE_SDSS_TARGET_SELECTION", "all"
+)
+completeness_stratification = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_STRATIFICATION", "none"
+)
+z_min = __xonsh__.env.get("QVC_HUBBLE_Z_MIN", "0.44")
+z_max = __xonsh__.env.get("QVC_HUBBLE_Z_MAX", "3.16")
 resume_checkpoint = __xonsh__.env.get("QVC_HUBBLE_RESUME", "")
 resume_args = ["--resume", resume_checkpoint] if resume_checkpoint else []
 no_cuts = __xonsh__.env.get("QVC_HUBBLE_NO_CUTS", "false").lower() in {
@@ -74,6 +85,10 @@ h5_file = "results/data/lc_data_all.h5"
 spectra_fit_h5 = "results/data/aug21_0827am_spectrafit_9b14caf_nested_N8000_rhat.h5"
 h5_file = "results/data/aug22_0346pm_mag_linear_svi4000w2000s500_stonechisq_specaug210827am_n8000_af3ff4c_chisq.h5"
 
+spectra_fit_h5 = __xonsh__.env.get(
+    "QVC_HUBBLE_SPECTRA_FIT_H5", spectra_fit_h5
+)
+h5_file = __xonsh__.env.get("QVC_HUBBLE_LIGHT_CURVE_H5", h5_file)
 
 $PREFIX = __xonsh__.env.get(
     "QVC_HUBBLE_PREFIX",
@@ -89,10 +104,13 @@ python -m qvc.hubble.hubble_fit \
     --run single \
     --speed @(speed) \
     --spectra_fit_h5 @(spectra_fit_h5) \
+    --spectra_sdss_run2d @(spectra_sdss_run2d) \
+    --sdss-target-selection @(sdss_target_selection) \
+    --completeness-stratification @(completeness_stratification) \
     --magnitude-convention @(magnitude_convention) \
     --completeness_magnitude @(completeness_magnitude) \
     --result_prefix "fiducial" \
-    --z_range 0.44 3.16 \
+    --z_range @(z_min) @(z_max) \
     --prefix @(prefix) \
     --disable_sigma_clip_pass \
     --sigma_clip_threshold 3.0 \

@@ -439,6 +439,45 @@ def test_load_agn_data_run2d_filter_bypassed_when_no_cuts(tmp_path, monkeypatch)
     assert filtered["object_id"].tolist() == ["a", "b", "c", "d"]
 
 
+def test_load_agn_data_target_selection_remains_active_without_quality_cuts(
+    tmp_path, monkeypatch
+):
+    source_path = tmp_path / "agn.h5"
+    source_path.touch()
+    df = _minimal_agn_frame(n=4)
+    df["object_id"] = ["var", "var-core", "var-other", "boss-var"]
+    df["SDSS_SURVEY"] = ["eBOSS", "eboss", "eboss", "boss"]
+    df["SDSS_EBOSS_TARGET0"] = [0, 0, 0, 0]
+    df["SDSS_EBOSS_TARGET1"] = [1 << 9, (1 << 9) | (1 << 10), (1 << 9) | (1 << 14), 1 << 9]
+    df["SDSS_EBOSS_TARGET2"] = [0, 0, 0, 0]
+    df["SDSS_SPECOBJ_MATCHED"] = [True, True, True, True]
+
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *_args, **_kwargs: df.copy(),
+    )
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda frame: frame)
+    _patch_load_agn_plotters(monkeypatch)
+
+    filtered, parent = hubble_utils.load_agn_data(
+        source_path,
+        magnitude_convention="dereddened",
+        spectra_fit_h5=None,
+        lc_info_csv=None,
+        apply_cut=False,
+        sdss_target_selection="eboss-var-s82-only",
+        plot_path=str(tmp_path / "figures"),
+        cut_report_path=tmp_path / "cut_summary.txt",
+    )
+
+    assert filtered["object_id"].tolist() == ["var"]
+    assert parent["object_id"].tolist() == ["var"]
+    summary = (tmp_path / "cut_summary.txt").read_text(encoding="utf-8")
+    assert "sample:sdss_target_selection" in summary
+    assert "eboss-var-s82-only" in summary
+
+
 def test_load_agn_data_run2d_filter_requires_sdss_run2d_column(tmp_path, monkeypatch):
     source_path = tmp_path / "agn.h5"
     source_path.touch()

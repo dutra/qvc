@@ -74,6 +74,7 @@ from qvc.hubble.hubble_completeness_refactored import (
     fit_fhost_2500_l2500_model,
     predict_fhost_2500_from_logL2500,
 )
+from qvc.hubble.completeness_strata import COMPLETENESS_STRATUM_COL
 from dynesty.utils import resample_equal
 from dynesty import plotting as dyplot
 
@@ -576,6 +577,7 @@ def _resolve_debias_values(
         df_agn[COMPLETENESS_MAG_COL].values,
         f_host_2500_psf=df_agn.get(COMPLETENESS_FHOST_COL),
         alpha_lambda=df_agn.get("alpha_lambda"),
+        completeness_stratum=df_agn.get(COMPLETENESS_STRATUM_COL),
     )
     return dmi_interp
 
@@ -603,6 +605,7 @@ def _resolve_selection_sigma_values(
             df_agn[COMPLETENESS_MAG_COL].values,
             f_host_2500_psf=df_agn.get(COMPLETENESS_FHOST_COL),
             alpha_lambda=df_agn.get("alpha_lambda"),
+            completeness_stratum=df_agn.get(COMPLETENESS_STRATUM_COL),
         )
         sigma_sel = sigma_sel_interp
 
@@ -6817,6 +6820,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             "residuals",
             "mu_zscore",
         ]
+        if COMPLETENESS_STRATUM_COL in residuals_df.columns:
+            fields.insert(1, COMPLETENESS_STRATUM_COL)
         sedfit_fields = [
             "fit_backend",
             "fracAGN_5100_fit",
@@ -10020,13 +10025,17 @@ def plot_predicted_L2500_vs_sigmahat(
         ds = df_calibrators.copy()
 
         M2500_show = ds['apparent_mag_2500'].values - cosmo.distmod(ds['z'].values).value
-        if debias:
+        if debias and (
+            not hasattr(dm_interp, "evaluate_stratified")
+            or COMPLETENESS_STRATUM_COL in ds
+        ):
             M2500_show -= evaluate_dm_interp(
                 dm_interp,
                 ds["z"].values,
                 ds[COMPLETENESS_MAG_COL].values,
                 f_host_2500_psf=ds.get(COMPLETENESS_FHOST_COL),
                 alpha_lambda=ds.get("alpha_lambda"),
+                completeness_stratum=ds.get(COMPLETENESS_STRATUM_COL),
             )
         actual_logL2500_show = convert_M2500_to_logL2500(M2500_show)
         y_log_meas_err_show = 0.4 * np.asarray(ds['apparent_mag_2500_err'].fillna(0.0), dtype=float)
@@ -10343,13 +10352,17 @@ def plot_predicted_L2500_vs_sigmahat(
         ds = df_calibrators.copy()
 
         M2500_show = ds['apparent_mag_2500'].values - cosmo.distmod(ds['z'].values).value
-        if debias:
+        if debias and (
+            not hasattr(dm_interp, "evaluate_stratified")
+            or COMPLETENESS_STRATUM_COL in ds
+        ):
             M2500_show -= evaluate_dm_interp(
                 dm_interp,
                 ds["z"].values,
                 ds[COMPLETENESS_MAG_COL].values,
                 f_host_2500_psf=ds.get(COMPLETENESS_FHOST_COL),
                 alpha_lambda=ds.get("alpha_lambda"),
+                completeness_stratum=ds.get(COMPLETENESS_STRATUM_COL),
             )
         actual_logL2500_show = convert_M2500_to_logL2500(M2500_show)
         y_log_meas_err_show = 0.4 * np.asarray(ds['apparent_mag_2500_err'].fillna(0.0), dtype=float)
@@ -12733,6 +12746,7 @@ def plot_completeness_diagnostics(
     integrals_max_w=None,
     plot_path="plots/hubble",
     z_range=None,
+    completeness_strata=None,
 ):
 
     # Plot dmi vs z for the posterior-summary correction used in debiasing.
@@ -12745,6 +12759,13 @@ def plot_completeness_diagnostics(
             f"{z.shape}, {m2500.shape}, {dmi_plot.shape}."
         )
     finite = np.isfinite(z) & np.isfinite(m2500) & np.isfinite(dmi_plot)
+    strata = None
+    if completeness_strata is not None:
+        strata = np.asarray(completeness_strata).astype(str)
+        if strata.shape != z.shape:
+            raise ValueError(
+                f"completeness_strata has shape {strata.shape}, expected {z.shape}."
+            )
     if z_range is None:
         fit_mask = finite
         out_mask = np.zeros_like(finite, dtype=bool)
@@ -12754,7 +12775,7 @@ def plot_completeness_diagnostics(
     
     fig, ax = plt.subplots(figsize=(8, 5))
 
-    if np.any(fit_mask):
+    if strata is None and np.any(fit_mask):
         ax.plot(
             z[fit_mask],
             -dmi_plot[fit_mask],
@@ -12764,7 +12785,7 @@ def plot_completeness_diagnostics(
             color="k",
             alpha=0.5,
         )
-    if np.any(out_mask):
+    if strata is None and np.any(out_mask):
         ax.plot(
             z[out_mask],
             -dmi_plot[out_mask],
@@ -12774,6 +12795,24 @@ def plot_completeness_diagnostics(
             color="k",
             alpha=0.5,
         )
+    if strata is not None:
+        for name in dict.fromkeys(strata[finite].tolist()):
+            group = strata == name
+            ax.scatter(
+                z[fit_mask & group],
+                -dmi_plot[fit_mask & group],
+                s=20,
+                marker="o",
+                alpha=0.55,
+                label=name,
+            )
+            ax.scatter(
+                z[out_mask & group],
+                -dmi_plot[out_mask & group],
+                s=28,
+                marker="D",
+                alpha=0.55,
+            )
 
     ax.set_xlabel(r"$z$")
     ax.set_ylabel(r"$\Delta m$ (mag)")
@@ -12790,7 +12829,7 @@ def plot_completeness_diagnostics(
     # Plot dmi vs m2500 (apparent magnitude)
     fig, ax = plt.subplots(figsize=(8, 5))
 
-    if np.any(fit_mask):
+    if strata is None and np.any(fit_mask):
         ax.scatter(
             m2500[fit_mask],
             -dmi_plot[fit_mask],
@@ -12800,7 +12839,7 @@ def plot_completeness_diagnostics(
             color="k",
             label="in $z$ range",
         )
-    if np.any(out_mask):
+    if strata is None and np.any(out_mask):
         ax.scatter(
             m2500[out_mask],
             -dmi_plot[out_mask],
@@ -12810,6 +12849,24 @@ def plot_completeness_diagnostics(
             color="k",
             label="outside $z$ range",
         )
+    if strata is not None:
+        for name in dict.fromkeys(strata[finite].tolist()):
+            group = strata == name
+            ax.scatter(
+                m2500[fit_mask & group],
+                -dmi_plot[fit_mask & group],
+                alpha=0.55,
+                s=20,
+                marker="o",
+                label=name,
+            )
+            ax.scatter(
+                m2500[out_mask & group],
+                -dmi_plot[out_mask & group],
+                alpha=0.55,
+                s=28,
+                marker="D",
+            )
 
     ax.set_xlabel(r"Apparent magnitude $m_{2500}$ (mag)")
     ax.set_ylabel(r"$\Delta m$ (mag)")
@@ -12825,7 +12882,15 @@ def plot_completeness_diagnostics(
         if integrals_max_w.shape == z.shape:
             mask_integrals = np.isfinite(z) & np.isfinite(integrals_max_w)
             fig, ax = plt.subplots(figsize=(8, 5))
-            ax.scatter(z[mask_integrals], integrals_max_w[mask_integrals], s=16, alpha=0.3)
+            if strata is None:
+                ax.scatter(z[mask_integrals], integrals_max_w[mask_integrals], s=16, alpha=0.3)
+            else:
+                for name in dict.fromkeys(strata[mask_integrals].tolist()):
+                    group = mask_integrals & (strata == name)
+                    ax.scatter(
+                        z[group], integrals_max_w[group], s=16, alpha=0.4, label=name
+                    )
+                ax.legend(frameon=False)
             ax.set_xlabel("Redshift (z)")
             ax.set_ylabel("integral  (completeness)")
             ax.set_title("Completeness integrals vs z — highest posterior weight sample")
