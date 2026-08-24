@@ -69,6 +69,15 @@ def test_qvc_psf_photometry_replaces_saved_sdss_and_includes_z():
     }
     g_flux = result.loc[result["filter_name"] == "g_sdss", "flux_mjy"].item()
     assert np.isclose(g_flux, ab_mag_to_mjy(20.0))
+    qvc_rows = result["filter_name"].isin(
+        [f"{band}_sdss" for band in "ugriz"]
+    )
+    assert set(result.loc[qvc_rows, "host_capture_group"]) == {
+        joint.QVC_PSF_HOST_CAPTURE_GROUP
+    }
+    assert pd.isna(
+        result.loc[result["filter_name"] == "W2", "host_capture_group"].item()
+    )
 
 
 def test_qvc_psf_photometry_requires_z_even_if_variability_fit_dropped_it():
@@ -279,6 +288,8 @@ def test_base_result_has_stable_nan_hubble_convergence_schema(tmp_path):
     expected = joint.empty_hubble_convergence_summary()
     assert set(expected) <= set(result)
     assert all(np.isnan(result[name]) for name in expected)
+    assert np.isnan(result["f_host_2500_psf"])
+    assert np.isnan(result["f_host_2500_psf_err"])
 
 
 def test_save_spectrum_figure_uses_separate_spectrum_filename(tmp_path):
@@ -327,6 +338,7 @@ def _component_prediction(filter_names):
         "variable_agn_fluxes": 0.7 * total,
         "fracAGN_5100_fit": np.array([0.6, 0.8]),
         "formed_stellar_mass": np.array([1.0e10, 1.2e10]),
+        "component_host_fraction": np.array([[0.2], [0.3], [0.4], [0.5]]),
     }
     prediction.update(
         {
@@ -407,6 +419,7 @@ def test_joint_summaries_have_stable_native_schema():
     prediction = _component_prediction(filter_names)
 
     fractions = summarize_psf_agn_fractions(prediction, filter_names)
+    host_2500 = joint.summarize_host_2500_psf(prediction)
     chi2 = summarize_joint_chi2(prediction)
 
     assert set(empty_psf_agn_fraction_summary()) <= set(fractions)
@@ -416,6 +429,8 @@ def test_joint_summaries_have_stable_native_schema():
     for name in joint.JOINT_CHI2_SITES:
         assert name in chi2
         assert f"{name}_err" in chi2
+    assert host_2500["f_host_2500_psf"] == pytest.approx(0.35)
+    assert host_2500["f_host_2500_psf_err"] == pytest.approx(0.102)
 
 
 def test_catalog_summary_combines_latent_and_deterministic_scalar_sites():
@@ -444,12 +459,13 @@ def test_catalog_summary_combines_latent_and_deterministic_scalar_sites():
 def test_catalog_prediction_temporarily_requests_legacy_csv_scalar_sites():
     class DummyFitter:
         @staticmethod
-        def _predictive_return_sites(kind):
+        def _predictive_return_sites(kind, **kwargs):
             assert kind == "photometry"
             return ["pred_fluxes", "fracAGN_5100_fit"]
 
-        def predict(self, *, kind):
+        def predict(self, *, kind, **kwargs):
             self.requested_sites = self._predictive_return_sites(kind)
+            self.prediction_kwargs = kwargs
             return {"fracAGN_5100_fit": np.array([0.6, 0.8])}
 
     fitter = DummyFitter()
@@ -466,6 +482,34 @@ def test_catalog_prediction_temporarily_requests_legacy_csv_scalar_sites():
     ]
 
 
+def test_catalog_prediction_forwards_monochromatic_component_request():
+    class DummyFitter:
+        @staticmethod
+        def _predictive_return_sites(kind, **kwargs):
+            sites = ["fracAGN_5100_fit"]
+            if kwargs.get("include_component_request"):
+                sites.append("component_host_fraction")
+            return sites
+
+        def predict(self, **kwargs):
+            self.kwargs = kwargs
+            self.requested_sites = self._predictive_return_sites(
+                kwargs["kind"], include_component_request=True
+            )
+            return {"component_host_fraction": np.array([[0.25]])}
+
+    fitter = DummyFitter()
+    prediction = predict_catalog_posterior(
+        fitter,
+        kind="photometry",
+        component_rest_wavelengths=(2500.0,),
+        component_host_capture_group=joint.QVC_PSF_HOST_CAPTURE_GROUP,
+    )
+    assert prediction["component_host_fraction"][0, 0] == pytest.approx(0.25)
+    assert fitter.kwargs["component_rest_wavelengths"] == (2500.0,)
+    assert "component_host_fraction" in fitter.requested_sites
+
+
 def test_verify_new_posterior_bundle_requires_v2_schema(tmp_path):
     current = tmp_path / "current.h5"
     with h5py.File(current, "w") as handle:
@@ -477,6 +521,30 @@ def test_verify_new_posterior_bundle_requires_v2_schema(tmp_path):
         handle.attrs["posterior_bundle_format"] = "jaxsedfit_samples_meta_v1"
     with pytest.raises(ValueError, match="expected 'jaxsedfit_samples_meta_v2'"):
         verify_new_posterior_bundle(old)
+
+
+def test_resume_preflight_rejects_old_and_accepts_grouped_bundle(tmp_path):
+    args = _hybrid_args(tmp_path)
+    rec = _run_record()
+    path = joint.posterior_bundle_path(args.resume, rec)
+    path.parent.mkdir(parents=True)
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("samples/log_agn_amp", data=np.ones(2))
+
+    with pytest.raises(
+        joint.IncompatibleHostCaptureResumeError,
+        match="predates the shared qvc_sdss_psf",
+    ):
+        joint.preflight_resume_host_capture_bundles([rec], args)
+
+    with h5py.File(path, "a") as handle:
+        handle.attrs[joint.HOST_CAPTURE_BUNDLE_ATTR] = (
+            joint.QVC_PSF_HOST_CAPTURE_GROUP
+        )
+        handle.create_dataset(
+            "samples/host_capture_group_fraction", data=np.ones((2, 1))
+        )
+    joint.preflight_resume_host_capture_bundles([rec], args)
 
 
 def test_parse_args_resume_keeps_current_inputs_and_separate_destinations(tmp_path):
@@ -530,24 +598,13 @@ def test_parse_args_rejects_resume_output_directory_alias(tmp_path):
         )
 
 
-def test_hybrid_missing_bundle_runs_fresh_with_provenance(monkeypatch, tmp_path):
+def test_hybrid_missing_bundle_requires_fresh_spectral_run(monkeypatch, tmp_path):
     args = _hybrid_args(tmp_path)
-    calls = []
-
-    def fake_fresh(rec, received_args, **kwargs):
-        calls.append((rec, received_args, kwargs))
-        return {"fit_ok": True, **kwargs}
-
-    monkeypatch.setattr(joint, "run_one_fit", fake_fresh)
-
-    result = joint.run_hybrid_fit(_run_record(), args)
-
-    assert result["fit_ok"] is True
-    assert result["execution_mode"] == "fresh_missing_bundle"
-    assert str(result["resumed_from_path"]).endswith(
-        "z1.000_J0000+0000_joint_samples.h5"
-    )
-    assert len(calls) == 1
+    with pytest.raises(
+        joint.IncompatibleHostCaptureResumeError,
+        match="Run fresh spectral inference",
+    ):
+        joint.run_hybrid_fit(_run_record(), args)
 
 
 def test_hybrid_bad_bundle_cleans_new_artifacts_and_falls_back(monkeypatch, tmp_path):
@@ -595,23 +652,30 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
 
     class DummyFitter:
         predictive = {"stale": np.array([1.0])}
-        samples = {"log_agn_amp": np.array([1.0, 2.0])}
+        samples = {
+            "log_agn_amp": np.array([1.0, 2.0]),
+            "host_capture_group_fraction": np.array([[0.4], [0.5]]),
+        }
         config = SimpleNamespace(
             observation=SimpleNamespace(
                 object_id=joint.joint_saved_name(rec),
                 redshift=rec["z"],
             ),
-            photometry=SimpleNamespace(filter_names=filter_names),
+            photometry=SimpleNamespace(
+                filter_names=filter_names,
+                host_capture_group=[joint.QVC_PSF_HOST_CAPTURE_GROUP] * 5,
+            ),
             galaxy=SimpleNamespace(cosmology_h0=70.0, cosmology_om0=0.3),
         )
 
         @staticmethod
-        def _predictive_return_sites(kind):
+        def _predictive_return_sites(kind, **kwargs):
             return ["pred_fluxes", "variable_agn_fluxes"]
 
-        def predict(self, *, kind):
+        def predict(self, *, kind, **kwargs):
             assert kind == "plot"
             assert self.predictive is None
+            assert kwargs["component_rest_wavelengths"] == (2500.0,)
             return prediction
 
         def save(self, output_dir):
@@ -621,6 +685,10 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
                 handle.attrs["posterior_bundle_format"] = joint.POSTERIOR_BUNDLE_FORMAT
                 handle.create_dataset(
                     "samples/log_agn_amp", data=self.samples["log_agn_amp"]
+                )
+                handle.create_dataset(
+                    "samples/host_capture_group_fraction",
+                    data=self.samples["host_capture_group_fraction"],
                 )
             return path
 
@@ -652,6 +720,7 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
     assert result["resumed_from_run"] == "old_run"
     assert result["joint_reduced_chi2"] == pytest.approx(9.0)
     assert result["f_AGN_psf_g"] == pytest.approx(0.7)
+    assert result["f_host_2500_psf"] == pytest.approx(0.35)
     assert result["fracAGN_5100_fit"] == pytest.approx(0.7)
     assert result["fracAGN_5100_fit_err"] == pytest.approx(0.068)
     assert result["formed_stellar_mass"] == pytest.approx(1.1e10)
@@ -671,6 +740,9 @@ def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_
     saved_path.parent.mkdir(parents=True)
     with h5py.File(saved_path, "w") as handle:
         handle.attrs["posterior_bundle_format"] = joint.POSTERIOR_BUNDLE_FORMAT
+        handle.create_dataset(
+            "samples/host_capture_group_fraction", data=np.array([[0.4], [0.5]])
+        )
 
     class DummyHDUL:
         def close(self):
@@ -689,15 +761,18 @@ def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_
             self.config = config
 
         @staticmethod
-        def _predictive_return_sites(kind):
+        def _predictive_return_sites(kind, **kwargs):
             return ["pred_fluxes", "variable_agn_fluxes"]
 
         def fit(self, *, progress_bar):
             assert progress_bar is False
             return DummyFitResult()
 
-        def predict(self, *, kind):
+        def predict(self, *, kind, **kwargs):
             assert kind == "photometry"
+            assert kwargs["component_host_capture_group"] == (
+                joint.QVC_PSF_HOST_CAPTURE_GROUP
+            )
             return prediction
 
     config = SimpleNamespace(
@@ -736,6 +811,7 @@ def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_
     assert result["execution_mode"] == "fresh_missing_bundle"
     assert result["joint_reduced_chi2"] == pytest.approx(9.0)
     assert result["f_AGN_psf_i"] == pytest.approx(0.7)
+    assert result["f_host_2500_psf"] == pytest.approx(0.35)
     assert result["fracAGN_5100_fit"] == pytest.approx(0.7)
     assert result["fracAGN_5100_fit_err"] == pytest.approx(0.068)
     assert result["formed_stellar_mass"] == pytest.approx(1.1e10)

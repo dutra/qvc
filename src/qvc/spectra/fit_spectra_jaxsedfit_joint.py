@@ -52,6 +52,24 @@ METER_PER_MEGAPARSEC = 3.085677581491367e22
 GRAHSP_ATTENUATION_BREAK_ANGSTROM = 11_000.0
 POSTERIOR_BUNDLE_FORMAT = "jaxsedfit_samples_meta_v2"
 PSF_AGN_FRACTION_BANDS = tuple(legacy.SDSS_BANDS)
+QVC_PSF_HOST_CAPTURE_GROUP = "qvc_sdss_psf"
+HOST_FRACTION_REST_WAVELENGTH_ANGSTROM = 2500.0
+HOST_CAPTURE_BUNDLE_ATTR = "qvc_host_capture_group"
+
+
+class IncompatibleHostCaptureResumeError(RuntimeError):
+    """Raised when a resume bundle predates shared QVC PSF host capture."""
+
+
+def _host_capture_resume_message(path, detail):
+    return (
+        f"Cannot resume spectral posterior bundle {path}: {detail}. "
+        "This run predates the shared qvc_sdss_psf host-capture parameter. "
+        "Run fresh spectral inference with the updated JAXSEDFit/QVC model; "
+        "old per-band fractions cannot be interpolated into f_host_2500_psf."
+    )
+
+
 JOINT_CHI2_SITES = (
     "sed_chi2",
     "sed_n_eff",
@@ -520,6 +538,7 @@ def add_qvc_psf_photometry(rec, phot):
                 "flux_err_mjy": float(ab_mag_err_to_mjy_err(mag, mag_err)),
                 "psf_fwhm_arcsec": np.nan,
                 "photometry_method": "psf",
+                "host_capture_group": QVC_PSF_HOST_CAPTURE_GROUP,
                 "is_upper_limit": False,
             }
         )
@@ -581,9 +600,16 @@ def build_joint_config(rec, phot, lam, flux, err, resolving_power, args):
         None if not np.isfinite(legacy.safe_float(value)) else float(value)
         for value in phot.get("psf_fwhm_arcsec", pd.Series(np.nan, index=phot.index))
     ]
-    methods = phot.get(
+    method_values = phot.get(
         "photometry_method", pd.Series("catalog", index=phot.index)
-    ).astype(str).tolist()
+    )
+    methods = [None if pd.isna(value) else str(value) for value in method_values]
+    group_values = phot.get(
+        "host_capture_group", pd.Series(None, index=phot.index, dtype=object)
+    )
+    host_capture_groups = [
+        None if pd.isna(value) else str(value) for value in group_values
+    ]
 
     config = FitConfig(
         observation=Observation(
@@ -601,6 +627,7 @@ def build_joint_config(rec, phot, lam, flux, err, resolving_power, args):
             is_upper_limit=phot["is_upper_limit"].astype(bool).tolist(),
             psf_fwhm_arcsec=psf_fwhm,
             photometry_method=methods,
+            host_capture_group=host_capture_groups,
         ),
         filters=FilterSet(curves=load_filter_curves(filter_names)),
         spectroscopy=SpectroscopyData(
@@ -689,7 +716,7 @@ def summarize_samples(samples):
     return out
 
 
-def predict_catalog_posterior(fitter, *, kind):
+def predict_catalog_posterior(fitter, *, kind, **prediction_kwargs):
     """Predict the standard products plus legacy scalar catalog sites.
 
     JAXSEDFit's public prediction products intentionally omit some scalar
@@ -708,11 +735,11 @@ def predict_catalog_posterior(fitter, *, kind):
     had_instance_override = "_predictive_return_sites" in instance_vars
     previous_instance_override = instance_vars.get("_predictive_return_sites")
 
-    def catalog_return_sites(prediction_kind):
+    def catalog_return_sites(prediction_kind, *args, **kwargs):
         return list(
             dict.fromkeys(
                 (
-                    *original_return_sites(prediction_kind),
+                    *original_return_sites(prediction_kind, *args, **kwargs),
                     *LEGACY_CSV_SCALAR_PREDICTION_SITES,
                 )
             )
@@ -720,7 +747,7 @@ def predict_catalog_posterior(fitter, *, kind):
 
     fitter._predictive_return_sites = catalog_return_sites
     try:
-        return fitter.predict(kind=kind)
+        return fitter.predict(kind=kind, **prediction_kwargs)
     finally:
         if had_instance_override:
             fitter._predictive_return_sites = previous_instance_override
@@ -777,6 +804,45 @@ def empty_psf_agn_fraction_summary(bands=PSF_AGN_FRACTION_BANDS):
         key: np.nan
         for band in bands
         for key in (f"f_AGN_psf_{band}", f"f_AGN_psf_{band}_err")
+    }
+
+
+def empty_host_2500_psf_summary():
+    """Return the stable direct 2500-Angstrom host-fraction schema."""
+    return {
+        "f_host_2500_psf": np.nan,
+        "f_host_2500_psf_err": np.nan,
+    }
+
+
+def summarize_host_2500_psf(prediction):
+    """Summarize direct posterior PSF host fractions at rest-frame 2500 A."""
+    if "component_host_fraction" not in prediction:
+        raise ValueError(
+            "JAXSEDFit prediction lacks direct monochromatic component_host_fraction."
+        )
+    fractions = np.asarray(prediction["component_host_fraction"], dtype=float)
+    if fractions.ndim != 2 or fractions.shape[1] != 1 or fractions.shape[0] < 1:
+        raise ValueError(
+            "Direct 2500-Angstrom host-fraction predictions must have shape "
+            f"(draw, 1); received {fractions.shape}."
+        )
+    draws = fractions[:, 0]
+    if not np.all(np.isfinite(draws)):
+        raise ValueError(
+            "Direct 2500-Angstrom host-fraction prediction contains nonfinite draws."
+        )
+    if np.any((draws < 0.0) | (draws > 1.0)):
+        raise ValueError(
+            "Direct 2500-Angstrom host-fraction prediction contains draws outside "
+            "the physical interval [0, 1]."
+        )
+    median, err, _, _ = legacy.sym_percentile(draws)
+    if not (np.isfinite(median) and np.isfinite(err) and 0.0 <= median <= 1.0):
+        raise ValueError("Direct 2500-Angstrom host-fraction summary is invalid.")
+    return {
+        "f_host_2500_psf": float(median),
+        "f_host_2500_psf_err": float(err),
     }
 
 
@@ -975,7 +1041,94 @@ def annotate_posterior_bundle(path, args, rec, *, event_type="fit", source_path=
         if previous is None:
             record["source_bundle"]["provenance"] = "unavailable"
     write_hdf5_provenance(path, merge_history(record, previous))
+    with h5py.File(path, "r+") as handle:
+        if "samples/host_capture_group_fraction" not in handle:
+            raise ValueError(
+                "New posterior bundle lacks the required shared "
+                "host_capture_group_fraction sample."
+            )
+        handle.attrs[HOST_CAPTURE_BUNDLE_ATTR] = QVC_PSF_HOST_CAPTURE_GROUP
     return path
+
+
+def validate_resume_host_capture_fitter(fitter, path):
+    """Validate the exact QVC grouping after loading one resume bundle."""
+    photometry = getattr(getattr(fitter, "config", None), "photometry", None)
+    filter_names = list(getattr(photometry, "filter_names", ()) or ())
+    groups = getattr(photometry, "host_capture_group", None)
+    if groups is None or len(groups) != len(filter_names):
+        raise IncompatibleHostCaptureResumeError(
+            _host_capture_resume_message(path, "configuration has no group assignments")
+        )
+    expected_filters = {f"{band}_sdss" for band in PSF_AGN_FRACTION_BANDS}
+    grouped_qvc_filters = [
+        str(name)
+        for name, group in zip(filter_names, groups)
+        if group == QVC_PSF_HOST_CAPTURE_GROUP
+    ]
+    found_filters = set(grouped_qvc_filters)
+    unexpected_groups = [
+        (str(name), group)
+        for name, group in zip(filter_names, groups)
+        if str(name) not in expected_filters and group is not None
+    ]
+    if (
+        found_filters != expected_filters
+        or len(grouped_qvc_filters) != len(expected_filters)
+        or unexpected_groups
+    ):
+        raise IncompatibleHostCaptureResumeError(
+            _host_capture_resume_message(
+                path,
+                "configuration does not assign exactly the five QVC ugriz "
+                "measurements to qvc_sdss_psf",
+            )
+        )
+    samples = getattr(fitter, "samples", None) or {}
+    group_draws = np.asarray(samples.get("host_capture_group_fraction", []))
+    if group_draws.ndim < 2 or group_draws.shape[-1] != 1:
+        raise IncompatibleHostCaptureResumeError(
+            _host_capture_resume_message(
+                path, "posterior lacks one shared host-capture group parameter"
+            )
+        )
+
+
+def preflight_resume_host_capture_bundles(records, args):
+    """Reject missing, old, or mixed-model resume bundles before workers start."""
+    failures = []
+    for rec in records:
+        path = posterior_bundle_path(args.resume, rec)
+        if not path.is_file():
+            failures.append(f"{path}: missing")
+            continue
+        try:
+            with h5py.File(path, "r") as handle:
+                marker = handle.attrs.get(HOST_CAPTURE_BUNDLE_ATTR)
+                if isinstance(marker, bytes):
+                    marker = marker.decode("utf-8")
+                if marker != QVC_PSF_HOST_CAPTURE_GROUP:
+                    raise ValueError("missing shared-group model marker")
+                if "samples/host_capture_group_fraction" not in handle:
+                    raise ValueError("missing host_capture_group_fraction samples")
+                shape = handle["samples/host_capture_group_fraction"].shape
+                if len(shape) < 2 or shape[-1] != 1:
+                    raise ValueError(
+                        f"expected one host-capture group parameter, found shape {shape}"
+                    )
+        except (OSError, ValueError) as exc:
+            failures.append(f"{path}: {exc}")
+        if len(failures) >= 10:
+            break
+    if failures:
+        detail = "; ".join(failures)
+        raise IncompatibleHostCaptureResumeError(
+            _host_capture_resume_message(
+                args.resume,
+                "resume preflight found incompatible bundles (first failures: "
+                f"{detail})",
+            )
+        )
 
 
 def _base_result(rec, args, *, execution_mode, resumed_from_path=""):
@@ -1010,6 +1163,7 @@ def _base_result(rec, args, *, execution_mode, resumed_from_path=""):
     )
     result.update(empty_joint_chi2_summary())
     result.update(empty_psf_agn_fraction_summary())
+    result.update(empty_host_2500_psf_summary())
     result.update(empty_hubble_convergence_summary())
     result["_psf_agn_fraction_draws"] = np.full(
         (PSF_AGN_FRACTION_DRAW_COUNT, len(PSF_AGN_FRACTION_BANDS)),
@@ -1082,9 +1236,17 @@ def run_one_fit(
 
         fitter = JAXSEDFit(config)
         fit_result = fitter.fit(progress_bar=args.progress)
-        prediction = predict_catalog_posterior(fitter, kind="photometry")
+        prediction = predict_catalog_posterior(
+            fitter,
+            kind="photometry",
+            component_rest_wavelengths=(
+                HOST_FRACTION_REST_WAVELENGTH_ANGSTROM,
+            ),
+            component_host_capture_group=QVC_PSF_HOST_CAPTURE_GROUP,
+        )
         result.update(summarize_catalog_posterior(fit_result.samples, prediction))
         result.update(summarize_joint_chi2(prediction))
+        result.update(summarize_host_2500_psf(prediction))
         result.update(
             summarize_psf_agn_fractions(
                 prediction,
@@ -1168,6 +1330,7 @@ def _run_resumed_fit(rec, args, source_path):
     )
     fitter = JAXSEDFit.load(source_path)
     fitter.predictive = None
+    validate_resume_host_capture_fitter(fitter, source_path)
     config = fitter.config
     saved_name = str(config.observation.object_id)
     expected_name = joint_saved_name(rec)
@@ -1177,9 +1340,15 @@ def _run_resumed_fit(rec, args, source_path):
             f"selected object {expected_name!r}."
         )
 
-    prediction = predict_catalog_posterior(fitter, kind="plot")
+    prediction = predict_catalog_posterior(
+        fitter,
+        kind="plot",
+        component_rest_wavelengths=(HOST_FRACTION_REST_WAVELENGTH_ANGSTROM,),
+        component_host_capture_group=QVC_PSF_HOST_CAPTURE_GROUP,
+    )
     result.update(summarize_catalog_posterior(fitter.samples, prediction))
     result.update(summarize_joint_chi2(prediction))
+    result.update(summarize_host_2500_psf(prediction))
     result.update(
         summarize_psf_agn_fractions(
             prediction,
@@ -1273,18 +1442,17 @@ def _remove_incomplete_resumed_outputs(rec, args):
 
 
 def run_hybrid_fit(rec, args):
-    """Resume one selected object when possible, otherwise fit it from scratch."""
+    """Resume one selected object, retaining fallback only for non-model errors."""
     source_path = posterior_bundle_path(args.resume, rec)
     if not source_path.is_file():
-        return run_one_fit(
-            rec,
-            args,
-            execution_mode="fresh_missing_bundle",
-            resumed_from_path=source_path,
+        raise IncompatibleHostCaptureResumeError(
+            _host_capture_resume_message(source_path, "expected bundle is missing")
         )
 
     try:
         return _run_resumed_fit(rec, args, source_path)
+    except IncompatibleHostCaptureResumeError:
+        raise
     except Exception as exc:
         resume_error = f"{type(exc).__name__}: {exc}"
         if args.verbose:
@@ -1320,6 +1488,8 @@ def run_fit(args):
     records = build_records(args)
     if not records:
         raise RuntimeError("No records to process.")
+    if args.resume:
+        preflight_resume_host_capture_bundles(records, args)
     worker = partial(run_hybrid_fit if args.resume else run_one_fit, args=args)
     description = (
         "Joint SED+spectrum resume/fallback"
@@ -1368,8 +1538,9 @@ def parse_args(argv=None):
     parser.add_argument(
         "--resume",
         help=(
-            "Directory containing old per-object *_samples.h5 bundles. "
-            "Missing or unusable bundles fall back to complete fresh fits."
+            "Directory containing compatible per-object *_samples.h5 bundles. "
+            "Bundles without the shared QVC ugriz host-capture parameter are "
+            "rejected before workers start and must be refit from scratch."
         ),
     )
     parser.add_argument(
