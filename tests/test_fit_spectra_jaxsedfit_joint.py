@@ -347,6 +347,27 @@ def test_base_result_has_stable_nan_hubble_convergence_schema(tmp_path):
     assert np.isnan(result["f_host_2500_psf_err"])
 
 
+@pytest.mark.parametrize(
+    ("record", "expected"),
+    [
+        ({"SDSSS_RUN2D": "26"}, "26"),
+        ({"SDSS_RUN2D": "v5_13_2", "SDSSS_RUN2D": "26"}, "v5_13_2"),
+        ({}, None),
+    ],
+)
+def test_base_result_canonicalizes_input_run2d_field(tmp_path, record, expected):
+    rec = _run_record()
+    rec.update(record)
+
+    result = joint._base_result(
+        rec,
+        _hybrid_args(tmp_path),
+        execution_mode="fresh",
+    )
+
+    assert result["SDSS_RUN2D"] == expected
+
+
 def test_save_spectrum_figure_uses_separate_spectrum_filename(tmp_path):
     class FakeFitter:
         def __init__(self):

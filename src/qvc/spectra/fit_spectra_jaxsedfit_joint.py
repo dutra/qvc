@@ -1378,6 +1378,11 @@ def _base_result(rec, args, *, execution_mode, resumed_from_path=""):
     }
     result.update(
         {
+            # The production input catalog historically misspelled this field
+            # as SDSSS_RUN2D.  Emit one canonical column from every worker so
+            # fresh and resumed shards retain the survey-reduction metadata
+            # needed by the Hubble sample filter.
+            "SDSS_RUN2D": rec.get("SDSS_RUN2D", rec.get("SDSSS_RUN2D")),
             "fit_ok": False,
             "error_message": "",
             "fit_backend": "jaxsedfit_joint",
