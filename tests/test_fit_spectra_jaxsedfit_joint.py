@@ -110,6 +110,61 @@ def test_dereddened_m2500_uses_intrinsic_disk_and_both_attenuation_terms():
     assert np.all(a_internal > 0)
 
 
+def test_m2500_resume_regenerates_dust_and_overrides_stale_values():
+    latent = {
+        "log_agn_amp": np.log(np.array([1.0e38, 1.1e38])),
+        "pl_slope": np.array([-1.8, -1.8]),
+    }
+    regenerated = {
+        "ebv_gal": np.array([0.02, 0.03]),
+        "ebv_agn": np.array([0.04, 0.05]),
+    }
+    stale = {
+        **latent,
+        "ebv_gal": np.zeros(2),
+        "ebv_agn": np.zeros(2),
+    }
+
+    resumed = joint.posterior_samples_for_m2500(stale, regenerated)
+    fresh = {**latent, **regenerated}
+
+    np.testing.assert_array_equal(resumed["ebv_gal"], regenerated["ebv_gal"])
+    np.testing.assert_array_equal(resumed["ebv_agn"], regenerated["ebv_agn"])
+    resumed_draws = estimate_m2500_dereddened(resumed, redshift=1.0)
+    fresh_draws = estimate_m2500_dereddened(fresh, redshift=1.0)
+    assert set(resumed_draws) == set(fresh_draws)
+    for name in resumed_draws:
+        np.testing.assert_allclose(resumed_draws[name], fresh_draws[name])
+
+
+def test_m2500_resume_rejects_missing_regenerated_dust_site():
+    latent = {
+        "log_agn_amp": np.log(np.array([1.0e38, 1.1e38])),
+        "pl_slope": np.array([-1.8, -1.8]),
+    }
+
+    with pytest.raises(joint.M2500ReconstructionError, match="ebv_agn"):
+        joint.posterior_samples_for_m2500(
+            latent,
+            {"ebv_gal": np.array([0.02, 0.03])},
+        )
+
+
+def test_m2500_rejects_all_zero_attenuation_draws():
+    samples = {
+        "log_agn_amp": np.log(np.array([1.0e38, 1.1e38])),
+        "pl_slope": np.array([-1.8, -1.8]),
+        "ebv_gal": np.zeros(2),
+        "ebv_agn": np.zeros(2),
+    }
+
+    with pytest.raises(
+        joint.M2500ReconstructionError,
+        match="zero attenuation for every draw",
+    ):
+        estimate_m2500_dereddened(samples, redshift=1.0)
+
+
 def test_total_a2500_summary_is_computed_from_joint_posterior_draws():
     samples = {
         "log_agn_amp": np.log(np.full(3, 1.0e38)),
@@ -401,6 +456,108 @@ def test_joint_fit_result_writer_moves_private_draw_payload_out_of_catalog(tmp_p
         assert handle["psf_agn_fraction_draws/valid_count"][0] == 2
 
 
+def test_m2500_catalog_validation_rejects_zeroed_resumed_attenuation():
+    row = {
+        "object_id": "1452887",
+        "fit_ok": True,
+        "execution_mode": "resumed",
+        "ebv_gal": 0.02,
+        "ebv_agn": 0.03,
+        "m_2500_dereddened": 20.0,
+        "m_2500_attenuated_model": 20.0,
+        "a_2500_galaxy": 0.0,
+        "a_2500_internal": 0.0,
+        "a_2500_total": 0.0,
+    }
+
+    with pytest.raises(
+        joint.M2500ReconstructionError,
+        match="positive EBV posteriors but zero reconstructed A_2500",
+    ):
+        joint.validate_m2500_catalog_rows([row])
+
+
+@pytest.mark.parametrize(
+    ("a_2500_total", "m_2500_attenuated_model"),
+    [(0.0, 20.25), (0.25, 20.0)],
+)
+def test_m2500_catalog_validation_rejects_partially_zeroed_resume_fields(
+    a_2500_total,
+    m_2500_attenuated_model,
+):
+    row = {
+        "object_id": "1452887",
+        "fit_ok": True,
+        "execution_mode": "resumed",
+        "ebv_gal": 0.02,
+        "ebv_agn": 0.03,
+        "m_2500_dereddened": 20.0,
+        "m_2500_attenuated_model": m_2500_attenuated_model,
+        "a_2500_galaxy": 0.10,
+        "a_2500_internal": 0.15,
+        "a_2500_total": a_2500_total,
+    }
+
+    with pytest.raises(joint.M2500ReconstructionError, match="object_ids"):
+        joint.validate_m2500_catalog_rows([row])
+
+
+def test_m2500_catalog_validation_uses_latent_log_ebv_as_dust_evidence():
+    row = {
+        "object_id": "1452887",
+        "fit_ok": True,
+        "execution_mode": "resumed",
+        "ebv_gal": 0.0,
+        "ebv_agn": 0.0,
+        "log_ebv_gal": np.log(0.02),
+        "log_ebv_agn": np.log(0.03),
+        "m_2500_dereddened": 20.0,
+        "m_2500_attenuated_model": 20.0,
+        "a_2500_galaxy": 0.0,
+        "a_2500_internal": 0.0,
+        "a_2500_total": 0.0,
+    }
+
+    with pytest.raises(joint.M2500ReconstructionError, match="object_ids"):
+        joint.validate_m2500_catalog_rows([row])
+
+
+def test_m2500_catalog_validation_accepts_physical_rows_and_ignores_failures():
+    valid = {
+        "object_id": "1452887",
+        "fit_ok": True,
+        "execution_mode": "resumed",
+        "ebv_gal": 0.02,
+        "ebv_agn": 0.03,
+        "m_2500_dereddened": 20.0,
+        "m_2500_attenuated_model": 20.25,
+        "a_2500_galaxy": 0.10,
+        "a_2500_internal": 0.15,
+        "a_2500_total": 0.25,
+    }
+    failed = {
+        "object_id": "failed",
+        "fit_ok": False,
+        "execution_mode": "resumed",
+    }
+
+    joint.validate_m2500_catalog_rows([valid, failed])
+
+
+def test_m2500_catalog_validation_requires_same_success_schema():
+    incomplete = {
+        "object_id": "1452887",
+        "fit_ok": True,
+        "execution_mode": "fresh",
+    }
+
+    with pytest.raises(
+        joint.M2500ReconstructionError,
+        match="lacks required m2500 catalog fields",
+    ):
+        joint.validate_m2500_catalog_rows([incomplete])
+
+
 def _hybrid_args(tmp_path):
     return SimpleNamespace(
         resume=str(tmp_path / "old"),
@@ -641,6 +798,45 @@ def test_hybrid_bad_bundle_cleans_new_artifacts_and_falls_back(monkeypatch, tmp_
     assert len(fresh_calls) == 1
 
 
+def test_hybrid_m2500_reconstruction_error_does_not_refit(monkeypatch, tmp_path):
+    args = _hybrid_args(tmp_path)
+    source = joint.posterior_bundle_path(args.resume, _run_record())
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"posterior")
+
+    def fail_resume(*args, **kwargs):
+        raise joint.M2500ReconstructionError("missing regenerated ebv_agn")
+
+    monkeypatch.setattr(joint, "_run_resumed_fit", fail_resume)
+    monkeypatch.setattr(
+        joint,
+        "run_one_fit",
+        lambda *args, **kwargs: pytest.fail("must not launch a fresh refit"),
+    )
+
+    with pytest.raises(
+        joint.M2500ReconstructionError,
+        match="missing regenerated ebv_agn",
+    ):
+        joint.run_hybrid_fit(_run_record(), args)
+
+
+def test_fresh_m2500_reconstruction_error_is_not_silenced(monkeypatch, tmp_path):
+    args = _hybrid_args(tmp_path)
+    args.cache_dir = str(tmp_path / "cache")
+
+    def fail_load(*args, **kwargs):
+        raise joint.M2500ReconstructionError("systemic m2500 failure")
+
+    monkeypatch.setattr(joint.legacy, "load_spec_from_cache", fail_load)
+
+    with pytest.raises(
+        joint.M2500ReconstructionError,
+        match="systemic m2500 failure",
+    ):
+        joint.run_one_fit(_run_record(), args)
+
+
 def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
     rec = _run_record()
     args = _hybrid_args(tmp_path)
@@ -649,11 +845,20 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
     source.write_bytes(b"immutable old posterior")
     filter_names = [f"{band}_sdss" for band in "ugriz"]
     prediction = _component_prediction(filter_names)
+    prediction.update(
+        {
+            "ebv_gal": np.array([0.02, 0.02]),
+            "ebv_agn": np.array([0.03, 0.03]),
+        }
+    )
 
     class DummyFitter:
         predictive = {"stale": np.array([1.0])}
         samples = {
-            "log_agn_amp": np.array([1.0, 2.0]),
+            "log_agn_amp": np.log(np.array([1.0e38, 1.1e38])),
+            "pl_slope": np.array([-1.8, -1.8]),
+            "pl_bend_loc": np.array([1000.0, 1000.0]),
+            "pl_bend_width": np.array([10.0, 10.0]),
             "host_capture_group_fraction": np.array([[0.4], [0.5]]),
         }
         config = SimpleNamespace(
@@ -704,9 +909,6 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
         SimpleNamespace(JAXSEDFit=SimpleNamespace(load=lambda path: DummyFitter())),
     )
     monkeypatch.setattr(
-        joint, "summarize_m2500_dereddened", lambda *args, **kwargs: {}
-    )
-    monkeypatch.setattr(
         joint,
         "save_spectrum_figure",
         lambda fitter, record, fig_dir: Path(fig_dir) / "spectrum.png",
@@ -724,6 +926,15 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
     assert result["fracAGN_5100_fit"] == pytest.approx(0.7)
     assert result["fracAGN_5100_fit_err"] == pytest.approx(0.068)
     assert result["formed_stellar_mass"] == pytest.approx(1.1e10)
+    assert result["a_2500_galaxy"] > 0.0
+    assert result["a_2500_internal"] > 0.0
+    assert result["a_2500_total"] == pytest.approx(
+        result["a_2500_galaxy"] + result["a_2500_internal"]
+    )
+    assert (
+        result["m_2500_attenuated_model"]
+        > result["m_2500_dereddened"]
+    )
     assert verify_new_posterior_bundle(result["fit_result_path"]).is_file()
     assert source.read_bytes() == b"immutable old posterior"
 
@@ -736,6 +947,12 @@ def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_
     args.save_fig = False
     filter_names = [f"{band}_sdss" for band in "ugriz"]
     prediction = _component_prediction(filter_names)
+    prediction.update(
+        {
+            "ebv_gal": np.array([0.02, 0.02]),
+            "ebv_agn": np.array([0.03, 0.03]),
+        }
+    )
     saved_path = joint.posterior_bundle_path(args.output_dir, rec)
     saved_path.parent.mkdir(parents=True)
     with h5py.File(saved_path, "w") as handle:
@@ -749,7 +966,10 @@ def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_
             pass
 
     class DummyFitResult:
-        samples = {"log_agn_amp": np.array([1.0, 2.0])}
+        samples = {
+            "log_agn_amp": np.log(np.array([1.0e38, 1.1e38])),
+            "pl_slope": np.array([-1.8, -1.8]),
+        }
         path = saved_path
 
         def predict(self, *, kind):
@@ -795,9 +1015,6 @@ def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_
     monkeypatch.setattr(
         joint, "build_joint_config", lambda *args, **kwargs: (config, used_phot)
     )
-    monkeypatch.setattr(
-        joint, "summarize_m2500_dereddened", lambda *args, **kwargs: {}
-    )
     monkeypatch.setitem(sys.modules, "jaxsedfit", SimpleNamespace(JAXSEDFit=DummyFitter))
 
     result = joint.run_one_fit(
@@ -815,4 +1032,13 @@ def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_
     assert result["fracAGN_5100_fit"] == pytest.approx(0.7)
     assert result["fracAGN_5100_fit_err"] == pytest.approx(0.068)
     assert result["formed_stellar_mass"] == pytest.approx(1.1e10)
+    assert result["a_2500_galaxy"] > 0.0
+    assert result["a_2500_internal"] > 0.0
+    assert result["a_2500_total"] == pytest.approx(
+        result["a_2500_galaxy"] + result["a_2500_internal"]
+    )
+    assert (
+        result["m_2500_attenuated_model"]
+        > result["m_2500_dereddened"]
+    )
     assert result["fit_result_path"] == str(saved_path)
