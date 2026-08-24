@@ -27,7 +27,17 @@ def _write_shard(path, object_ids, draw_values):
     draws = np.full((len(object_ids), 64, 5), np.nan, dtype=np.float32)
     for index, value in enumerate(draw_values):
         draws[index, 0] = value
-    write_spectra_catalog_hdf5(path, frame, draws, np.ones(len(object_ids), dtype=int))
+    host_draws = np.full((len(object_ids), 64), np.nan, dtype=np.float32)
+    for index, value in enumerate(draw_values):
+        host_draws[index, 0] = 1.0 - value
+    write_spectra_catalog_hdf5(
+        path,
+        frame,
+        draws,
+        np.ones(len(object_ids), dtype=int),
+        f_host_2500_psf_draws=host_draws,
+        f_host_2500_psf_valid_count=np.ones(len(object_ids), dtype=int),
+    )
 
 
 def test_h5_merge_deduplicates_last_row_with_its_matching_draws(tmp_path):
@@ -44,6 +54,9 @@ def test_h5_merge_deduplicates_last_row_with_its_matching_draws(tmp_path):
 
     assert merged.frame["object_id"].tolist() == ["1", "2", "3"]
     np.testing.assert_allclose(merged.fraction_draws[:, 0, 0], [0.1, 0.8, 0.3])
+    np.testing.assert_allclose(
+        merged.f_host_2500_psf_draws[:, 0], [0.9, 0.2, 0.7]
+    )
     np.testing.assert_array_equal(merged.valid_count, [1, 1, 1])
 
 
@@ -135,8 +148,24 @@ def test_h5_merge_unions_optional_columns_and_accepts_numeric_dtype_promotion(tm
     )
     draws = np.full((1, 64, 5), np.nan, dtype=np.float32)
     draws[0, 0] = 0.2
-    write_spectra_catalog_hdf5(first, first_frame, draws, np.array([1]))
-    write_spectra_catalog_hdf5(second, second_frame, draws, np.array([1]))
+    host_draws = np.full((1, 64), np.nan, dtype=np.float32)
+    host_draws[0, 0] = 0.8
+    write_spectra_catalog_hdf5(
+        first,
+        first_frame,
+        draws,
+        np.array([1]),
+        f_host_2500_psf_draws=host_draws,
+        f_host_2500_psf_valid_count=np.array([1]),
+    )
+    write_spectra_catalog_hdf5(
+        second,
+        second_frame,
+        draws,
+        np.array([1]),
+        f_host_2500_psf_draws=host_draws,
+        f_host_2500_psf_valid_count=np.array([1]),
+    )
 
     merged = load_and_merge_h5([str(first), str(second)])
 
@@ -167,7 +196,16 @@ def test_h5_merge_rejects_incompatible_shared_column_dtype(tmp_path):
     )
     draws = np.full((1, 64, 5), np.nan, dtype=np.float32)
     draws[0, 0] = 0.2
-    write_spectra_catalog_hdf5(second, frame, draws, np.array([1]))
+    host_draws = np.full((1, 64), np.nan, dtype=np.float32)
+    host_draws[0, 0] = 0.8
+    write_spectra_catalog_hdf5(
+        second,
+        frame,
+        draws,
+        np.array([1]),
+        f_host_2500_psf_draws=host_draws,
+        f_host_2500_psf_valid_count=np.array([1]),
+    )
 
     with pytest.raises(
         ValueError,
@@ -278,6 +316,10 @@ def test_populate_sdss_run2d_from_fits_copies_survey_and_targeting_metadata(
         result,
         draws,
         np.zeros(len(result), dtype=np.int16),
+        f_host_2500_psf_draws=np.full(
+            (len(result), 64), np.nan, dtype=np.float32
+        ),
+        f_host_2500_psf_valid_count=np.zeros(len(result), dtype=np.int16),
     )
     reloaded = merge_results.read_spectra_catalog_hdf5(output_path).frame
     assert reloaded["SDSS_SURVEY"].tolist() == ["eboss", "boss", "preexisting"]

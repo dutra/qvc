@@ -15,9 +15,10 @@ import pandas as pd
 from qvc.provenance import write_hdf5_provenance
 
 
-SPECTRA_CATALOG_FORMAT = "qvc_spectra_catalog_v1"
+SPECTRA_CATALOG_FORMAT = "qvc_spectra_catalog_v2"
 PSF_AGN_FRACTION_BANDS = ("u", "g", "r", "i", "z")
 PSF_AGN_FRACTION_DRAW_COUNT = 64
+F_HOST_2500_PSF_DRAW_COUNT = 64
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,8 @@ class SpectraCatalog:
     fraction_draws: np.ndarray
     valid_count: np.ndarray
     bands: tuple[str, ...]
+    f_host_2500_psf_draws: np.ndarray
+    f_host_2500_psf_valid_count: np.ndarray
 
 
 def _decode_strings(values):
@@ -64,6 +67,8 @@ def write_spectra_catalog_hdf5(
     fraction_draws,
     valid_count,
     *,
+    f_host_2500_psf_draws,
+    f_host_2500_psf_valid_count,
     provenance: Mapping | None = None,
 ):
     """Atomically write scalar catalog fields and compact joint fraction draws."""
@@ -89,6 +94,38 @@ def write_spectra_catalog_hdf5(
                 f"fraction_draws row {row_index} must be NaN-padded beyond valid_count."
             )
 
+    host_draws = np.asarray(f_host_2500_psf_draws, dtype=np.float32)
+    host_counts = np.asarray(f_host_2500_psf_valid_count, dtype=np.int16)
+    expected_host_shape = (len(frame), F_HOST_2500_PSF_DRAW_COUNT)
+    if host_draws.shape != expected_host_shape:
+        raise ValueError(
+            f"f_host_2500_psf_draws has shape {host_draws.shape}; "
+            f"expected {expected_host_shape}."
+        )
+    if host_counts.shape != (len(frame),):
+        raise ValueError(
+            "f_host_2500_psf_valid_count has shape "
+            f"{host_counts.shape}; expected {(len(frame),)}."
+        )
+    if np.any((host_counts < 0) | (host_counts > F_HOST_2500_PSF_DRAW_COUNT)):
+        raise ValueError("f_host_2500_psf_valid_count must be between 0 and 64.")
+    for row_index, count in enumerate(host_counts):
+        valid = host_draws[row_index, :count]
+        if not np.all(np.isfinite(valid)):
+            raise ValueError(
+                f"f_host_2500_psf_draws row {row_index} is nonfinite within "
+                "f_host_2500_psf_valid_count."
+            )
+        if np.any((valid < 0.0) | (valid > 1.0)):
+            raise ValueError(
+                f"f_host_2500_psf_draws row {row_index} is outside [0, 1]."
+            )
+        if not np.all(np.isnan(host_draws[row_index, count:])):
+            raise ValueError(
+                f"f_host_2500_psf_draws row {row_index} must be NaN-padded "
+                "beyond f_host_2500_psf_valid_count."
+            )
+
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     os.close(fd)
@@ -97,6 +134,10 @@ def write_spectra_catalog_hdf5(
             handle.attrs["qvc_spectra_catalog_format"] = SPECTRA_CATALOG_FORMAT
             handle.attrs["psf_agn_fraction_draw_count"] = PSF_AGN_FRACTION_DRAW_COUNT
             handle.attrs["psf_agn_fraction_draw_selection"] = (
+                "deterministic_uniform_without_replacement"
+            )
+            handle.attrs["f_host_2500_psf_draw_count"] = F_HOST_2500_PSF_DRAW_COUNT
+            handle.attrs["f_host_2500_psf_draw_selection"] = (
                 "deterministic_uniform_without_replacement"
             )
             catalog_group = handle.create_group("catalog", track_order=True)
@@ -124,6 +165,21 @@ def write_spectra_catalog_hdf5(
                 compression="gzip",
                 shuffle=True,
             )
+            host_draw_group = handle.create_group("f_host_2500_psf_draws")
+            host_draw_group.create_dataset(
+                "values",
+                data=host_draws,
+                dtype=np.float32,
+                compression="gzip",
+                shuffle=True,
+            )
+            host_draw_group.create_dataset(
+                "valid_count",
+                data=host_counts,
+                dtype=np.int16,
+                compression="gzip",
+                shuffle=True,
+            )
             if provenance is not None:
                 write_hdf5_provenance(handle, provenance)
         os.replace(tmp_name, path)
@@ -145,7 +201,12 @@ def read_spectra_catalog_hdf5(path, *, include_fraction_draws=True):
                 f"Spectra catalog {path} has format {actual_format!r}; "
                 f"expected {SPECTRA_CATALOG_FORMAT!r}."
             )
-        if "catalog" not in handle or "psf_agn_fraction_draws" not in handle:
+        required_groups = {
+            "catalog",
+            "psf_agn_fraction_draws",
+            "f_host_2500_psf_draws",
+        }
+        if not required_groups.issubset(handle.keys()):
             raise ValueError(f"Spectra catalog {path} is missing required groups.")
         if int(handle.attrs.get("psf_agn_fraction_draw_count", -1)) != PSF_AGN_FRACTION_DRAW_COUNT:
             raise ValueError(f"Spectra catalog {path} has an incompatible draw width.")
@@ -199,4 +260,58 @@ def read_spectra_catalog_hdf5(path, *, include_fraction_draws=True):
                         f"Spectra catalog {path} has non-NaN values beyond valid_count "
                         f"for row {row_index}."
                     )
-    return SpectraCatalog(frame=frame, fraction_draws=draws, valid_count=counts, bands=bands)
+
+        host_group = handle["f_host_2500_psf_draws"]
+        missing_host_datasets = {"values", "valid_count"}.difference(
+            host_group.keys()
+        )
+        if missing_host_datasets:
+            raise ValueError(
+                f"Spectra catalog {path} is missing host-fraction draw datasets "
+                f"{sorted(missing_host_datasets)}."
+            )
+        if int(handle.attrs.get("f_host_2500_psf_draw_count", -1)) != F_HOST_2500_PSF_DRAW_COUNT:
+            raise ValueError(
+                f"Spectra catalog {path} has an incompatible host-fraction draw width."
+            )
+        host_counts = np.asarray(host_group["valid_count"][...], dtype=np.int16)
+        if host_counts.shape != (len(frame),) or np.any(
+            (host_counts < 0) | (host_counts > F_HOST_2500_PSF_DRAW_COUNT)
+        ):
+            raise ValueError(
+                f"Spectra catalog {path} has invalid host-fraction valid counts."
+            )
+        expected_host_shape = (len(frame), F_HOST_2500_PSF_DRAW_COUNT)
+        if host_group["values"].shape != expected_host_shape:
+            raise ValueError(
+                f"Spectra catalog {path} has invalid host-fraction draw shape "
+                f"{host_group['values'].shape}."
+            )
+        if include_fraction_draws:
+            host_draws = np.asarray(host_group["values"][...], dtype=np.float32)
+            for row_index, valid_count in enumerate(host_counts):
+                valid = host_draws[row_index, :valid_count]
+                if not np.all(np.isfinite(valid)) or np.any(
+                    (valid < 0.0) | (valid > 1.0)
+                ):
+                    raise ValueError(
+                        f"Spectra catalog {path} has invalid host-fraction draws "
+                        f"for row {row_index}."
+                    )
+                if not np.all(np.isnan(host_draws[row_index, valid_count:])):
+                    raise ValueError(
+                        f"Spectra catalog {path} has non-NaN host-fraction values "
+                        f"beyond valid_count for row {row_index}."
+                    )
+        else:
+            host_draws = np.empty(
+                (0, F_HOST_2500_PSF_DRAW_COUNT), dtype=np.float32
+            )
+    return SpectraCatalog(
+        frame=frame,
+        fraction_draws=draws,
+        valid_count=counts,
+        bands=bands,
+        f_host_2500_psf_draws=host_draws,
+        f_host_2500_psf_valid_count=host_counts,
+    )

@@ -14,6 +14,7 @@ from qvc.hubble.hubble_utils import populate_sdss_fields
 from qvc.hubble.hubble_utils import resolve_qvc_data_path
 from qvc.provenance import build_run_record
 from qvc.spectra.catalog_hdf5 import (
+    F_HOST_2500_PSF_DRAW_COUNT,
     PSF_AGN_FRACTION_BANDS,
     PSF_AGN_FRACTION_DRAW_COUNT,
     SpectraCatalog,
@@ -213,6 +214,8 @@ def deduplicate_h5_catalog(catalog, keys):
         fraction_draws=catalog.fraction_draws[keep],
         valid_count=catalog.valid_count[keep],
         bands=catalog.bands,
+        f_host_2500_psf_draws=catalog.f_host_2500_psf_draws[keep],
+        f_host_2500_psf_valid_count=catalog.f_host_2500_psf_valid_count[keep],
     )
 
 
@@ -222,6 +225,8 @@ def load_and_merge_h5(file_list, expected_n=None, dedup_keys=None):
     frames = []
     draws = []
     counts = []
+    host_draws = []
+    host_counts = []
     column_order = []
     column_dtype_kinds = {}
     column_sources = {}
@@ -248,6 +253,8 @@ def load_and_merge_h5(file_list, expected_n=None, dedup_keys=None):
         frames.append(catalog.frame)
         draws.append(catalog.fraction_draws)
         counts.append(catalog.valid_count)
+        host_draws.append(catalog.f_host_2500_psf_draws)
+        host_counts.append(catalog.f_host_2500_psf_valid_count)
 
     if not frames:
         return SpectraCatalog(
@@ -258,6 +265,10 @@ def load_and_merge_h5(file_list, expected_n=None, dedup_keys=None):
             ),
             valid_count=np.empty(0, dtype=np.int16),
             bands=PSF_AGN_FRACTION_BANDS,
+            f_host_2500_psf_draws=np.empty(
+                (0, F_HOST_2500_PSF_DRAW_COUNT), dtype=np.float32
+            ),
+            f_host_2500_psf_valid_count=np.empty(0, dtype=np.int16),
         )
 
     # Posterior sites can legitimately vary by object because the fitted line
@@ -269,12 +280,16 @@ def load_and_merge_h5(file_list, expected_n=None, dedup_keys=None):
     )
     draw_array = np.concatenate(draws, axis=0)
     count_array = np.concatenate(counts, axis=0)
+    host_draw_array = np.concatenate(host_draws, axis=0)
+    host_count_array = np.concatenate(host_counts, axis=0)
     return deduplicate_h5_catalog(
         SpectraCatalog(
             frame=frame,
             fraction_draws=draw_array,
             valid_count=count_array,
             bands=PSF_AGN_FRACTION_BANDS,
+            f_host_2500_psf_draws=host_draw_array,
+            f_host_2500_psf_valid_count=host_count_array,
         ),
         dedup_keys,
     )
@@ -305,6 +320,8 @@ def enrich_h5_catalog_rows(catalog, enrichment):
         fraction_draws=catalog.fraction_draws,
         valid_count=catalog.valid_count,
         bands=catalog.bands,
+        f_host_2500_psf_draws=catalog.f_host_2500_psf_draws,
+        f_host_2500_psf_valid_count=catalog.f_host_2500_psf_valid_count,
     )
 
 
@@ -645,6 +662,10 @@ def main():
             frame,
             merged_catalog.fraction_draws,
             merged_catalog.valid_count,
+            f_host_2500_psf_draws=merged_catalog.f_host_2500_psf_draws,
+            f_host_2500_psf_valid_count=(
+                merged_catalog.f_host_2500_psf_valid_count
+            ),
             provenance=provenance,
         )
         print(f"Wrote {len(frame)} rows to merged HDF5 {out_path}")
