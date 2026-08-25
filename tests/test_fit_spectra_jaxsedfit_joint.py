@@ -174,6 +174,37 @@ def test_dereddened_m2500_uses_intrinsic_disk_and_both_attenuation_terms():
     assert np.all(a_internal > 0)
 
 
+def test_m2500_attenuation_matches_jaxsedfit_normalized_curve():
+    ebv_gal = np.array([0.02, 0.04])
+    ebv_agn = np.array([0.03, 0.05])
+    samples = {
+        "log_agn_amp": np.log(np.array([1.0e38, 1.1e38])),
+        "pl_slope": np.array([-1.8, -1.8]),
+        "pl_bend_loc": np.array([1000.0, 1000.0]),
+        "pl_bend_width": np.array([10.0, 10.0]),
+        "ebv_gal": ebv_gal,
+        "ebv_agn": ebv_agn,
+    }
+
+    result = estimate_m2500_dereddened(samples, redshift=1.0)
+
+    # JAXSEDFit's GRAHSP optical attenuation branch is
+    # 1.2 * (wave / 11000 Angstrom)^-1.2.
+    curve_2500 = 1.2 * (2500.0 / 11_000.0) ** -1.2
+    assert curve_2500 == pytest.approx(7.101080857438753)
+    np.testing.assert_allclose(
+        result["a_2500_galaxy_draws"], ebv_gal * curve_2500
+    )
+    np.testing.assert_allclose(
+        result["a_2500_internal_draws"], ebv_agn * curve_2500
+    )
+    np.testing.assert_allclose(
+        result["m_2500_attenuated_model_draws"]
+        - result["m_2500_dereddened_draws"],
+        (ebv_gal + ebv_agn) * curve_2500,
+    )
+
+
 def test_m2500_resume_regenerates_dust_and_overrides_stale_values():
     latent = {
         "log_agn_amp": np.log(np.array([1.0e38, 1.1e38])),
