@@ -1758,6 +1758,18 @@ def test_plot_hubble_debiased_returns_clipping_sigma_and_writes_distinct_diagnos
         residuals_df["mu_zscore"].to_numpy(dtype=float),
         np.abs(residuals_df["residuals"].to_numpy(dtype=float)) / residuals_df["clipping_sigma"].to_numpy(dtype=float),
     )
+    budget_summary = pd.read_csv(
+        tmp_path / "diagnostics" / "hubble_error_budget_summary_debiased.csv"
+    ).set_index("metric")["value"]
+    for metric in (
+        "redshift_trend_slope_mag_per_dex",
+        "redshift_trend_slope_err_mag_per_dex",
+        "redshift_trend_slope_significance_sigma",
+        "redshift_trend_delta_chi2",
+        "redshift_trend_p_value",
+    ):
+        assert metric in budget_summary.index
+        assert np.isfinite(budget_summary[metric])
 
 
 def test_plot_hubble_uses_complete_debiased_uncertainty_for_all_bins(
@@ -2235,6 +2247,34 @@ def test_weighted_bin_stats_includes_outer_edges_and_uses_histogram_convention()
     assert int(np.sum(counts)) == 5
 
 
+def test_compute_hubble_redshift_trend_recovers_weighted_slope():
+    z_pivot = 1.5
+    redshift = np.linspace(0.44, 3.16, 40)
+    x = np.log10((1.0 + redshift) / (1.0 + z_pivot))
+    expected_intercept = 0.07
+    expected_slope = -1.25
+    residuals = expected_intercept + expected_slope * x
+    sigma_sel = np.linspace(0.4, 0.9, redshift.size)
+
+    trend = hubble_plotting.compute_hubble_redshift_trend(
+        redshift,
+        residuals,
+        sigma_sel,
+        z_pivot=z_pivot,
+    )
+
+    assert trend["n_used"] == redshift.size
+    assert trend["intercept_mag"] == pytest.approx(expected_intercept)
+    assert trend["slope_mag_per_dex"] == pytest.approx(expected_slope)
+    assert trend["slope_err_mag_per_dex"] > 0.0
+    assert trend["slope_significance_sigma"] < 0.0
+    assert trend["delta_chi2"] == pytest.approx(
+        trend["slope_significance_sigma"] ** 2
+    )
+    assert 0.0 <= trend["p_value"] <= 1.0
+    assert trend["weighted_correlation"] == pytest.approx(-1.0)
+
+
 @pytest.mark.parametrize(
     "bins",
     [
@@ -2411,6 +2451,7 @@ def test_plot_hubble_residual_chi2_annotation_uses_debiased_full_and_data_errors
 
     pivot_context = _agn_pivot_context(df_agn, z_range)
     dmi_sigma = np.linspace(0.05, 0.20, len(df_agn))
+    sigma_sel = np.linspace(0.45, 0.80, len(df_agn))
     (
         residuals,
         _clipping_sigma,
@@ -2429,6 +2470,7 @@ def test_plot_hubble_residual_chi2_annotation_uses_debiased_full_and_data_errors
         dm_interp=None,
         dmi_values=np.zeros(len(df_agn), dtype=float),
         dmi_sigma=dmi_sigma,
+        dmi_selection_sigma=sigma_sel,
         z_range=z_range,
         only_agn=only_agn,
         residuals_csv_filename=None,
@@ -2480,6 +2522,9 @@ def test_plot_hubble_residual_chi2_annotation_uses_debiased_full_and_data_errors
     assert "full / data only" in annotation_text
     assert r"0.44\leq z\leq3.16" in annotation_text
     assert r"1.00<z\leq3.16" in annotation_text
+    assert "Selection-weighted" in annotation_text
+    assert r"\gamma_z=" in annotation_text
+    assert r"\Delta\chi^2=" in annotation_text
     assert (
         f"{expected_full:.2f} / {expected_data:.2f}"
         in annotation_text
