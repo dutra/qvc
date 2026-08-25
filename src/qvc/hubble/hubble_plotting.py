@@ -22,6 +22,7 @@ from matplotlib.lines import Line2D
 from matplotlib.ticker import FixedLocator, FormatStrFormatter, FuncFormatter, LogLocator, NullLocator
 from scipy.interpolate import RegularGridInterpolator, interp1d
 from scipy.optimize import minimize_scalar
+from scipy.stats import chi2 as chi2_distribution
 from scipy.stats import gaussian_kde, kurtosis, norm, normaltest, probplot, skew, spearmanr
 from tqdm import tqdm
 
@@ -5317,6 +5318,104 @@ def _weighted_bin_stats(z, y, yerr, bins, *, min_count=3, center='mid', plot_pat
     return zc[keep], mean[keep], sem[keep], n[keep]
 
 
+def compute_hubble_redshift_trend(
+    redshift,
+    residuals,
+    sigma_sel,
+    *,
+    z_pivot,
+):
+    """Fit the selection-weighted mean residual trend in pivoted log(1+z).
+
+    The delta chi-squared compares a constant residual with a constant plus
+    one redshift-slope parameter. It targets coherent redshift structure
+    rather than measuring the total object-to-object scatter.
+    """
+    z = np.asarray(redshift, dtype=float)
+    r = np.asarray(residuals, dtype=float)
+    sigma = np.asarray(sigma_sel, dtype=float)
+    if z.shape != r.shape or z.shape != sigma.shape:
+        raise ValueError(
+            "redshift, residuals, and sigma_sel must have identical shapes"
+        )
+    if not np.isfinite(z_pivot) or z_pivot <= -1.0:
+        raise ValueError("z_pivot must be finite and greater than -1")
+
+    valid = (
+        np.isfinite(z)
+        & (z > -1.0)
+        & np.isfinite(r)
+        & np.isfinite(sigma)
+        & (sigma > 0.0)
+    )
+    n_used = int(np.count_nonzero(valid))
+    empty = {
+        "n_used": n_used,
+        "intercept_mag": np.nan,
+        "intercept_err_mag": np.nan,
+        "slope_mag_per_dex": np.nan,
+        "slope_err_mag_per_dex": np.nan,
+        "slope_significance_sigma": np.nan,
+        "delta_chi2": np.nan,
+        "p_value": np.nan,
+        "weighted_correlation": np.nan,
+    }
+    if n_used < 3:
+        return empty
+
+    z = z[valid]
+    r = r[valid]
+    sigma = sigma[valid]
+    x = np.log10((1.0 + z) / (1.0 + float(z_pivot)))
+    weights = 1.0 / np.square(sigma)
+    design_constant = np.ones((n_used, 1), dtype=float)
+    design_trend = np.column_stack((np.ones(n_used, dtype=float), x))
+
+    def _fit(design):
+        normal_matrix = design.T @ (weights[:, None] * design)
+        try:
+            covariance = np.linalg.inv(normal_matrix)
+        except np.linalg.LinAlgError:
+            return None
+        coefficients = covariance @ (design.T @ (weights * r))
+        fit_residuals = r - design @ coefficients
+        chi2_value = float(np.sum(weights * np.square(fit_residuals)))
+        return coefficients, covariance, chi2_value
+
+    constant_fit = _fit(design_constant)
+    trend_fit = _fit(design_trend)
+    if constant_fit is None or trend_fit is None:
+        return empty
+
+    coefficients, covariance, trend_chi2 = trend_fit
+    slope_error = float(np.sqrt(max(covariance[1, 1], 0.0)))
+    delta_chi2 = max(float(constant_fit[2] - trend_chi2), 0.0)
+    x_mean = float(np.sum(weights * x) / np.sum(weights))
+    r_mean = float(np.sum(weights * r) / np.sum(weights))
+    covariance_xr = float(np.sum(weights * (x - x_mean) * (r - r_mean)))
+    variance_x = float(np.sum(weights * np.square(x - x_mean)))
+    variance_r = float(np.sum(weights * np.square(r - r_mean)))
+    correlation_denom = np.sqrt(variance_x * variance_r)
+
+    return {
+        "n_used": n_used,
+        "intercept_mag": float(coefficients[0]),
+        "intercept_err_mag": float(np.sqrt(max(covariance[0, 0], 0.0))),
+        "slope_mag_per_dex": float(coefficients[1]),
+        "slope_err_mag_per_dex": slope_error,
+        "slope_significance_sigma": (
+            float(coefficients[1] / slope_error) if slope_error > 0.0 else np.nan
+        ),
+        "delta_chi2": delta_chi2,
+        "p_value": float(chi2_distribution.sf(delta_chi2, 1)),
+        "weighted_correlation": (
+            covariance_xr / correlation_denom
+            if correlation_denom > 0.0
+            else np.nan
+        ),
+    }
+
+
 def _interval_bin_edges(bins, lower, upper):
     """Return ``bins`` clipped to one non-empty interval."""
     bins = np.asarray(bins, dtype=float)
@@ -5844,6 +5943,22 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     )
     if clipped_mask is not None:
         chi2_redshift_mask &= ~clipped_mask
+
+    redshift_trend = None
+    if debias and sigma_sel is not None:
+        trend_mask = (
+            np.isfinite(z_values)
+            & (z_values >= z_range[0])
+            & (z_values <= z_range[1])
+        )
+        if clipped_mask is not None:
+            trend_mask &= ~clipped_mask
+        redshift_trend = compute_hubble_redshift_trend(
+            z_values[trend_mask],
+            residuals[trend_mask],
+            sigma_sel[trend_mask],
+            z_pivot=z_pivot_agn,
+        )
 
     # Plot the inferred distance moduli directly.  The observed population
     # already contains its real scatter; adding a synthetic intrinsic-scatter
@@ -6428,6 +6543,20 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                         f"{chi2_data_only_zgt1:.2f}"
                     )
                 )
+            if (
+                redshift_trend is not None
+                and np.isfinite(redshift_trend["slope_mag_per_dex"])
+            ):
+                chi2_annotation_lines.append(
+                    (
+                        r"Selection-weighted $z$ trend: "
+                        rf"$\gamma_z={redshift_trend['slope_mag_per_dex']:+.2f}"
+                        rf"\pm{redshift_trend['slope_err_mag_per_dex']:.2f}$ "
+                        rf"mag dex$^{{-1}}$ "
+                        rf"$({redshift_trend['slope_significance_sigma']:+.1f}\sigma, "
+                        rf"\Delta\chi^2={redshift_trend['delta_chi2']:.1f})$"
+                    )
+                )
             ax_resid.text(
                 0.02,
                 0.08,
@@ -6663,6 +6792,14 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             {"metric": "median_var_fraction_predicted_M2500_alpha_lambda_term", "value": _median_fraction(pred_m2500_alpha_lambda_var)},
             {"metric": "median_var_fraction_predicted_M2500_eta_sigma_term", "value": _median_fraction(pred_m2500_eta_sigma_var)},
         ]
+        if redshift_trend is not None:
+            budget_rows.extend(
+                {
+                    "metric": f"redshift_trend_{metric}",
+                    "value": float(value),
+                }
+                for metric, value in redshift_trend.items()
+            )
         budget_suffix = diagnostics_suffix if diagnostics_suffix is not None else ("_debiased" if debias else "")
         budget_summary_path = os.path.join(diagnostics_path, f"hubble_error_budget_summary{budget_suffix}.csv")
         pd.DataFrame(budget_rows).to_csv(budget_summary_path, index=False)
