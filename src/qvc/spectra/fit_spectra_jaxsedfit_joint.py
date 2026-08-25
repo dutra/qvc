@@ -51,6 +51,7 @@ C_ANGSTROM_PER_SECOND = 2.99792458e18
 AB_ZEROPOINT_MJY = 3.631e6
 METER_PER_MEGAPARSEC = 3.085677581491367e22
 GRAHSP_ATTENUATION_BREAK_ANGSTROM = 11_000.0
+GRAHSP_ATTENUATION_NORMALIZATION = 1.2
 POSTERIOR_BUNDLE_FORMAT = "jaxsedfit_samples_meta_v2"
 PSF_AGN_FRACTION_BANDS = tuple(legacy.SDSS_BANDS)
 QVC_PSF_HOST_CAPTURE_GROUP = "qvc_sdss_psf"
@@ -389,7 +390,11 @@ def estimate_m2500_dereddened(samples, redshift, *, h0=70.0, om0=0.3):
     ebv_gal, ebv_agn, intrinsic_mag = _broadcast_draws(
         ebv_gal, ebv_agn, intrinsic_mag
     )
-    curve_2500 = (2500.0 / GRAHSP_ATTENUATION_BREAK_ANGSTROM) ** -1.2
+    # Match JAXSEDFit's native GRAHSP bi-attenuation law exactly.  Its
+    # optical branch is norm * (wave / break)^index with norm=1.2.
+    curve_2500 = GRAHSP_ATTENUATION_NORMALIZATION * (
+        2500.0 / GRAHSP_ATTENUATION_BREAK_ANGSTROM
+    ) ** -1.2
     attenuation_gal = ebv_gal * curve_2500
     attenuation_agn = ebv_agn * curve_2500
     attenuation_total = attenuation_gal + attenuation_agn
