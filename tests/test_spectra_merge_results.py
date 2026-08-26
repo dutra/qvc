@@ -1,11 +1,21 @@
 import sys
 
+import h5py
 import numpy as np
 import pandas as pd
 import pytest
 from astropy.table import Table
 
-from qvc.spectra.catalog_hdf5 import write_spectra_catalog_hdf5
+from qvc.spectra.catalog_hdf5 import (
+    ALPHA_NU_BLUE_WAVELENGTH_ANGSTROM,
+    ALPHA_NU_RED_WAVELENGTH_ANGSTROM,
+    GRAHSP_ATTENUATION_OPTICAL_INDEX,
+    JOINT_PSF_PHOTOMETRY_BANDS,
+    JOINT_POSTERIOR_DRAW_FIELDS,
+    JOINT_POSTERIOR_SCALAR_SUMMARY_FIELDS,
+    SPECTRA_CATALOG_FORMAT_V2,
+    write_spectra_catalog_hdf5,
+)
 from qvc.spectra import merge_results
 from qvc.spectra.merge_results import (
     deduplicate_h5_catalog,
@@ -14,7 +24,122 @@ from qvc.spectra.merge_results import (
 )
 
 
-def _write_shard(path, object_ids, draw_values):
+def _joint_row_values(value):
+    value = float(value)
+    a_galaxy = 0.01 + 0.01 * value
+    a_internal = 0.02 + 0.01 * value
+    a_total = a_galaxy + a_internal
+    alpha_intrinsic = -0.7 + 0.2 * value
+    alpha_denominator = np.log10(
+        ALPHA_NU_RED_WAVELENGTH_ANGSTROM
+        / ALPHA_NU_BLUE_WAVELENGTH_ANGSTROM
+    )
+    attenuation_ratio = (
+        ALPHA_NU_BLUE_WAVELENGTH_ANGSTROM
+        / ALPHA_NU_RED_WAVELENGTH_ANGSTROM
+    ) ** GRAHSP_ATTENUATION_OPTICAL_INDEX
+    m_dereddened = 20.0 + value
+    return {
+        "f_host_2500_psf": 1.0 - value,
+        "alpha_nu_intrinsic_1450_2500": alpha_intrinsic,
+        "alpha_nu_attenuated_1450_2500": (
+            alpha_intrinsic
+            - 0.4 * a_total * (attenuation_ratio - 1.0) / alpha_denominator
+        ),
+        "m_2500_dereddened": m_dereddened,
+        "m_2500_attenuated_model": m_dereddened + a_total,
+        "a_2500_galaxy": a_galaxy,
+        "a_2500_internal": a_internal,
+        "a_2500_total": a_total,
+    }
+
+
+def _write_v3_catalog(
+    path,
+    frame,
+    draw_values,
+    *,
+    selection_seed=3,
+    joint_psf_values=None,
+):
+    """Write a small physically consistent v3 shard for merge tests."""
+
+    frame = pd.DataFrame(frame).reset_index(drop=True)
+    if len(draw_values) != len(frame):
+        raise ValueError("draw_values must have one entry per test-catalog row")
+    if "fit_ok" not in frame:
+        frame["fit_ok"] = [value is not None for value in draw_values]
+    if "mw_deredden_applied" not in frame:
+        frame["mw_deredden_applied"] = True
+    if "joint_posterior_draw_source" not in frame:
+        frame["joint_posterior_draw_source"] = [
+            "test_saved_bundle" if value is not None else ""
+            for value in draw_values
+        ]
+    fraction_draws = np.full((len(frame), 64, 5), np.nan, dtype=np.float32)
+    joint_draws = {
+        name: np.full((len(frame), 64), np.nan, dtype=np.float32)
+        for name in JOINT_POSTERIOR_DRAW_FIELDS
+    }
+    valid_count = np.zeros(len(frame), dtype=np.int16)
+    posterior_index = np.full((len(frame), 64), -1, dtype=np.int32)
+    source_draw_count = np.zeros(len(frame), dtype=np.int32)
+    for index, value in enumerate(draw_values):
+        if value is None:
+            continue
+        value = float(value)
+        fraction_draws[index, 0] = value
+        valid_count[index] = 1
+        posterior_index[index, 0] = int(round(10.0 * value))
+        source_draw_count[index] = 250
+        for name, field_value in _joint_row_values(value).items():
+            joint_draws[name][index, 0] = field_value
+    for name in JOINT_POSTERIOR_DRAW_FIELDS:
+        summaries = [
+            np.nan if value is None else _joint_row_values(value)[name]
+            for value in draw_values
+        ]
+        if name not in frame:
+            frame[name] = summaries
+        for suffix in ("_err", "_err_lower", "_err_upper"):
+            column = f"{name}{suffix}"
+            if column not in frame:
+                frame[column] = [
+                    np.nan if value is None else 0.0 for value in draw_values
+                ]
+    assert set(JOINT_POSTERIOR_SCALAR_SUMMARY_FIELDS).issubset(frame.columns)
+    if joint_psf_values is None:
+        joint_psf_values = draw_values
+    if len(joint_psf_values) != len(frame):
+        raise ValueError("joint_psf_values must match the test frame")
+    joint_psf_photometry = np.full(
+        (len(frame), 64, len(JOINT_PSF_PHOTOMETRY_BANDS)),
+        np.nan,
+        dtype=np.float32,
+    )
+    for row_index, value in enumerate(joint_psf_values):
+        if value is not None:
+            joint_psf_photometry[row_index, 0] = float(value)
+    joint_psf_provenance = {
+        "prediction_source": "synthetic_test",
+        "jaxsedfit_git_commit": "a" * 40,
+    }
+    write_spectra_catalog_hdf5(
+        path,
+        frame,
+        fraction_draws,
+        valid_count,
+        joint_posterior_draws=joint_draws,
+        joint_posterior_valid_count=valid_count,
+        joint_posterior_index=posterior_index,
+        joint_posterior_source_draw_count=source_draw_count,
+        joint_posterior_selection_seed=selection_seed,
+        joint_psf_photometry_draws=joint_psf_photometry,
+        joint_psf_photometry_provenance=joint_psf_provenance,
+    )
+
+
+def _write_shard(path, object_ids, draw_values, *, selection_seed=3):
     frame = pd.DataFrame(
         {
             "object_id": object_ids,
@@ -24,19 +149,11 @@ def _write_shard(path, object_ids, draw_values):
             "z": np.arange(len(object_ids), dtype=float),
         }
     )
-    draws = np.full((len(object_ids), 64, 5), np.nan, dtype=np.float32)
-    for index, value in enumerate(draw_values):
-        draws[index, 0] = value
-    host_draws = np.full((len(object_ids), 64), np.nan, dtype=np.float32)
-    for index, value in enumerate(draw_values):
-        host_draws[index, 0] = 1.0 - value
-    write_spectra_catalog_hdf5(
+    _write_v3_catalog(
         path,
         frame,
-        draws,
-        np.ones(len(object_ids), dtype=int),
-        f_host_2500_psf_draws=host_draws,
-        f_host_2500_psf_valid_count=np.ones(len(object_ids), dtype=int),
+        draw_values,
+        selection_seed=selection_seed,
     )
 
 
@@ -58,6 +175,19 @@ def test_h5_merge_deduplicates_last_row_with_its_matching_draws(tmp_path):
         merged.f_host_2500_psf_draws[:, 0], [0.9, 0.2, 0.7]
     )
     np.testing.assert_array_equal(merged.valid_count, [1, 1, 1])
+    np.testing.assert_array_equal(merged.joint_posterior_valid_count, [1, 1, 1])
+    np.testing.assert_array_equal(merged.joint_posterior_index[:, 0], [1, 8, 3])
+    np.testing.assert_array_equal(
+        merged.joint_posterior_source_draw_count, [250, 250, 250]
+    )
+    assert merged.joint_posterior_selection_seed == 3
+    expected_values = [0.1, 0.8, 0.3]
+    for name in JOINT_POSTERIOR_DRAW_FIELDS:
+        np.testing.assert_allclose(
+            merged.joint_posterior_draws[name][:, 0],
+            [_joint_row_values(value)[name] for value in expected_values],
+        )
+        assert np.all(np.isnan(merged.joint_posterior_draws[name][:, 1:]))
 
 
 def test_h5_catalog_can_be_deduplicated_after_single_merge(tmp_path):
@@ -116,6 +246,16 @@ def test_h5_main_loads_shards_once_then_deduplicates_in_memory(
     merged = merge_results.read_spectra_catalog_hdf5(output)
     assert merged.frame["object_id"].tolist() == ["1", "2", "3"]
     np.testing.assert_allclose(merged.fraction_draws[:, 0, 0], [0.1, 0.8, 0.3])
+    assert merged.joint_posterior_selection_seed == 3
+    np.testing.assert_array_equal(merged.joint_posterior_index[:, 0], [1, 8, 3])
+    for name in JOINT_POSTERIOR_DRAW_FIELDS:
+        np.testing.assert_allclose(
+            merged.joint_posterior_draws[name][:, 0],
+            [
+                _joint_row_values(value)[name]
+                for value in (0.1, 0.8, 0.3)
+            ],
+        )
 
 
 def test_h5_merge_unions_optional_columns_and_accepts_numeric_dtype_promotion(tmp_path):
@@ -146,33 +286,15 @@ def test_h5_merge_unions_optional_columns_and_accepts_numeric_dtype_promotion(tm
             "jqf_line_amp_CIV_std": [0.3],
         }
     )
-    draws = np.full((1, 64, 5), np.nan, dtype=np.float32)
-    draws[0, 0] = 0.2
-    host_draws = np.full((1, 64), np.nan, dtype=np.float32)
-    host_draws[0, 0] = 0.8
-    write_spectra_catalog_hdf5(
-        first,
-        first_frame,
-        draws,
-        np.array([1]),
-        f_host_2500_psf_draws=host_draws,
-        f_host_2500_psf_valid_count=np.array([1]),
-    )
-    write_spectra_catalog_hdf5(
-        second,
-        second_frame,
-        draws,
-        np.array([1]),
-        f_host_2500_psf_draws=host_draws,
-        f_host_2500_psf_valid_count=np.array([1]),
-    )
+    _write_v3_catalog(first, first_frame, [0.2])
+    _write_v3_catalog(second, second_frame, [0.2])
 
     merged = load_and_merge_h5([str(first), str(second)])
 
-    assert merged.frame.columns.tolist() == [
-        *first_frame.columns,
-        "jqf_line_amp_CIV_std",
-    ]
+    assert merged.frame.columns.tolist()[: len(first_frame.columns)] == list(
+        first_frame.columns
+    )
+    assert merged.frame.columns.tolist()[-1] == "jqf_line_amp_CIV_std"
     assert merged.frame["n_photometry"].tolist() == [5.0, 5.0]
     assert merged.frame["jqf_line_amp_Lya_std"].tolist()[0] == pytest.approx(0.2)
     assert np.isnan(merged.frame["jqf_line_amp_Lya_std"].tolist()[1])
@@ -194,18 +316,7 @@ def test_h5_merge_rejects_incompatible_shared_column_dtype(tmp_path):
             "z": ["not-numeric"],
         }
     )
-    draws = np.full((1, 64, 5), np.nan, dtype=np.float32)
-    draws[0, 0] = 0.2
-    host_draws = np.full((1, 64), np.nan, dtype=np.float32)
-    host_draws[0, 0] = 0.8
-    write_spectra_catalog_hdf5(
-        second,
-        frame,
-        draws,
-        np.array([1]),
-        f_host_2500_psf_draws=host_draws,
-        f_host_2500_psf_valid_count=np.array([1]),
-    )
+    _write_v3_catalog(second, frame, [0.2])
 
     with pytest.raises(
         ValueError,
@@ -224,6 +335,87 @@ def test_h5_merge_rejects_corrupt_shard(tmp_path):
         load_and_merge_h5([str(valid), str(corrupt)])
 
 
+def test_h5_merge_rejects_different_joint_selection_seeds(tmp_path):
+    first = tmp_path / "chunk0000.h5"
+    second = tmp_path / "chunk0001.h5"
+    _write_shard(first, ["1"], [0.1], selection_seed=3)
+    _write_shard(second, ["2"], [0.2], selection_seed=4)
+
+    with pytest.raises(ValueError, match="different joint posterior seeds"):
+        load_and_merge_h5([str(first), str(second)])
+
+
+def test_h5_merge_rejects_mixed_catalog_formats(tmp_path):
+    first = tmp_path / "chunk0000.h5"
+    second = tmp_path / "chunk0001.h5"
+    _write_shard(first, ["1"], [0.1])
+    _write_shard(second, ["2"], [0.2])
+    with h5py.File(second, "r+") as handle:
+        handle.attrs["qvc_spectra_catalog_format"] = SPECTRA_CATALOG_FORMAT_V2
+
+    with pytest.raises(ValueError, match="has format 'qvc_spectra_catalog_v2'"):
+        load_and_merge_h5([str(first), str(second)])
+
+
+def test_h5_merge_rejects_incompatible_joint_semantics(tmp_path):
+    first = tmp_path / "chunk0000.h5"
+    second = tmp_path / "chunk0001.h5"
+    _write_shard(first, ["1"], [0.1])
+    _write_shard(second, ["2"], [0.2])
+    with h5py.File(second, "r+") as handle:
+        handle.attrs["alpha_nu_definition"] = "incompatible-test-definition"
+
+    with pytest.raises(ValueError, match="incompatible alpha_nu_definition"):
+        load_and_merge_h5([str(first), str(second)])
+
+
+def test_h5_merge_preserves_required_joint_psf_photometry_alignment(tmp_path):
+    first = tmp_path / "chunk0000.h5"
+    second = tmp_path / "chunk0001.h5"
+    _write_v3_catalog(
+        first,
+        pd.DataFrame({"object_id": ["1"], "fit_ok": [True], "z": [1.0]}),
+        [0.1],
+        joint_psf_values=[1.5],
+    )
+    _write_v3_catalog(
+        second,
+        pd.DataFrame({"object_id": ["2"], "fit_ok": [True], "z": [2.0]}),
+        [0.2],
+        joint_psf_values=[2.5],
+    )
+
+    merged = load_and_merge_h5([str(first), str(second)])
+
+    assert merged.joint_psf_photometry_bands == JOINT_PSF_PHOTOMETRY_BANDS
+    np.testing.assert_allclose(
+        merged.joint_psf_photometry_draws[:, 0, 1],
+        [1.5, 2.5],
+    )
+    assert np.all(np.isnan(merged.joint_psf_photometry_draws[:, 1:]))
+
+
+def test_h5_merge_rejects_v3_shard_missing_mandatory_joint_psf_photometry(tmp_path):
+    first = tmp_path / "chunk0000.h5"
+    second = tmp_path / "chunk0001.h5"
+    _write_v3_catalog(
+        first,
+        pd.DataFrame({"object_id": ["1"], "fit_ok": [True], "z": [1.0]}),
+        [0.1],
+        joint_psf_values=[1.5],
+    )
+    _write_v3_catalog(
+        second,
+        pd.DataFrame({"object_id": ["2"], "fit_ok": [True], "z": [2.0]}),
+        [0.2],
+    )
+    with h5py.File(second, "r+") as handle:
+        del handle["joint_psf_photometry_draws"]
+
+    with pytest.raises(ValueError, match="missing required groups"):
+        load_and_merge_h5([str(first), str(second)])
+
+
 def test_h5_enrichment_restores_row_and_draw_alignment(tmp_path):
     shard = tmp_path / "chunk0000.h5"
     _write_shard(shard, ["1", "2"], [0.1, 0.2])
@@ -237,6 +429,14 @@ def test_h5_enrichment_restores_row_and_draw_alignment(tmp_path):
     assert enriched.frame["object_id"].tolist() == ["1", "2"]
     assert enriched.frame["sdss_field"].tolist() == ["added", "added"]
     np.testing.assert_allclose(enriched.fraction_draws[:, 0, 0], [0.1, 0.2])
+    np.testing.assert_array_equal(enriched.joint_posterior_index[:, 0], [1, 2])
+    assert enriched.joint_posterior_selection_seed == 3
+    for name in JOINT_POSTERIOR_DRAW_FIELDS:
+        np.testing.assert_allclose(
+            enriched.joint_posterior_draws[name],
+            catalog.joint_posterior_draws[name],
+            equal_nan=True,
+        )
 
 
 def test_populate_sdss_run2d_from_fits_copies_survey_and_targeting_metadata(
@@ -310,17 +510,7 @@ def test_populate_sdss_run2d_from_fits_copies_survey_and_targeting_metadata(
     assert result["SDSS_EBOSS_TARGET2"].tolist() == [-1, -1, -1]
 
     output_path = tmp_path / "enriched.h5"
-    draws = np.full((len(result), 64, 5), np.nan, dtype=np.float32)
-    write_spectra_catalog_hdf5(
-        output_path,
-        result,
-        draws,
-        np.zeros(len(result), dtype=np.int16),
-        f_host_2500_psf_draws=np.full(
-            (len(result), 64), np.nan, dtype=np.float32
-        ),
-        f_host_2500_psf_valid_count=np.zeros(len(result), dtype=np.int16),
-    )
+    _write_v3_catalog(output_path, result, [None] * len(result))
     reloaded = merge_results.read_spectra_catalog_hdf5(output_path).frame
     assert reloaded["SDSS_SURVEY"].tolist() == ["eboss", "boss", "preexisting"]
     assert reloaded["SDSS_SPECOBJ_MATCHED"].tolist() == [True, True, False]

@@ -14,9 +14,13 @@ from qvc.hubble.hubble_utils import populate_sdss_fields
 from qvc.hubble.hubble_utils import resolve_qvc_data_path
 from qvc.provenance import build_run_record
 from qvc.spectra.catalog_hdf5 import (
-    F_HOST_2500_PSF_DRAW_COUNT,
+    JOINT_PSF_PHOTOMETRY_BANDS,
+    JOINT_PSF_PHOTOMETRY_DRAW_COUNT,
+    JOINT_POSTERIOR_DRAW_COUNT,
+    JOINT_POSTERIOR_DRAW_FIELDS,
     PSF_AGN_FRACTION_BANDS,
     PSF_AGN_FRACTION_DRAW_COUNT,
+    SPECTRA_CATALOG_FORMAT,
     SpectraCatalog,
     read_spectra_catalog_hdf5,
     write_spectra_catalog_hdf5,
@@ -216,6 +220,22 @@ def deduplicate_h5_catalog(catalog, keys):
         bands=catalog.bands,
         f_host_2500_psf_draws=catalog.f_host_2500_psf_draws[keep],
         f_host_2500_psf_valid_count=catalog.f_host_2500_psf_valid_count[keep],
+        catalog_format=catalog.catalog_format,
+        joint_posterior_draws={
+            name: catalog.joint_posterior_draws[name][keep]
+            for name in JOINT_POSTERIOR_DRAW_FIELDS
+        },
+        joint_posterior_valid_count=catalog.joint_posterior_valid_count[keep],
+        joint_posterior_index=catalog.joint_posterior_index[keep],
+        joint_posterior_source_draw_count=(
+            catalog.joint_posterior_source_draw_count[keep]
+        ),
+        joint_posterior_selection_seed=catalog.joint_posterior_selection_seed,
+        joint_psf_photometry_draws=catalog.joint_psf_photometry_draws[keep],
+        joint_psf_photometry_bands=catalog.joint_psf_photometry_bands,
+        joint_psf_photometry_provenance=(
+            catalog.joint_psf_photometry_provenance
+        ),
     )
 
 
@@ -225,13 +245,37 @@ def load_and_merge_h5(file_list, expected_n=None, dedup_keys=None):
     frames = []
     draws = []
     counts = []
-    host_draws = []
-    host_counts = []
+    joint_draws = {name: [] for name in JOINT_POSTERIOR_DRAW_FIELDS}
+    joint_counts = []
+    joint_indices = []
+    joint_source_counts = []
+    joint_psf_photometry = []
+    joint_psf_photometry_provenance = None
+    selection_seed = None
     column_order = []
     column_dtype_kinds = {}
     column_sources = {}
     for path in tqdm(file_list, desc="Merging HDF5 shards", unit="file"):
         catalog = read_spectra_catalog_hdf5(path)
+        if catalog.catalog_format != SPECTRA_CATALOG_FORMAT:
+            raise ValueError(
+                f"Cannot merge legacy spectra catalog {path} with format "
+                f"{catalog.catalog_format!r}; all shards must use "
+                f"{SPECTRA_CATALOG_FORMAT!r}."
+            )
+        if catalog.joint_posterior_selection_seed is None:
+            raise ValueError(
+                f"Spectra catalog {path} has no joint posterior selection seed."
+            )
+        if selection_seed is None:
+            selection_seed = catalog.joint_posterior_selection_seed
+        elif catalog.joint_posterior_selection_seed != selection_seed:
+            raise ValueError(
+                "Cannot merge spectra catalogs selected with different joint "
+                "posterior seeds: "
+                f"{selection_seed} != {catalog.joint_posterior_selection_seed} "
+                f"in {path}."
+            )
         if not enforce_expected_count(len(catalog.frame), expected_n, path):
             continue
         if catalog.bands != PSF_AGN_FRACTION_BANDS:
@@ -253,8 +297,31 @@ def load_and_merge_h5(file_list, expected_n=None, dedup_keys=None):
         frames.append(catalog.frame)
         draws.append(catalog.fraction_draws)
         counts.append(catalog.valid_count)
-        host_draws.append(catalog.f_host_2500_psf_draws)
-        host_counts.append(catalog.f_host_2500_psf_valid_count)
+        for name in JOINT_POSTERIOR_DRAW_FIELDS:
+            joint_draws[name].append(catalog.joint_posterior_draws[name])
+        joint_counts.append(catalog.joint_posterior_valid_count)
+        joint_indices.append(catalog.joint_posterior_index)
+        joint_source_counts.append(catalog.joint_posterior_source_draw_count)
+        if catalog.joint_psf_photometry_draws is None:
+            raise ValueError(f"Required joint PSF photometry is absent in {path}.")
+        if catalog.joint_psf_photometry_bands != JOINT_PSF_PHOTOMETRY_BANDS:
+            raise ValueError(
+                f"Incompatible joint PSF photometry bands in {path}: "
+                f"{catalog.joint_psf_photometry_bands}."
+            )
+        if joint_psf_photometry_provenance is None:
+            joint_psf_photometry_provenance = dict(
+                catalog.joint_psf_photometry_provenance
+            )
+        elif (
+            dict(catalog.joint_psf_photometry_provenance)
+            != joint_psf_photometry_provenance
+        ):
+            raise ValueError(
+                "Cannot merge joint PSF photometry selected with different "
+                f"prediction provenance; mismatch in {path}."
+            )
+        joint_psf_photometry.append(catalog.joint_psf_photometry_draws)
 
     if not frames:
         return SpectraCatalog(
@@ -266,9 +333,31 @@ def load_and_merge_h5(file_list, expected_n=None, dedup_keys=None):
             valid_count=np.empty(0, dtype=np.int16),
             bands=PSF_AGN_FRACTION_BANDS,
             f_host_2500_psf_draws=np.empty(
-                (0, F_HOST_2500_PSF_DRAW_COUNT), dtype=np.float32
+                (0, JOINT_POSTERIOR_DRAW_COUNT), dtype=np.float32
             ),
             f_host_2500_psf_valid_count=np.empty(0, dtype=np.int16),
+            catalog_format=SPECTRA_CATALOG_FORMAT,
+            joint_posterior_draws={
+                name: np.empty(
+                    (0, JOINT_POSTERIOR_DRAW_COUNT), dtype=np.float32
+                )
+                for name in JOINT_POSTERIOR_DRAW_FIELDS
+            },
+            joint_posterior_valid_count=np.empty(0, dtype=np.int16),
+            joint_posterior_index=np.empty(
+                (0, JOINT_POSTERIOR_DRAW_COUNT), dtype=np.int32
+            ),
+            joint_posterior_source_draw_count=np.empty(0, dtype=np.int32),
+            joint_posterior_selection_seed=selection_seed,
+            joint_psf_photometry_draws=np.empty(
+                (0, JOINT_PSF_PHOTOMETRY_DRAW_COUNT, len(JOINT_PSF_PHOTOMETRY_BANDS)),
+                dtype=np.float32,
+            ),
+            joint_psf_photometry_bands=JOINT_PSF_PHOTOMETRY_BANDS,
+            joint_psf_photometry_provenance={
+                "prediction_source": "empty_merge",
+                "jaxsedfit_git_commit": "not_applicable",
+            },
         )
 
     # Posterior sites can legitimately vary by object because the fitted line
@@ -280,16 +369,36 @@ def load_and_merge_h5(file_list, expected_n=None, dedup_keys=None):
     )
     draw_array = np.concatenate(draws, axis=0)
     count_array = np.concatenate(counts, axis=0)
-    host_draw_array = np.concatenate(host_draws, axis=0)
-    host_count_array = np.concatenate(host_counts, axis=0)
+    joint_draw_arrays = {
+        name: np.concatenate(values, axis=0)
+        for name, values in joint_draws.items()
+    }
+    joint_count_array = np.concatenate(joint_counts, axis=0)
+    joint_index_array = np.concatenate(joint_indices, axis=0)
+    joint_source_count_array = np.concatenate(joint_source_counts, axis=0)
+    joint_psf_photometry_array = np.concatenate(
+        joint_psf_photometry,
+        axis=0,
+    )
     return deduplicate_h5_catalog(
         SpectraCatalog(
             frame=frame,
             fraction_draws=draw_array,
             valid_count=count_array,
             bands=PSF_AGN_FRACTION_BANDS,
-            f_host_2500_psf_draws=host_draw_array,
-            f_host_2500_psf_valid_count=host_count_array,
+            f_host_2500_psf_draws=joint_draw_arrays["f_host_2500_psf"],
+            f_host_2500_psf_valid_count=joint_count_array,
+            catalog_format=SPECTRA_CATALOG_FORMAT,
+            joint_posterior_draws=joint_draw_arrays,
+            joint_posterior_valid_count=joint_count_array,
+            joint_posterior_index=joint_index_array,
+            joint_posterior_source_draw_count=joint_source_count_array,
+            joint_posterior_selection_seed=selection_seed,
+            joint_psf_photometry_draws=joint_psf_photometry_array,
+            joint_psf_photometry_bands=JOINT_PSF_PHOTOMETRY_BANDS,
+            joint_psf_photometry_provenance=(
+                joint_psf_photometry_provenance or {}
+            ),
         ),
         dedup_keys,
     )
@@ -322,6 +431,19 @@ def enrich_h5_catalog_rows(catalog, enrichment):
         bands=catalog.bands,
         f_host_2500_psf_draws=catalog.f_host_2500_psf_draws,
         f_host_2500_psf_valid_count=catalog.f_host_2500_psf_valid_count,
+        catalog_format=catalog.catalog_format,
+        joint_posterior_draws=catalog.joint_posterior_draws,
+        joint_posterior_valid_count=catalog.joint_posterior_valid_count,
+        joint_posterior_index=catalog.joint_posterior_index,
+        joint_posterior_source_draw_count=(
+            catalog.joint_posterior_source_draw_count
+        ),
+        joint_posterior_selection_seed=catalog.joint_posterior_selection_seed,
+        joint_psf_photometry_draws=catalog.joint_psf_photometry_draws,
+        joint_psf_photometry_bands=catalog.joint_psf_photometry_bands,
+        joint_psf_photometry_provenance=(
+            catalog.joint_psf_photometry_provenance
+        ),
     )
 
 
@@ -662,9 +784,22 @@ def main():
             frame,
             merged_catalog.fraction_draws,
             merged_catalog.valid_count,
-            f_host_2500_psf_draws=merged_catalog.f_host_2500_psf_draws,
-            f_host_2500_psf_valid_count=(
-                merged_catalog.f_host_2500_psf_valid_count
+            joint_posterior_draws=merged_catalog.joint_posterior_draws,
+            joint_posterior_valid_count=(
+                merged_catalog.joint_posterior_valid_count
+            ),
+            joint_posterior_index=merged_catalog.joint_posterior_index,
+            joint_posterior_source_draw_count=(
+                merged_catalog.joint_posterior_source_draw_count
+            ),
+            joint_posterior_selection_seed=(
+                merged_catalog.joint_posterior_selection_seed
+            ),
+            joint_psf_photometry_draws=(
+                merged_catalog.joint_psf_photometry_draws
+            ),
+            joint_psf_photometry_provenance=(
+                merged_catalog.joint_psf_photometry_provenance
             ),
             provenance=provenance,
         )

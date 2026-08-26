@@ -18,11 +18,14 @@ $SHEN_PUBTOOLS_PATH = __xonsh__.env.get(
 # Hubble quality cuts used for the conservative completeness-smoothing test.
 # Keep the category-specific R-hat variables: QVC_CUT_MCMC_RHAT_MAX has been
 # retired and is intentionally not used here.
-$QVC_CUT_SPECTRAL_RHAT_MAX = "1.20"
+$QVC_CUT_SPECTRAL_RHAT_MAX = "1.05"
 $QVC_CUT_LIGHT_CURVE_RHAT_MAX = "1.05"
-$QVC_CUT_LOG_TAU_UV_RF_MAX = "2.8"
-$QVC_CUT_APPARENT_MAG_2500_ERR_MAX = "0.30"
-$QVC_CUT_JAXSEDFIT_JOINT_REDUCED_CHI2_MAX = "1.30"
+$QVC_CUT_LOG_TAU_UV_RF_MAX = "3.5"
+$QVC_CUT_APPARENT_MAG_2500_ERR_MAX = "0.3"
+$QVC_CUT_SED_REDUCED_CHI2_MAX = "1.3"
+$QVC_CUT_SPECTROSCOPY_REDUCED_CHI2_MAX = "1.3"
+$QVC_CUT_JAXSEDFIT_JOINT_REDUCED_CHI2_MAX = "1.3"
+$QVC_CUT_LOO_CHI2_EFF_MAX = "1.3"
 
 # Conservative 2D completeness-map smoothing (mag, z).  These override the
 # shared defaults for this runner and match the retained Hubble-diagram test.
@@ -34,7 +37,10 @@ $QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z = "0.30"
 # $QVC_CUT_LIGHT_CURVE_RHAT_MAX = "1.10"
 # $QVC_CUT_LOG_TAU_UV_RF_MAX = "4.0"
 # $QVC_CUT_APPARENT_MAG_2500_ERR_MAX = "1.0"
+# $QVC_CUT_SED_REDUCED_CHI2_MAX = "none"
+# $QVC_CUT_SPECTROSCOPY_REDUCED_CHI2_MAX = "none"
 # $QVC_CUT_JAXSEDFIT_JOINT_REDUCED_CHI2_MAX = "1.5"
+# $QVC_CUT_LOO_CHI2_EFF_MAX = "none"
 # $QVC_CUT_A_2500_TOTAL_MAX = "0.25"
 # $QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG = "0.20"
 # $QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z = "0.20"
@@ -54,6 +60,102 @@ sdss_target_selection = __xonsh__.env.get(
 )
 completeness_stratification = __xonsh__.env.get(
     "QVC_HUBBLE_COMPLETENESS_STRATIFICATION", "none"
+)
+completeness_mode = __xonsh__.env.get("QVC_HUBBLE_COMPLETENESS_MODE", "2d")
+completeness_lf_model = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_LF_MODEL", "shen"
+).strip()
+completeness_sim_file = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_SIM_FILE", ""
+).strip()
+completeness_sim_args = (
+    ["--completeness_sim_file", completeness_sim_file]
+    if completeness_sim_file
+    else []
+)
+completeness_mock_oversample = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_MOCK_OVERSAMPLE",
+    "4",
+)
+completeness_mock_max_rows = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_MOCK_MAX_ROWS", "2000000"
+)
+completeness_mock_proposal_area = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_MOCK_PROPOSAL_AREA", "full_sky"
+)
+dynesty_seed = __xonsh__.env.get("QVC_HUBBLE_DYNESTY_SEED", "12345")
+allow_spectra_catalog_v1 = __xonsh__.env.get(
+    "QVC_HUBBLE_ALLOW_SPECTRA_CATALOG_V1", "false"
+).lower() in {"1", "true", "yes", "on"}
+allow_spectra_catalog_v1_args = (
+    ["--allow-spectra-catalog-v1"] if allow_spectra_catalog_v1 else []
+)
+allow_spectra_catalog_v2 = __xonsh__.env.get(
+    "QVC_HUBBLE_ALLOW_SPECTRA_CATALOG_V2", "false"
+).lower() in {"1", "true", "yes", "on"}
+allow_spectra_catalog_v2_args = (
+    ["--allow-spectra-catalog-v2"] if allow_spectra_catalog_v2 else []
+)
+approximate_v1_fhost = __xonsh__.env.get(
+    "QVC_HUBBLE_APPROXIMATE_V1_FHOST_2500_PSF", "false"
+).lower() in {"1", "true", "yes", "on"}
+approximate_v1_fhost_args = (
+    ["--approximate-v1-fhost-2500-psf"] if approximate_v1_fhost else []
+)
+alpha_parent_mean = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_ALPHA_PARENT_MEAN", "-0.5"
+)
+alpha_parent_sigma = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_ALPHA_PARENT_SIGMA", "0.3"
+)
+alpha_luminosity_mode = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_ALPHA_LUMINOSITY_MODE", "off"
+)
+alpha_parent_beta_l = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_ALPHA_PARENT_BETA_L", ""
+).strip()
+alpha_parent_beta_l_args = (
+    ["--completeness-alpha-parent-beta-l", alpha_parent_beta_l]
+    if alpha_parent_beta_l
+    else []
+)
+alpha_beta_prior = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_ALPHA_PARENT_BETA_L_PRIOR", "-0.5 0.5"
+).split()
+if len(alpha_beta_prior) != 2:
+    raise ValueError(
+        "QVC_HUBBLE_COMPLETENESS_ALPHA_PARENT_BETA_L_PRIOR must contain MIN MAX"
+    )
+alpha_logl_pivot = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_ALPHA_PARENT_LOGL_PIVOT", "45.5"
+)
+alpha_magnitude_interaction = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_ALPHA_MAGNITUDE_INTERACTION", "false"
+).lower() in {"1", "true", "yes", "on"}
+alpha_magnitude_interaction_args = (
+    ["--completeness-alpha-magnitude-interaction"]
+    if alpha_magnitude_interaction
+    else []
+)
+color_model = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_COLOR_MODEL", "none"
+).strip()
+color_parent_file = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_COLOR_PARENT_FILE", ""
+).strip()
+color_parent_file_args = (
+    ["--completeness-color-parent-file", color_parent_file]
+    if color_parent_file
+    else []
+)
+color_parent_sigma = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_COLOR_PARENT_SIGMA", "0.20"
+)
+completeness_closure_test = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_CLOSURE_TEST", "true"
+).lower() in {"1", "true", "yes", "on"}
+completeness_closure_args = (
+    ["--completeness-closure-test"] if completeness_closure_test else []
 )
 z_min = __xonsh__.env.get("QVC_HUBBLE_Z_MIN", "0.44")
 z_max = __xonsh__.env.get("QVC_HUBBLE_Z_MAX", "3.16")
@@ -82,8 +184,10 @@ h5_file = "results/data/lc_data_all.h5"
 #spectra_fit_h5 = "results/data/aug20_0955am_spectrafit_1738e97_stone_svi4000lr001w500s250_chunk1.h5"
 #h5_file = "results/data/aug19_1037pm_mag_linear_svi4000w2000s500_c3ce4ce_stone_nolinear.h5"
 
-spectra_fit_h5 = "results/data/aug21_0827am_spectrafit_9b14caf_nested_N8000_rhat.h5"
-h5_file = "results/data/aug22_0346pm_mag_linear_svi4000w2000s500_stonechisq_specaug210827am_n8000_af3ff4c_chisq.h5"
+spectra_fit_h5 = "results/data/aug23_0925am_spectrafit_dd61211_nested_N8000_rhat_reprocessed_sdss_metadata.h5"
+#h5_file = "results/data/aug22_0346pm_mag_linear_svi4000w2000s500_stonechisq_specaug210827am_n8000_af3ff4c_chisq.h5"
+#h5_file = "results/data/aug23_1002am_erlang_legacy_svithennuts_psfmedian_svi4000w250s250_stonechisq_specaug230925am_n8000_dd61211_chisq.h5"
+h5_file = "results/data/aug23_1256pm_erlang_legacy_svithennuts_psflogitnormal_iters3_svi4000w250s250_stonechisq_specaug230925am_n8000_dd61211_chisq.h5"
 
 spectra_fit_h5 = __xonsh__.env.get(
     "QVC_HUBBLE_SPECTRA_FIT_H5", spectra_fit_h5
@@ -92,7 +196,7 @@ h5_file = __xonsh__.env.get("QVC_HUBBLE_LIGHT_CURVE_H5", h5_file)
 
 $PREFIX = __xonsh__.env.get(
     "QVC_HUBBLE_PREFIX",
-    f"aug22b_dereddened_nocutsrelaxed_fixedzcompletenessrange_h5aug0346pmmaglinear_specaug210827am_newcuts_newbins_n8000_{speed}",
+    f"aug25a_dereddened_cutstight_cuttau4_fixedzcompletenessrange_h5aug23_1256pm_psflogit_specaug210827am_newcuts_newbins_n8000_{speed}",
 )
 
 prefix = $PREFIX
@@ -107,6 +211,26 @@ python -m qvc.hubble.hubble_fit \
     --spectra_sdss_run2d @(spectra_sdss_run2d) \
     --sdss-target-selection @(sdss_target_selection) \
     --completeness-stratification @(completeness_stratification) \
+    --completeness_mode @(completeness_mode) \
+    --completeness-lf-model @(completeness_lf_model) \
+    @(completeness_sim_args) \
+    --completeness-mock-oversample @(completeness_mock_oversample) \
+    --completeness-mock-max-rows @(completeness_mock_max_rows) \
+    --completeness-mock-proposal-area @(completeness_mock_proposal_area) \
+    --dynesty-seed @(dynesty_seed) \
+    @(allow_spectra_catalog_v1_args) \
+    @(allow_spectra_catalog_v2_args) \
+    @(approximate_v1_fhost_args) \
+    --completeness-alpha-parent-mean @(alpha_parent_mean) \
+    --completeness-alpha-parent-sigma @(alpha_parent_sigma) \
+    --completeness-alpha-luminosity-mode @(alpha_luminosity_mode) \
+    @(alpha_parent_beta_l_args) \
+    --completeness-alpha-parent-beta-l-prior @(alpha_beta_prior[0]) @(alpha_beta_prior[1]) \
+    --completeness-alpha-parent-logl-pivot @(alpha_logl_pivot) \
+    @(alpha_magnitude_interaction_args) \
+    --completeness-color-model @(color_model) \
+    @(color_parent_file_args) \
+    --completeness-color-parent-sigma @(color_parent_sigma) \
     --magnitude-convention @(magnitude_convention) \
     --completeness_magnitude @(completeness_magnitude) \
     --result_prefix "fiducial" \
@@ -114,7 +238,9 @@ python -m qvc.hubble.hubble_fit \
     --prefix @(prefix) \
     --disable_sigma_clip_pass \
     --sigma_clip_threshold 3.0 \
-    --completeness-closure-test \
+    @(completeness_closure_args) \
     @(no_cuts_args) \
     @(minimal_plots_args) \
     @(h5_file)
+
+#    --fit_redshift_mu_term \

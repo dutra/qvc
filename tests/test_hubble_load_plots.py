@@ -271,6 +271,37 @@ def test_load_agn_data_writes_sigma_tau_ls_identity_grids_to_diagnostics(tmp_pat
     assert postcut_kwargs["tau_limits"] == (-0.2, 4.9)
 
 
+def test_plot_hubble_reddening_redshift_diagnostic_writes_pdf(tmp_path, monkeypatch):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+    frame = _minimal_agn_frame(n=30)
+    frame["ebv_agn"] = np.geomspace(0.01, 0.25, len(frame))
+    frame["ebv_gal"] = np.geomspace(0.012, 0.18, len(frame))[::-1]
+    residuals = np.linspace(-0.5, 0.5, len(frame))
+
+    output = hubble_plotting.plot_hubble_reddening_redshift_diagnostic(
+        frame,
+        residuals,
+        plot_path=tmp_path,
+        filename="reddening_redshift_postcut.pdf",
+        sample_label="post-cut",
+        n_bins=5,
+    )
+
+    assert Path(output) == tmp_path / "reddening_redshift_postcut.pdf"
+    assert Path(output).is_file()
+    assert Path(output).stat().st_size > 0
+
+
+def test_plot_hubble_reddening_redshift_diagnostic_checks_alignment(tmp_path):
+    frame = _minimal_agn_frame(n=5)
+    with pytest.raises(ValueError, match="aligned with df_agn"):
+        hubble_plotting.plot_hubble_reddening_redshift_diagnostic(
+            frame,
+            np.zeros(4),
+            plot_path=tmp_path,
+        )
+
+
 def test_plot_f_host_2500_vs_l2500_accepts_psf_column(tmp_path, monkeypatch):
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
     df = _minimal_agn_frame(n=12).drop(columns=["f_host_2500"])

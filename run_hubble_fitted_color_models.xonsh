@@ -1,0 +1,138 @@
+#!/usr/bin/env xonsh
+
+"""Compare Wang completeness with and without fitted qsogen g-i response.
+
+The four jobs are ordered from cheapest to slowest: ordinary 2D, fitted-color
+2D, ordinary host-aware 3D, and fitted-color host-aware 3D.  Every other
+scientific and random setting is held fixed and every normal plot is retained.
+"""
+
+from pathlib import Path
+
+
+repo_root = Path(__file__).resolve().parent
+$PYTHONPATH = str(repo_root / "src")
+runner = repo_root / "run_hubble.xonsh"
+spectra_catalog = repo_root / (
+    "results/data/jaxqsofit/"
+    "aug24_0152pm_spectrafit_e5d2897_chisqgt20_N8000_nested_fhostpsf_resumed_m2500norm12_v3.h5"
+)
+parent_cache = Path(
+    __xonsh__.env.get(
+        "QVC_HUBBLE_COMPLETENESS_COLOR_PARENT_FILE",
+        str(repo_root / "results/data/qsogen_color_parent_v2.h5"),
+    )
+).expanduser()
+dry_run = __xonsh__.env.get(
+    "QVC_HUBBLE_FITTED_COLOR_DRY_RUN", "false"
+).lower() in {"1", "true", "yes", "on"}
+
+if not runner.is_file():
+    raise FileNotFoundError(f"Hubble runner not found: {runner}")
+if not spectra_catalog.is_file() and not dry_run:
+    raise FileNotFoundError(
+        "The fitted-color comparison requires the v3 spectra catalog with "
+        f"aligned total-PSF ugriz draws: {spectra_catalog}. Generate it first "
+        "with `python3 run_backfill_spectra_psf_photometry.py --workers N` "
+        "(replace N with the desired local worker count)."
+    )
+if __xonsh__.env.get("QVC_HUBBLE_RESUME", "").strip():
+    raise ValueError(
+        "QVC_HUBBLE_RESUME cannot be shared across this four-job comparison."
+    )
+if not parent_cache.is_file() and not dry_run:
+    parent_cache.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Generating pinned qsogen color-parent cache: {parent_cache}")
+    python -m qvc.hubble.qsogen_color_parent --output @(str(parent_cache))
+
+speed = __xonsh__.env.get("QVC_HUBBLE_SPEED", "quick").strip()
+prefix_stem = __xonsh__.env.get(
+    "QVC_HUBBLE_FITTED_COLOR_PREFIX_STEM",
+    f"aug25_wang_fitted_color_m2500norm12_{speed}",
+).strip()
+if not prefix_stem:
+    raise ValueError("QVC_HUBBLE_FITTED_COLOR_PREFIX_STEM cannot be empty.")
+
+# name: (base completeness mode, color model, interpretation)
+experiments = (
+    ("baseline_2d", "2d", "none", "ordinary C2(m2500,z) baseline"),
+    (
+        "fitted_color_2d",
+        "2d",
+        "qsogen_delta_gi",
+        "C2 redistributed by fitted total-PSF g-i",
+    ),
+    (
+        "baseline_3d_fhost",
+        "3d_fhost",
+        "none",
+        "ordinary C3(m2500,z,fhost) baseline",
+    ),
+    (
+        "fitted_color_3d_fhost",
+        "3d_fhost",
+        "qsogen_delta_gi",
+        "C3 redistributed by aligned fitted total-PSF g-i and fhost draws",
+    ),
+)
+
+# Apples-to-apples Wang settings.  Wang is an attenuation-retaining empirical
+# Type-1 LF; the Hubble standardization itself remains dereddened.
+$QVC_HUBBLE_SPECTRA_FIT_H5 = str(spectra_catalog)
+$QVC_HUBBLE_ALLOW_SPECTRA_CATALOG_V1 = "false"
+$QVC_HUBBLE_ALLOW_SPECTRA_CATALOG_V2 = "false"
+$QVC_HUBBLE_APPROXIMATE_V1_FHOST_2500_PSF = "false"
+$QVC_HUBBLE_COMPLETENESS_LF_MODEL = "wang2026_type1_lade_a"
+$QVC_HUBBLE_MAGNITUDE_CONVENTION = "dereddened"
+$QVC_HUBBLE_COMPLETENESS_MAGNITUDE = "attenuated"
+$QVC_HUBBLE_COMPLETENESS_COLOR_PARENT_SIGMA = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_COLOR_PARENT_SIGMA", "0.20"
+)
+$QVC_HUBBLE_COMPLETENESS_CLOSURE_TEST = "false"
+$QVC_HUBBLE_Z_MIN = "0.44"
+$QVC_HUBBLE_Z_MAX = "3.16"
+$QVC_HUBBLE_SPECTRA_SDSS_RUN2D = "all"
+$QVC_HUBBLE_SDSS_TARGET_SELECTION = "all"
+$QVC_HUBBLE_COMPLETENESS_STRATIFICATION = "none"
+$QVC_HUBBLE_NO_CUTS = "false"
+$QVC_CUT_COMPLETENESS_MAG_2500_MIN = "18.5"
+$QVC_CUT_COMPLETENESS_MAG_2500_MAX = "24.0"
+$QVC_HUBBLE_COMPLETENESS_MOCK_OVERSAMPLE = "4"
+$QVC_HUBBLE_COMPLETENESS_MOCK_MAX_ROWS = "2000000"
+$QVC_HUBBLE_COMPLETENESS_MOCK_PROPOSAL_AREA = "full_sky"
+$QVC_HUBBLE_COMPLETENESS_MOCK_REQUIRE_FULL_OVERSAMPLE = "true"
+$QVC_HUBBLE_COMPLETENESS_SIM_FILE = ""
+$QVC_HUBBLE_DYNESTY_SEED = "12345"
+$QVC_HUBBLE_MINIMAL_PLOTS = "false"
+$QVC_HUBBLE_SPEED = speed
+$XONSH_SUBPROC_CMD_RAISE_ERROR = True
+
+print("Running the four-job Wang fitted-color comparison:")
+print(f"  order: {', '.join(name for name, _, _, _ in experiments)}")
+print(f"  spectra catalog: {spectra_catalog}")
+print(f"  qsogen parent: {parent_cache}")
+print("  LF/completeness magnitude: attenuation-retaining M2500")
+print("  plots: full diagnostic set")
+print(
+    "  interpretation: fixed-parent fitted-color sensitivity diagnostic; "
+    "the log-mean relative factor is cosmology-independent"
+)
+if dry_run:
+    print("  dry run: jobs will only be listed")
+
+for job_index, (name, mode, color_model, description) in enumerate(
+    experiments, start=1
+):
+    $QVC_HUBBLE_COMPLETENESS_MODE = mode
+    $QVC_HUBBLE_COMPLETENESS_COLOR_MODEL = color_model
+    $QVC_HUBBLE_COMPLETENESS_COLOR_PARENT_FILE = (
+        str(parent_cache) if color_model != "none" else ""
+    )
+    run_prefix = f"{prefix_stem}_{name}"
+    $QVC_HUBBLE_PREFIX = run_prefix
+    print(
+        f"[{job_index}/{len(experiments)}] {name}: {description}; "
+        f"prefix={run_prefix!r}"
+    )
+    if not dry_run:
+        xonsh @(str(runner))

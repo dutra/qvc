@@ -46,4 +46,6 @@ include = ["qvc*"]
 
 [tool.setuptools.package-data]
 "qvc.hubble" = ["style.mplstyle"]
+"qvc.hubble._vendor.qsogen" = ["*.dat", "*.sed", "*.sph", "LICENSE.md"]
+"qvc.hubble._vendor.jaxsedfit_filters" = ["*.dat", "*.md", "*.txt"]
 "qvc.light_curve" = ["style.mplstyle"]

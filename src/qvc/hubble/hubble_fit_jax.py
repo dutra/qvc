@@ -20,6 +20,7 @@ with the NumPy/Dynesty pipeline.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -31,11 +32,13 @@ try:
     import jax.numpy as jnp
     from jax import config as jax_config
     from jax.scipy.linalg import solve_triangular
+    from jax.scipy.special import logsumexp as logsumexp_jax
 except Exception:  # pragma: no cover - optional dependency
     jax = None
     jnp = None
     jax_config = None
     solve_triangular = None
+    logsumexp_jax = None
 
 try:  # pragma: no cover - optional dependency
     import jax_cosmo as jc
@@ -67,17 +70,33 @@ from qvc.hubble.hubble_completeness_refactored import (
     prepare_completeness_magnitude_columns,
 )
 from qvc.hubble.hubble_fit import (
+    COMPLETENESS_MOCK_MAX_ROWS_ENV,
+    COMPLETENESS_MOCK_OVERSAMPLE_ENV,
+    COMPLETENESS_MOCK_PROPOSAL_AREA_ENV,
+    DEFAULT_COMPLETENESS_MOCK_MAX_ROWS,
+    DEFAULT_COMPLETENESS_MOCK_OVERSAMPLE,
     DEFAULT_COMPLETENESS_SIM_FILE,
     SPEED_CHOICES,
     VALID_COMPLETENESS_MODES,
     _select_agn_fit_selection,
+    _parse_completeness_mock_proposal_area,
     _completeness_stratification_checkpoint_payload,
     estimate_sky_box_area_deg2,
     generate_fresh_completeness_sim_file,
     make_run_tag,
     normalize_speed,
+    prepare_fitted_color_posterior_draws,
+    standardization_plot_posterior_view,
     _validate_agn_pivot_context_for_reference,
     validate_completeness_mode,
+    validate_loaded_spectra_catalog_compatibility,
+    validate_latent_alpha_runtime_semantics,
+    validate_fitted_color_runtime_semantics,
+    validate_fitted_color_v3_frame,
+    validate_latent_alpha_mock_semantics,
+    validate_spectra_catalog_compatibility_args,
+    write_fitted_color_run_diagnostics,
+    write_latent_alpha_run_diagnostics,
     z_pivot_agn,
     z_pivot_sna,
 )
@@ -109,6 +128,24 @@ from qvc.hubble.hubble_model import (
     build_agn_pivot_context,
     get_model_params,
     validate_agn_observable_uncertainties,
+    LATENT_ALPHA_RESPONSE_PARAM_PREFIX,
+    LATENT_ALPHA_RESPONSE_PRIOR_SIGMA,
+)
+from qvc.hubble.latent_alpha_completeness import (
+    BETA_ALPHA_L_PRIOR,
+    M2500_TO_LOG_NU_LNU_INTERCEPT,
+    LatentAlphaConfig,
+    deterministic_joint_draw_indices,
+    latent_alpha_provenance,
+    normal_gauss_hermite_nodes,
+    response_coefficient_names,
+)
+from qvc.hubble.fitted_color_completeness import (
+    COLOR_STRENGTH_PARAMETER,
+    FittedColorConfig,
+    color_relative_selection_factor_xp,
+    deterministic_color_draw_indices,
+    fitted_color_provenance,
 )
 from qvc.hubble.hubble_plotting import (
     HubblePosteriorDrawSelection,
@@ -119,6 +156,7 @@ from qvc.hubble.hubble_plotting import (
     plot_delta_m_flux_recal_vs_redshift,
     plot_full_residuals,
     plot_hubble,
+    plot_hubble_reddening_redshift_diagnostic,
     plot_L2500_vs_sigma_tau_separate,
     plot_catalog_quantity_vs_sigma_tau_separate,
     plot_predicted_L2500_vs_sigmahat,
@@ -160,6 +198,9 @@ def _require_jax_stack() -> None:
 
 def _trapz_jax(y: jnp.ndarray, x: jnp.ndarray, axis: int = -1) -> jnp.ndarray:
     return jnp.trapezoid(y, x=x, axis=axis)
+
+
+JAX_COSMOLOGY_GRID_SIZE = 8192
 
 
 def _normal_logpdf(x: jnp.ndarray, loc: jnp.ndarray, scale: jnp.ndarray) -> jnp.ndarray:
@@ -211,17 +252,30 @@ def _comoving_distance_jax(
     cosmo_model: str,
     zp: float,
 ) -> jnp.ndarray:
-    """Return line-of-sight comoving distance in Mpc."""
+    """Return distances from one shared cumulative integration grid."""
     z = jnp.asarray(z)
     H0 = params["H0"]
     c_kms = 299792.458
+    z_flat = jnp.ravel(z)
+    z_max = jnp.maximum(jnp.max(z_flat), 1e-8)
+    grid = jnp.linspace(0.0, z_max, JAX_COSMOLOGY_GRID_SIZE)
+    integrand = _ez_inv_flat_jax(grid, params, cosmo_model, zp)
+    increments = 0.5 * (integrand[1:] + integrand[:-1]) * (
+        grid[1:] - grid[:-1]
+    )
+    cumulative = jnp.concatenate(
+        [jnp.zeros(1, dtype=integrand.dtype), jnp.cumsum(increments)]
+    )
+    dc_flat = (c_kms / H0) * jnp.interp(z_flat, grid, cumulative)
+    return jnp.reshape(dc_flat, z.shape)
 
-    def one_distance(zi):
-        grid = jnp.linspace(0.0, jnp.maximum(zi, 1e-8), 256)
-        integrand = _ez_inv_flat_jax(grid, params, cosmo_model, zp)
-        return (c_kms / H0) * _trapz_jax(integrand, grid, axis=0)
 
-    return jax.vmap(one_distance)(z)
+def _distance_modulus_from_dc_jax(
+    dc: jnp.ndarray,
+    z_photon: jnp.ndarray,
+) -> jnp.ndarray:
+    dl = dc * (1.0 + jnp.asarray(z_photon))
+    return 5.0 * jnp.log10(jnp.maximum(dl, 1e-12)) + 25.0
 
 
 def _distance_modulus_from_redshifts_jax(
@@ -235,8 +289,7 @@ def _distance_modulus_from_redshifts_jax(
     z_distance = jnp.asarray(z_distance)
     z_photon = jnp.asarray(z_photon)
     dc = _comoving_distance_jax(z_distance, params, cosmo_model, zp)
-    dl = dc * (1.0 + z_photon)
-    mu = 5.0 * jnp.log10(jnp.maximum(dl, 1e-12)) + 25.0
+    mu = _distance_modulus_from_dc_jax(dc, z_photon)
     return mu, dc
 
 
@@ -258,21 +311,25 @@ def _sigma_mu_from_z_err_jax(
     cosmo_model: str,
     zp: float,
     use_redshift_mu_term: bool = False,
+    dc: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
+    """Propagate z uncertainty with the analytic evolved-mean derivative."""
     z = jnp.asarray(z)
     z_err = jnp.asarray(z_err)
-    z_lo = jnp.maximum(z - z_err, 1e-8)
-    z_hi = jnp.maximum(z + z_err, z_lo + 1e-8)
-    mu_lo, _ = _distance_modulus_jax(z_lo, params, cosmo_model, zp)
-    mu_hi, _ = _distance_modulus_jax(z_hi, params, cosmo_model, zp)
+    if dc is None:
+        dc = _comoving_distance_jax(z, params, cosmo_model, zp)
+    c_kms = 299792.458
+    d_dc_dz = (c_kms / params["H0"]) * _ez_inv_flat_jax(
+        z, params, cosmo_model, zp
+    )
+    d_mu_dz = (5.0 / jnp.log(10.0)) * (
+        1.0 / (1.0 + z) + d_dc_dz / jnp.maximum(dc, 1e-12)
+    )
     if use_redshift_mu_term:
-        mu_lo = mu_lo + params["gamma_mu_z"] * jnp.log10(
-            (1.0 + z_lo) / (1.0 + zp)
+        d_mu_dz = d_mu_dz + params["gamma_mu_z"] / (
+            jnp.log(10.0) * (1.0 + z)
         )
-        mu_hi = mu_hi + params["gamma_mu_z"] * jnp.log10(
-            (1.0 + z_hi) / (1.0 + zp)
-        )
-    sigma_mu = 0.5 * jnp.abs(mu_hi - mu_lo)
+    sigma_mu = jnp.abs(d_mu_dz) * z_err
     return jnp.where(jnp.isfinite(z_err) & (z_err > 0.0), sigma_mu, 0.0)
 
 
@@ -344,7 +401,11 @@ def _prepare_completeness_for_jax(
             "z_centers": jnp.asarray(model.z_centers),
             "fhost_centers": jnp.asarray(model.fhost_centers),
             "cube": cube,
-            "sigma": jnp.asarray(float(completeness_params[-2])),
+            # The tuple's sigma is the bandwidth used to smooth the mock map;
+            # it is already encoded in ``cube`` and is not an additional
+            # physical scatter in the selected-data likelihood.  NumPy uses
+            # sigma_completeness=0.0 for the same reason.
+            "sigma": jnp.asarray(0.0),
         }
     if isinstance(model, Completeness4D):
         cube = jnp.asarray(model._interp.values)
@@ -356,7 +417,7 @@ def _prepare_completeness_for_jax(
             "fhost_centers": jnp.asarray(model.fhost_centers),
             "alpha_centers": jnp.asarray(model.alpha_centers),
             "cube": cube,
-            "sigma": jnp.asarray(float(completeness_params[-3])),
+            "sigma": jnp.asarray(0.0),
         }
     if isinstance(model, Completeness2D):
         cmap = jnp.asarray(model._interp.values)
@@ -366,26 +427,32 @@ def _prepare_completeness_for_jax(
             "mag_centers": jnp.asarray(model.mag_centers),
             "z_centers": jnp.asarray(model.z_centers),
             "cube": cmap,
-            "sigma": jnp.asarray(float(completeness_params[-1])),
+            "sigma": jnp.asarray(0.0),
         }
     raise TypeError(f"Unsupported completeness model type: {type(model)!r}")
 
 
 def _interp_regular_2d(x, y, x_grid, y_grid, values):
-    dx = x_grid[1] - x_grid[0]
-    dy = y_grid[1] - y_grid[0]
-    ux = (x - x_grid[0]) / dx
-    uy = (y - y_grid[0]) / dy
     # Magnitude remains bounded; redshift extrapolates from the outermost cell.
     valid = (
         (x >= x_grid[0])
         & (x <= x_grid[-1])
-        & jnp.isfinite(uy)
+        & jnp.isfinite(y)
     )
-    ix = jnp.clip(jnp.floor(ux).astype(jnp.int32), 0, x_grid.shape[0] - 2)
-    iy = jnp.clip(jnp.floor(uy).astype(jnp.int32), 0, y_grid.shape[0] - 2)
-    tx = jnp.clip(ux - ix, 0.0, 1.0)
-    ty = uy - iy
+    ix = jnp.clip(
+        jnp.searchsorted(x_grid, x, side="right") - 1,
+        0,
+        x_grid.shape[0] - 2,
+    )
+    iy = jnp.clip(
+        jnp.searchsorted(y_grid, y, side="right") - 1,
+        0,
+        y_grid.shape[0] - 2,
+    )
+    tx = jnp.clip(
+        (x - x_grid[ix]) / (x_grid[ix + 1] - x_grid[ix]), 0.0, 1.0
+    )
+    ty = (y - y_grid[iy]) / (y_grid[iy + 1] - y_grid[iy])
     v00 = values[ix, iy]
     v10 = values[ix + 1, iy]
     v01 = values[ix, iy + 1]
@@ -400,23 +467,25 @@ def _interp_regular_2d(x, y, x_grid, y_grid, values):
 
 
 def _interp_regular_3d(x, y, z, x_grid, y_grid, z_grid, values):
-    dx = x_grid[1] - x_grid[0]
-    dy = y_grid[1] - y_grid[0]
-    dz = z_grid[1] - z_grid[0]
-    ux = (x - x_grid[0]) / dx
-    uy = (y - y_grid[0]) / dy
-    uz = (z - z_grid[0]) / dz
+    # Match Completeness3D exactly: host fractions are a bounded physical
+    # coordinate and extend to [0, 1], while the interpolation nodes are bin
+    # centers.  Values outside the center range use the nearest center plane.
+    z_clipped = jnp.clip(z, z_grid[0], z_grid[-1])
     valid = (
         (x >= x_grid[0]) & (x <= x_grid[-1])
-        & jnp.isfinite(uy)
-        & (uz >= 0.0) & (uz <= (z_grid.shape[0] - 1))
+        & jnp.isfinite(y)
+        & jnp.isfinite(z)
     )
-    ix = jnp.clip(jnp.floor(ux).astype(jnp.int32), 0, x_grid.shape[0] - 2)
-    iy = jnp.clip(jnp.floor(uy).astype(jnp.int32), 0, y_grid.shape[0] - 2)
-    iz = jnp.clip(jnp.floor(uz).astype(jnp.int32), 0, z_grid.shape[0] - 2)
-    tx = jnp.clip(ux - ix, 0.0, 1.0)
-    ty = uy - iy
-    tz = jnp.clip(uz - iz, 0.0, 1.0)
+    ix = jnp.clip(jnp.searchsorted(x_grid, x, side="right") - 1, 0, x_grid.shape[0] - 2)
+    iy = jnp.clip(jnp.searchsorted(y_grid, y, side="right") - 1, 0, y_grid.shape[0] - 2)
+    iz = jnp.clip(jnp.searchsorted(z_grid, z_clipped, side="right") - 1, 0, z_grid.shape[0] - 2)
+    tx = jnp.clip((x - x_grid[ix]) / (x_grid[ix + 1] - x_grid[ix]), 0.0, 1.0)
+    ty = (y - y_grid[iy]) / (y_grid[iy + 1] - y_grid[iy])
+    tz = jnp.clip(
+        (z_clipped - z_grid[iz]) / (z_grid[iz + 1] - z_grid[iz]),
+        0.0,
+        1.0,
+    )
 
     c000 = values[ix, iy, iz]
     c100 = values[ix + 1, iy, iz]
@@ -440,28 +509,24 @@ def _interp_regular_3d(x, y, z, x_grid, y_grid, z_grid, values):
 
 
 def _interp_regular_4d(x, y, z, w, x_grid, y_grid, z_grid, w_grid, values):
-    dx = x_grid[1] - x_grid[0]
-    dy = y_grid[1] - y_grid[0]
-    dz = z_grid[1] - z_grid[0]
-    dw = w_grid[1] - w_grid[0]
-    ux = (x - x_grid[0]) / dx
-    uy = (y - y_grid[0]) / dy
-    uz = (z - z_grid[0]) / dz
-    uw = (w - w_grid[0]) / dw
+    # Match Completeness4D's nearest-plane handling of host fraction and
+    # alpha outside their center grids.
+    z_clipped = jnp.clip(z, z_grid[0], z_grid[-1])
+    w_clipped = jnp.clip(w, w_grid[0], w_grid[-1])
     valid = (
         (x >= x_grid[0]) & (x <= x_grid[-1])
-        & jnp.isfinite(uy)
-        & (uz >= 0.0) & (uz <= (z_grid.shape[0] - 1))
-        & (uw >= 0.0) & (uw <= (w_grid.shape[0] - 1))
+        & jnp.isfinite(y)
+        & jnp.isfinite(z)
+        & jnp.isfinite(w)
     )
-    ix = jnp.clip(jnp.floor(ux).astype(jnp.int32), 0, x_grid.shape[0] - 2)
-    iy = jnp.clip(jnp.floor(uy).astype(jnp.int32), 0, y_grid.shape[0] - 2)
-    iz = jnp.clip(jnp.floor(uz).astype(jnp.int32), 0, z_grid.shape[0] - 2)
-    iw = jnp.clip(jnp.floor(uw).astype(jnp.int32), 0, w_grid.shape[0] - 2)
-    tx = jnp.clip(ux - ix, 0.0, 1.0)
-    ty = uy - iy
-    tz = jnp.clip(uz - iz, 0.0, 1.0)
-    tw = jnp.clip(uw - iw, 0.0, 1.0)
+    ix = jnp.clip(jnp.searchsorted(x_grid, x, side="right") - 1, 0, x_grid.shape[0] - 2)
+    iy = jnp.clip(jnp.searchsorted(y_grid, y, side="right") - 1, 0, y_grid.shape[0] - 2)
+    iz = jnp.clip(jnp.searchsorted(z_grid, z_clipped, side="right") - 1, 0, z_grid.shape[0] - 2)
+    iw = jnp.clip(jnp.searchsorted(w_grid, w_clipped, side="right") - 1, 0, w_grid.shape[0] - 2)
+    tx = jnp.clip((x - x_grid[ix]) / (x_grid[ix + 1] - x_grid[ix]), 0.0, 1.0)
+    ty = (y - y_grid[iy]) / (y_grid[iy + 1] - y_grid[iy])
+    tz = jnp.clip((z_clipped - z_grid[iz]) / (z_grid[iz + 1] - z_grid[iz]), 0.0, 1.0)
+    tw = jnp.clip((w_clipped - w_grid[iw]) / (w_grid[iw + 1] - w_grid[iw]), 0.0, 1.0)
 
     out = 0.0
     for ox in (0, 1):
@@ -479,6 +544,125 @@ def _interp_regular_4d(x, y, z, w, x_grid, y_grid, z_grid, w_grid, values):
     return jnp.where(valid, jnp.clip(out, 0.0, 1.0), 0.0)
 
 
+def _latent_alpha_beta_jax(params, config):
+    if config.mode == "off":
+        return jnp.asarray(0.0, dtype=jnp.float64)
+    if config.mode == "fixed":
+        return jnp.asarray(config.fixed_beta_l, dtype=jnp.float64)
+    return params["beta_alpha_L"]
+
+
+def _latent_alpha_response_offset_jax(alpha, redshift, magnitude, params, config):
+    """JAX equivalent of the authoritative NumPy response design matrix."""
+
+    u = (alpha - config.mu) / config.sigma
+    q = u**2 - 1.0
+    zc = 2.0 * (redshift - config.redshift_min) / (
+        config.redshift_max - config.redshift_min
+    ) - 1.0
+    zc = jnp.clip(zc, -1.0, 1.0)
+    legendre = (
+        jnp.ones_like(zc),
+        zc,
+        0.5 * (3.0 * zc**2 - 1.0),
+        0.5 * (5.0 * zc**3 - 3.0 * zc),
+    )
+    value = jnp.zeros_like(u)
+    for order, basis in enumerate(legendre):
+        value = value + params[f"alpha_sel_z_p{order}_linear"] * basis * u
+        value = value + params[f"alpha_sel_z_p{order}_quadratic"] * basis * q
+    if config.include_magnitude_interactions:
+        mc = jnp.clip(
+            (magnitude - config.magnitude_pivot) / config.magnitude_scale,
+            -1.0,
+            1.0,
+        )
+        for order, basis in enumerate(legendre):
+            value = value + (
+                params[f"alpha_sel_mag_z_p{order}_linear"] * mc * basis * u
+            )
+            value = value + (
+                params[f"alpha_sel_mag_z_p{order}_quadratic"] * mc * basis * q
+            )
+    return value
+
+
+def _latent_alpha_kappa_jax(base, redshift, log_luminosity, magnitude, params, config):
+    raw_nodes, raw_weights = normal_gauss_hermite_nodes(config.quadrature_order)
+    nodes = jnp.asarray(raw_nodes, dtype=jnp.float64)
+    weights = jnp.asarray(raw_weights, dtype=jnp.float64)
+    beta_l = _latent_alpha_beta_jax(params, config)
+    mean = config.mu + beta_l * (log_luminosity - config.logl_pivot)
+    alpha_nodes = mean[..., None] + config.sigma * nodes
+    offsets = _latent_alpha_response_offset_jax(
+        alpha_nodes,
+        redshift[..., None],
+        magnitude[..., None],
+        params,
+        config,
+    )
+    offsets = jnp.broadcast_to(offsets, base.shape + (nodes.shape[0],))
+    base_interior = jnp.clip(base, jnp.finfo(jnp.float64).tiny, 1.0 - jnp.finfo(jnp.float64).eps)
+    base_logit = jnp.log(base_interior) - jnp.log1p(-base_interior)
+    low0 = jnp.min(offsets, axis=-1) - 64.0
+    high0 = jnp.max(offsets, axis=-1) + 64.0
+
+    def body(_index, state):
+        low, high = state
+        midpoint = 0.5 * (low + high)
+        response = jax.nn.sigmoid(
+            base_logit[..., None] + offsets - midpoint[..., None]
+        )
+        marginalized = jnp.sum(response * weights, axis=-1)
+        move_low = marginalized > base
+        return jnp.where(move_low, midpoint, low), jnp.where(
+            move_low, high, midpoint
+        )
+
+    low, high = jax.lax.fori_loop(0, 96, body, (low0, high0))
+    kappa = 0.5 * (low + high)
+    kappa = jnp.where(base == 0.0, jnp.inf, kappa)
+    return jnp.where(base == 1.0, -jnp.inf, kappa)
+
+
+def _latent_alpha_selected_log_numerator_jax(
+    base,
+    alpha_draws,
+    redshift,
+    log_luminosity,
+    magnitude,
+    params,
+    config,
+):
+    z_draw = jnp.broadcast_to(redshift[:, None], alpha_draws.shape)
+    log_l_draw = jnp.broadcast_to(log_luminosity, alpha_draws.shape)
+    mag_draw = jnp.broadcast_to(magnitude, alpha_draws.shape)
+    kappa = _latent_alpha_kappa_jax(
+        base, z_draw, log_l_draw, mag_draw, params, config
+    )
+    offset = _latent_alpha_response_offset_jax(
+        alpha_draws, z_draw, mag_draw, params, config
+    )
+    base_interior = jnp.clip(base, 1e-300, 1.0 - jnp.finfo(jnp.float64).eps)
+    response = jax.nn.sigmoid(
+        jnp.log(base_interior) - jnp.log1p(-base_interior) + offset - kappa
+    )
+    response = jnp.where(base == 0.0, 0.0, response)
+    response = jnp.where(base == 1.0, 1.0, response)
+    beta_l = _latent_alpha_beta_jax(params, config)
+    parent_mean = config.mu + beta_l * (log_l_draw - config.logl_pivot)
+    standardized = (alpha_draws - parent_mean) / config.sigma
+    log_parent = (
+        -0.5 * standardized**2
+        - jnp.log(config.sigma)
+        - 0.5 * jnp.log(2.0 * jnp.pi)
+    )
+    per_object = logsumexp_jax(
+        log_parent + jnp.log(jnp.clip(response, 1e-300)), axis=1
+    ) - jnp.log(alpha_draws.shape[1])
+    return jnp.sum(per_object)
+
+
 def _completeness_loglike_jax(
     m_model,
     mu_err,
@@ -487,6 +671,17 @@ def _completeness_loglike_jax(
     f_host_2500_psf,
     alpha_lambda,
     stratum_codes=None,
+    selection_magnitude=None,
+    latent_alpha_draws=None,
+    latent_alpha_magnitude_draws=None,
+    latent_alpha_distance_modulus=None,
+    latent_alpha_config=None,
+    fitted_color_config=None,
+    fitted_color_percentile_draws=None,
+    fitted_color_magnitude_draws=None,
+    fitted_color_fhost_draws=None,
+    fitted_color_in_support_draws=None,
+    params=None,
 ):
     if completeness is None:
         return 0.0
@@ -520,14 +715,27 @@ def _completeness_loglike_jax(
                 cube,
             )
         if completeness["mode"] == "3d_fhost":
-            return _interp_regular_3d(
-                map_m_grid[None, :],
-                z[:, None],
-                f_host_2500_psf[:, None],
-                completeness["mag_centers"],
-                completeness["z_centers"],
-                completeness["fhost_centers"],
-                cube,
+            if f_host_2500_psf.ndim == 1:
+                return _interp_regular_3d(
+                    map_m_grid[None, :],
+                    z[:, None],
+                    f_host_2500_psf[:, None],
+                    completeness["mag_centers"],
+                    completeness["z_centers"],
+                    completeness["fhost_centers"],
+                    cube,
+                )
+            return jnp.mean(
+                _interp_regular_3d(
+                    map_m_grid[None, None, :],
+                    z[:, None, None],
+                    f_host_2500_psf[:, :, None],
+                    completeness["mag_centers"],
+                    completeness["z_centers"],
+                    completeness["fhost_centers"],
+                    cube,
+                ),
+                axis=1,
             )
         return _interp_regular_2d(
             map_m_grid[None, :],
@@ -543,7 +751,152 @@ def _completeness_loglike_jax(
         p_det = interpolate(completeness["cube"])
     pdf_model = jnp.exp(_normal_logpdf(m_grid[None, :], m_model[:, None], sig))
     Z = _trapz_jax(pdf_model * p_det, m_grid, axis=1)
-    return jnp.sum(jnp.log(jnp.clip(Z, 1e-300)))
+    log_denominator = jnp.sum(jnp.log(jnp.clip(Z, 1e-300)))
+    if fitted_color_config is not None:
+        if latent_alpha_config is not None:
+            raise ValueError(
+                "Fitted-color and latent-alpha completeness cannot be active "
+                "simultaneously."
+            )
+        if (
+            fitted_color_percentile_draws is None
+            or fitted_color_magnitude_draws is None
+            or fitted_color_in_support_draws is None
+            or params is None
+        ):
+            raise ValueError("Fitted-color JAX completeness inputs are incomplete.")
+        color_support = completeness["magnitude_support"]
+        inside_color_support = fitted_color_in_support_draws & (
+            jnp.isfinite(fitted_color_magnitude_draws)
+            & (fitted_color_magnitude_draws >= color_support[0])
+            & (fitted_color_magnitude_draws <= color_support[1])
+        )
+        color_map_magnitude = jnp.clip(
+            fitted_color_magnitude_draws,
+            completeness["mag_centers"][0],
+            completeness["mag_centers"][-1],
+        )
+
+        def interpolate_color_observed(cube):
+            if completeness["mode"] == "3d_fhost":
+                if fitted_color_fhost_draws is None:
+                    raise ValueError(
+                        "Host-aware fitted-color JAX completeness requires "
+                        "aligned fitted_color_fhost_draws."
+                    )
+                return _interp_regular_3d(
+                    color_map_magnitude,
+                    z[:, None],
+                    fitted_color_fhost_draws,
+                    completeness["mag_centers"],
+                    completeness["z_centers"],
+                    completeness["fhost_centers"],
+                    cube,
+                )
+            if completeness["mode"] == "2d":
+                return _interp_regular_2d(
+                    color_map_magnitude,
+                    z[:, None],
+                    completeness["mag_centers"],
+                    completeness["z_centers"],
+                    cube,
+                )
+            raise ValueError(
+                "Fitted-color JAX completeness supports only 2d and 3d_fhost."
+            )
+
+        if is_stratified:
+            color_base_all = jax.vmap(interpolate_color_observed)(
+                completeness["cube"]
+            )
+            color_base = color_base_all[
+                stratum_codes, jnp.arange(z.shape[0]), :
+            ]
+        else:
+            color_base = interpolate_color_observed(completeness["cube"])
+        valid_color_draw = (
+            inside_color_support
+            & jnp.isfinite(color_base)
+            & (color_base > jnp.finfo(jnp.float64).tiny)
+        )
+        invalid_color_in_support = inside_color_support & ~valid_color_draw
+        relative = color_relative_selection_factor_xp(
+            jnp.where(valid_color_draw, color_base, 0.0),
+            fitted_color_percentile_draws,
+            params[COLOR_STRENGTH_PARAMETER],
+            xp=jnp,
+        )
+        relative = jnp.where(inside_color_support, relative, 1.0)
+        mean_relative = jnp.mean(relative, axis=1)
+        mean_relative = jnp.where(
+            jnp.any(invalid_color_in_support, axis=1), 0.0, mean_relative
+        )
+        log_color_factor = jnp.sum(
+            jnp.log(jnp.clip(mean_relative, 1e-300))
+        )
+        return jnp.where(
+            jnp.any(invalid_color_in_support),
+            jnp.inf,
+            log_denominator - log_color_factor,
+        )
+    if latent_alpha_config is None:
+        return log_denominator
+    if (
+        selection_magnitude is None
+        or latent_alpha_draws is None
+        or latent_alpha_magnitude_draws is None
+        or latent_alpha_distance_modulus is None
+        or params is None
+    ):
+        raise ValueError("Latent-alpha JAX completeness inputs are incomplete.")
+
+    latent_magnitude_support = completeness["magnitude_support"]
+    inside_magnitude_support = (
+        jnp.isfinite(latent_alpha_magnitude_draws)
+        & (latent_alpha_magnitude_draws >= latent_magnitude_support[0])
+        & (latent_alpha_magnitude_draws <= latent_magnitude_support[1])
+    )
+    observed_map_magnitude = jnp.clip(
+        latent_alpha_magnitude_draws,
+        completeness["mag_centers"][0],
+        completeness["mag_centers"][-1],
+    )
+
+    def interpolate_observed(cube):
+        return _interp_regular_3d(
+            observed_map_magnitude,
+            z[:, None],
+            f_host_2500_psf,
+            completeness["mag_centers"],
+            completeness["z_centers"],
+            completeness["fhost_centers"],
+            cube,
+        )
+
+    if is_stratified:
+        base_all = jax.vmap(interpolate_observed)(completeness["cube"])
+        base = base_all[stratum_codes, jnp.arange(z.shape[0]), :]
+    else:
+        base = interpolate_observed(completeness["cube"])
+    base = jnp.where(inside_magnitude_support, base, 0.0)
+    latent_alpha_log_luminosity = (
+        M2500_TO_LOG_NU_LNU_INTERCEPT
+        - 0.4
+        * (
+            latent_alpha_magnitude_draws
+            - latent_alpha_distance_modulus[:, None]
+        )
+    )
+    log_numerator = _latent_alpha_selected_log_numerator_jax(
+        base,
+        latent_alpha_draws,
+        z,
+        latent_alpha_log_luminosity,
+        latent_alpha_magnitude_draws,
+        params,
+        latent_alpha_config,
+    )
+    return log_denominator - log_numerator
 
 
 def _prepare_agn_arrays(
@@ -661,6 +1014,8 @@ def _log_likelihood_jax(
     use_ceph_dist_calibration: bool,
     early_de_guard: bool,
     use_redshift_mu_term: bool = False,
+    latent_alpha_config=None,
+    fitted_color_config=None,
 ) -> jnp.ndarray:
     params = _pack_param_dict(theta, model_labels)
     if early_de_guard and cosmo_model == "Flatw0waCDM":
@@ -668,19 +1023,33 @@ def _log_likelihood_jax(
     else:
         early_de_ok = True
 
+    # Evaluate the cosmology once on a shared cumulative grid for every
+    # redshift needed by this likelihood call.  The final z=1 entry supplies
+    # the weak-lensing reference distance without another integration.
+    distance_redshift_parts = []
+    if not only_agn:
+        z_sn_hd = pantheon_jax["zHD"]
+        distance_redshift_parts.append(z_sn_hd)
+    if not only_sna:
+        z_agn = agn_data_jax["z"]
+        distance_redshift_parts.extend(
+            [z_agn, jnp.asarray([1.0], dtype=z_agn.dtype)]
+        )
+    all_distance_redshifts = jnp.concatenate(distance_redshift_parts)
+    all_dc = _comoving_distance_jax(
+        all_distance_redshifts, params, cosmo_model, z_pivot_agn
+    )
+    distance_offset = 0
+
     if only_agn:
         ll_sn = 0.0
     else:
-        z_sn_hd = pantheon_jax["zHD"]
         z_sn_hel = pantheon_jax["zHEL"]
         is_cal = pantheon_jax["IS_CALIBRATOR"]
-        mu_sn, _ = _distance_modulus_from_redshifts_jax(
-            z_sn_hd,
-            z_sn_hel,
-            params,
-            cosmo_model,
-            z_pivot_agn,
-        )
+        n_sn = z_sn_hd.shape[0]
+        dc_sn = all_dc[distance_offset:distance_offset + n_sn]
+        distance_offset += n_sn
+        mu_sn = _distance_modulus_from_dc_jax(dc_sn, z_sn_hel)
         if use_ceph_dist_calibration:
             mu_sn = jnp.where(is_cal, pantheon_jax["CEPH_DIST"], mu_sn)
         res_sn = pantheon_jax["m_b_corr"] - (mu_sn + params["M0_sn"])
@@ -692,9 +1061,13 @@ def _log_likelihood_jax(
     agn_param_vec = jnp.stack([params[k] for k in agn_model_req_params], axis=0)
     M_pred = _agn_model_jax(agn_param_vec, agn_data_jax["_obs_arr"], agn_data_jax["_pivot_arr"])
     M_pred_err = _agn_model_err_jax(agn_param_vec, agn_data_jax["_err_arr"])
-    z_agn = agn_data_jax["z"]
-    mu_cosmo, dc = _distance_modulus_jax(z_agn, params, cosmo_model, z_pivot_agn)
-    sigma_lens = _sigma_lens_from_dc_jax(z_agn, dc)
+    n_agn = z_agn.shape[0]
+    dc = all_dc[distance_offset:distance_offset + n_agn]
+    dc_ref = all_dc[distance_offset + n_agn]
+    mu_cosmo = _distance_modulus_from_dc_jax(dc, z_agn)
+    sigma_lens = 0.06 * jnp.clip(
+        dc / jnp.maximum(dc_ref, 1e-12), 0.0
+    ) ** 1.5
     sigma_mu_z = _sigma_mu_from_z_err_jax(
         z_agn,
         agn_data_jax["z_err"],
@@ -702,6 +1075,7 @@ def _log_likelihood_jax(
         cosmo_model,
         z_pivot_agn,
         use_redshift_mu_term=use_redshift_mu_term,
+        dc=dc,
     )
     mu_err = jnp.sqrt(
         agn_data_jax["apparent_mag_2500_err"] ** 2
@@ -735,7 +1109,33 @@ def _log_likelihood_jax(
         selection_total_error = jnp.sqrt(
             non_magnitude_variance + selection_magnitude_error**2
         )
-        f_host_2500_psf = agn_data_jax.get(COMPLETENESS_FHOST_COL)
+        if latent_alpha_config is None and fitted_color_config is None:
+            f_host_2500_psf = agn_data_jax.get(COMPLETENESS_FHOST_COL)
+            latent_alpha_draws = None
+            latent_magnitude_draws = None
+            latent_distance_modulus = None
+        elif fitted_color_config is not None:
+            # The normalized color layer must not alter the existing C2/C3
+            # denominator.  C3 therefore retains the same catalog-median host
+            # fraction as the ordinary baseline; aligned host draws are used
+            # only for the selected-data relative color factor below.
+            f_host_2500_psf = agn_data_jax.get(COMPLETENESS_FHOST_COL)
+            latent_alpha_draws = None
+            latent_magnitude_draws = None
+            latent_distance_modulus = None
+        else:
+            f_host_2500_psf = agn_data_jax["f_host_2500_psf_draws"]
+            # The latent variable is the intrinsic disk-only slope for every
+            # LF.  LF semantics select the magnitude/logL state separately.
+            alpha_key = "alpha_nu_intrinsic_1450_2500_draws"
+            latent_alpha_draws = agn_data_jax[alpha_key]
+            magnitude_key = (
+                "m_2500_attenuated_model_draws"
+                if latent_alpha_config.luminosity_state == "attenuated"
+                else "m_2500_dereddened_draws"
+            )
+            latent_magnitude_draws = agn_data_jax[magnitude_key]
+            latent_distance_modulus = mu_cosmo
         ll_comp = _completeness_loglike_jax(
             selection_model_magnitude,
             selection_total_error,
@@ -744,6 +1144,25 @@ def _log_likelihood_jax(
             f_host_2500_psf,
             agn_data_jax.get("alpha_lambda"),
             agn_data_jax.get(COMPLETENESS_STRATUM_CODE_COL),
+            selection_magnitude=selection_magnitude,
+            latent_alpha_draws=latent_alpha_draws,
+            latent_alpha_magnitude_draws=latent_magnitude_draws,
+            latent_alpha_distance_modulus=latent_distance_modulus,
+            latent_alpha_config=latent_alpha_config,
+            fitted_color_config=fitted_color_config,
+            fitted_color_percentile_draws=agn_data_jax.get(
+                "fitted_color_parent_percentile_draws"
+            ),
+            fitted_color_magnitude_draws=agn_data_jax.get(
+                "fitted_color_magnitude_draws"
+            ),
+            fitted_color_fhost_draws=agn_data_jax.get(
+                "fitted_color_fhost_draws"
+            ),
+            fitted_color_in_support_draws=agn_data_jax.get(
+                "fitted_color_in_support_draws"
+            ),
+            params=params,
         )
     else:
         ll_comp = 0.0
@@ -757,13 +1176,24 @@ def _build_numpyro_nested_model(model_labels, priors, loglike_fn):
         theta = []
         for label in model_labels:
             low, high = priors[label]
+            if label.startswith(LATENT_ALPHA_RESPONSE_PARAM_PREFIX):
+                prior_distribution = dist.TruncatedNormal(
+                    loc=jnp.asarray(0.0, dtype=jnp.float64),
+                    scale=jnp.asarray(
+                        LATENT_ALPHA_RESPONSE_PRIOR_SIGMA, dtype=jnp.float64
+                    ),
+                    low=jnp.asarray(low, dtype=jnp.float64),
+                    high=jnp.asarray(high, dtype=jnp.float64),
+                )
+            else:
+                prior_distribution = dist.Uniform(
+                    low=jnp.asarray(low, dtype=jnp.float64),
+                    high=jnp.asarray(high, dtype=jnp.float64),
+                )
             theta.append(
                 numpyro.sample(
                     label,
-                    dist.Uniform(
-                        low=jnp.asarray(low, dtype=jnp.float64),
-                        high=jnp.asarray(high, dtype=jnp.float64),
-                    ),
+                    prior_distribution,
                 )
             )
         theta = jnp.stack(theta, axis=0)
@@ -885,6 +1315,8 @@ def _compute_numpy_blobs_from_samples(
     use_planck_om_prior,
     use_redshift_mu_term=False,
     early_de_guard=False,
+    latent_alpha_config=None,
+    fitted_color_config=None,
 ):
     logls = []
     blobs = []
@@ -909,6 +1341,8 @@ def _compute_numpy_blobs_from_samples(
             only_sna=only_sna,
             only_agn=only_agn,
             use_full_cov=True,
+            latent_alpha_config=latent_alpha_config,
+            fitted_color_config=fitted_color_config,
         )
         logls.append(float(logl))
         blobs.append(np.asarray(blob, dtype=float))
@@ -949,7 +1383,42 @@ def run_single_jax(
     completeness_closure_test=False,
     seed=42,
     agn_pivot_context=None,
+    latent_alpha_config=None,
+    fitted_color_config=None,
 ):
+    validate_latent_alpha_runtime_semantics(
+        latent_alpha_config,
+        completeness=completeness,
+        completeness_mode=completeness_mode,
+        completeness_magnitude=completeness_magnitude,
+        only_sna=only_sna,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        has_agn_calibrators=False,
+    )
+    validate_fitted_color_runtime_semantics(
+        fitted_color_config,
+        completeness=completeness,
+        completeness_mode=completeness_mode,
+        completeness_magnitude=completeness_magnitude,
+        only_sna=only_sna,
+        has_agn_calibrators=False,
+        latent_alpha_config=latent_alpha_config,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+    )
+    if fitted_color_config is not None:
+        validate_fitted_color_v3_frame(df_agn_all)
+        if completeness_closure_test:
+            raise ValueError(
+                "The posterior-predictive closure simulator does not yet "
+                "generate fitted g-i draws; disable completeness_closure_test."
+            )
+    if latent_alpha_config is not None:
+        validate_loaded_spectra_catalog_compatibility(
+            df_agn_all,
+            completeness_enabled=completeness,
+            completeness_mode=completeness_mode,
+            approximate_v1_fhost_2500_psf=False,
+        )
     use_redshift_mu_term = bool(use_redshift_mu_term and not only_sna)
     completeness_stratification = normalize_completeness_stratification(
         completeness_stratification
@@ -974,6 +1443,16 @@ def run_single_jax(
     if use_redshift_log_f_term:
         raise NotImplementedError("run_single_jax does not support --fit_redshift_log_f_term yet.")
     validate_completeness_mode(completeness_mode)
+    use_latent_alpha = latent_alpha_config is not None
+    use_fitted_color = fitted_color_config is not None
+    if (latent_alpha_config is None) != (
+        completeness_mode != "3d_fhost_latent_alpha"
+    ):
+        raise ValueError(
+            "3d_fhost_latent_alpha and latent_alpha_config must be enabled together."
+        )
+    if use_latent_alpha and (not completeness or only_sna):
+        raise ValueError("Latent-alpha JAX completeness requires an AGN likelihood.")
     completeness_magnitude = normalize_completeness_magnitude(
         completeness_magnitude
     )
@@ -1008,6 +1487,8 @@ def run_single_jax(
         use_eta_sigma_term=False,
         use_redshift_mu_term=use_redshift_mu_term,
         completeness_stratification=completeness_stratification,
+        latent_alpha_config=latent_alpha_config,
+        fitted_color_config=fitted_color_config,
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -1094,7 +1575,12 @@ def run_single_jax(
                 plot_path,
                 area_deg2=completeness_area_deg2,
                 seed=seed,
+                z_range=z_range,
+                completeness_magnitude=completeness_magnitude,
             )
+        validate_latent_alpha_mock_semantics(
+            completeness_sim_file, latent_alpha_config
+        )
         completeness_params = build_completeness_params_for_strata(
             df_agn_fit,
             df_agn_all,
@@ -1107,6 +1593,15 @@ def run_single_jax(
     else:
         completeness_params = None
 
+    if use_fitted_color:
+        df_agn_fit = prepare_fitted_color_posterior_draws(
+            df_agn_fit,
+            df_agn_all,
+            config=fitted_color_config,
+            completeness_mode=completeness_mode,
+            z_range=z_range,
+        )
+
     agn_fields = agn_model_req_params + agn_model_req_obs + agn_model_req_errs
     agn_fields += ("apparent_mag_2500", "apparent_mag_2500_err", "z", "z_err", "object_id")
     if completeness:
@@ -1117,7 +1612,40 @@ def run_single_jax(
         agn_fields += (COMPLETENESS_FHOST_COL,)
     if "alpha_lambda" in df_agn_fit.columns:
         agn_fields += ("alpha_lambda",)
-    agn_data = {col: df_agn_fit[col].values for col in agn_fields if col in df_agn_fit.columns}
+    if use_latent_alpha:
+        agn_fields += (
+            "f_host_2500_psf_draws",
+            "alpha_nu_intrinsic_1450_2500_draws",
+            "alpha_nu_attenuated_1450_2500_draws",
+            "m_2500_dereddened_draws",
+            "m_2500_attenuated_model_draws",
+            "joint_posterior_valid_count",
+        )
+    if use_fitted_color:
+        agn_fields += (
+            "fitted_color_parent_percentile_draws",
+            "fitted_color_magnitude_draws",
+            "fitted_color_fhost_draws",
+            "fitted_color_g_minus_i_draws",
+            "fitted_color_in_support_draws",
+        )
+    agn_data = {}
+    selected_draw_indices = deterministic_joint_draw_indices()
+    for col in agn_fields:
+        if col not in df_agn_fit.columns:
+            continue
+        if col.endswith("_draws"):
+            values = np.stack(df_agn_fit[col].to_numpy())
+            agn_data[col] = values
+        else:
+            agn_data[col] = df_agn_fit[col].values
+    if use_latent_alpha:
+        counts = np.asarray(agn_data["joint_posterior_valid_count"], dtype=int)
+        if np.any(counts < 64):
+            raise ValueError(
+                "Latent-alpha JAX completeness requires 64 valid aligned draws "
+                "for every object."
+            )
 
     pantheon_fields = ["zHD", "zHEL", "m_b_corr", "IS_CALIBRATOR", "CEPH_DIST", "MU_SH0ES_ERR_DIAG"]
     pantheon_data = {col: df_pantheon[col].values for col in pantheon_fields if col in df_pantheon.columns}
@@ -1129,6 +1657,17 @@ def run_single_jax(
             agn_data,
             agn_pivot_context=agn_pivot_context,
         )
+        if use_latent_alpha:
+            for draw_key in (
+                "f_host_2500_psf_draws",
+                "alpha_nu_intrinsic_1450_2500_draws",
+                "alpha_nu_attenuated_1450_2500_draws",
+                "m_2500_dereddened_draws",
+                "m_2500_attenuated_model_draws",
+            ):
+                agn_data_jax[draw_key] = agn_data_jax[draw_key][
+                    :, selected_draw_indices
+                ]
     pantheon_jax = _prepare_pantheon_arrays(pantheon_data, _sna_L, _sna_Lower, _sna_LogdetCov)
     completeness_jax = _prepare_completeness_for_jax(
         completeness_params,
@@ -1146,6 +1685,21 @@ def run_single_jax(
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
         use_redshift_mu_term=use_redshift_mu_term,
+        use_latent_alpha_completeness=use_latent_alpha,
+        latent_alpha_luminosity_mode=(
+            latent_alpha_config.mode if use_latent_alpha else "off"
+        ),
+        latent_alpha_beta_prior=(
+            latent_alpha_config.beta_l_prior
+            if use_latent_alpha
+            else BETA_ALPHA_L_PRIOR
+        ),
+        latent_alpha_magnitude_interaction=(
+            latent_alpha_config.include_magnitude_interactions
+            if use_latent_alpha
+            else False
+        ),
+        use_fitted_color_completeness=use_fitted_color,
     )
     loglike_fn = jax.jit(
         lambda theta: _log_likelihood_jax(
@@ -1160,6 +1714,8 @@ def run_single_jax(
             use_ceph_dist_calibration=not disable_ceph_dist_calibration,
             early_de_guard=early_de_guard,
             use_redshift_mu_term=use_redshift_mu_term,
+            latent_alpha_config=latent_alpha_config,
+            fitted_color_config=fitted_color_config,
         )
     )
     model = _build_numpyro_nested_model(model_labels, priors, loglike_fn)
@@ -1197,6 +1753,8 @@ def run_single_jax(
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
         early_de_guard=early_de_guard,
+        latent_alpha_config=latent_alpha_config,
+        fitted_color_config=fitted_color_config,
     )
     idx_max_weight = int(np.argmax(logls))
     integrals_max_w = blobs[idx_max_weight, 0, :]
@@ -1236,6 +1794,39 @@ def run_single_jax(
         model_labels=np.asarray(model_labels, dtype=str),
         use_redshift_mu_term=bool(use_redshift_mu_term),
     )
+    if use_latent_alpha:
+        alpha_provenance = latent_alpha_provenance(latent_alpha_config)
+        checkpoint_payload.update(
+            latent_alpha_config_json=latent_alpha_config.to_json(),
+            latent_alpha_surface_hash=alpha_provenance["config_hash_sha256"],
+            latent_alpha_provenance_json=json.dumps(
+                alpha_provenance, sort_keys=True, separators=(",", ":")
+            ),
+            latent_alpha_model_label="3d_fhost_latent_alpha",
+            latent_alpha_draw_approximation=(
+                "16_of_64_equal_weight_no_derived_slope_prior_correction"
+            ),
+        )
+    if use_fitted_color:
+        color_provenance = fitted_color_provenance(fitted_color_config)
+        checkpoint_payload.update(
+            fitted_color_config_json=json.dumps(
+                fitted_color_config.to_dict(),
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            fitted_color_surface_hash=color_provenance["config_hash_sha256"],
+            fitted_color_provenance_json=json.dumps(
+                color_provenance, sort_keys=True, separators=(",", ":")
+            ),
+            fitted_color_model_label=fitted_color_config.model,
+            fitted_color_draw_approximation=(
+                "16_of_64_equal_weight_aligned_total_psf_g_i"
+            ),
+            fitted_color_photometry_provenance_json=str(
+                df_agn_fit["joint_psf_photometry_provenance_json"].iloc[0]
+            ),
+        )
     if not only_sna:
         checkpoint_payload.update(
             object_id_fit_selection=agn_data["object_id"],
@@ -1251,6 +1842,28 @@ def run_single_jax(
         )
     )
     save_chains(checkpoint_file, **checkpoint_payload)
+
+    if use_fitted_color:
+        write_fitted_color_run_diagnostics(
+            agn_data=agn_data,
+            completeness_params=completeness_params,
+            flat_samples=flat_samples,
+            model_labels=model_labels,
+            config=fitted_color_config,
+            plot_path=plot_path,
+        )
+
+    if use_latent_alpha:
+        write_latent_alpha_run_diagnostics(
+            df_agn_fit=df_agn_fit,
+            completeness_params=completeness_params,
+            flat_samples=flat_samples,
+            model_labels=model_labels,
+            cosmo_model=cosmo_model,
+            z_pivot=z_pivot_agn,
+            latent_alpha_config=latent_alpha_config,
+            plot_path=plot_path,
+        )
 
     if completeness_closure_test and completeness and not only_sna:
         closure_bin_width = 0.2
@@ -1276,6 +1889,7 @@ def run_single_jax(
             use_planck_h0_prior=use_planck_h0_prior,
             use_planck_om_prior=use_planck_om_prior,
             use_redshift_mu_term=use_redshift_mu_term,
+            latent_alpha_config=latent_alpha_config,
         )
         closure_paths = write_completeness_closure_diagnostics(
             closure_result, plot_path
@@ -1292,17 +1906,28 @@ def run_single_jax(
         z_pivot_agn,
         sigma_sel_posterior_median=dmi_selection_sigma_posterior_median,
         use_redshift_mu_term=use_redshift_mu_term,
+        model_labels_override=model_labels,
     )
     age, age_err = compute_age_universe_with_error(
         flat_samples,
         cosmo_model,
         max_eval=200,
         use_redshift_mu_term=use_redshift_mu_term,
+        model_labels_override=model_labels,
     )
 
     if only_sna:
         print("Skipping AGN-specific post-processing and plots for SNe-only run.")
         return flat_samples, model_labels, logZ, logZerr, age, age_err
+
+    authoritative_flat_samples = flat_samples
+    authoritative_model_labels = model_labels
+    flat_samples, model_labels = standardization_plot_posterior_view(
+        flat_samples,
+        model_labels,
+        latent_alpha_config=latent_alpha_config,
+        fitted_color_config=fitted_color_config,
+    )
 
     debias_magnitude = (
         agn_data[COMPLETENESS_MAG_COL]
@@ -1527,6 +2152,18 @@ def run_single_jax(
         mu_pred_std_debiased,
         mu_pred_std_debiased_with_scatter,
     ) = r
+    for cut_stage, sample_label in (
+        ("precut", "pre-cut sample (sigma clipping disabled)"),
+        ("postcut", "post-cut sample (sigma clipping disabled)"),
+    ):
+        plot_hubble_reddening_redshift_diagnostic(
+            df_agn_fit,
+            debiased_residuals,
+            plot_path=plot_path,
+            show=False,
+            filename=f"hubble_reddening_redshift_diagnostic_{cut_stage}.pdf",
+            sample_label=sample_label,
+        )
     n_agn_params = sum(label != "M0_sn" for label in model_labels)
     hubble_chi2_mask = (
         df_agn_fit["z"]
@@ -1570,7 +2207,14 @@ def run_single_jax(
         z_range=z_range,
         completeness_strata=agn_data.get(COMPLETENESS_STRATUM_COL),
     )
-    return flat_samples, model_labels, logZ, logZerr, age, age_err
+    return (
+        authoritative_flat_samples,
+        authoritative_model_labels,
+        logZ,
+        logZerr,
+        age,
+        age_err,
+    )
 
 
 def main():
@@ -1630,7 +2274,31 @@ def main():
         "--completeness_sim_file",
         type=str,
         default=DEFAULT_COMPLETENESS_SIM_FILE,
-        help="Optional mock catalog HDF5 override. If omitted, generate a fresh mock catalog for each run.",
+        help="Optional mock catalog HDF5 override. If omitted, generate or reuse a validated area-scaled mock cache.",
+    )
+    parser.add_argument(
+        "--completeness-mock-oversample",
+        type=float,
+        default=DEFAULT_COMPLETENESS_MOCK_OVERSAMPLE,
+    )
+    parser.add_argument(
+        "--completeness-mock-max-rows",
+        type=int,
+        default=DEFAULT_COMPLETENESS_MOCK_MAX_ROWS,
+    )
+    parser.add_argument(
+        "--completeness-mock-proposal-area",
+        default="full_sky",
+    )
+    parser.add_argument(
+        "--allow-spectra-catalog-v1",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--approximate-v1-fhost-2500-psf",
+        action="store_true",
+        default=False,
     )
     parser.add_argument("--completeness_mode", type=str, choices=list(VALID_COMPLETENESS_MODES), default="2d")
     parser.add_argument(
@@ -1661,6 +2329,23 @@ def main():
     )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
+    if not np.isfinite(args.completeness_mock_oversample) or args.completeness_mock_oversample < 1.0:
+        parser.error("--completeness-mock-oversample must be at least one.")
+    if args.completeness_mock_max_rows <= 0:
+        parser.error("--completeness-mock-max-rows must be positive.")
+    try:
+        _parse_completeness_mock_proposal_area(args.completeness_mock_proposal_area)
+    except ValueError as exc:
+        parser.error(str(exc))
+    os.environ[COMPLETENESS_MOCK_OVERSAMPLE_ENV] = str(
+        args.completeness_mock_oversample
+    )
+    os.environ[COMPLETENESS_MOCK_MAX_ROWS_ENV] = str(
+        args.completeness_mock_max_rows
+    )
+    os.environ[COMPLETENESS_MOCK_PROPOSAL_AREA_ENV] = str(
+        args.completeness_mock_proposal_area
+    )
     args.speed = normalize_speed(args.speed)
     if args.only_sna and args.only_agn:
         raise ValueError("--only_sna and --only_agn cannot be used together.")
@@ -1677,6 +2362,7 @@ def main():
             raise ValueError(
                 "--completeness-stratification requires an AGN likelihood."
             )
+    validate_spectra_catalog_compatibility_args(args)
     effective_use_planck_h0_prior = args.use_planck_h0_prior or args.disable_ceph_dist_calibration
 
     _require_jax_stack()
@@ -1686,6 +2372,8 @@ def main():
         args.agn_data_filepath,
         apply_cut=not args.no_cuts,
         spectra_fit_h5=args.spectra_fit_h5,
+        allow_spectra_catalog_v1=args.allow_spectra_catalog_v1,
+        approximate_v1_fhost_2500_psf=args.approximate_v1_fhost_2500_psf,
         magnitude_convention=args.magnitude_convention,
         completeness_magnitude=args.completeness_magnitude,
         sdss_target_selection=args.sdss_target_selection,
@@ -1694,6 +2382,12 @@ def main():
         z_range=tuple(args.z_range),
         plot_path=agn_plot_path,
         cut_report_path=Path(agn_plot_path) / "cut_summary.txt",
+    )
+    validate_loaded_spectra_catalog_compatibility(
+        df_agn_all,
+        completeness_enabled=not args.disable_completeness,
+        completeness_mode=args.completeness_mode,
+        approximate_v1_fhost_2500_psf=args.approximate_v1_fhost_2500_psf,
     )
     run_single_jax(
         df_agn,

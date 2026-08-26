@@ -2,6 +2,7 @@ import os
 import sys
 from pathlib import Path
 
+import h5py
 import numpy as np
 import pandas as pd
 import pytest
@@ -25,7 +26,14 @@ from qvc.hubble.hubble_utils import (
     rest_frame_ab_magnitude_to_log_lnu,
     xray_band_integral,
 )
-from qvc.spectra.catalog_hdf5 import write_spectra_catalog_hdf5
+from qvc.spectra.catalog_hdf5 import (
+    ALPHA_NU_BLUE_WAVELENGTH_ANGSTROM,
+    ALPHA_NU_RED_WAVELENGTH_ANGSTROM,
+    GRAHSP_ATTENUATION_OPTICAL_INDEX,
+    JOINT_POSTERIOR_DRAW_COUNT,
+    JOINT_POSTERIOR_DRAW_FIELDS,
+    write_spectra_catalog_hdf5,
+)
 
 
 REFERENCE_LOG_L2500_NU = 30.278006016683868
@@ -68,14 +76,88 @@ def _spectra_row(**updates):
 
 
 def _write_spectra_h5(path, row):
+    original_columns = set(row)
+    frame = pd.DataFrame([row]).copy()
+    frame["fit_ok"] = True
+    frame["mw_deredden_applied"] = True
+    frame["joint_posterior_draw_source"] = "synthetic_test_posterior"
+
+    m_dereddened = float(frame.get("m_2500_dereddened", pd.Series([20.0])).iloc[0])
+    m_attenuated = float(
+        frame.get("m_2500_attenuated_model", pd.Series([m_dereddened])).iloc[0]
+    )
+    a_total = m_attenuated - m_dereddened
+    assert a_total >= 0.0
+    alpha_intrinsic = -0.5
+    alpha_denominator = np.log10(
+        ALPHA_NU_RED_WAVELENGTH_ANGSTROM
+        / ALPHA_NU_BLUE_WAVELENGTH_ANGSTROM
+    )
+    attenuation_ratio = (
+        ALPHA_NU_BLUE_WAVELENGTH_ANGSTROM
+        / ALPHA_NU_RED_WAVELENGTH_ANGSTROM
+    ) ** GRAHSP_ATTENUATION_OPTICAL_INDEX
+    alpha_attenuated = (
+        alpha_intrinsic
+        - 0.4 * a_total * (attenuation_ratio - 1.0) / alpha_denominator
+    )
+    medians = {
+        "f_host_2500_psf": 0.2,
+        "alpha_nu_intrinsic_1450_2500": alpha_intrinsic,
+        "alpha_nu_attenuated_1450_2500": alpha_attenuated,
+        "m_2500_dereddened": m_dereddened,
+        "m_2500_attenuated_model": m_attenuated,
+        "a_2500_galaxy": 0.0,
+        "a_2500_internal": a_total,
+        "a_2500_total": a_total,
+    }
+    for name, value in medians.items():
+        if name not in frame:
+            frame[name] = value
+        symmetric_error = float(frame.get(f"{name}_err", pd.Series([0.0])).iloc[0])
+        if f"{name}_err" not in frame:
+            frame[f"{name}_err"] = symmetric_error
+        frame[f"{name}_err_lower"] = symmetric_error
+        frame[f"{name}_err_upper"] = symmetric_error
+
+    shape = (1, JOINT_POSTERIOR_DRAW_COUNT)
+    joint_draws = {
+        name: np.full(shape, medians[name], dtype=np.float32)
+        for name in JOINT_POSTERIOR_DRAW_FIELDS
+    }
+    fitted_fluxes = np.ones((1, JOINT_POSTERIOR_DRAW_COUNT, 5), dtype=np.float32)
     write_spectra_catalog_hdf5(
         path,
-        pd.DataFrame([row]),
+        frame,
         np.full((1, 64, 5), np.nan, dtype=np.float32),
         np.zeros(1, dtype=np.int16),
-        f_host_2500_psf_draws=np.full((1, 64), np.nan, dtype=np.float32),
-        f_host_2500_psf_valid_count=np.zeros(1, dtype=np.int16),
+        joint_posterior_draws=joint_draws,
+        joint_posterior_valid_count=np.array([JOINT_POSTERIOR_DRAW_COUNT]),
+        joint_posterior_index=np.arange(
+            JOINT_POSTERIOR_DRAW_COUNT, dtype=np.int32
+        )[None, :],
+        joint_posterior_source_draw_count=np.array(
+            [JOINT_POSTERIOR_DRAW_COUNT], dtype=np.int32
+        ),
+        joint_posterior_selection_seed=12345,
+        joint_psf_photometry_draws=fitted_fluxes,
+        joint_psf_photometry_provenance={
+            "prediction_source": "synthetic_test",
+            "jaxsedfit_git_commit": "a" * 40,
+        },
     )
+
+    # The missing-field test deliberately exercises a malformed external
+    # catalog. Keep the production writer strict and corrupt only that fixture
+    # after a valid v3 file has been written.
+    intentionally_missing = {
+        "m_2500_dereddened",
+        "m_2500_dereddened_err",
+    }.difference(original_columns)
+    if intentionally_missing:
+        with h5py.File(path, "r+") as handle:
+            for name in intentionally_missing:
+                del handle["catalog"][name]
 
 
 def test_luminosity_helpers_require_an_explicit_cosmology():

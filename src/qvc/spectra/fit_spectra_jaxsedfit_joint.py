@@ -18,6 +18,7 @@ import argparse
 import hashlib
 import multiprocessing as mp
 import traceback
+import warnings
 from functools import partial
 from pathlib import Path
 
@@ -35,13 +36,24 @@ from qvc.provenance import (
     fingerprint_path,
     merge_history,
     read_hdf5_provenance,
+    runtime_state,
     write_hdf5_provenance,
 )
 from tqdm import tqdm
 
 from qvc.spectra import fit_spectra as legacy
 from qvc.spectra.catalog_hdf5 import (
+    ALPHA_NU_BLUE_WAVELENGTH_ANGSTROM,
+    ALPHA_NU_RED_WAVELENGTH_ANGSTROM,
     F_HOST_2500_PSF_DRAW_COUNT,
+    GRAHSP_ATTENUATION_BREAK_ANGSTROM,
+    GRAHSP_ATTENUATION_NORMALIZATION,
+    GRAHSP_ATTENUATION_OPTICAL_INDEX,
+    JOINT_POSTERIOR_DRAW_COUNT,
+    JOINT_POSTERIOR_DRAW_FIELDS,
+    JOINT_POSTERIOR_SCALAR_SUMMARY_FIELDS,
+    JOINT_PSF_PHOTOMETRY_BANDS,
+    JOINT_PSF_PHOTOMETRY_DRAW_COUNT,
     PSF_AGN_FRACTION_DRAW_COUNT,
     write_spectra_catalog_hdf5,
 )
@@ -50,8 +62,6 @@ from qvc.spectra.catalog_hdf5 import (
 C_ANGSTROM_PER_SECOND = 2.99792458e18
 AB_ZEROPOINT_MJY = 3.631e6
 METER_PER_MEGAPARSEC = 3.085677581491367e22
-GRAHSP_ATTENUATION_BREAK_ANGSTROM = 11_000.0
-GRAHSP_ATTENUATION_NORMALIZATION = 1.2
 POSTERIOR_BUNDLE_FORMAT = "jaxsedfit_samples_meta_v2"
 PSF_AGN_FRACTION_BANDS = tuple(legacy.SDSS_BANDS)
 QVC_PSF_HOST_CAPTURE_GROUP = "qvc_sdss_psf"
@@ -137,10 +147,7 @@ M2500_POSTERIOR_SITES = (
     "ebv_agn",
 )
 M2500_REQUIRED_POSTERIOR_SITES = (
-    "log_agn_amp",
-    "pl_slope",
-    "ebv_gal",
-    "ebv_agn",
+    *M2500_POSTERIOR_SITES,
 )
 M2500_CATALOG_SITES = (
     "m_2500_dereddened",
@@ -149,9 +156,18 @@ M2500_CATALOG_SITES = (
     "a_2500_internal",
     "a_2500_total",
 )
+ALPHA_NU_CATALOG_SITES = (
+    "alpha_nu_intrinsic_1450_2500",
+    "alpha_nu_attenuated_1450_2500",
+)
+DERIVED_HUBBLE_CATALOG_SITES = (
+    *M2500_CATALOG_SITES,
+    *ALPHA_NU_CATALOG_SITES,
+)
 DERIVED_SPECTRAL_CONVERGENCE_SITES = (
     *HUBBLE_MAGNITUDE_SITES,
     "a_2500_total",
+    *ALPHA_NU_CATALOG_SITES,
 )
 SPECTRAL_CONVERGENCE_DISPLAY_SITES = (
     "ebv_gal",
@@ -303,8 +319,8 @@ def posterior_samples_for_m2500(samples, prediction=None):
     return combined
 
 
-def _intrinsic_disk_luminosity_lambda_2500(samples):
-    """Evaluate the unattenuated JAXSEDFit disk L_lambda at 2500 Angstrom."""
+def _intrinsic_disk_luminosity_lambda(samples, wavelength_angstrom):
+    """Evaluate the unattenuated JAXSEDFit bent-disk ``L_lambda`` exactly."""
     log_agn_amp = _sample_draws(samples, "log_agn_amp")
     pl_slope = _sample_draws(samples, "pl_slope")
     pl_bend_loc = _sample_draws(samples, "pl_bend_loc", 1000.0)
@@ -327,7 +343,9 @@ def _intrinsic_disk_luminosity_lambda_2500(samples):
         pl_cutoff,
     )
 
-    wave = 2500.0
+    wave = float(wavelength_angstrom)
+    if not np.isfinite(wave) or wave <= 0.0:
+        raise ValueError("Disk wavelength must be positive and finite.")
     pivot = 5100.0
     norm = np.exp(log_agn_amp) / pivot
     width = np.maximum(pl_bend_width, 1e-6)
@@ -345,6 +363,14 @@ def _intrinsic_disk_luminosity_lambda_2500(samples):
     )
     cutoff_factor = -np.expm1(-np.maximum(pl_cutoff, 0.0) / wave)
     return np.where(pl_cutoff > 0.0, luminosity_lambda * cutoff_factor, luminosity_lambda)
+
+
+def _intrinsic_disk_luminosity_lambda_2500(samples):
+    """Compatibility wrapper for the exact 2500-Angstrom disk continuum."""
+
+    return _intrinsic_disk_luminosity_lambda(
+        samples, ALPHA_NU_RED_WAVELENGTH_ANGSTROM
+    )
 
 
 def estimate_m2500_dereddened(samples, redshift, *, h0=70.0, om0=0.3):
@@ -394,7 +420,7 @@ def estimate_m2500_dereddened(samples, redshift, *, h0=70.0, om0=0.3):
     # optical branch is norm * (wave / break)^index with norm=1.2.
     curve_2500 = GRAHSP_ATTENUATION_NORMALIZATION * (
         2500.0 / GRAHSP_ATTENUATION_BREAK_ANGSTROM
-    ) ** -1.2
+    ) ** GRAHSP_ATTENUATION_OPTICAL_INDEX
     attenuation_gal = ebv_gal * curve_2500
     attenuation_agn = ebv_agn * curve_2500
     attenuation_total = attenuation_gal + attenuation_agn
@@ -426,12 +452,122 @@ def summarize_m2500_dereddened(samples, redshift, *, h0=70.0, om0=0.3):
     return out
 
 
+def estimate_alpha_nu_1450_2500(samples, *, m2500_draws=None):
+    """Return intrinsic and attenuated disk-only UV secant slopes.
+
+    The convention is ``L_nu proportional to nu**alpha_nu``.  Both slopes are
+    calculated from the same bent JAXSEDFit accretion-disk continuum at exactly
+    1450 and 2500 Angstrom.  Host light, dust emission, torus, Fe II, Balmer
+    continuum, and emission lines are deliberately excluded.  The attenuated
+    slope applies the model's foreground-host plus nuclear GRAHSP screens; it
+    does not reapply Milky-Way extinction to already corrected input data.
+    """
+
+    blue_wave = ALPHA_NU_BLUE_WAVELENGTH_ANGSTROM
+    red_wave = ALPHA_NU_RED_WAVELENGTH_ANGSTROM
+    blue_lambda = _intrinsic_disk_luminosity_lambda(samples, blue_wave)
+    red_lambda = _intrinsic_disk_luminosity_lambda(samples, red_wave)
+    blue_nu = np.asarray(blue_lambda, dtype=float) * blue_wave**2
+    red_nu = np.asarray(red_lambda, dtype=float) * red_wave**2
+    if (
+        blue_nu.size == 0
+        or blue_nu.shape != red_nu.shape
+        or not np.all(np.isfinite(blue_nu))
+        or not np.all(np.isfinite(red_nu))
+        or np.any(blue_nu <= 0.0)
+        or np.any(red_nu <= 0.0)
+    ):
+        raise M2500ReconstructionError(
+            "UV alpha_nu reconstruction produced invalid intrinsic disk draws."
+        )
+
+    denominator = np.log10(red_wave / blue_wave)
+    intrinsic = np.log10(blue_nu / red_nu) / denominator
+    if m2500_draws is None:
+        ebv_gal = _sample_draws(samples, "ebv_gal")
+        ebv_agn = _sample_draws(samples, "ebv_agn")
+        ebv_gal, ebv_agn, intrinsic = _broadcast_draws(
+            ebv_gal, ebv_agn, intrinsic
+        )
+        curve_2500 = GRAHSP_ATTENUATION_NORMALIZATION * (
+            red_wave / GRAHSP_ATTENUATION_BREAK_ANGSTROM
+        ) ** GRAHSP_ATTENUATION_OPTICAL_INDEX
+        a_2500_total = (ebv_gal + ebv_agn) * curve_2500
+    else:
+        a_2500_total = np.asarray(
+            m2500_draws["a_2500_total_draws"], dtype=float
+        ).reshape(-1)
+        intrinsic, a_2500_total = _broadcast_draws(intrinsic, a_2500_total)
+    attenuation_ratio = (
+        blue_wave / red_wave
+    ) ** GRAHSP_ATTENUATION_OPTICAL_INDEX
+    attenuated = (
+        intrinsic
+        - 0.4
+        * a_2500_total
+        * (attenuation_ratio - 1.0)
+        / denominator
+    )
+    if not np.all(np.isfinite(intrinsic)) or not np.all(np.isfinite(attenuated)):
+        raise M2500ReconstructionError(
+            "UV alpha_nu reconstruction produced nonfinite posterior draws."
+        )
+    return {
+        "alpha_nu_intrinsic_1450_2500_draws": np.asarray(intrinsic, dtype=float),
+        "alpha_nu_attenuated_1450_2500_draws": np.asarray(attenuated, dtype=float),
+    }
+
+
+def estimate_joint_hubble_posterior_draws(
+    samples,
+    redshift,
+    *,
+    h0=70.0,
+    om0=0.3,
+):
+    """Return every disk/magnitude/attenuation draw stored jointly in v3."""
+
+    m2500 = estimate_m2500_dereddened(
+        samples, redshift, h0=h0, om0=om0
+    )
+    alpha = estimate_alpha_nu_1450_2500(samples, m2500_draws=m2500)
+    draws = {**m2500, **alpha}
+    sizes = {np.asarray(value).size for value in draws.values()}
+    if len(sizes) != 1 or not sizes or next(iter(sizes)) < 1:
+        raise M2500ReconstructionError(
+            "Joint Hubble posterior products have incompatible draw counts."
+        )
+    return draws
+
+
+def summarize_joint_hubble_posterior_draws(draws):
+    """Summarize full posterior draws while retaining compact-draw covariance."""
+
+    out = {}
+    for draw_name, values in draws.items():
+        name = draw_name.removesuffix("_draws")
+        median, err, err_lower, err_upper = legacy.sym_percentile(values)
+        out[name] = float(median)
+        out[f"{name}_err"] = float(err)
+        out[f"{name}_err_lower"] = float(err_lower)
+        out[f"{name}_err_upper"] = float(err_upper)
+    return out
+
+
+def summarize_alpha_nu_1450_2500(samples):
+    """Return scalar summaries for the two explicit UV slope definitions."""
+
+    return summarize_joint_hubble_posterior_draws(
+        estimate_alpha_nu_1450_2500(samples)
+    )
+
+
 def empty_hubble_convergence_summary():
     """Return the stable convergence schema used by the Hubble workflow."""
 
     return {
         f"{name}_rhat": np.nan
-        for name in HUBBLE_MAGNITUDE_SITES
+        for name in DERIVED_SPECTRAL_CONVERGENCE_SITES
     }
 
 
@@ -542,6 +678,7 @@ def summarize_spectral_convergence(
     h0=70.0,
     om0=0.3,
     heading=None,
+    print_summary=True,
 ):
     """Save R-hat for every scalar spectral parameter and m2500 draw.
 
@@ -558,7 +695,7 @@ def summarize_spectral_convergence(
     summary_samples, chain_shape = _scalar_grouped_samples(grouped_samples)
     if chain_shape is None:
         return empty_hubble_convergence_summary()
-    derived = estimate_m2500_dereddened(
+    derived = estimate_joint_hubble_posterior_draws(
         grouped_samples,
         redshift,
         h0=h0,
@@ -582,7 +719,8 @@ def summarize_spectral_convergence(
         for name in SPECTRAL_CONVERGENCE_DISPLAY_SITES
         if name in summary_dict
     }
-    print_numpyro_summary_dict(display_summary, heading=heading)
+    if print_summary:
+        print_numpyro_summary_dict(display_summary, heading=heading)
     fields = convergence_fields(
         summary_dict,
         {name: name for name in summary_samples},
@@ -850,12 +988,13 @@ def summarize_samples(samples):
 
 
 def predict_catalog_posterior(fitter, *, kind, **prediction_kwargs):
-    """Predict the standard products plus legacy scalar catalog sites.
+    """Predict standard products plus every scalar needed by v3 derivations.
 
     JAXSEDFit's public prediction products intentionally omit some scalar
     deterministics that were present in the original in-memory fit samples.
     Extend the return-site selection only for this prediction call so QVC can
-    reproduce the legacy CSV columns from compact resume bundles.
+    reproduce legacy CSV columns and the exact bent-disk physical parameters
+    from compact resume bundles, including log-parameterized configurations.
     """
     original_return_sites = getattr(fitter, "_predictive_return_sites", None)
     if original_return_sites is None:
@@ -874,6 +1013,7 @@ def predict_catalog_posterior(fitter, *, kind, **prediction_kwargs):
                 (
                     *original_return_sites(prediction_kind, *args, **kwargs),
                     *LEGACY_CSV_SCALAR_PREDICTION_SITES,
+                    *M2500_POSTERIOR_SITES,
                 )
             )
         )
@@ -945,6 +1085,38 @@ def empty_host_2500_psf_summary():
     return {
         "f_host_2500_psf": np.nan,
         "f_host_2500_psf_err": np.nan,
+        "f_host_2500_psf_err_lower": np.nan,
+        "f_host_2500_psf_err_upper": np.nan,
+    }
+
+
+def empty_alpha_nu_1450_2500_summary():
+    """Return the stable scalar schema for both explicit UV slopes."""
+
+    return {
+        key: np.nan
+        for name in ALPHA_NU_CATALOG_SITES
+        for key in (
+            name,
+            f"{name}_err",
+            f"{name}_err_lower",
+            f"{name}_err_upper",
+        )
+    }
+
+
+def empty_joint_hubble_posterior_summary():
+    """Return the stable scalar schema paired with the v3 draw fields."""
+
+    return {
+        key: np.nan
+        for name in DERIVED_HUBBLE_CATALOG_SITES
+        for key in (
+            name,
+            f"{name}_err",
+            f"{name}_err_lower",
+            f"{name}_err_upper",
+        )
     }
 
 
@@ -970,12 +1142,14 @@ def summarize_host_2500_psf(prediction):
             "Direct 2500-Angstrom host-fraction prediction contains draws outside "
             "the physical interval [0, 1]."
         )
-    median, err, _, _ = legacy.sym_percentile(draws)
+    median, err, err_lower, err_upper = legacy.sym_percentile(draws)
     if not (np.isfinite(median) and np.isfinite(err) and 0.0 <= median <= 1.0):
         raise ValueError("Direct 2500-Angstrom host-fraction summary is invalid.")
     return {
         "f_host_2500_psf": float(median),
         "f_host_2500_psf_err": float(err),
+        "f_host_2500_psf_err_lower": float(err_lower),
+        "f_host_2500_psf_err_upper": float(err_upper),
     }
 
 
@@ -1015,6 +1189,172 @@ def extract_compact_host_2500_psf_draws(
     compact = np.full(int(draw_count), np.nan, dtype=np.float32)
     compact[:valid_count] = draws[:valid_count].astype(np.float32)
     return compact, valid_count
+
+
+def deterministic_compact_posterior_indices(
+    source_draw_count,
+    *,
+    object_id,
+    seed,
+    draw_count=JOINT_POSTERIOR_DRAW_COUNT,
+):
+    """Choose reproducible original posterior indices without replacement."""
+
+    source_draw_count = int(source_draw_count)
+    draw_count = int(draw_count)
+    if source_draw_count < 1 or draw_count < 1:
+        raise ValueError("Positive source and compact posterior draw counts are required.")
+    if source_draw_count <= draw_count:
+        return np.arange(source_draw_count, dtype=np.int32)
+    digest = hashlib.sha256(f"{int(seed)}:{object_id}".encode("utf-8")).digest()
+    object_seed = int.from_bytes(digest[:8], "little", signed=False)
+    rng = np.random.default_rng(object_seed)
+    return np.sort(
+        rng.choice(source_draw_count, size=draw_count, replace=False)
+    ).astype(np.int32)
+
+
+def extract_compact_joint_posterior_draws(
+    prediction,
+    derived_draws,
+    *,
+    object_id,
+    seed,
+    draw_count=JOINT_POSTERIOR_DRAW_COUNT,
+):
+    """Compact every Hubble quantity at one shared set of posterior indices."""
+
+    fractions = np.asarray(prediction.get("component_host_fraction"), dtype=float)
+    if fractions.ndim != 2 or fractions.shape[1] != 1 or fractions.shape[0] < 1:
+        raise ValueError(
+            "Direct 2500-Angstrom host-fraction predictions must have shape "
+            f"(draw, 1); received {fractions.shape}."
+        )
+    source_draw_count = int(fractions.shape[0])
+    full = {"f_host_2500_psf": fractions[:, 0]}
+    for name in JOINT_POSTERIOR_DRAW_FIELDS:
+        if name == "f_host_2500_psf":
+            continue
+        draw_name = f"{name}_draws"
+        if draw_name not in derived_draws:
+            raise ValueError(
+                f"Joint posterior derivation lacks required field {draw_name!r}."
+            )
+        values = np.asarray(derived_draws[draw_name], dtype=float).reshape(-1)
+        if values.size != source_draw_count:
+            raise ValueError(
+                f"Joint posterior field {draw_name!r} has {values.size} draws; "
+                f"expected {source_draw_count}."
+            )
+        full[name] = values
+    nonfinite = [name for name, values in full.items() if not np.all(np.isfinite(values))]
+    if nonfinite:
+        raise ValueError(
+            f"Joint posterior products contain nonfinite full draws for {nonfinite}."
+        )
+    if np.any((full["f_host_2500_psf"] < 0.0) | (full["f_host_2500_psf"] > 1.0)):
+        raise ValueError("Direct f_host_2500_psf posterior draws are outside [0, 1].")
+
+    selected = deterministic_compact_posterior_indices(
+        source_draw_count,
+        object_id=object_id,
+        seed=seed,
+        draw_count=draw_count,
+    )
+    valid_count = int(selected.size)
+    compact = {
+        name: np.full(int(draw_count), np.nan, dtype=np.float32)
+        for name in JOINT_POSTERIOR_DRAW_FIELDS
+    }
+    for name, values in full.items():
+        compact[name][:valid_count] = values[selected].astype(np.float32)
+    posterior_index = np.full(int(draw_count), -1, dtype=np.int32)
+    posterior_index[:valid_count] = selected
+    return compact, valid_count, posterior_index, source_draw_count
+
+
+def extract_aligned_joint_psf_photometry_draws(
+    prediction,
+    filter_names,
+    posterior_index,
+    valid_count,
+    *,
+    bands=JOINT_PSF_PHOTOMETRY_BANDS,
+    draw_count=JOINT_PSF_PHOTOMETRY_DRAW_COUNT,
+):
+    """Select fitted total-PSF ugriz fluxes at the authoritative v3 indices."""
+
+    total = np.asarray(prediction.get("pred_fluxes"), dtype=float)
+    if total.ndim != 2 or total.shape[0] < 1:
+        raise ValueError(
+            "JAXSEDFit pred_fluxes must have shape (posterior draw, filter)."
+        )
+    names = [str(name) for name in filter_names]
+    if len(names) != total.shape[1]:
+        raise ValueError(
+            "JAXSEDFit filter-name count does not match pred_fluxes width: "
+            f"{len(names)} != {total.shape[1]}."
+        )
+    filter_indices = []
+    for band in bands:
+        matches = [index for index, name in enumerate(names) if name == band]
+        if len(matches) != 1:
+            raise ValueError(
+                f"Expected exactly one {band!r} total-PSF prediction, "
+                f"found {len(matches)}."
+            )
+        filter_indices.append(matches[0])
+
+    count = int(valid_count)
+    indices = np.asarray(posterior_index, dtype=np.int64)
+    if indices.shape != (int(draw_count),):
+        raise ValueError(
+            f"posterior_index has shape {indices.shape}; expected {(int(draw_count),)}."
+        )
+    if count < 1 or count > int(draw_count):
+        raise ValueError(
+            f"valid_count must be between 1 and {int(draw_count)}."
+        )
+    selected_indices = indices[:count]
+    if (
+        np.any(selected_indices < 0)
+        or np.any(selected_indices >= total.shape[0])
+        or (count > 1 and np.any(np.diff(selected_indices) <= 0))
+        or not np.all(indices[count:] == -1)
+    ):
+        raise ValueError(
+            "posterior_index is not a valid strictly increasing, -1-padded "
+            "selection from pred_fluxes."
+        )
+    selected = total[np.ix_(selected_indices, filter_indices)]
+    if not np.all(np.isfinite(selected)) or np.any(selected <= 0.0):
+        raise ValueError(
+            "Selected fitted total-PSF ugriz fluxes must be finite and positive."
+        )
+    compact = np.full(
+        (int(draw_count), len(bands)),
+        np.nan,
+        dtype=np.float32,
+    )
+    compact[:count] = selected.astype(np.float32)
+    return compact
+
+
+def joint_psf_photometry_prediction_provenance(prediction_source):
+    """Capture the exact JAXSEDFit code state behind fitted photometry."""
+
+    dependency = runtime_state().get("dependencies", {}).get("JAXSEDFit", {})
+    git = dependency.get("git", {}) if isinstance(dependency, dict) else {}
+    commit = str(git.get("commit", "")).strip() or "unavailable"
+    return {
+        "prediction_source": str(prediction_source),
+        "jaxsedfit_git_commit": commit,
+        "jaxsedfit_git_dirty": git.get("dirty"),
+        "jaxsedfit_module_path": str(dependency.get("module_path", "")),
+        "jaxsedfit_version": str(dependency.get("version", "")),
+        "posterior_alignment": "joint_posterior_draws/posterior_index",
+        "prediction_site": "pred_fluxes",
+    }
 
 
 def extract_compact_psf_agn_fraction_draws(
@@ -1074,29 +1414,36 @@ def validate_m2500_catalog_rows(rows):
 
     successful = [row for row in rows if bool(row.get("fit_ok", False))]
     for row in successful:
-        missing = [name for name in M2500_CATALOG_SITES if name not in row]
+        missing = [name for name in DERIVED_HUBBLE_CATALOG_SITES if name not in row]
         if missing:
             raise M2500ReconstructionError(
                 "Successful spectral fit "
                 f"{row.get('object_id')!r} ({row.get('execution_mode')!r}) "
-                f"lacks required m2500 catalog fields: {missing}."
+                f"lacks required m2500 catalog fields or alpha_nu fields: {missing}."
             )
         try:
             values = np.asarray(
-                [row[name] for name in M2500_CATALOG_SITES],
+                [row[name] for name in DERIVED_HUBBLE_CATALOG_SITES],
                 dtype=float,
             )
         except (TypeError, ValueError) as exc:
             raise M2500ReconstructionError(
                 "Successful spectral fit "
-                f"{row.get('object_id')!r} has nonnumeric m2500 fields."
+                f"{row.get('object_id')!r} has nonnumeric m2500/alpha_nu fields."
             ) from exc
         if not np.all(np.isfinite(values)):
             raise M2500ReconstructionError(
                 "Successful spectral fit "
-                f"{row.get('object_id')!r} has nonfinite m2500 fields."
+                f"{row.get('object_id')!r} has nonfinite m2500/alpha_nu fields."
             )
-        if np.any(values[2:] < -1e-12) or values[1] < values[0] - 1e-12:
+        attenuation_values = np.asarray(
+            [row[name] for name in M2500_CATALOG_SITES[2:]], dtype=float
+        )
+        if (
+            np.any(attenuation_values < -1e-12)
+            or float(row["m_2500_attenuated_model"])
+            < float(row["m_2500_dereddened"]) - 1e-12
+        ):
             raise M2500ReconstructionError(
                 "Successful spectral fit "
                 f"{row.get('object_id')!r} has physically inconsistent "
@@ -1156,13 +1503,18 @@ def validate_m2500_catalog_rows(rows):
 
 
 def write_joint_fit_results_hdf5(path, rows, *, provenance=None):
-    """Write worker result rows and their private fraction-draw payloads."""
+    """Write worker rows and their private, jointly indexed v3 payloads."""
 
     catalog_rows = []
     draws = []
     counts = []
-    host_draws = []
-    host_counts = []
+    joint_draws = {name: [] for name in JOINT_POSTERIOR_DRAW_FIELDS}
+    joint_counts = []
+    joint_indices = []
+    joint_source_counts = []
+    joint_psf_photometry = []
+    joint_psf_provenance = None
+    selection_seeds = set()
     for row in rows:
         catalog_rows.append({key: value for key, value in row.items() if not key.startswith("_")})
         draws.append(
@@ -1175,29 +1527,133 @@ def write_joint_fit_results_hdf5(path, rows, *, provenance=None):
             )
         )
         counts.append(int(row.get("_psf_agn_fraction_valid_count", 0)))
-        host_draws.append(
+        payload = row.get("_joint_posterior_draws", {})
+        for name in JOINT_POSTERIOR_DRAW_FIELDS:
+            joint_draws[name].append(
+                np.asarray(
+                    payload.get(
+                        name,
+                        np.full(JOINT_POSTERIOR_DRAW_COUNT, np.nan),
+                    ),
+                    dtype=np.float32,
+                )
+            )
+        joint_counts.append(int(row.get("_joint_posterior_valid_count", 0)))
+        joint_indices.append(
             np.asarray(
                 row.get(
-                    "_f_host_2500_psf_draws",
-                    np.full(F_HOST_2500_PSF_DRAW_COUNT, np.nan),
+                    "_joint_posterior_index",
+                    np.full(JOINT_POSTERIOR_DRAW_COUNT, -1),
                 ),
-                dtype=np.float32,
+                dtype=np.int32,
             )
         )
-        host_counts.append(int(row.get("_f_host_2500_psf_valid_count", 0)))
+        joint_source_counts.append(
+            int(row.get("_joint_posterior_source_draw_count", 0))
+        )
+        if "_joint_posterior_selection_seed" not in row:
+            raise ValueError("Worker row lacks _joint_posterior_selection_seed.")
+        selection_seeds.add(int(row["_joint_posterior_selection_seed"]))
+        psf_photometry = row.get("_joint_psf_photometry_draws")
+        if psf_photometry is None:
+            joint_psf_photometry.append(None)
+        else:
+            joint_psf_photometry.append(
+                np.asarray(psf_photometry, dtype=np.float32)
+            )
+            row_provenance = row.get("_joint_psf_photometry_provenance")
+            if row_provenance is None:
+                raise ValueError(
+                    "Worker row with joint PSF photometry lacks provenance."
+                )
+            if joint_psf_provenance is None:
+                joint_psf_provenance = dict(row_provenance)
+            elif dict(row_provenance) != joint_psf_provenance:
+                raise ValueError(
+                    "Worker rows use mixed joint PSF photometry provenance."
+                )
     draw_array = np.stack(draws, axis=0) if draws else np.empty(
         (0, PSF_AGN_FRACTION_DRAW_COUNT, len(PSF_AGN_FRACTION_BANDS)), dtype=np.float32
     )
-    host_draw_array = np.stack(host_draws, axis=0) if host_draws else np.empty(
-        (0, F_HOST_2500_PSF_DRAW_COUNT), dtype=np.float32
+    if len(selection_seeds) > 1:
+        raise ValueError(
+            f"Worker rows use mixed joint posterior selection seeds: {selection_seeds}."
+        )
+    selection_seed = next(iter(selection_seeds), 0)
+    joint_draw_arrays = {
+        name: np.stack(values, axis=0)
+        if values
+        else np.empty((0, JOINT_POSTERIOR_DRAW_COUNT), dtype=np.float32)
+        for name, values in joint_draws.items()
+    }
+    joint_index_array = (
+        np.stack(joint_indices, axis=0)
+        if joint_indices
+        else np.empty((0, JOINT_POSTERIOR_DRAW_COUNT), dtype=np.int32)
     )
+    normalized_psf_photometry = []
+    for row_index, (value, count) in enumerate(
+        zip(joint_psf_photometry, joint_counts, strict=True)
+    ):
+        if value is None:
+            if int(count) > 0:
+                raise ValueError(
+                    "Successful worker row with joint posterior draws lacks "
+                    f"joint PSF photometry at row {row_index}."
+                )
+            value = np.full(
+                (
+                    JOINT_PSF_PHOTOMETRY_DRAW_COUNT,
+                    len(JOINT_PSF_PHOTOMETRY_BANDS),
+                ),
+                np.nan,
+                dtype=np.float32,
+            )
+        normalized_psf_photometry.append(value)
+    joint_psf_photometry_array = (
+        np.stack(normalized_psf_photometry, axis=0)
+        if normalized_psf_photometry
+        else np.empty(
+            (
+                0,
+                JOINT_PSF_PHOTOMETRY_DRAW_COUNT,
+                len(JOINT_PSF_PHOTOMETRY_BANDS),
+            ),
+            dtype=np.float32,
+        )
+    )
+    if joint_psf_provenance is None:
+        joint_psf_provenance = joint_psf_photometry_prediction_provenance(
+            "fit_attempt_no_valid_draws"
+        )
+    catalog_frame = pd.DataFrame(catalog_rows)
+    if catalog_frame.empty and len(catalog_frame.columns) == 0:
+        # Preserve the v3 scalar schema even for a deliberately empty shard.
+        catalog_frame = pd.DataFrame(
+            {
+                "fit_ok": pd.Series(dtype=bool),
+                "mw_deredden_applied": pd.Series(dtype=bool),
+                "joint_posterior_draw_source": pd.Series(dtype=str),
+                **{
+                    name: pd.Series(dtype=float)
+                    for name in JOINT_POSTERIOR_SCALAR_SUMMARY_FIELDS
+                },
+            }
+        )
     write_spectra_catalog_hdf5(
         path,
-        pd.DataFrame(catalog_rows),
+        catalog_frame,
         draw_array,
         np.asarray(counts, dtype=np.int16),
-        f_host_2500_psf_draws=host_draw_array,
-        f_host_2500_psf_valid_count=np.asarray(host_counts, dtype=np.int16),
+        joint_posterior_draws=joint_draw_arrays,
+        joint_posterior_valid_count=np.asarray(joint_counts, dtype=np.int16),
+        joint_posterior_index=joint_index_array,
+        joint_posterior_source_draw_count=np.asarray(
+            joint_source_counts, dtype=np.int32
+        ),
+        joint_posterior_selection_seed=selection_seed,
+        joint_psf_photometry_draws=joint_psf_photometry_array,
+        joint_psf_photometry_provenance=joint_psf_provenance,
         provenance=provenance,
     )
 
@@ -1384,17 +1840,32 @@ def preflight_resume_host_capture_bundles(records, args):
             continue
         try:
             with h5py.File(path, "r") as handle:
+                unannotated_accepted = False
                 marker = handle.attrs.get(HOST_CAPTURE_BUNDLE_ATTR)
                 if isinstance(marker, bytes):
                     marker = marker.decode("utf-8")
                 if marker != QVC_PSF_HOST_CAPTURE_GROUP:
-                    raise ValueError("missing shared-group model marker")
+                    allow_unannotated = bool(
+                        getattr(args, "allow_unannotated_resume_bundle", False)
+                    )
+                    if marker not in (None, "") or not allow_unannotated:
+                        raise ValueError("missing shared-group model marker")
+                    unannotated_accepted = True
                 if "samples/host_capture_group_fraction" not in handle:
                     raise ValueError("missing host_capture_group_fraction samples")
                 shape = handle["samples/host_capture_group_fraction"].shape
                 if len(shape) < 2 or shape[-1] != 1:
                     raise ValueError(
                         f"expected one host-capture group parameter, found shape {shape}"
+                    )
+                if unannotated_accepted:
+                    warnings.warn(
+                        "Explicitly accepting an unannotated resume bundle after "
+                        f"structural sample validation: {path}. The loaded "
+                        "JAXSEDFit configuration will still be checked before "
+                        "posterior prediction.",
+                        RuntimeWarning,
+                        stacklevel=2,
                     )
         except (OSError, ValueError) as exc:
             failures.append(f"{path}: {exc}")
@@ -1444,11 +1915,16 @@ def _base_result(rec, args, *, execution_mode, resumed_from_path=""):
             "fit_result_path": "",
             "sed_fig_path": "",
             "spectrum_fig_path": "",
+            "mw_deredden_applied": not bool(
+                getattr(args, "no_deredden", False)
+            ),
+            "joint_posterior_draw_source": str(execution_mode),
         }
     )
     result.update(empty_joint_chi2_summary())
     result.update(empty_psf_agn_fraction_summary())
     result.update(empty_host_2500_psf_summary())
+    result.update(empty_joint_hubble_posterior_summary())
     result.update(empty_hubble_convergence_summary())
     result["_psf_agn_fraction_draws"] = np.full(
         (PSF_AGN_FRACTION_DRAW_COUNT, len(PSF_AGN_FRACTION_BANDS)),
@@ -1456,13 +1932,43 @@ def _base_result(rec, args, *, execution_mode, resumed_from_path=""):
         dtype=np.float32,
     )
     result["_psf_agn_fraction_valid_count"] = 0
-    result["_f_host_2500_psf_draws"] = np.full(
-        F_HOST_2500_PSF_DRAW_COUNT,
+    result["_joint_posterior_draws"] = {
+        name: np.full(JOINT_POSTERIOR_DRAW_COUNT, np.nan, dtype=np.float32)
+        for name in JOINT_POSTERIOR_DRAW_FIELDS
+    }
+    result["_joint_posterior_valid_count"] = 0
+    result["_joint_posterior_index"] = np.full(
+        JOINT_POSTERIOR_DRAW_COUNT, -1, dtype=np.int32
+    )
+    result["_joint_posterior_source_draw_count"] = 0
+    result["_joint_posterior_selection_seed"] = int(
+        getattr(args, "seed", 0)
+    )
+    result["_joint_psf_photometry_draws"] = None
+    result["_joint_psf_photometry_provenance"] = None
+    return result
+
+
+def _clear_compact_posterior_payloads(result):
+    """Ensure a failed worker row cannot retain a partially built draw payload."""
+
+    result["_psf_agn_fraction_draws"] = np.full(
+        (PSF_AGN_FRACTION_DRAW_COUNT, len(PSF_AGN_FRACTION_BANDS)),
         np.nan,
         dtype=np.float32,
     )
-    result["_f_host_2500_psf_valid_count"] = 0
-    return result
+    result["_psf_agn_fraction_valid_count"] = 0
+    result["_joint_posterior_draws"] = {
+        name: np.full(JOINT_POSTERIOR_DRAW_COUNT, np.nan, dtype=np.float32)
+        for name in JOINT_POSTERIOR_DRAW_FIELDS
+    }
+    result["_joint_posterior_valid_count"] = 0
+    result["_joint_posterior_index"] = np.full(
+        JOINT_POSTERIOR_DRAW_COUNT, -1, dtype=np.int32
+    )
+    result["_joint_posterior_source_draw_count"] = 0
+    result["_joint_psf_photometry_draws"] = None
+    result["_joint_psf_photometry_provenance"] = None
 
 
 def _uses_nuts(config, method=None):
@@ -1539,17 +2045,46 @@ def run_one_fit(
             fit_result.samples,
             prediction,
         )
+        derived_draws = estimate_joint_hubble_posterior_draws(
+            m2500_samples,
+            rec["z"],
+            h0=config.galaxy.cosmology_h0,
+            om0=config.galaxy.cosmology_om0,
+        )
         result.update(summarize_catalog_posterior(fit_result.samples, prediction))
         result.update(summarize_joint_chi2(prediction))
         result.update(summarize_host_2500_psf(prediction))
         (
-            result["_f_host_2500_psf_draws"],
-            result["_f_host_2500_psf_valid_count"],
-        ) = extract_compact_host_2500_psf_draws(
+            result["_joint_posterior_draws"],
+            result["_joint_posterior_valid_count"],
+            result["_joint_posterior_index"],
+            result["_joint_posterior_source_draw_count"],
+        ) = extract_compact_joint_posterior_draws(
             prediction,
+            derived_draws,
             object_id=rec["object_id"],
             seed=args.seed,
         )
+        if bool(
+            getattr(
+                getattr(config, "observation", None),
+                "apply_mw_deredden",
+                not bool(getattr(args, "no_deredden", False)),
+            )
+        ):
+            result["_joint_psf_photometry_draws"] = (
+                extract_aligned_joint_psf_photometry_draws(
+                    prediction,
+                    used_phot["filter_name"].astype(str).tolist(),
+                    result["_joint_posterior_index"],
+                    result["_joint_posterior_valid_count"],
+                )
+            )
+            result["_joint_psf_photometry_provenance"] = (
+                joint_psf_photometry_prediction_provenance(
+                    "fresh_fit_prediction"
+                )
+            )
         result.update(
             summarize_psf_agn_fractions(
                 prediction,
@@ -1565,14 +2100,15 @@ def run_one_fit(
             object_id=rec["object_id"],
             seed=args.seed,
         )
-        result.update(
-            summarize_m2500_dereddened(
-                m2500_samples,
-                rec["z"],
-                h0=config.galaxy.cosmology_h0,
-                om0=config.galaxy.cosmology_om0,
+        result.update(summarize_joint_hubble_posterior_draws(derived_draws))
+        result["mw_deredden_applied"] = bool(
+            getattr(
+                getattr(config, "observation", None),
+                "apply_mw_deredden",
+                not bool(getattr(args, "no_deredden", False)),
             )
         )
+        result["joint_posterior_draw_source"] = "fresh_fit"
         if _uses_nuts(config, getattr(fit_result, "method", None)):
             try:
                 result.update(
@@ -1587,6 +2123,9 @@ def run_one_fit(
                         heading=(
                             f"[{rec['object_id']}] NumPyro spectral "
                             "posterior summary:"
+                        ),
+                        print_summary=getattr(
+                            args, "print_convergence_summary", True
                         ),
                     )
                 )
@@ -1619,6 +2158,7 @@ def run_one_fit(
     except M2500ReconstructionError:
         raise
     except Exception as exc:
+        _clear_compact_posterior_payloads(result)
         result["error_message"] = str(exc)
         if args.verbose:
             traceback.print_exc()
@@ -1658,17 +2198,46 @@ def _run_resumed_fit(rec, args, source_path):
         fitter.samples,
         prediction,
     )
+    derived_draws = estimate_joint_hubble_posterior_draws(
+        m2500_samples,
+        config.observation.redshift,
+        h0=config.galaxy.cosmology_h0,
+        om0=config.galaxy.cosmology_om0,
+    )
     result.update(summarize_catalog_posterior(fitter.samples, prediction))
     result.update(summarize_joint_chi2(prediction))
     result.update(summarize_host_2500_psf(prediction))
     (
-        result["_f_host_2500_psf_draws"],
-        result["_f_host_2500_psf_valid_count"],
-    ) = extract_compact_host_2500_psf_draws(
+        result["_joint_posterior_draws"],
+        result["_joint_posterior_valid_count"],
+        result["_joint_posterior_index"],
+        result["_joint_posterior_source_draw_count"],
+    ) = extract_compact_joint_posterior_draws(
         prediction,
+        derived_draws,
         object_id=rec["object_id"],
         seed=args.seed,
     )
+    if bool(
+        getattr(
+            getattr(config, "observation", None),
+            "apply_mw_deredden",
+            not bool(getattr(args, "no_deredden", False)),
+        )
+    ):
+        result["_joint_psf_photometry_draws"] = (
+            extract_aligned_joint_psf_photometry_draws(
+                prediction,
+                config.photometry.filter_names,
+                result["_joint_posterior_index"],
+                result["_joint_posterior_valid_count"],
+            )
+        )
+        result["_joint_psf_photometry_provenance"] = (
+            joint_psf_photometry_prediction_provenance(
+                "saved_posterior_bundle_prediction"
+            )
+        )
     result.update(
         summarize_psf_agn_fractions(
             prediction,
@@ -1684,14 +2253,15 @@ def _run_resumed_fit(rec, args, source_path):
         object_id=rec["object_id"],
         seed=args.seed,
     )
-    result.update(
-        summarize_m2500_dereddened(
-            m2500_samples,
-            config.observation.redshift,
-            h0=config.galaxy.cosmology_h0,
-            om0=config.galaxy.cosmology_om0,
+    result.update(summarize_joint_hubble_posterior_draws(derived_draws))
+    result["mw_deredden_applied"] = bool(
+        getattr(
+            config.observation,
+            "apply_mw_deredden",
+            not bool(getattr(args, "no_deredden", False)),
         )
     )
+    result["joint_posterior_draw_source"] = "resume_bundle_reprocess"
     if _uses_nuts(config):
         try:
             result.update(
@@ -1706,6 +2276,9 @@ def _run_resumed_fit(rec, args, source_path):
                     heading=(
                         f"[{rec['object_id']}] NumPyro spectral "
                         "posterior summary:"
+                    ),
+                    print_summary=getattr(
+                        args, "print_convergence_summary", True
                     ),
                 )
             )
@@ -1731,6 +2304,11 @@ def _run_resumed_fit(rec, args, source_path):
                 source_path=source_path,
             )
         )
+    else:
+        # The immutable source bundle remains the posterior backing this row.
+        # Retain that useful reference when a catalog-only resume deliberately
+        # avoids writing a many-gigabyte duplicate bundle set.
+        result["fit_result_path"] = str(source_path)
 
     if args.save_fig:
         sed_path = sed_figure_path(args.fig_dir, rec)
@@ -1775,13 +2353,20 @@ def run_hybrid_fit(rec, args):
         raise
     except Exception as exc:
         resume_error = f"{type(exc).__name__}: {exc}"
+        _remove_incomplete_resumed_outputs(rec, args)
+        if bool(getattr(args, "resume_only", False)):
+            raise RuntimeError(
+                "Strict --resume-only reconstruction failed for "
+                f"object_id={rec.get('object_id')} from {source_path}; "
+                "a fresh Optax/NUTS fit was not started. "
+                f"Original error: {resume_error}"
+            ) from exc
         if args.verbose:
             print(
                 f"Resume failed for object_id={rec.get('object_id')} from "
                 f"{source_path}; running a fresh fit. {resume_error}"
             )
             traceback.print_exc()
-        _remove_incomplete_resumed_outputs(rec, args)
         return run_one_fit(
             rec,
             args,
@@ -1791,8 +2376,80 @@ def run_hybrid_fit(rec, args):
         )
 
 
+def load_prepared_resume_records(path, object_ids):
+    """Load already cross-matched records for inexpensive local resume batches."""
+    path = Path(path)
+    frame = pd.read_csv(path, dtype={"object_id": str})
+    required = {
+        "object_id",
+        "sdss_name",
+        "plate",
+        "fiber",
+        "mjd",
+        "z",
+        "ra",
+        "dec",
+    }
+    missing_columns = required - set(frame.columns)
+    if missing_columns:
+        raise ValueError(
+            f"Prepared resume records {path} are missing columns: "
+            f"{sorted(missing_columns)}"
+        )
+    frame = frame.copy()
+    frame["object_id"] = frame["object_id"].map(legacy.normalize_object_id)
+    if (frame["object_id"] == "").any():
+        raise ValueError(f"Prepared resume records {path} contain empty object IDs.")
+    duplicates = frame.loc[
+        frame["object_id"].duplicated(keep=False), "object_id"
+    ].unique()
+    if len(duplicates):
+        raise ValueError(
+            f"Prepared resume records {path} contain duplicate object IDs: "
+            f"{duplicates[:10].tolist()}"
+        )
+
+    requested = [legacy.normalize_object_id(value) for value in object_ids or []]
+    requested = [value for value in requested if value]
+    requested = list(dict.fromkeys(requested))
+    if requested:
+        indexed = frame.set_index("object_id", drop=False)
+        missing_ids = [value for value in requested if value not in indexed.index]
+        if missing_ids:
+            raise ValueError(
+                f"Prepared resume records {path} lack {len(missing_ids)} requested "
+                f"object ID(s); first missing: {missing_ids[:10]}"
+            )
+        frame = indexed.loc[requested].reset_index(drop=True)
+
+    for column in ("plate", "fiber", "mjd", "z", "ra", "dec"):
+        numeric = pd.to_numeric(frame[column], errors="coerce")
+        if not np.isfinite(numeric.to_numpy(dtype=float)).all():
+            raise ValueError(
+                f"Prepared resume records {path} contain non-finite {column!r}."
+            )
+        frame[column] = numeric
+    if (frame["sdss_name"].astype(str).str.strip() == "").any():
+        raise ValueError(
+            f"Prepared resume records {path} contain empty SDSS names."
+        )
+    return frame.to_dict(orient="records")
+
+
 def build_records(args):
-    records = legacy.build_records(args)
+    if getattr(args, "resume_records_path", None):
+        records = load_prepared_resume_records(
+            args.resume_records_path,
+            args.filter_object_id,
+        )
+    else:
+        records = legacy.build_records(args)
+    if args.resume and bool(getattr(args, "resume_only", False)):
+        # All photometry and spectroscopy needed for posterior prediction are
+        # embedded in the saved bundle. Avoid re-reading the large SED table in
+        # every strict, restartable local resume call. Ordinary hybrid resume
+        # still prepares these inputs because it may fall back to a fresh fit.
+        return records
     phot = load_saved_sed_photometry(args.sed_photometry_path)
     grouped = (
         {str(key): value.to_dict(orient="records") for key, value in phot.groupby("source_id")}
@@ -1811,17 +2468,34 @@ def run_fit(args):
     if args.resume:
         preflight_resume_host_capture_bundles(records, args)
     worker = partial(run_hybrid_fit if args.resume else run_one_fit, args=args)
-    description = (
-        "Joint SED+spectrum resume/fallback"
-        if args.resume
-        else "Joint SED+spectrum fits"
-    )
+    if args.resume:
+        description = (
+            "Joint SED+spectrum resume-only"
+            if args.resume_only
+            else "Joint SED+spectrum resume/fallback"
+        )
+    else:
+        description = "Joint SED+spectrum fits"
     if args.nproc <= 1:
-        rows = [worker(rec) for rec in tqdm(records, desc=description)]
+        rows = [
+            worker(rec)
+            for rec in tqdm(
+                records,
+                desc=description,
+                disable=not args.catalog_progress,
+            )
+        ]
     else:
         ctx = mp.get_context("spawn")
         with ctx.Pool(args.nproc) as pool:
-            rows = list(tqdm(pool.imap(worker, records), total=len(records)))
+            rows = list(
+                tqdm(
+                    pool.imap(worker, records),
+                    total=len(records),
+                    desc=description,
+                    disable=not args.catalog_progress,
+                )
+            )
     provenance = build_run_record(
         "qvc.spectra.fit_spectra_jaxsedfit_joint",
         args,
@@ -1829,6 +2503,7 @@ def run_fit(args):
             "input_catalog": args.fpath_in,
             "sed_photometry": args.sed_photometry_path,
             "dr16q_catalog": args.dr16q_fits,
+            "prepared_resume_records": getattr(args, "resume_records_path", None),
         },
         event_type="catalog_shard",
     )
@@ -1869,6 +2544,32 @@ def parse_args(argv=None):
         default="",
         help="Old run identifier recorded in output provenance columns.",
     )
+    parser.add_argument(
+        "--resume-only",
+        action="store_true",
+        help=(
+            "Fail if reconstruction from a saved posterior bundle fails; never "
+            "fall back to a fresh Optax/NUTS fit. Requires --resume."
+        ),
+    )
+    parser.add_argument(
+        "--allow-unannotated-resume-bundle",
+        action="store_true",
+        help=(
+            "Explicitly allow a resume bundle that has the required shared "
+            "host-capture draws but is missing only the QVC model-marker "
+            "attribute. The loaded configuration is still validated. Requires "
+            "--resume."
+        ),
+    )
+    parser.add_argument(
+        "--resume-records-path",
+        help=(
+            "CSV of already DR16Q-cross-matched records used to avoid repeating "
+            "the expensive catalog preparation in local resume batches. Valid "
+            "only with --resume."
+        ),
+    )
     parser.add_argument("--max-sep", type=float, default=1.0)
     parser.add_argument("--N", type=int)
     parser.add_argument("--skip", type=int)
@@ -1895,7 +2596,27 @@ def parse_args(argv=None):
     parser.add_argument("--nproc", type=int, default=1)
     parser.add_argument("--no-deredden", action="store_true")
     parser.add_argument("--progress", action="store_true")
+    parser.set_defaults(catalog_progress=True)
+    parser.add_argument(
+        "--no-catalog-progress",
+        dest="catalog_progress",
+        action="store_false",
+        help=(
+            "Disable the outer per-process catalog progress bar. Useful when a "
+            "parent driver provides one persistent run-level progress bar."
+        ),
+    )
     parser.add_argument("--verbose", action="store_true")
+    parser.set_defaults(print_convergence_summary=True)
+    parser.add_argument(
+        "--no-print-convergence-summary",
+        dest="print_convergence_summary",
+        action="store_false",
+        help=(
+            "Compute and save convergence fields without printing a posterior "
+            "summary table for every object."
+        ),
+    )
     parser.set_defaults(fit_lines=True, fit_fe=True, fit_bc=True, save_fig=True, save_jaxsedfit_samples=True)
     parser.add_argument("--no-fit-lines", dest="fit_lines", action="store_false")
     parser.add_argument("--no-fit-fe", dest="fit_fe", action="store_false")
@@ -1911,6 +2632,12 @@ def parse_args(argv=None):
         parser.error("fpath_out must end in .h5 or .hdf5 for joint spectral fits.")
     if args.mode == "fit" and not args.sed_photometry_path:
         parser.error("--sed-photometry-path is required for --mode fit.")
+    if args.mode == "fit" and args.no_deredden:
+        parser.error(
+            "--no-deredden is incompatible with qvc_spectra_catalog_v3: "
+            "mandatory fitted PSF colors are defined after Milky-Way "
+            "foreground correction."
+        )
     if not (args.fpath_in or args.filter_object_id):
         parser.error("--fpath-in or --filter_object_id is required.")
     if args.resume:
@@ -1922,6 +2649,28 @@ def parse_args(argv=None):
         args.resume = str(resume_dir)
         if not args.resume_run_name:
             args.resume_run_name = resume_dir.parent.name
+        if args.resume_records_path:
+            if not args.resume_only:
+                parser.error(
+                    "--resume-records-path requires --resume-only because the "
+                    "prepared records intentionally omit fresh-fit photometry."
+                )
+            resume_records_path = Path(args.resume_records_path)
+            if not resume_records_path.is_file():
+                parser.error(
+                    "--resume-records-path does not exist: "
+                    f"{resume_records_path}"
+                )
+            args.resume_records_path = str(resume_records_path)
+    elif (
+        args.resume_only
+        or args.allow_unannotated_resume_bundle
+        or args.resume_records_path
+    ):
+        parser.error(
+            "--resume-only, --allow-unannotated-resume-bundle, and "
+            "--resume-records-path require --resume."
+        )
     args.dense_mass = {"true": True, "false": False}.get(args.dense_mass, args.dense_mass)
     return args
 

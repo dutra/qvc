@@ -19,7 +19,11 @@ from qvc.light_curve.psf_constant_flux_correction import (
     load_spectra_psf_fractions,
     subtract_constant_flux_from_band,
 )
-from qvc.spectra.catalog_hdf5 import write_spectra_catalog_hdf5
+from qvc.spectra.catalog_hdf5 import (
+    JOINT_POSTERIOR_DRAW_COUNT,
+    JOINT_POSTERIOR_DRAW_FIELDS,
+    write_spectra_catalog_hdf5,
+)
 
 
 def test_subtract_constant_flux_from_band_makes_curve_fainter_and_more_variable():
@@ -145,18 +149,73 @@ def _make_light_curve_object(object_id, *, include_fraction=False):
     return obj
 
 
+def _write_v3_spectra_catalog(path, frame, fraction_draws, valid_count):
+    """Write the PSF fixture inside a physically valid spectra-v3 envelope."""
+
+    frame = frame.copy()
+    n_rows = len(frame)
+    frame["fit_ok"] = True
+    frame["mw_deredden_applied"] = True
+    frame["joint_posterior_draw_source"] = "synthetic_test_posterior"
+    medians = {
+        "f_host_2500_psf": np.full(n_rows, 0.2),
+        "alpha_nu_intrinsic_1450_2500": np.full(n_rows, -0.5),
+        "alpha_nu_attenuated_1450_2500": np.full(n_rows, -0.5),
+        "m_2500_dereddened": np.full(n_rows, 20.0),
+        "m_2500_attenuated_model": np.full(n_rows, 20.0),
+        "a_2500_galaxy": np.zeros(n_rows),
+        "a_2500_internal": np.zeros(n_rows),
+        "a_2500_total": np.zeros(n_rows),
+    }
+    for name, values in medians.items():
+        frame[name] = values
+        frame[f"{name}_err"] = 0.0
+        frame[f"{name}_err_lower"] = 0.0
+        frame[f"{name}_err_upper"] = 0.0
+    joint_draws = {
+        name: np.repeat(
+            np.asarray(medians[name], dtype=np.float32)[:, None],
+            JOINT_POSTERIOR_DRAW_COUNT,
+            axis=1,
+        )
+        for name in JOINT_POSTERIOR_DRAW_FIELDS
+    }
+    fitted_fluxes = np.ones(
+        (n_rows, JOINT_POSTERIOR_DRAW_COUNT, 5), dtype=np.float32
+    )
+    write_spectra_catalog_hdf5(
+        path,
+        frame,
+        fraction_draws,
+        valid_count,
+        joint_posterior_draws=joint_draws,
+        joint_posterior_valid_count=np.full(
+            n_rows, JOINT_POSTERIOR_DRAW_COUNT, dtype=np.int16
+        ),
+        joint_posterior_index=np.tile(
+            np.arange(JOINT_POSTERIOR_DRAW_COUNT, dtype=np.int32),
+            (n_rows, 1),
+        ),
+        joint_psf_photometry_draws=fitted_fluxes,
+        joint_psf_photometry_provenance={
+            "prediction_source": "synthetic_test",
+            "jaxsedfit_git_commit": "a" * 40,
+        },
+        joint_posterior_source_draw_count=np.full(
+            n_rows, JOINT_POSTERIOR_DRAW_COUNT, dtype=np.int32
+        ),
+        joint_posterior_selection_seed=12345,
+    )
+
+
 def _write_spectra_h5(tmp_path, rows):
     h5_path = tmp_path / "spectra_fit.h5"
     frame = pd.DataFrame(rows)
-    write_spectra_catalog_hdf5(
+    _write_v3_spectra_catalog(
         h5_path,
         frame,
         np.full((len(frame), 64, 5), np.nan, dtype=np.float32),
         np.zeros(len(frame), dtype=np.int16),
-        f_host_2500_psf_draws=np.full(
-            (len(frame), 64), np.nan, dtype=np.float32
-        ),
-        f_host_2500_psf_valid_count=np.zeros(len(frame), dtype=np.int16),
     )
     return str(h5_path)
 
@@ -168,13 +227,11 @@ def test_load_spectra_psf_fractions_reads_joint_draws_from_hdf5(tmp_path):
     )
     draws = np.full((1, 64, 5), np.nan, dtype=np.float32)
     draws[0, :2] = [[0.6, 0.7, 0.8, 0.9, 1.0], [0.5, 0.6, 0.7, 0.8, 0.9]]
-    write_spectra_catalog_hdf5(
+    _write_v3_spectra_catalog(
         path,
         frame,
         draws,
         np.array([2]),
-        f_host_2500_psf_draws=np.full((1, 64), np.nan, dtype=np.float32),
-        f_host_2500_psf_valid_count=np.zeros(1, dtype=np.int16),
     )
 
     result = load_spectra_psf_fractions([path])

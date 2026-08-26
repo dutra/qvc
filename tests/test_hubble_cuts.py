@@ -23,13 +23,16 @@ from qvc.hubble.cuts import (  # noqa: E402
     EXCLUDED_SDSS_NAMES,
     FRAC_AGN_5100_MIN,
     JAXSEDFIT_JOINT_REDUCED_CHI2_MAX,
+    LOO_CHI2_EFF_MAX,
     LIGHT_CURVE_N_POINTS_COLUMN,
     LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
     LIGHT_CURVE_RHAT_MAX,
     LOG_TAU_UV_RF_MAX,
     LOG_TAU_UV_RF_MIN,
     REL_APPARENT_MAG_2500_ERR_MAX,
+    SED_REDUCED_CHI2_MAX,
     SPECTRAL_RHAT_MAX,
+    SPECTROSCOPY_REDUCED_CHI2_MAX,
     add_light_curve_point_count_column,
     build_sdss_target_selection_mask,
     light_curve_point_count_series,
@@ -42,22 +45,97 @@ from qvc.hubble.hubble_utils import (  # noqa: E402
     _render_cut_summary_table,
     _scalar_cut_has_inclusive_upper,
     _scalar_parameter_cut_mask,
+    approximate_v1_fhost_2500_psf_from_draws,
     populate_spectra_fit,
 )
-from qvc.spectra.catalog_hdf5 import write_spectra_catalog_hdf5  # noqa: E402
+from qvc.spectra.catalog_hdf5 import (  # noqa: E402
+    JOINT_POSTERIOR_DRAW_FIELDS,
+    write_spectra_catalog_hdf5,
+)
 
 
 def _write_spectra_h5(path, rows):
-    frame = pd.DataFrame(rows)
+    frame = pd.DataFrame(rows).copy()
+    n_rows = len(frame)
+    success = frame.get("fit_ok", pd.Series(False, index=frame.index)).astype(bool)
+    joint = {
+        name: np.full((n_rows, 64), np.nan, dtype=np.float32)
+        for name in JOINT_POSTERIOR_DRAW_FIELDS
+    }
+    posterior_index = np.full((n_rows, 64), -1, dtype=np.int32)
+    source_count = np.zeros(n_rows, dtype=np.int32)
+    joint_count = np.zeros(n_rows, dtype=np.int16)
+    alpha_denominator = np.log10(2500.0 / 1450.0)
+    attenuation_ratio = (1450.0 / 2500.0) ** -1.2
+
+    frame["mw_deredden_applied"] = frame.get("mw_deredden_applied", True)
+    frame["joint_posterior_draw_source"] = frame.get(
+        "joint_posterior_draw_source", "synthetic_test_payload"
+    )
+    for row_index in range(n_rows):
+        if not success.iloc[row_index]:
+            continue
+        row = frame.iloc[row_index]
+        m_dered = float(row.get("m_2500_dereddened", 20.0))
+        m_attenuated = float(row.get("m_2500_attenuated_model", m_dered + 0.2))
+        a_total = max(m_attenuated - m_dered, 0.0)
+        a_galaxy_raw = row.get("a_2500_galaxy", 0.4 * a_total)
+        a_galaxy = float(a_galaxy_raw) if np.isfinite(a_galaxy_raw) else 0.4 * a_total
+        a_galaxy = float(np.clip(a_galaxy, 0.0, a_total))
+        a_internal = a_total - a_galaxy
+        alpha_intrinsic = -0.5
+        alpha_attenuated = (
+            alpha_intrinsic
+            - 0.4 * a_total * (attenuation_ratio - 1.0) / alpha_denominator
+        )
+        values = {
+            "f_host_2500_psf": 0.2,
+            "alpha_nu_intrinsic_1450_2500": alpha_intrinsic,
+            "alpha_nu_attenuated_1450_2500": alpha_attenuated,
+            "m_2500_dereddened": m_dered,
+            "m_2500_attenuated_model": m_dered + a_total,
+            "a_2500_galaxy": a_galaxy,
+            "a_2500_internal": a_internal,
+            "a_2500_total": a_total,
+        }
+        for name, value in values.items():
+            joint[name][row_index] = value
+            if name not in frame.columns or not np.isfinite(
+                pd.to_numeric(frame.at[row_index, name], errors="coerce")
+            ):
+                frame.at[row_index, name] = value
+            for suffix in ("_err", "_err_lower", "_err_upper"):
+                column = f"{name}{suffix}"
+                if column not in frame.columns or not np.isfinite(
+                    pd.to_numeric(frame.at[row_index, column], errors="coerce")
+                ):
+                    frame.at[row_index, column] = 0.01
+        posterior_index[row_index] = np.arange(64, dtype=np.int32)
+        source_count[row_index] = 64
+        joint_count[row_index] = 64
+
+    for name in JOINT_POSTERIOR_DRAW_FIELDS:
+        for suffix in ("", "_err", "_err_lower", "_err_upper"):
+            column = f"{name}{suffix}"
+            if column not in frame:
+                frame[column] = np.nan
+    fitted_fluxes = np.full((n_rows, 64, 5), np.nan, dtype=np.float32)
+    fitted_fluxes[success.to_numpy(dtype=bool)] = 1.0
     write_spectra_catalog_hdf5(
         path,
         frame,
-        np.full((len(frame), 64, 5), np.nan, dtype=np.float32),
-        np.zeros(len(frame), dtype=np.int16),
-        f_host_2500_psf_draws=np.full(
-            (len(frame), 64), np.nan, dtype=np.float32
-        ),
-        f_host_2500_psf_valid_count=np.zeros(len(frame), dtype=np.int16),
+        np.full((n_rows, 64, 5), np.nan, dtype=np.float32),
+        np.zeros(n_rows, dtype=np.int16),
+        joint_posterior_draws=joint,
+        joint_posterior_valid_count=joint_count,
+        joint_posterior_index=posterior_index,
+        joint_posterior_source_draw_count=source_count,
+        joint_posterior_selection_seed=12345,
+        joint_psf_photometry_draws=fitted_fluxes,
+        joint_psf_photometry_provenance={
+            "prediction_source": "synthetic_test",
+            "jaxsedfit_git_commit": "a" * 40,
+        },
     )
 
 
@@ -156,13 +234,19 @@ def test_build_agn_cuts_contains_only_fiducial_profile():
             COMPLETENESS_MAG_2500_MIN,
             COMPLETENESS_MAG_2500_MAX,
         ),
+        "sed_reduced_chi2": (None, SED_REDUCED_CHI2_MAX),
+        "spectroscopy_reduced_chi2": (None, SPECTROSCOPY_REDUCED_CHI2_MAX),
         "joint_reduced_chi2": (None, JAXSEDFIT_JOINT_REDUCED_CHI2_MAX),
+        "loo_chi2_eff": (None, LOO_CHI2_EFF_MAX),
         "m_2500_dereddened_rhat": (None, SPECTRAL_RHAT_MAX),
         "m_2500_attenuated_model_rhat": (None, SPECTRAL_RHAT_MAX),
         "log_tau_uv_rf_rhat": (None, LIGHT_CURVE_RHAT_MAX),
         "log_sigma_uv_rhat": (None, LIGHT_CURVE_RHAT_MAX),
     }
     assert JAXSEDFIT_JOINT_REDUCED_CHI2_MAX == 1.5
+    assert SED_REDUCED_CHI2_MAX == 2.0
+    assert SPECTROSCOPY_REDUCED_CHI2_MAX == 1.3
+    assert LOO_CHI2_EFF_MAX == 1.01
     assert SPECTRAL_RHAT_MAX == 1.20
     assert LIGHT_CURVE_RHAT_MAX == 1.10
     assert LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS == ("u",)
@@ -178,7 +262,6 @@ def test_previous_scalar_and_component_defaults_are_disabled():
             "f_host_2500",
             "alpha_lambda",
             "variability_chi_sq_red_g",
-            "loo_chi2_eff",
             "log_sigma_uv",
         }
     )
@@ -197,6 +280,13 @@ def test_fiducial_cut_boundaries_are_inclusive_and_nonfinite_values_fail():
             COMPLETENESS_MAG_2500_MIN,
             COMPLETENESS_MAG_2500_MAX,
         ),
+        ("sed_reduced_chi2", None, SED_REDUCED_CHI2_MAX),
+        (
+            "spectroscopy_reduced_chi2",
+            None,
+            SPECTROSCOPY_REDUCED_CHI2_MAX,
+        ),
+        ("loo_chi2_eff", None, LOO_CHI2_EFF_MAX),
     )
     for column, lower, upper in cases:
         if lower is None and upper is None:
@@ -240,14 +330,42 @@ def test_completeness_magnitude_cut_follows_selected_definition():
     assert "m_2500_dereddened" not in attenuated_columns
 
 
-def test_jaxsedfit_joint_reduced_chi2_cut_requires_finite_values():
-    column = "joint_reduced_chi2"
-    upper = JAXSEDFIT_JOINT_REDUCED_CHI2_MAX
-    values = [upper, np.nextafter(upper, np.inf), np.nan, np.inf, -np.inf]
-    mask = _scalar_parameter_cut_mask(
-        pd.DataFrame({column: values}), column, None, upper
+def test_attenuated_completeness_magnitude_cut_is_inclusive_18p5_to_24():
+    magnitude_cut = next(
+        cut
+        for cut in build_agn_cuts(completeness_magnitude="attenuated")
+        if cut[0] == "m_2500_attenuated_model"
     )
-    np.testing.assert_array_equal(mask, [True, False, False, False, False])
+    column, lower, upper = magnitude_cut
+
+    assert (lower, upper) == (18.5, 24.0)
+    values = [
+        np.nextafter(lower, -np.inf),
+        lower,
+        21.0,
+        upper,
+        np.nextafter(upper, np.inf),
+        np.nan,
+    ]
+    mask = _scalar_parameter_cut_mask(
+        pd.DataFrame({column: values}), column, lower, upper
+    )
+    np.testing.assert_array_equal(mask, [False, True, True, True, False, False])
+
+
+def test_fit_quality_chi2_cuts_require_finite_values():
+    cases = (
+        ("sed_reduced_chi2", SED_REDUCED_CHI2_MAX),
+        ("spectroscopy_reduced_chi2", SPECTROSCOPY_REDUCED_CHI2_MAX),
+        ("joint_reduced_chi2", JAXSEDFIT_JOINT_REDUCED_CHI2_MAX),
+        ("loo_chi2_eff", LOO_CHI2_EFF_MAX),
+    )
+    for column, upper in cases:
+        values = [upper, np.nextafter(upper, np.inf), np.nan, np.inf, -np.inf]
+        mask = _scalar_parameter_cut_mask(
+            pd.DataFrame({column: values}), column, None, upper
+        )
+        np.testing.assert_array_equal(mask, [True, False, False, False, False])
 
 
 def test_rhat_cuts_allow_missing_but_reject_bad_finite_values():
@@ -326,6 +444,9 @@ def _scalar_thresholds_from_environment(overrides):
         "QVC_CUT_APPARENT_MAG_2500_ERR_MAX",
         "QVC_CUT_COMPLETENESS_MAG_2500_MIN",
         "QVC_CUT_COMPLETENESS_MAG_2500_MAX",
+        "QVC_CUT_SED_REDUCED_CHI2_MAX",
+        "QVC_CUT_SPECTROSCOPY_REDUCED_CHI2_MAX",
+        "QVC_CUT_LOO_CHI2_EFF_MAX",
     )
     for name in names:
         env.pop(name, None)
@@ -333,10 +454,13 @@ def _scalar_thresholds_from_environment(overrides):
     script = (
         "from qvc.hubble.cuts import ("
         "APPARENT_MAG_2500_ERR_MAX, COMPLETENESS_MAG_2500_MAX, "
-        "COMPLETENESS_MAG_2500_MIN, LOG_TAU_UV_RF_MAX, LOG_TAU_UV_RF_MIN); "
+        "COMPLETENESS_MAG_2500_MIN, LOG_TAU_UV_RF_MAX, LOG_TAU_UV_RF_MIN, "
+        "LOO_CHI2_EFF_MAX, SED_REDUCED_CHI2_MAX, "
+        "SPECTROSCOPY_REDUCED_CHI2_MAX); "
         "print(repr((LOG_TAU_UV_RF_MIN, LOG_TAU_UV_RF_MAX, "
         "APPARENT_MAG_2500_ERR_MAX, COMPLETENESS_MAG_2500_MIN, "
-        "COMPLETENESS_MAG_2500_MAX)))"
+        "COMPLETENESS_MAG_2500_MAX, SED_REDUCED_CHI2_MAX, "
+        "SPECTROSCOPY_REDUCED_CHI2_MAX, LOO_CHI2_EFF_MAX)))"
     )
     completed = subprocess.run(
         [sys.executable, "-c", script],
@@ -357,8 +481,11 @@ def test_scalar_cut_environment_overrides_allow_reproducible_cut_scans():
             "QVC_CUT_APPARENT_MAG_2500_ERR_MAX": "0.35",
             "QVC_CUT_COMPLETENESS_MAG_2500_MIN": "19.5",
             "QVC_CUT_COMPLETENESS_MAG_2500_MAX": "23.3",
+            "QVC_CUT_SED_REDUCED_CHI2_MAX": "1.8",
+            "QVC_CUT_SPECTROSCOPY_REDUCED_CHI2_MAX": "1.2",
+            "QVC_CUT_LOO_CHI2_EFF_MAX": "1.05",
         }
-    ) == (1.7, 3.2, 0.35, 19.5, 23.3)
+    ) == (1.7, 3.2, 0.35, 19.5, 23.3, 1.8, 1.2, 1.05)
     assert _scalar_thresholds_from_environment(
         {
             "QVC_CUT_LOG_TAU_UV_RF_MIN": "none",
@@ -366,8 +493,11 @@ def test_scalar_cut_environment_overrides_allow_reproducible_cut_scans():
             "QVC_CUT_APPARENT_MAG_2500_ERR_MAX": "none",
             "QVC_CUT_COMPLETENESS_MAG_2500_MIN": "none",
             "QVC_CUT_COMPLETENESS_MAG_2500_MAX": "none",
+            "QVC_CUT_SED_REDUCED_CHI2_MAX": "none",
+            "QVC_CUT_SPECTROSCOPY_REDUCED_CHI2_MAX": "none",
+            "QVC_CUT_LOO_CHI2_EFF_MAX": "none",
         }
-    ) == (None, None, None, None, None)
+    ) == (None, None, None, None, None, None, None, None)
 
 
 def test_total_a2500_cut_environment_override_is_inclusive():
@@ -424,6 +554,44 @@ def test_current_spectra_schema_requires_fracagn_5100_fit(tmp_path):
         populate_spectra_fit(pd.DataFrame({"object_id": ["obj"]}), [h5_path])
 
 
+def test_v1_fhost_proxy_interpolates_joint_draws_and_clamps_band_edges():
+    frame = pd.DataFrame(
+        {"object_id": ["low", "middle", "high"], "z": [0.0, 1.0, 3.0]}
+    )
+    draws = np.full((3, 64, 5), np.nan, dtype=np.float32)
+    draws[0, 0] = [0.9, 0.8, 0.7, 0.6, 0.5]
+    draws[1, 0] = [0.8, 0.7, 0.5, 0.4, 0.3]
+    draws[1, 1] = [0.6, 0.5, 0.3, 0.2, 0.1]
+    draws[2, 0] = [0.7, 0.6, 0.5, 0.4, 0.2]
+
+    result = approximate_v1_fhost_2500_psf_from_draws(
+        frame,
+        draws,
+        np.array([1, 2, 1]),
+        ("u", "g", "r", "i", "z"),
+    )
+
+    np.testing.assert_allclose(result.loc[0, "f_host_2500_psf"], 0.1, atol=1e-7)
+    np.testing.assert_allclose(result.loc[2, "f_host_2500_psf"], 0.8, atol=1e-7)
+    log_wave = np.log([3551.0, 4686.0, 6165.0, 7481.0, 8931.0])
+    expected_middle = [
+        1.0 - np.interp(np.log(5000.0), log_wave, draw)
+        for draw in draws[1, :2]
+    ]
+    p16, p50, p84 = np.percentile(expected_middle, [16.0, 50.0, 84.0])
+    np.testing.assert_allclose(result.loc[1, "f_host_2500_psf"], p50)
+    np.testing.assert_allclose(result.loc[1, "f_host_2500_psf_err"], 0.5 * (p84 - p16))
+    np.testing.assert_array_equal(
+        result["f_host_2500_psf_proxy_edge_clamped"],
+        [True, False, True],
+    )
+    np.testing.assert_array_equal(
+        result["f_host_2500_psf_proxy_valid_count"],
+        [1, 2, 1],
+    )
+    assert result["f_host_2500_psf_is_approximate"].all()
+
+
 def test_current_spectra_schema_accepts_only_joint_sedfit_backend(tmp_path):
     h5_path = tmp_path / "spectra.h5"
     row = {
@@ -448,7 +616,9 @@ def test_current_spectra_schema_accepts_only_joint_sedfit_backend(tmp_path):
 
     assert out["object_id"].tolist() == ["obj"]
     assert out.loc[0, "fit_backend"] == "jaxsedfit_joint"
-    assert out.loc[0, "alpha_lambda"] == row["pl_slope"]
+    assert out.loc[0, "pl_slope"] == row["pl_slope"]
+    assert "alpha_lambda" not in out.columns
+    assert "alpha_nu" not in out.columns
     assert "PL_slope" not in out.columns
     assert "f_host_2500" not in out.columns
 
@@ -510,7 +680,7 @@ def test_populate_spectra_fit_preserves_nonconflicting_columns_and_spectra_hdf5_
     assert out.attrs["light_curve_discarded_columns"] == ("pl_slope", "z")
 
 
-def test_populate_spectra_fit_derives_missing_slope_aliases_without_overwriting(
+def test_populate_spectra_fit_does_not_alias_pl_slope_to_continuum_slopes(
     tmp_path,
 ):
     h5_path = tmp_path / "spectra.h5"
@@ -534,10 +704,12 @@ def test_populate_spectra_fit_derives_missing_slope_aliases_without_overwriting(
 
     out = populate_spectra_fit(pd.DataFrame({"object_id": ["obj"]}), [h5_path])
 
-    assert out.loc[0, "alpha_lambda"] == -1.5
-    assert out.loc[0, "alpha_lambda_err"] == 0.1
-    assert out.loc[0, "alpha_nu"] == -0.5
-    assert out.loc[0, "alpha_nu_err"] == 0.1
+    assert out.loc[0, "pl_slope"] == -1.5
+    assert out.loc[0, "pl_slope_err"] == 0.1
+    assert "alpha_lambda" not in out.columns
+    assert "alpha_lambda_err" not in out.columns
+    assert "alpha_nu" not in out.columns
+    assert "alpha_nu_err" not in out.columns
 
 
 def test_populate_spectra_fit_reconstructs_missing_total_a2500(tmp_path):

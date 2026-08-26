@@ -1,5 +1,6 @@
 
 from scipy.linalg import cho_solve
+from scipy.special import logsumexp
 from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
 import numpy as np
 
@@ -21,6 +22,22 @@ from qvc.hubble.hubble_completeness_refactored import (
 from qvc.hubble.completeness_strata import (
     COMPLETENESS_STRATUM_CODE_COL,
     StratifiedCompletenessBundle,
+)
+from qvc.hubble.latent_alpha_completeness import (
+    JOINT_DRAW_INPUT_COUNT,
+    LatentAlphaConfig,
+    absolute_m2500_to_log_nu_lnu,
+    bounded_response_from_kappa,
+    calibrate_response_kappa,
+    deterministic_joint_draw_indices,
+    parent_alpha_logpdf,
+    response_coefficient_names,
+    response_logit_offset,
+)
+from qvc.hubble.fitted_color_completeness import (
+    COLOR_STRENGTH_PARAMETER,
+    FittedColorConfig,
+    color_relative_selection_factor_xp,
 )
 
 _LOG_2PI = np.log(2.0 * np.pi)
@@ -250,11 +267,29 @@ def _cached_completeness_pdet(
     elif mode == "3d_fhost":
         if f_host_2500_psf is None:
             raise ValueError("f_host_2500_psf is required for 3D host-aware completeness.")
-        p_det = completeness_model(
-            map_m_grid[None, :],
-            z[:, None],
-            np.asarray(f_host_2500_psf)[:, None],
-        )
+        f_host = np.asarray(f_host_2500_psf)
+        if f_host.ndim == 1:
+            p_det = completeness_model(
+                map_m_grid[None, :],
+                z[:, None],
+                f_host[:, None],
+            )
+        elif f_host.ndim == 2:
+            # Posterior host draws are jointly indexed with the slope draws.
+            # The selection denominator marginalizes their equal-weight
+            # measurement posterior rather than substituting a median host
+            # fraction.
+            p_det = completeness_model(
+                map_m_grid[None, None, :],
+                z[:, None, None],
+                f_host[:, :, None],
+            )
+            p_det = np.mean(p_det, axis=1)
+        else:
+            raise ValueError(
+                "f_host_2500_psf must have shape (object,) or "
+                "(object, draw)."
+            )
     else:
         p_det = completeness_model(map_m_grid[None, :], z[:, None])
 
@@ -364,15 +399,396 @@ def completeness_loglike_for_data(
     m_model,
     mu_err,
     z,
+    latent_alpha_config=None,
+    latent_alpha_parameters=None,
+    latent_alpha_distance_modulus=None,
+    fitted_color_config=None,
+    fitted_color_parameters=None,
 ):
-    """Evaluate legacy or per-stratum completeness in original object order."""
+    """Evaluate selection normalization in original object order.
+
+    For latent-alpha completeness the returned scalar is ``log Z - log N``,
+    where ``N`` is the compact-draw approximation to the selected-data slope
+    numerator.  The caller therefore continues to subtract this scalar from
+    the ordinary Hubble likelihood.  The fitted-color layer is normalized to
+    the base map under its qsogen parent, so it changes only the aligned-draw
+    selected-data numerator and leaves the existing denominator unchanged.
+    """
 
     n_objects = len(np.asarray(z))
     if completeness_params is None:
         return 0.0, empty_blob(n_objects)
 
+    if fitted_color_config is not None:
+        if not isinstance(fitted_color_config, FittedColorConfig):
+            raise TypeError("fitted_color_config must be a FittedColorConfig.")
+        if latent_alpha_config is not None:
+            raise ValueError(
+                "Fitted-color and latent-alpha completeness cannot be active "
+                "simultaneously."
+            )
+        fitted_color_parameters = dict(fitted_color_parameters or {})
+        if COLOR_STRENGTH_PARAMETER not in fitted_color_parameters:
+            raise KeyError(
+                "Fitted-color completeness requires sampled parameter "
+                f"{COLOR_STRENGTH_PARAMETER!r}."
+            )
+        required_color_fields = {
+            "fitted_color_parent_percentile_draws",
+            "fitted_color_magnitude_draws",
+            "fitted_color_in_support_draws",
+        }
+        missing_color_fields = sorted(required_color_fields.difference(agn_data))
+        if missing_color_fields:
+            raise KeyError(
+                "Fitted-color completeness requires precomputed aligned fields "
+                f"{missing_color_fields}."
+            )
+        color_percentiles = np.asarray(
+            agn_data["fitted_color_parent_percentile_draws"], dtype=float
+        )
+        color_magnitude_draws = np.asarray(
+            agn_data["fitted_color_magnitude_draws"], dtype=float
+        )
+        color_in_support = np.asarray(
+            agn_data["fitted_color_in_support_draws"], dtype=bool
+        )
+        if color_percentiles.ndim != 2 or color_percentiles.shape[0] != n_objects:
+            raise ValueError(
+                "Fitted-color parent percentiles must have shape "
+                "(N_object, N_draw)."
+            )
+        if color_magnitude_draws.shape != color_percentiles.shape:
+            raise ValueError(
+                "Fitted-color percentile and magnitude draws must be aligned "
+                "and have identical shapes."
+            )
+        if color_in_support.shape != color_percentiles.shape:
+            raise ValueError(
+                "Fitted-color support masks must align with the color draws."
+            )
+        if (
+            np.any(~np.isfinite(color_percentiles))
+            or np.any((color_percentiles < 0.0) | (color_percentiles > 1.0))
+            or np.any(~np.isfinite(color_magnitude_draws))
+        ):
+            raise ValueError(
+                "Fitted-color parent percentiles must be finite in [0, 1] "
+                "and their aligned magnitude draws must be finite."
+            )
+        color_host_draws = agn_data.get("fitted_color_fhost_draws")
+        if color_host_draws is not None:
+            color_host_draws = np.asarray(color_host_draws, dtype=float)
+            if color_host_draws.shape != color_percentiles.shape:
+                raise ValueError(
+                    "Fitted-color host draws must align with the color percentiles."
+                )
+            if np.any(~np.isfinite(color_host_draws)) or np.any(
+                (color_host_draws < 0.0) | (color_host_draws > 1.0)
+            ):
+                raise ValueError(
+                    "Fitted-color host draws must be finite and lie in [0, 1]."
+                )
+
     f_host = agn_data.get(COMPLETENESS_FHOST_COL)
     alpha = agn_data.get("alpha_lambda")
+    if latent_alpha_config is not None:
+        if not isinstance(latent_alpha_config, LatentAlphaConfig):
+            raise TypeError("latent_alpha_config must be a LatentAlphaConfig.")
+        required = {
+            "f_host_2500_psf_draws",
+            "joint_posterior_valid_count",
+        }
+        # The selected-data latent variable is always the intrinsic disk-only
+        # secant.  ``luminosity_state`` controls M_2500/logL only; it must not
+        # silently replace the intrinsic slope with its dust-attenuated peer.
+        alpha_draw_key = "alpha_nu_intrinsic_1450_2500_draws"
+        magnitude_draw_key = (
+            "m_2500_attenuated_model_draws"
+            if latent_alpha_config.luminosity_state == "attenuated"
+            else "m_2500_dereddened_draws"
+        )
+        required.update((alpha_draw_key, magnitude_draw_key))
+        missing = sorted(required.difference(agn_data))
+        if missing:
+            raise KeyError(
+                "Latent-alpha completeness requires aligned v3 posterior "
+                f"fields {missing}."
+            )
+        if latent_alpha_distance_modulus is None:
+            raise ValueError(
+                "latent_alpha_distance_modulus is required for latent-alpha "
+                "completeness."
+            )
+        valid_count = np.asarray(
+            agn_data["joint_posterior_valid_count"], dtype=int
+        )
+        if valid_count.shape != (n_objects,) or np.any(
+            valid_count < JOINT_DRAW_INPUT_COUNT
+        ):
+            raise ValueError(
+                "Latent-alpha completeness requires 64 valid aligned joint "
+                "posterior draws for every fitted object."
+            )
+        def _joint_matrix(values, field_name):
+            raw = np.asarray(values)
+            if raw.ndim == 1 and raw.dtype == object:
+                try:
+                    raw = np.stack(raw)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Could not stack joint posterior field {field_name!r}."
+                    ) from exc
+            try:
+                return np.asarray(raw, dtype=float)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Joint posterior field {field_name!r} must be numeric."
+                ) from exc
+
+        compact_cache = (
+            agn_data.get("_latent_alpha_compact_draw_cache")
+            if isinstance(agn_data, dict)
+            else None
+        )
+        selected = deterministic_joint_draw_indices()
+        if compact_cache is None:
+            f_host_full = _joint_matrix(
+                agn_data["f_host_2500_psf_draws"],
+                "f_host_2500_psf_draws",
+            )
+            alpha_full = _joint_matrix(
+                agn_data[alpha_draw_key], alpha_draw_key
+            )
+            magnitude_full = _joint_matrix(
+                agn_data[magnitude_draw_key], magnitude_draw_key
+            )
+            expected_full_shape = (n_objects, JOINT_DRAW_INPUT_COUNT)
+            if any(
+                values.shape != expected_full_shape
+                for values in (f_host_full, alpha_full, magnitude_full)
+            ):
+                raise ValueError(
+                    "Aligned v3 host, intrinsic-slope, and LF-state magnitude "
+                    f"posterior fields must all have shape {expected_full_shape}."
+                )
+            f_host = f_host_full[:, selected]
+            alpha_nu_draws = alpha_full[:, selected]
+            magnitude_draws = magnitude_full[:, selected]
+            if isinstance(agn_data, dict):
+                agn_data["_latent_alpha_compact_draw_cache"] = (
+                    magnitude_draw_key,
+                    f_host,
+                    alpha_nu_draws,
+                    magnitude_draws,
+                )
+        else:
+            try:
+                (
+                    cached_magnitude_key,
+                    f_host,
+                    alpha_nu_draws,
+                    magnitude_draws,
+                ) = compact_cache
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "Malformed latent-alpha compact draw cache."
+                ) from exc
+            if cached_magnitude_key != magnitude_draw_key:
+                raise ValueError(
+                    "Latent-alpha compact draw cache luminosity state does not "
+                    "match the active LF configuration."
+                )
+        if any(
+            values.shape != (n_objects, len(selected))
+            for values in (f_host, alpha_nu_draws, magnitude_draws)
+        ):
+            raise ValueError(
+                "Aligned v3 host, slope, and magnitude posterior draws have "
+                "incompatible shapes."
+            )
+        if f_host.shape != alpha_nu_draws.shape or f_host.shape != (
+            n_objects,
+            len(selected),
+        ):
+            raise ValueError(
+                "Aligned v3 host and slope posterior draws have incompatible "
+                "shapes."
+            )
+        if (
+            np.any(~np.isfinite(f_host))
+            or np.any((f_host < 0.0) | (f_host > 1.0))
+            or np.any(~np.isfinite(alpha_nu_draws))
+            or np.any(~np.isfinite(magnitude_draws))
+        ):
+            raise ValueError(
+                "Selected latent-alpha host, slope, and magnitude draws must "
+                "be finite, with host fractions in [0, 1]."
+            )
+        distance_modulus = np.asarray(
+            latent_alpha_distance_modulus, dtype=float
+        )
+        if distance_modulus.shape != (n_objects,) or np.any(
+            ~np.isfinite(distance_modulus)
+        ):
+            raise ValueError(
+                "latent_alpha_distance_modulus must be a finite object vector."
+            )
+        latent_alpha_parameters = dict(latent_alpha_parameters or {})
+
+    def _latent_numerator(model, object_mask=None):
+        if latent_alpha_config is None:
+            return 0.0
+        if object_mask is None:
+            object_mask = np.ones(n_objects, dtype=bool)
+        z_values = np.asarray(z, dtype=float)[object_mask]
+        host_values = f_host[object_mask]
+        slope_values = alpha_nu_draws[object_mask]
+        magnitude_values = magnitude_draws[object_mask]
+        distance_modulus_values = distance_modulus[object_mask]
+        log_l_values = absolute_m2500_to_log_nu_lnu(
+            magnitude_values - distance_modulus_values[:, None]
+        )
+        map_centers = np.asarray(model.mag_centers, dtype=float)
+        support = np.asarray(model.magnitude_support, dtype=float)
+        inside_magnitude_support = (
+            np.isfinite(magnitude_values)
+            & (magnitude_values >= support[0])
+            & (magnitude_values <= support[1])
+        )
+        map_mag = np.clip(
+            magnitude_values, map_centers[0], map_centers[-1]
+        )
+        base = np.asarray(
+            model(
+                map_mag,
+                z_values[:, None],
+                host_values,
+            ),
+            dtype=float,
+        )
+        # The grid is stored at bin centers, whereas magnitude_support records
+        # the exact hard cut.  Extend the edge planes only through the valid
+        # half-bin tails; posterior draws beyond the physical support have
+        # zero selection probability.
+        base = np.where(inside_magnitude_support, base, 0.0)
+        coefficient_names = response_coefficient_names(
+            latent_alpha_config.include_magnitude_interactions
+        )
+        coefficients = {
+            name: latent_alpha_parameters[name]
+            for name in coefficient_names
+        }
+        log_l_draw = log_l_values
+        z_draw = z_values[:, None]
+        magnitude_draw = magnitude_values
+        kappa = calibrate_response_kappa(
+            base,
+            z_draw,
+            log_l_draw,
+            coefficients,
+            config=latent_alpha_config,
+            magnitude=(
+                magnitude_draw
+                if latent_alpha_config.include_magnitude_interactions
+                else None
+            ),
+            parameters=latent_alpha_parameters,
+        )
+        offsets = response_logit_offset(
+            slope_values,
+            z_draw,
+            coefficients,
+            config=latent_alpha_config,
+            magnitude=(
+                magnitude_draw
+                if latent_alpha_config.include_magnitude_interactions
+                else None
+            ),
+        )
+        response = bounded_response_from_kappa(
+            base, offsets, kappa
+        )
+        log_parent = parent_alpha_logpdf(
+            slope_values,
+            log_l_draw,
+            latent_alpha_config.beta_l(latent_alpha_parameters),
+            mu=latent_alpha_config.mu,
+            sigma=latent_alpha_config.sigma,
+            logl_pivot=latent_alpha_config.logl_pivot,
+        )
+        # Equal-weight compact posterior approximation.  The derived slope's
+        # fitting prior is deliberately not divided out; this limitation is
+        # recorded in checkpoint/run provenance.
+        per_object = logsumexp(
+            log_parent + np.log(np.clip(response, 1e-300, None)),
+            axis=1,
+        ) - np.log(response.shape[1])
+        return float(np.sum(per_object))
+
+    def _fitted_color_log_factor(model, object_mask=None):
+        if fitted_color_config is None:
+            return 0.0
+        if object_mask is None:
+            object_mask = np.ones(n_objects, dtype=bool)
+        z_values = np.asarray(z, dtype=float)[object_mask]
+        magnitude_values = color_magnitude_draws[object_mask]
+        percentile_values = color_percentiles[object_mask]
+        map_centers = np.asarray(model.mag_centers, dtype=float)
+        support = np.asarray(model.magnitude_support, dtype=float)
+        inside = color_in_support[object_mask] & (
+            (magnitude_values >= support[0])
+            & (magnitude_values <= support[1])
+        )
+        map_magnitude = np.clip(
+            magnitude_values, map_centers[0], map_centers[-1]
+        )
+        if hasattr(model, "fhost_centers"):
+            if color_host_draws is None:
+                raise KeyError(
+                    "Host-aware fitted-color completeness requires aligned "
+                    "fitted_color_fhost_draws."
+                )
+            base = np.asarray(
+                model(
+                    map_magnitude,
+                    z_values[:, None],
+                    color_host_draws[object_mask],
+                ),
+                dtype=float,
+            )
+        else:
+            base = np.asarray(
+                model(map_magnitude, z_values[:, None]), dtype=float
+            )
+        valid_draw = inside & np.isfinite(base) & (base > np.finfo(float).tiny)
+        invalid_in_support = inside & ~valid_draw
+        if np.any(invalid_in_support):
+            return -np.inf
+        relative = np.asarray(
+            color_relative_selection_factor_xp(
+                np.where(valid_draw, base, 0.0),
+                percentile_values,
+                fitted_color_parameters[COLOR_STRENGTH_PARAMETER],
+                xp=np,
+            ), dtype=float
+        )
+        # Draws outside the hard selection support do not define C/B.  They
+        # are neutral in this *relative-only* layer, which is required for
+        # s_color=0 to reproduce the ordinary C2/C3 likelihood exactly.
+        # In-support cells with vanishing base completeness remain impossible.
+        relative = np.where(inside, relative, 1.0)
+        per_object = np.mean(relative, axis=1)
+        expected_shape = (int(np.count_nonzero(object_mask)),)
+        if per_object.shape != expected_shape:
+            raise ValueError(
+                "Fitted-color relative-factor reduction returned shape "
+                f"{per_object.shape}; expected {expected_shape}."
+            )
+        if np.any(~np.isfinite(per_object)) or np.any(per_object <= 0.0):
+            return -np.inf
+        return float(np.sum(np.log(per_object)))
+
     if not isinstance(completeness_params, StratifiedCompletenessBundle):
         completeness_model = completeness_params[0]
         mag_centers = completeness_params[1]
@@ -381,7 +797,7 @@ def completeness_loglike_for_data(
             "magnitude_support",
             (float(mag_centers[0]), float(mag_centers[-1])),
         )
-        return completeness_loglike(
+        denominator, blob = completeness_loglike(
             m_obs=m_obs,
             m_obs_err=m_obs_err,
             m_model=m_model,
@@ -394,6 +810,11 @@ def completeness_loglike_for_data(
             f_host_2500_psf=f_host,
             alpha_lambda=alpha,
         )
+        return (
+            denominator
+            - _latent_numerator(completeness_model)
+            - _fitted_color_log_factor(completeness_model)
+        ), blob
 
     if COMPLETENESS_STRATUM_CODE_COL not in agn_data:
         raise KeyError(
@@ -449,6 +870,8 @@ def completeness_loglike_for_data(
             alpha_lambda=np.asarray(alpha)[mask] if alpha is not None else None,
         )
         total += float(group_loglike)
+        total -= _latent_numerator(model, mask)
+        total -= _fitted_color_log_factor(model, mask)
         blob[:, mask] = group_blob
     return total, blob
 
@@ -628,6 +1051,8 @@ def agn_selection_prediction(
     use_redshift_log_f_term=False,
     use_redshift_mu_term=False,
     require_selection_fields=True,
+    latent_alpha_config=None,
+    fitted_color_config=None,
 ):
     """Return one posterior draw's exact AGN selection-space prediction."""
 
@@ -641,6 +1066,21 @@ def agn_selection_prediction(
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         use_redshift_mu_term=use_redshift_mu_term,
+        use_latent_alpha_completeness=latent_alpha_config is not None,
+        latent_alpha_luminosity_mode=(
+            latent_alpha_config.mode if latent_alpha_config is not None else "off"
+        ),
+        latent_alpha_beta_prior=(
+            latent_alpha_config.beta_l_prior
+            if latent_alpha_config is not None
+            else (-0.5, 0.5)
+        ),
+        latent_alpha_magnitude_interaction=(
+            latent_alpha_config.include_magnitude_interactions
+            if latent_alpha_config is not None
+            else False
+        ),
+        use_fitted_color_completeness=fitted_color_config is not None,
     )
     params = dict(zip(model_labels, np.asarray(theta, dtype=float)))
     cosmo = _cosmology_from_agn_params(cosmo_model, params, z_pivot_agn)
@@ -772,7 +1212,11 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
                    early_de_guard=False,
                    only_sna=False,
                    only_agn=False,
-                   use_full_cov=False):
+                   use_full_cov=False,
+                   latent_alpha_config=None,
+                   fitted_color_config=None):
+    use_latent_alpha = latent_alpha_config is not None
+    use_fitted_color = fitted_color_config is not None
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         only_sna=only_sna,
@@ -783,6 +1227,21 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         use_redshift_mu_term=use_redshift_mu_term,
+        use_latent_alpha_completeness=use_latent_alpha,
+        latent_alpha_luminosity_mode=(
+            latent_alpha_config.mode if use_latent_alpha else "off"
+        ),
+        latent_alpha_beta_prior=(
+            latent_alpha_config.beta_l_prior
+            if use_latent_alpha
+            else (-0.5, 0.5)
+        ),
+        latent_alpha_magnitude_interaction=(
+            latent_alpha_config.include_magnitude_interactions
+            if use_latent_alpha
+            else False
+        ),
+        use_fitted_color_completeness=use_fitted_color,
     )
     model_priors = {key: priors[key] for key in model_labels}
     params = dict(zip(model_labels, theta))
@@ -838,6 +1297,8 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         use_redshift_log_f_term=use_redshift_log_f_term,
         use_redshift_mu_term=use_redshift_mu_term,
         require_selection_fields=completeness_params is not None,
+        latent_alpha_config=latent_alpha_config,
+        fitted_color_config=fitted_color_config,
     )
     z = np.asarray(agn_data["z"], dtype=float)
     ll_agn = _normal_logpdf_sum(
@@ -848,6 +1309,11 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     ll_completeness = 0.0
     comp_blob = empty_blob(N_obj)
     if completeness_params is not None:
+        latent_distance_modulus = None
+        if use_latent_alpha:
+            latent_distance_modulus = np.asarray(
+                cosmo.distmod(z).value, dtype=float
+            )
         ll_completeness, comp_blob = completeness_loglike_for_data(
             completeness_params=completeness_params,
             agn_data=agn_data,
@@ -856,6 +1322,11 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
             m_model=prediction["selection_model_magnitude"],
             mu_err=prediction["selection_total_error"],
             z=z,
+            latent_alpha_config=latent_alpha_config,
+            latent_alpha_parameters=params,
+            latent_alpha_distance_modulus=latent_distance_modulus,
+            fitted_color_config=fitted_color_config,
+            fitted_color_parameters=params,
         )
 
     # ll_cmb, _ = loglike_cmb_theta_simple(cosmo)

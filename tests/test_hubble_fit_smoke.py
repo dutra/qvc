@@ -3,6 +3,7 @@ import inspect
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -26,11 +27,104 @@ from qvc.hubble import (
 )
 
 
+def test_dynesty_rstate_is_reproducible_and_seed_sensitive():
+    first = hubble_fit.make_dynesty_rstate(12345).random(8)
+    repeated = hubble_fit.make_dynesty_rstate(12345).random(8)
+    different = hubble_fit.make_dynesty_rstate(12346).random(8)
+
+    np.testing.assert_array_equal(first, repeated)
+    assert not np.array_equal(first, different)
+    with pytest.raises(ValueError, match="non-negative"):
+        hubble_fit.make_dynesty_rstate(-1)
+
+
+def _spectra_compatibility_args(**overrides):
+    values = {
+        "allow_spectra_catalog_v1": False,
+        "approximate_v1_fhost_2500_psf": False,
+        "disable_completeness": False,
+        "completeness_mode": "2d",
+        "correct_sigma_uv_host": False,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def test_v1_fhost_compatibility_flags_are_explicit_and_3d_only():
+    hubble_fit.validate_spectra_catalog_compatibility_args(
+        _spectra_compatibility_args(allow_spectra_catalog_v1=True)
+    )
+    with pytest.raises(ValueError, match="requires --allow-spectra-catalog-v1"):
+        hubble_fit.validate_spectra_catalog_compatibility_args(
+            _spectra_compatibility_args(
+                approximate_v1_fhost_2500_psf=True,
+                completeness_mode="3d_fhost",
+            )
+        )
+    with pytest.raises(ValueError, match="only supported with"):
+        hubble_fit.validate_spectra_catalog_compatibility_args(
+            _spectra_compatibility_args(
+                allow_spectra_catalog_v1=True,
+                approximate_v1_fhost_2500_psf=True,
+                completeness_mode="4d_fhost_alpha",
+            )
+        )
+    with pytest.raises(ValueError, match="correct-sigma-uv-host"):
+        hubble_fit.validate_spectra_catalog_compatibility_args(
+            _spectra_compatibility_args(
+                allow_spectra_catalog_v1=True,
+                approximate_v1_fhost_2500_psf=True,
+                completeness_mode="3d_fhost",
+                correct_sigma_uv_host=True,
+            )
+        )
+
+
+def test_loaded_v1_catalog_is_safe_for_2d_and_gated_for_host_modes():
+    frame = pd.DataFrame(
+        {
+            "qvc_spectra_catalog_format": ["qvc_spectra_catalog_v1"] * 8,
+            "f_host_2500_psf": np.linspace(0.1, 0.8, 8),
+        }
+    )
+    hubble_fit.validate_loaded_spectra_catalog_compatibility(
+        frame,
+        completeness_enabled=True,
+        completeness_mode="2d",
+        approximate_v1_fhost_2500_psf=False,
+    )
+    with pytest.raises(ValueError, match="requires.*approximate-v1"):
+        hubble_fit.validate_loaded_spectra_catalog_compatibility(
+            frame,
+            completeness_enabled=True,
+            completeness_mode="3d_fhost",
+            approximate_v1_fhost_2500_psf=False,
+        )
+    with pytest.raises(ValueError, match="cannot be used for 4D"):
+        hubble_fit.validate_loaded_spectra_catalog_compatibility(
+            frame,
+            completeness_enabled=True,
+            completeness_mode="4d_fhost_alpha",
+            approximate_v1_fhost_2500_psf=True,
+        )
+    hubble_fit.validate_loaded_spectra_catalog_compatibility(
+        frame,
+        completeness_enabled=True,
+        completeness_mode="3d_fhost",
+        approximate_v1_fhost_2500_psf=True,
+    )
+
+
 @pytest.fixture(autouse=True)
 def _disable_expensive_redshift_wiggle_atlas(monkeypatch):
     monkeypatch.setattr(
         hubble_fit,
         "plot_redshift_wiggle_diagnostics",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        hubble_fit,
+        "plot_hubble_reddening_redshift_diagnostic",
         lambda *args, **kwargs: None,
     )
 
@@ -142,6 +236,48 @@ def _make_fake_agn_sample(n_agn=24, seed=123):
             "log_sigma_band_i_err": np.full(n_agn, 0.04),
         }
     )
+
+
+def test_reddening_redshift_diagnostics_use_pre_and_post_sigma_cut_samples(monkeypatch):
+    postcut = pd.DataFrame(
+        {
+            "object_id": ["a", "c"],
+            "z": [0.7, 1.4],
+            "ebv_agn": [0.02, 0.03],
+            "ebv_gal": [0.01, 0.04],
+        }
+    )
+    pass1 = pd.DataFrame(
+        {
+            "object_id": ["a", "b", "c"],
+            "z": [0.7, 1.0, 1.4],
+            "ebv_agn": [0.02, 0.08, 0.03],
+            "ebv_gal": [0.01, 0.07, 0.04],
+            "residuals": [0.1, 2.0, -0.2],
+        }
+    )
+    calls = []
+
+    def capture(frame, residuals, **kwargs):
+        calls.append((frame["object_id"].tolist(), np.asarray(residuals), kwargs))
+
+    monkeypatch.setattr(
+        hubble_fit,
+        "plot_hubble_reddening_redshift_diagnostic",
+        capture,
+    )
+    hubble_fit._plot_hubble_reddening_redshift_pre_and_postcut(
+        postcut,
+        np.array([0.1, -0.2]),
+        plot_path="plots",
+        pass1_diagnostics_df=pass1,
+    )
+
+    assert [call[0] for call in calls] == [["a", "b", "c"], ["a", "c"]]
+    np.testing.assert_allclose(calls[0][1], [0.1, 2.0, -0.2])
+    np.testing.assert_allclose(calls[1][1], [0.1, -0.2])
+    assert calls[0][2]["filename"].endswith("_precut.pdf")
+    assert calls[1][2]["filename"].endswith("_postcut.pdf")
 
 
 def test_completeness_magnitude_alias_defaults_to_dereddened_and_can_attenuate():
@@ -3643,6 +3779,7 @@ def test_run_mcmc_pipeline_uses_explicit_parent_sample_for_completeness_map(monk
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
     theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
     completeness_sample_ids = []
+    sampler_kwargs = {}
     pivot_context = _agn_pivot_context(df_fit, (0.44, 3.16))
 
     class FakeResults:
@@ -3656,7 +3793,7 @@ def test_run_mcmc_pipeline_uses_explicit_parent_sample_for_completeness_map(monk
 
     class FakeSampler:
         def __init__(self, *args, **kwargs):
-            pass
+            sampler_kwargs.update(kwargs)
 
         def run_nested(self, *args, **kwargs):
             self.results = FakeResults()
@@ -3708,6 +3845,11 @@ def test_run_mcmc_pipeline_uses_explicit_parent_sample_for_completeness_map(monk
 
     assert result[6].shape == (len(df_fit),)
     assert completeness_sample_ids == [df_parent["object_id"].tolist()]
+    assert isinstance(sampler_kwargs["rstate"], np.random.Generator)
+    np.testing.assert_array_equal(
+        sampler_kwargs["rstate"].random(4),
+        hubble_fit.make_dynesty_rstate().random(4),
+    )
 
 
 def _patch_run_single_plot_stack(monkeypatch):
@@ -5103,6 +5245,81 @@ def test_hubble_fit_cli_declares_and_forwards_spectra_sdss_run2d():
 
     assert parser_declared
     assert "spectra_sdss_run2d" in load_kwargs
+
+
+def test_hubble_fit_clis_declare_and_forward_sdss_target_selection():
+    for source_path in (
+        Path(hubble_fit.__file__),
+        SRC / "qvc" / "hubble" / "hubble_fit_jax.py",
+    ):
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+
+        option_strings = set()
+        load_kwargs = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument":
+                option_strings.update(
+                    arg.value
+                    for arg in node.args
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                )
+            if isinstance(node.func, ast.Name) and node.func.id == "load_agn_data":
+                load_kwargs.update(kw.arg for kw in node.keywords if kw.arg is not None)
+
+        assert "--sdss-target-selection" in option_strings
+        assert "--sdss_target_selection" in option_strings
+        assert "sdss_target_selection" in load_kwargs
+
+
+def test_run_hubble_forwards_configurable_spectra_sdss_run2d():
+    runner = (ROOT / "run_hubble.xonsh").read_text(encoding="utf-8")
+
+    assert '"QVC_HUBBLE_SPECTRA_SDSS_RUN2D", "all"' in runner
+    assert "--spectra_sdss_run2d @(spectra_sdss_run2d)" in runner
+    assert '"QVC_HUBBLE_Z_MIN", "0.44"' in runner
+    assert '"QVC_HUBBLE_Z_MAX", "3.16"' in runner
+    assert "--z_range @(z_min) @(z_max)" in runner
+    assert '"QVC_HUBBLE_SPECTRA_FIT_H5", spectra_fit_h5' in runner
+    assert '"QVC_HUBBLE_LIGHT_CURVE_H5", h5_file' in runner
+
+
+def test_run_hubble_forwards_target_selection_and_defaults_to_metadata_catalog():
+    runner = (ROOT / "run_hubble.xonsh").read_text(encoding="utf-8")
+
+    assert '"QVC_HUBBLE_SDSS_TARGET_SELECTION", "all"' in runner
+    assert "--sdss-target-selection @(sdss_target_selection)" in runner
+    assert "rhat_reprocessed_sdss_metadata.h5" in runner
+
+
+def test_target_selection_sweep_defines_fixed_range_and_unique_members():
+    runner = (ROOT / "run_hubble_target_selection_sweep.xonsh").read_text(
+        encoding="utf-8"
+    )
+
+    for selection in (
+        "all",
+        "legacy-sdss",
+        "boss",
+        "eboss",
+        "eboss-var-s82-inclusive",
+        "eboss-non-var-s82",
+        "eboss-var-s82-only",
+        "eboss-var-s82-core-only",
+    ):
+        assert f'"{selection}"' in runner
+    assert '"QVC_HUBBLE_SELECTIONS"' in runner
+    assert '$QVC_HUBBLE_Z_MIN = "0.44"' in runner
+    assert '$QVC_HUBBLE_Z_MAX = "3.16"' in runner
+    assert "$QVC_HUBBLE_SDSS_TARGET_SELECTION = selection" in runner
+    assert 'run_prefix = f"{prefix_stem}_{selection}_{speed}"' in runner
+    assert "$RAISE_SUBPROC_ERROR = True" in runner
+    assert "QVC_HUBBLE_RESUME cannot be shared" in runner
+    assert "run_hubble.xonsh" in runner
+    assert "rhat_reprocessed_sdss_metadata.h5" in runner
+    assert '"QVC_HUBBLE_SELECTIONS", ",".join(default_selections)' in runner
+    assert "aug23c_surveyvar_targetselection_fixedz_h5aug23_1256pm_psflogit_" in runner
 
 
 def test_hubble_fit_clis_declare_and_forward_no_cuts():

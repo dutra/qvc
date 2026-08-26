@@ -14,7 +14,11 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from qvc.hubble import hubble_model, hubble_plotting, hubble_utils
-from qvc.spectra.catalog_hdf5 import write_spectra_catalog_hdf5
+from qvc.spectra.catalog_hdf5 import (
+    JOINT_POSTERIOR_DRAW_COUNT,
+    JOINT_POSTERIOR_DRAW_FIELDS,
+    write_spectra_catalog_hdf5,
+)
 
 
 def _make_loader_input():
@@ -138,17 +142,63 @@ def test_load_agn_data_does_not_require_legacy_spectral_fraction_columns(
             "pl_slope_err": 0.1,
         }
     )
+    spectra_frame["mw_deredden_applied"] = True
+    spectra_frame["joint_posterior_draw_source"] = "synthetic_test_posterior"
+    n_rows = len(spectra_frame)
+    medians = {
+        "f_host_2500_psf": np.full(n_rows, 0.2),
+        "alpha_nu_intrinsic_1450_2500": np.full(n_rows, -0.5),
+        "alpha_nu_attenuated_1450_2500": np.full(n_rows, -0.5),
+        "m_2500_dereddened": spectra_frame["m_2500_dereddened"].to_numpy(
+            dtype=float
+        ),
+        "m_2500_attenuated_model": spectra_frame[
+            "m_2500_attenuated_model"
+        ].to_numpy(dtype=float),
+        "a_2500_galaxy": np.zeros(n_rows),
+        "a_2500_internal": np.zeros(n_rows),
+        "a_2500_total": np.zeros(n_rows),
+    }
+    for name, values in medians.items():
+        if name not in spectra_frame:
+            spectra_frame[name] = values
+        if f"{name}_err" not in spectra_frame:
+            spectra_frame[f"{name}_err"] = 0.0
+        spectra_frame[f"{name}_err_lower"] = spectra_frame[f"{name}_err"]
+        spectra_frame[f"{name}_err_upper"] = spectra_frame[f"{name}_err"]
+    joint_draws = {
+        name: np.repeat(
+            np.asarray(medians[name], dtype=np.float32)[:, None],
+            JOINT_POSTERIOR_DRAW_COUNT,
+            axis=1,
+        )
+        for name in JOINT_POSTERIOR_DRAW_FIELDS
+    }
+    fitted_fluxes = np.ones(
+        (n_rows, JOINT_POSTERIOR_DRAW_COUNT, 5), dtype=np.float32
+    )
     write_spectra_catalog_hdf5(
         spectra_path,
         spectra_frame,
         np.full((len(spectra_frame), 64, 5), np.nan, dtype=np.float32),
         np.zeros(len(spectra_frame), dtype=np.int16),
-        f_host_2500_psf_draws=np.full(
-            (len(spectra_frame), 64), np.nan, dtype=np.float32
+        joint_posterior_draws=joint_draws,
+        joint_posterior_valid_count=np.full(
+            n_rows, JOINT_POSTERIOR_DRAW_COUNT, dtype=np.int16
         ),
-        f_host_2500_psf_valid_count=np.zeros(
-            len(spectra_frame), dtype=np.int16
+        joint_posterior_index=np.tile(
+            np.arange(JOINT_POSTERIOR_DRAW_COUNT, dtype=np.int32),
+            (n_rows, 1),
         ),
+        joint_posterior_source_draw_count=np.full(
+            n_rows, JOINT_POSTERIOR_DRAW_COUNT, dtype=np.int32
+        ),
+        joint_posterior_selection_seed=12345,
+        joint_psf_photometry_draws=fitted_fluxes,
+        joint_psf_photometry_provenance={
+            "prediction_source": "synthetic_test",
+            "jaxsedfit_git_commit": "a" * 40,
+        },
     )
     _patch_minimal_loader(monkeypatch, df_in)
 

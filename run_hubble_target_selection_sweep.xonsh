@@ -1,0 +1,87 @@
+#!/usr/bin/env xonsh
+
+from pathlib import Path
+
+valid_selections = (
+    "all",
+    "legacy-sdss",
+    "boss",
+    "eboss",
+    "eboss-var-s82-inclusive",
+    "eboss-non-var-s82",
+    "eboss-var-s82-only",
+    "eboss-var-s82-core-only",
+)
+default_selections = (
+    # Global baseline.
+    "all",
+    # Three-survey experiment.
+    "legacy-sdss",
+    "boss",
+    "eboss",
+    # Replace the eBOSS member above with these two members to test whether
+    # variability targeting explains any survey-level improvement.
+    "eboss-var-s82-inclusive",
+    "eboss-non-var-s82",
+)
+
+requested = __xonsh__.env.get(
+    "QVC_HUBBLE_SELECTIONS", ",".join(default_selections)
+)
+selections = tuple(
+    item.strip().lower().replace("_", "-")
+    for item in requested.split(",")
+    if item.strip()
+)
+if not selections:
+    raise ValueError("QVC_HUBBLE_SELECTIONS must contain at least one selection.")
+invalid = [item for item in selections if item not in valid_selections]
+if invalid:
+    raise ValueError(
+        f"Unknown QVC_HUBBLE_SELECTIONS value(s) {invalid}; "
+        f"valid selections are {list(valid_selections)}."
+    )
+if len(set(selections)) != len(selections):
+    raise ValueError("QVC_HUBBLE_SELECTIONS contains duplicate selections.")
+
+if (
+    __xonsh__.env.get("QVC_HUBBLE_RESUME", "").strip()
+    and len(selections) != 1
+):
+    raise ValueError(
+        "QVC_HUBBLE_RESUME cannot be shared by a target-selection sweep. "
+        "Rerun one member using QVC_HUBBLE_SELECTIONS and its own checkpoint."
+    )
+
+runner = Path(__file__).resolve().parent / "run_hubble.xonsh"
+if not runner.is_file():
+    raise FileNotFoundError(f"Hubble runner not found: {runner}")
+
+speed = __xonsh__.env.get("QVC_HUBBLE_SPEED", "quick")
+prefix_stem = __xonsh__.env.get(
+    "QVC_HUBBLE_SELECTION_PREFIX_STEM",
+    "aug23c_surveyvar_targetselection_fixedz_h5aug23_1256pm_psflogit_"
+    "specaug230925am_n8000",
+)
+metadata_spectra_h5 = __xonsh__.env.get(
+    "QVC_HUBBLE_SPECTRA_FIT_H5",
+    "results/data/aug23_0925am_spectrafit_dd61211_nested_N8000_"
+    "rhat_reprocessed_sdss_metadata.h5",
+)
+
+# These are population-definition constants for this comparison, not caller
+# defaults: external redshift settings cannot change the sweep range.
+$QVC_HUBBLE_Z_MIN = "0.44"
+$QVC_HUBBLE_Z_MAX = "3.16"
+$QVC_HUBBLE_SPECTRA_FIT_H5 = metadata_spectra_h5
+$RAISE_SUBPROC_ERROR = True
+
+for selection in selections:
+    run_prefix = f"{prefix_stem}_{selection}_{speed}"
+    $QVC_HUBBLE_SDSS_TARGET_SELECTION = selection
+    $QVC_HUBBLE_PREFIX = run_prefix
+    print(
+        f"Running target-selection sweep member {selection!r} "
+        f"with 0.44 <= z <= 3.16 and prefix {run_prefix!r}."
+    )
+    xonsh @(str(runner))
