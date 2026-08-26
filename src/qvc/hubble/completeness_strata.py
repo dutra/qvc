@@ -257,7 +257,11 @@ def _validate_map_input_columns(df: pd.DataFrame, completeness_mode: str) -> Non
             "Completeness requires prepared 2500-A magnitude columns: "
             f"{sorted(missing)}."
         )
-    if completeness_mode in {"3d_fhost", "4d_fhost_alpha"}:
+    if completeness_mode in {
+        "3d_fhost",
+        "3d_fhost_latent_alpha",
+        "4d_fhost_alpha",
+    }:
         if COMPLETENESS_FHOST_COL not in df.columns:
             raise KeyError(
                 f"completeness_mode={completeness_mode!r} requires "
@@ -295,7 +299,7 @@ def build_single_completeness_params(
             plot_path=str(plot_path),
             df_agn_fhost_population=df_parent,
         )
-    if completeness_mode == "3d_fhost":
+    if completeness_mode in {"3d_fhost", "3d_fhost_latent_alpha"}:
         return get_completeness_function_3d_fhost(
             df_observed,
             sim_file=completeness_sim_file,

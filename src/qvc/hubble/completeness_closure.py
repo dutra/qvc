@@ -19,6 +19,11 @@ from qvc.hubble.hubble_likelihood import (
     agn_selection_prediction,
     completeness_loglike,
 )
+from qvc.hubble.latent_alpha_completeness import (
+    JOINT_DRAW_INPUT_COUNT,
+    LatentAlphaConfig,
+    deterministic_joint_draw_indices,
+)
 
 
 @dataclass(frozen=True)
@@ -29,6 +34,7 @@ class CompletenessClosureResult:
     all_bins_pass: bool
     seed: int
     n_posterior_draws: int
+    latent_alpha_marginalized_to_c3: bool = False
 
 
 def _as_draw_matrix(values, *, n_objects, name):
@@ -69,7 +75,18 @@ def _evaluate_completeness(
             raise ValueError(
                 "3D completeness closure requires f_host_2500_psf."
             )
-        values = completeness_model(magnitude, redshift, f_host_2500_psf)
+        f_host = np.asarray(f_host_2500_psf, dtype=float)
+        if f_host.ndim == 2:
+            values = np.mean(
+                completeness_model(
+                    np.asarray(magnitude, dtype=float)[:, None],
+                    np.asarray(redshift, dtype=float)[:, None],
+                    f_host,
+                ),
+                axis=1,
+            )
+        else:
+            values = completeness_model(magnitude, redshift, f_host)
     else:
         values = completeness_model(magnitude, redshift)
     return np.clip(np.asarray(values, dtype=float), 0.0, 1.0)
@@ -89,6 +106,7 @@ def simulate_completeness_closure(
     seed=12345,
     max_abs_mean_zscore=4.0,
     min_detected_per_bin=100,
+    latent_alpha_marginalized_to_c3=False,
 ):
     """Simulate selection and test recovery of zero corrected residual.
 
@@ -161,8 +179,18 @@ def simulate_completeness_closure(
     f_host = None if f_host_2500_psf is None else np.asarray(f_host_2500_psf, dtype=float)
     alpha = None if alpha_lambda is None else np.asarray(alpha_lambda, dtype=float)
     for name, value in (("f_host_2500_psf", f_host), ("alpha_lambda", alpha)):
-        if value is not None and (value.shape != redshift.shape or not np.all(np.isfinite(value))):
-            raise ValueError(f"{name} must match redshift and contain only finite values.")
+        if value is None:
+            continue
+        shape_ok = value.shape == redshift.shape
+        if name == "f_host_2500_psf":
+            shape_ok = shape_ok or (
+                value.ndim == 2 and value.shape[0] == redshift.size
+            )
+        if not shape_ok or not np.all(np.isfinite(value)):
+            raise ValueError(
+                f"{name} must match redshift (optionally with a posterior-draw "
+                "axis for host fraction) and contain only finite values."
+            )
 
     rng = np.random.default_rng(seed)
     simulated_redshift = []
@@ -283,6 +311,9 @@ def simulate_completeness_closure(
         all_bins_pass=bool(summary["bin_pass"].all()),
         seed=int(seed),
         n_posterior_draws=int(model_draws.shape[0]),
+        latent_alpha_marginalized_to_c3=bool(
+            latent_alpha_marginalized_to_c3
+        ),
     )
 
 
@@ -324,6 +355,7 @@ def simulate_hubble_posterior_closure(
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
     use_redshift_mu_term=False,
+    latent_alpha_config=None,
 ):
     """Run closure using the exact selection prediction for posterior draws."""
 
@@ -336,6 +368,10 @@ def simulate_hubble_posterior_closure(
     n_keep = min(samples.shape[0], max_posterior_draws)
     draw_indices = np.linspace(0, samples.shape[0] - 1, n_keep, dtype=int)
     selected_samples = samples[draw_indices]
+    if latent_alpha_config is not None and not isinstance(
+        latent_alpha_config, LatentAlphaConfig
+    ):
+        raise TypeError("latent_alpha_config must be a LatentAlphaConfig.")
 
     model_draws = []
     sigma_draws = []
@@ -354,6 +390,7 @@ def simulate_hubble_posterior_closure(
             use_redshift_log_f_term=use_redshift_log_f_term,
             use_redshift_mu_term=use_redshift_mu_term,
             require_selection_fields=True,
+            latent_alpha_config=latent_alpha_config,
         )
         model_draws.append(prediction["selection_model_magnitude"])
         sigma_draws.append(prediction["selection_total_error"])
@@ -361,7 +398,19 @@ def simulate_hubble_posterior_closure(
     if isinstance(completeness_params, StratifiedCompletenessBundle):
         codes = _data_column(agn_data, COMPLETENESS_STRATUM_CODE_COL).astype(int)
         redshift = _data_column(agn_data, "z").astype(float)
-        f_host = _optional_data_column(agn_data, COMPLETENESS_FHOST_COL)
+        if latent_alpha_config is None:
+            f_host = _optional_data_column(agn_data, COMPLETENESS_FHOST_COL)
+        else:
+            raw_host = _data_column(agn_data, "f_host_2500_psf_draws")
+            if raw_host.ndim == 1 and raw_host.dtype == object:
+                raw_host = np.stack(raw_host)
+            raw_host = np.asarray(raw_host, dtype=float)
+            if raw_host.shape != (redshift.size, JOINT_DRAW_INPUT_COUNT):
+                raise ValueError(
+                    "Latent-alpha closure requires aligned host draws with "
+                    f"shape {(redshift.size, JOINT_DRAW_INPUT_COUNT)}."
+                )
+            f_host = raw_host[:, deterministic_joint_draw_indices()]
         alpha = _optional_data_column(agn_data, "alpha_lambda")
         summaries = []
         all_pass = True
@@ -389,6 +438,9 @@ def simulate_hubble_posterior_closure(
                 seed=int(seed) + code,
                 max_abs_mean_zscore=max_abs_mean_zscore,
                 min_detected_per_bin=min_detected_per_bin,
+                latent_alpha_marginalized_to_c3=(
+                    latent_alpha_config is not None
+                ),
             )
             summary = stratum_result.summary.copy()
             summary.insert(0, COMPLETENESS_STRATUM_COL, name)
@@ -400,21 +452,44 @@ def simulate_hubble_posterior_closure(
             all_bins_pass=bool(all_pass),
             seed=int(seed),
             n_posterior_draws=int(len(selected_samples)),
+            latent_alpha_marginalized_to_c3=(
+                latent_alpha_config is not None
+            ),
         )
 
     completeness_model, magnitude_grid = completeness_params[:2]
+    if latent_alpha_config is None:
+        closure_f_host = _optional_data_column(
+            agn_data, COMPLETENESS_FHOST_COL
+        )
+    else:
+        raw_host = _data_column(agn_data, "f_host_2500_psf_draws")
+        if raw_host.ndim == 1 and raw_host.dtype == object:
+            raw_host = np.stack(raw_host)
+        raw_host = np.asarray(raw_host, dtype=float)
+        expected_shape = (
+            np.asarray(agn_data["z"]).size,
+            JOINT_DRAW_INPUT_COUNT,
+        )
+        if raw_host.shape != expected_shape:
+            raise ValueError(
+                "Latent-alpha closure requires aligned host draws with "
+                f"shape {expected_shape}."
+            )
+        closure_f_host = raw_host[:, deterministic_joint_draw_indices()]
     return simulate_completeness_closure(
         model_magnitude_draws=np.asarray(model_draws, dtype=float),
         sigma_draws=np.asarray(sigma_draws, dtype=float),
         redshift=np.asarray(agn_data["z"], dtype=float),
         completeness_model=completeness_model,
         magnitude_grid=magnitude_grid,
-        f_host_2500_psf=_optional_data_column(agn_data, COMPLETENESS_FHOST_COL),
+        f_host_2500_psf=closure_f_host,
         alpha_lambda=_optional_data_column(agn_data, "alpha_lambda"),
         redshift_bins=redshift_bins,
         seed=seed,
         max_abs_mean_zscore=max_abs_mean_zscore,
         min_detected_per_bin=min_detected_per_bin,
+        latent_alpha_marginalized_to_c3=(latent_alpha_config is not None),
     )
 
 
@@ -448,6 +523,14 @@ def write_completeness_closure_diagnostics(result, plot_path):
                 "n_bins": int(len(result.summary)),
                 "n_bins_passed": int(result.summary["bin_pass"].sum()),
                 "per_stratum_verdicts": per_stratum_verdicts,
+                "latent_alpha_marginalized_to_c3": bool(
+                    result.latent_alpha_marginalized_to_c3
+                ),
+                "latent_alpha_closure_semantics": (
+                    "response_integrated_over_parent_equals_host_aware_C3"
+                    if result.latent_alpha_marginalized_to_c3
+                    else "not_applicable"
+                ),
             },
             indent=2,
             sort_keys=True,

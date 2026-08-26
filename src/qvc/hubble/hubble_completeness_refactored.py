@@ -432,6 +432,59 @@ def _estimate_mock_count_scale(H_obs_s, H_true_s, mag_centers, *, complete_mag_m
     return max(obs_sum / true_sum, eps)
 
 
+def _read_mock_count_scale(handle, path):
+    """Validate new area-aware metadata while retaining legacy catalogs."""
+
+    raw_scale = handle.attrs.get("mock_count_scale")
+    if raw_scale is None:
+        return None
+    count_scale = float(raw_scale)
+    if not np.isfinite(count_scale) or count_scale <= 0.0:
+        raise ValueError(f"Mock catalog {path} has an invalid mock_count_scale.")
+
+    area_keys = {
+        "target_area_deg2",
+        "proposal_area_deg2",
+        "effective_sampled_area_deg2",
+    }
+    present = area_keys.intersection(handle.attrs.keys())
+    if present and present != area_keys:
+        raise ValueError(
+            f"Mock catalog {path} has incomplete area-scaling metadata."
+        )
+    if present:
+        target = float(handle.attrs["target_area_deg2"])
+        proposal = float(handle.attrs["proposal_area_deg2"])
+        effective = float(handle.attrs["effective_sampled_area_deg2"])
+        thinning = float(handle.attrs.get("thinning_probability", np.nan))
+        values = np.asarray((target, proposal, effective, thinning), dtype=float)
+        if not np.all(np.isfinite(values)) or np.any(values <= 0.0):
+            raise ValueError(f"Mock catalog {path} has invalid area metadata.")
+        if proposal < target or effective > proposal * (1.0 + 1e-10):
+            raise ValueError(f"Mock catalog {path} has inconsistent mock areas.")
+        if not np.isclose(effective, proposal * thinning, rtol=1e-8, atol=0.0):
+            raise ValueError(
+                f"Mock catalog {path} has effective area inconsistent with thinning."
+            )
+        expected_scale = target / effective
+        if not np.isclose(count_scale, expected_scale, rtol=1e-8, atol=0.0):
+            raise ValueError(
+                f"Mock catalog {path} has mock_count_scale={count_scale}, but "
+                f"target/effective area requires {expected_scale}."
+            )
+        stored_count = int(handle.attrs.get("stored_object_count", -1))
+        if "z" in handle and stored_count != len(handle["z"]):
+            raise ValueError(
+                f"Mock catalog {path} has inconsistent stored_object_count metadata."
+            )
+        print(
+            "Area-scaled completeness mock: "
+            f"target={target:.3f} deg^2, proposal={proposal:.3f} deg^2, "
+            f"effective={effective:.3f} deg^2, scale={count_scale:.6g}."
+        )
+    return count_scale
+
+
 def _scaled_completeness_ratio(
     H_obs_s,
     H_true_s,
@@ -455,6 +508,23 @@ def _scaled_completeness_ratio(
     else:
         count_scale = max(float(count_scale), eps)
         scale_source = "mock H5 metadata"
+        bright_scale = _estimate_mock_count_scale(
+            H_obs_s,
+            H_true_s,
+            mag_centers,
+            complete_mag_max=complete_mag_max,
+            eps=eps,
+        )
+        scale_ratio = bright_scale / count_scale
+        print(
+            f"{label}: bright-end diagnostic scale={bright_scale:.4g}; "
+            f"bright/geometric ratio={scale_ratio:.3g}."
+        )
+        if scale_ratio < 0.5 or scale_ratio > 2.0:
+            print(
+                f"[WARNING] {label}: bright-end and area-based mock "
+                f"normalizations differ by a factor {scale_ratio:.3g}."
+            )
     C_raw = H_obs_s / (count_scale * H_true_s + eps)
     finite = np.isfinite(C_raw)
     n_finite = int(np.count_nonzero(finite))
@@ -486,6 +556,30 @@ def _normalize_magnitude_support(mag_centers, magnitude_support):
             "magnitude_support must satisfy lower < upper; "
             f"got ({lower}, {upper})."
         )
+    return lower, upper
+
+
+def _center_grid_edge_support(centers, *, physical_bounds=None):
+    """Return the calibrated outer bin edges for a regular center grid."""
+
+    centers = np.asarray(centers, dtype=float)
+    if centers.ndim != 1 or centers.size < 2:
+        raise ValueError("A center grid must contain at least two values.")
+    lower = float(centers[0] - 0.5 * (centers[1] - centers[0]))
+    upper = float(centers[-1] + 0.5 * (centers[-1] - centers[-2]))
+    zero_tolerance = 32.0 * np.finfo(float).eps * max(
+        1.0,
+        abs(lower),
+        abs(upper),
+    )
+    if abs(lower) <= zero_tolerance:
+        lower = 0.0
+    if abs(upper) <= zero_tolerance:
+        upper = 0.0
+    if physical_bounds is not None:
+        physical_lower, physical_upper = physical_bounds
+        lower = max(lower, float(physical_lower))
+        upper = min(upper, float(physical_upper))
     return lower, upper
 
 
@@ -598,6 +692,11 @@ class Completeness3D:
         self.mag_min, self.mag_max = float(self.mag_centers[0]), float(self.mag_centers[-1])
         self.z_min, self.z_max = float(self.z_centers[0]), float(self.z_centers[-1])
         self.fhost_min, self.fhost_max = float(self.fhost_centers[0]), float(self.fhost_centers[-1])
+        self.z_support = _center_grid_edge_support(self.z_centers)
+        self.fhost_support = _center_grid_edge_support(
+            self.fhost_centers,
+            physical_bounds=(0.0, 1.0),
+        )
 
         self._interp = RegularGridInterpolator(
             (self.mag_centers, self.z_centers, self.fhost_centers),
@@ -611,21 +710,44 @@ class Completeness3D:
         mag_raw = np.asarray(mag, dtype=float)
         z_raw = np.asarray(z, dtype=float)
         f_host_raw = np.asarray(f_host, dtype=float)
-        oob = (
-            (mag_raw < self.mag_min)
-            | (mag_raw > self.mag_max)
-            | (z_raw < self.z_min)
-            | (z_raw > self.z_max)
-            | (f_host_raw < self.fhost_min)
-            | (f_host_raw > self.fhost_max)
+        mag_check, z_check, fhost_check = np.broadcast_arrays(
+            mag_raw,
+            z_raw,
+            f_host_raw,
         )
+        nonfinite = ~(
+            np.isfinite(mag_check)
+            & np.isfinite(z_check)
+            & np.isfinite(fhost_check)
+        )
+        mag_oob = (
+            (mag_check < self.magnitude_support[0])
+            | (mag_check > self.magnitude_support[1])
+        ) & np.isfinite(mag_check)
+        z_oob = (
+            (z_check < self.z_support[0])
+            | (z_check > self.z_support[1])
+        ) & np.isfinite(z_check)
+        fhost_oob = (
+            (fhost_check < self.fhost_support[0])
+            | (fhost_check > self.fhost_support[1])
+        ) & np.isfinite(fhost_check)
+        oob = nonfinite | mag_oob | z_oob | fhost_oob
         if np.any(oob) and not self._warned_oob:
             print(
-                "[WARNING] Completeness3D received objects outside the "
-                f"grid range m=[{self.mag_min:.2f}, {self.mag_max:.2f}], "
-                f"z=[{self.z_min:.2f}, {self.z_max:.2f}], "
-                f"f_host=[{self.fhost_min:.3f}, {self.fhost_max:.3f}]. "
-                f"count={int(np.count_nonzero(oob))}"
+                "[WARNING] Completeness3D received queries outside its "
+                "calibrated physical support: "
+                f"m=[{self.magnitude_support[0]:.2f}, "
+                f"{self.magnitude_support[1]:.2f}], "
+                f"z=[{self.z_support[0]:.2f}, {self.z_support[1]:.2f}], "
+                f"f_host=[{self.fhost_support[0]:.3f}, "
+                f"{self.fhost_support[1]:.3f}]. "
+                "counts: "
+                f"m={int(np.count_nonzero(mag_oob))}, "
+                f"z={int(np.count_nonzero(z_oob))}, "
+                f"f_host={int(np.count_nonzero(fhost_oob))}, "
+                f"nonfinite={int(np.count_nonzero(nonfinite))}, "
+                f"any={int(np.count_nonzero(oob))}."
             )
             self._warned_oob = True
         mag = np.maximum(np.asarray(mag, dtype=float), self.mag_min)
@@ -842,12 +964,23 @@ def sample_alpha_lambda_population(size, model, rng):
 
 
 def _read_mock_alpha_lambda(h5file):
-    for key in ("alpha_lambda", "PL_slope"):
-        if key in h5file:
-            return np.asarray(h5file[key][:], dtype=float), f"mock_h5_dataset:{key}"
-    if "alpha_nu" in h5file:
-        alpha_nu = np.asarray(h5file["alpha_nu"][:], dtype=float)
-        return -alpha_nu - 2.0, "mock_h5_dataset:alpha_nu"
+    if "alpha_nu_lf_conversion" in h5file:
+        alpha_nu = np.asarray(
+            h5file["alpha_nu_lf_conversion"][:], dtype=float
+        )
+        return (
+            -alpha_nu - 2.0,
+            "mock_h5_dataset:alpha_nu_lf_conversion_converted_to_alpha_lambda",
+        )
+    # Legacy pre-schema-4 4D mocks used an explicit alpha_lambda dataset.
+    # Retain only that unambiguous compatibility path. Generic PL_slope and
+    # alpha_nu aliases are intentionally not accepted because their physical
+    # meaning cannot be established from the field name.
+    if "alpha_lambda" in h5file:
+        return (
+            np.asarray(h5file["alpha_lambda"][:], dtype=float),
+            "mock_h5_dataset:alpha_lambda",
+        )
     return None, None
 
 
@@ -859,15 +992,37 @@ def _read_mock_fhost_2500_psf(h5file):
 
 
 def _alpha_lambda_model_from_h5_attrs(attrs):
-    alpha_mean = _finite_float_attr(attrs, "alpha_lambda_parent_mean", "alpha_lambda_mean")
-    alpha_sigma = _finite_float_attr(attrs, "alpha_lambda_parent_sigma", "alpha_lambda_sigma")
-
-    alpha_nu_mean = _finite_float_attr(attrs, "alpha_nu_parent_mean", "alpha_nu_input_mean", "alpha_nu_mean")
-    alpha_nu_sigma = _finite_float_attr(attrs, "alpha_nu_parent_sigma", "alpha_nu_input_sigma", "alpha_nu_sigma")
-    if alpha_mean is None and alpha_nu_mean is not None:
+    alpha_nu_mean = _finite_float_attr(
+        attrs,
+        "alpha_nu_lf_conversion_parent_mean",
+        "alpha_nu_lf_conversion_mean",
+    )
+    alpha_nu_sigma = _finite_float_attr(
+        attrs,
+        "alpha_nu_lf_conversion_parent_sigma",
+        "alpha_nu_lf_conversion_sigma",
+    )
+    if alpha_nu_mean is not None:
         alpha_mean = -alpha_nu_mean - 2.0
-    if alpha_sigma is None and alpha_nu_sigma is not None:
-        alpha_sigma = abs(alpha_nu_sigma)
+        alpha_sigma = (
+            abs(alpha_nu_sigma) if alpha_nu_sigma is not None else None
+        )
+        source = "mock_h5_attrs:alpha_nu_lf_conversion_converted_to_alpha_lambda"
+    else:
+        # Explicit alpha_lambda metadata is retained only for pre-schema-4
+        # mocks. Generic alpha_nu_* attribute aliases are deliberately not
+        # accepted because they do not identify the LF-conversion proxy.
+        alpha_mean = _finite_float_attr(
+            attrs,
+            "alpha_lambda_parent_mean",
+            "alpha_lambda_mean",
+        )
+        alpha_sigma = _finite_float_attr(
+            attrs,
+            "alpha_lambda_parent_sigma",
+            "alpha_lambda_sigma",
+        )
+        source = "mock_h5_attrs:legacy_explicit_alpha_lambda"
     if alpha_mean is None:
         return None
     if alpha_sigma is None or not np.isfinite(alpha_sigma) or alpha_sigma <= 0.0:
@@ -877,7 +1032,7 @@ def _alpha_lambda_model_from_h5_attrs(attrs):
         "alpha_sigma": float(max(alpha_sigma, _ALPHA_MIN_SIGMA)),
         "alpha_min": float(_ALPHA_MIN),
         "alpha_max": float(_ALPHA_MAX),
-        "source": "mock_h5_attrs",
+        "source": source,
         "n_fit": 0,
     }
 
@@ -985,11 +1140,28 @@ def _fit_fhost_population_model(df_agn, df_agn_fhost_population, *, fit_logL_max
         fit_logL_max=fit_logL_max,
         cosmo=COSMO,
     )
-    host_model["observed_fit_source"] = (
+    observed_fit_source = (
         "fit_sample_f_host_2500_psf_vs_l2500"
         if df_agn_fhost_population is None
         else "precut_f_host_2500_psf_vs_l2500"
     )
+    approximate = np.zeros(len(fit_df), dtype=bool)
+    if "f_host_2500_psf_is_approximate" in fit_df.columns:
+        approximate = fit_df["f_host_2500_psf_is_approximate"].fillna(False).to_numpy(
+            dtype=bool
+        )
+    if np.any(approximate):
+        observed_fit_source += "_approximate_v1_psf_band_interpolation"
+    host_model["observed_fit_source"] = observed_fit_source
+    host_model["f_host_2500_psf_is_approximate"] = bool(np.any(approximate))
+    host_model["n_approximate_f_host_2500_psf"] = int(np.count_nonzero(approximate))
+    if "f_host_2500_psf_proxy_edge_clamped" in fit_df.columns:
+        edge_clamped = fit_df["f_host_2500_psf_proxy_edge_clamped"].fillna(
+            False
+        ).to_numpy(dtype=bool)
+        host_model["n_edge_clamped_f_host_2500_psf"] = int(
+            np.count_nonzero(edge_clamped)
+        )
     host_model["n_observed_population"] = int(len(fit_df))
     return host_model
 
@@ -1053,7 +1225,7 @@ def get_completeness_function_2d(
         else:
             m_true = np.asarray(f["apparent_mag_i_rest"][:], dtype=float)
         z_true  = np.asarray(f["z"][:], dtype=float)
-        mock_count_scale = f.attrs.get("mock_count_scale")
+        mock_count_scale = _read_mock_count_scale(f, sim_file)
 
     # Filter finite
     z_obs = df_agn["z"].to_numpy(dtype=float)
@@ -1444,7 +1616,7 @@ def get_completeness_function_3d_fhost(
                 f"{fhost_true_raw.shape} does not match apparent magnitude shape {m_true.shape}."
             )
             fhost_true_raw, fhost_source = None, None
-        mock_count_scale = f.attrs.get("mock_count_scale")
+        mock_count_scale = _read_mock_count_scale(f, sim_file)
 
     z_obs = df_agn["z"].to_numpy(dtype=float)
     magnitude_col = resolve_completeness_magnitude_column(df_agn)
@@ -1655,7 +1827,7 @@ def get_completeness_function_4d_fhost_alpha(
             )
             alpha_true_raw, alpha_source = None, None
         alpha_attr_model = _alpha_lambda_model_from_h5_attrs(f.attrs)
-        mock_count_scale = f.attrs.get("mock_count_scale")
+        mock_count_scale = _read_mock_count_scale(f, sim_file)
 
     z_obs = df_agn["z"].to_numpy(dtype=float)
     magnitude_col = resolve_completeness_magnitude_column(df_agn)

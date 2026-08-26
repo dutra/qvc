@@ -1,6 +1,7 @@
 """Shared utility functions for the QVC/Hubble fitting workflow."""
 
 import math
+import json
 import os
 import warnings
 from ast import literal_eval
@@ -53,12 +54,23 @@ from qvc.hubble.hubble_model import (
 )
 from qvc.hubble.sigma_tau_lambda_fit import fit_sigma_tau_lambda_broken_pl
 from qvc.light_curve.plotting_appendix import plot_sigma_tau_identity_grid
-from qvc.spectra.catalog_hdf5 import read_spectra_catalog_hdf5
+from qvc.spectra.catalog_hdf5 import (
+    PSF_AGN_FRACTION_BANDS,
+    SPECTRA_CATALOG_FORMAT,
+    SPECTRA_CATALOG_FORMAT_V1,
+    SPECTRA_CATALOG_FORMAT_V2,
+    read_spectra_catalog_hdf5,
+)
 
 PURPLE_ANSI = "\033[95m"
 RESET_ANSI = "\033[0m"
 HUBBLE_JITTER_SURVEYS = ("sdss", "ps1", "ztf")
 STRICT_UPPER_BOUND_SCALAR_CUT_COLUMNS = frozenset()
+SDSS_PSF_FRACTION_EFFECTIVE_WAVELENGTH_ANGSTROM = np.asarray(
+    (3551.0, 4686.0, 6165.0, 7481.0, 8931.0),
+    dtype=float,
+)
+V1_FHOST_PROXY_SOURCE = "v1_psf_agn_fraction_logwave_interpolation"
 
 AB_MAG_ZERO_POINT = 48.60
 XRAY_PHOTON_INDEX = 1.9
@@ -641,7 +653,86 @@ def _ensure_object_id(df):
     df["object_id"] = df["object_id"].astype(str)
     return df
 
-def populate_spectra_fit(df, spectra_fit_h5s):
+def approximate_v1_fhost_2500_psf_from_draws(
+    frame,
+    fraction_draws,
+    valid_count,
+    bands,
+):
+    """Approximate PSF host fractions from legacy joint ugriz AGN draws."""
+
+    frame = pd.DataFrame(frame).copy()
+    draws = np.asarray(fraction_draws, dtype=float)
+    counts = np.asarray(valid_count, dtype=int)
+    bands = tuple(str(band) for band in bands)
+    if bands != PSF_AGN_FRACTION_BANDS:
+        raise ValueError(
+            f"Cannot approximate v1 f_host_2500_psf with band order {bands}."
+        )
+    expected_shape = (len(frame), draws.shape[1], len(bands)) if draws.ndim == 3 else None
+    if draws.ndim != 3 or draws.shape != expected_shape:
+        raise ValueError(
+            "Legacy PSF AGN-fraction draws must have shape "
+            f"(row, draw, {len(bands)}); received {draws.shape}."
+        )
+    if counts.shape != (len(frame),):
+        raise ValueError("Legacy PSF AGN-fraction valid counts are misaligned.")
+    if np.any((counts < 0) | (counts > draws.shape[1])):
+        raise ValueError("Legacy PSF AGN-fraction valid counts are invalid.")
+    if "z" not in frame.columns:
+        raise ValueError(
+            "Cannot approximate v1 f_host_2500_psf because catalog column 'z' "
+            "is missing."
+        )
+
+    redshift = pd.to_numeric(frame["z"], errors="coerce").to_numpy(dtype=float)
+    medians = np.full(len(frame), np.nan, dtype=float)
+    errors = np.full(len(frame), np.nan, dtype=float)
+    edge_clamped = np.zeros(len(frame), dtype=bool)
+    proxy_counts = np.zeros(len(frame), dtype=np.int16)
+    log_wave = np.log(SDSS_PSF_FRACTION_EFFECTIVE_WAVELENGTH_ANGSTROM)
+
+    for row_index, (z_value, count) in enumerate(zip(redshift, counts)):
+        if not np.isfinite(z_value) or z_value < 0.0 or count <= 0:
+            continue
+        target_wave = 2500.0 * (1.0 + z_value)
+        edge_clamped[row_index] = bool(
+            target_wave < SDSS_PSF_FRACTION_EFFECTIVE_WAVELENGTH_ANGSTROM[0]
+            or target_wave > SDSS_PSF_FRACTION_EFFECTIVE_WAVELENGTH_ANGSTROM[-1]
+        )
+        target_log_wave = np.clip(np.log(target_wave), log_wave[0], log_wave[-1])
+        agn_draws = np.asarray(
+            [
+                np.interp(target_log_wave, log_wave, draw)
+                for draw in draws[row_index, :count]
+            ],
+            dtype=float,
+        )
+        host_draws = np.clip(1.0 - agn_draws[np.isfinite(agn_draws)], 0.0, 1.0)
+        if host_draws.size == 0:
+            continue
+        p16, p50, p84 = np.percentile(host_draws, (16.0, 50.0, 84.0))
+        medians[row_index] = float(p50)
+        errors[row_index] = float(0.5 * (p84 - p16))
+        proxy_counts[row_index] = int(host_draws.size)
+
+    frame["f_host_2500_psf"] = medians
+    frame["f_host_2500_psf_err"] = errors
+    frame["f_host_2500_psf_is_approximate"] = True
+    frame["f_host_2500_psf_proxy_edge_clamped"] = edge_clamped
+    frame["f_host_2500_psf_proxy_valid_count"] = proxy_counts
+    frame["f_host_2500_psf_source"] = V1_FHOST_PROXY_SOURCE
+    return frame
+
+
+def populate_spectra_fit(
+    df,
+    spectra_fit_h5s,
+    *,
+    allow_spectra_catalog_v1=False,
+    allow_spectra_catalog_v2=False,
+    approximate_v1_fhost_2500_psf=False,
+):
     required_cols = {
         "fit_ok",
         "fit_backend",
@@ -660,6 +751,7 @@ def populate_spectra_fit(df, spectra_fit_h5s):
     input_attrs = dict(df.attrs)
 
     spectra_frames = []
+    spectra_catalog_formats = []
 
     for i, h5_path in enumerate(spectra_fit_h5s):
         h5_path = resolve_qvc_data_path(h5_path)
@@ -668,9 +760,120 @@ def populate_spectra_fit(df, spectra_fit_h5s):
             f"({i+1}/{len(spectra_fit_h5s)}): {h5_path}\033[0m"
         )
 
-        df_spectra = read_spectra_catalog_hdf5(
-            h5_path, include_fraction_draws=False
-        ).frame
+        spectra_catalog = read_spectra_catalog_hdf5(
+            h5_path,
+            # The v3 joint payload is required downstream by latent-alpha
+            # completeness.  Loading the compact arrays here also preserves
+            # their common indexing through the object-id merge.
+            include_fraction_draws=True,
+            allow_v2=allow_spectra_catalog_v2,
+            allow_v1=allow_spectra_catalog_v1,
+        )
+        spectra_catalog_formats.append(spectra_catalog.catalog_format)
+        df_spectra = spectra_catalog.frame
+        df_spectra["qvc_spectra_catalog_format"] = spectra_catalog.catalog_format
+        if spectra_catalog.catalog_format == SPECTRA_CATALOG_FORMAT_V1:
+            if approximate_v1_fhost_2500_psf:
+                df_spectra = approximate_v1_fhost_2500_psf_from_draws(
+                    df_spectra,
+                    spectra_catalog.fraction_draws,
+                    spectra_catalog.valid_count,
+                    spectra_catalog.bands,
+                )
+                finite_proxy = int(
+                    np.count_nonzero(
+                        np.isfinite(df_spectra["f_host_2500_psf"].to_numpy())
+                    )
+                )
+                clamped_proxy = int(
+                    np.count_nonzero(
+                        df_spectra[
+                            "f_host_2500_psf_proxy_edge_clamped"
+                        ].to_numpy(dtype=bool)
+                    )
+                )
+                print(
+                    "[WARNING] Using approximate v1 f_host_2500_psf from "
+                    "joint ugriz PSF AGN-fraction draws: "
+                    f"finite={finite_proxy}/{len(df_spectra)}, "
+                    f"edge_clamped={clamped_proxy}."
+                )
+        elif spectra_catalog.catalog_format in {
+            SPECTRA_CATALOG_FORMAT,
+            SPECTRA_CATALOG_FORMAT_V2,
+        }:
+            if "f_host_2500_psf" in df_spectra.columns:
+                df_spectra["f_host_2500_psf_is_approximate"] = False
+                df_spectra["f_host_2500_psf_proxy_edge_clamped"] = False
+                df_spectra["f_host_2500_psf_source"] = (
+                    "v3_aligned_joint_host_capture"
+                    if spectra_catalog.catalog_format == SPECTRA_CATALOG_FORMAT
+                    else "v2_joint_host_capture"
+                )
+        if spectra_catalog.catalog_format == SPECTRA_CATALOG_FORMAT:
+            for field_name, field_draws in (
+                spectra_catalog.joint_posterior_draws.items()
+            ):
+                df_spectra[f"{field_name}_draws"] = pd.Series(
+                    list(np.asarray(field_draws, dtype=float)), dtype=object
+                )
+            df_spectra["joint_posterior_valid_count"] = np.asarray(
+                spectra_catalog.joint_posterior_valid_count, dtype=np.int16
+            )
+            df_spectra["joint_posterior_index"] = pd.Series(
+                list(np.asarray(spectra_catalog.joint_posterior_index, dtype=np.int32)),
+                dtype=object,
+            )
+            df_spectra["joint_posterior_source_draw_count"] = np.asarray(
+                spectra_catalog.joint_posterior_source_draw_count, dtype=np.int32
+            )
+            df_spectra["joint_posterior_selection_seed"] = int(
+                spectra_catalog.joint_posterior_selection_seed
+            )
+            joint_psf_flux = getattr(
+                spectra_catalog, "joint_psf_photometry_draws", None
+            )
+            if joint_psf_flux is not None:
+                joint_psf_flux = np.asarray(joint_psf_flux, dtype=float)
+                bands = tuple(
+                    str(value)
+                    for value in spectra_catalog.joint_psf_photometry_bands
+                )
+                expected_bands = (
+                    "u_sdss",
+                    "g_sdss",
+                    "r_sdss",
+                    "i_sdss",
+                    "z_sdss",
+                )
+                if bands != expected_bands:
+                    raise ValueError(
+                        "The aligned total-PSF photometry extension has bands "
+                        f"{bands!r}; expected {expected_bands!r}."
+                    )
+                expected_shape = (len(df_spectra), 64, len(expected_bands))
+                if joint_psf_flux.shape != expected_shape:
+                    raise ValueError(
+                        "The aligned total-PSF photometry extension has shape "
+                        f"{joint_psf_flux.shape}; expected {expected_shape}."
+                    )
+                df_spectra["joint_psf_total_g_flux_mjy_draws"] = pd.Series(
+                    list(joint_psf_flux[:, :, 1]), dtype=object
+                )
+                df_spectra["joint_psf_total_i_flux_mjy_draws"] = pd.Series(
+                    list(joint_psf_flux[:, :, 3]), dtype=object
+                )
+                df_spectra["joint_psf_photometry_valid_count"] = np.asarray(
+                    spectra_catalog.joint_posterior_valid_count, dtype=np.int16
+                )
+                provenance_json = json.dumps(
+                    dict(spectra_catalog.joint_psf_photometry_provenance),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                df_spectra["joint_psf_photometry_provenance_json"] = (
+                    provenance_json
+                )
         df_spectra.columns = [_norm_name(c) for c in df_spectra.columns]
         duplicate_columns = df_spectra.columns[df_spectra.columns.duplicated()].tolist()
         if duplicate_columns:
@@ -751,16 +954,13 @@ def populate_spectra_fit(df, spectra_fit_h5s):
     out.attrs["spectra_fit_columns"] = spectra_fit_columns
     out.attrs["spectra_fit_discarded_columns"] = ()
     out.attrs["light_curve_discarded_columns"] = tuple(conflicting_columns)
+    out.attrs["spectra_catalog_formats"] = tuple(
+        sorted(set(spectra_catalog_formats))
+    )
+    out.attrs["v1_fhost_2500_psf_approximation_enabled"] = bool(
+        approximate_v1_fhost_2500_psf
+    )
     print(f"Matched {len(out)} successful SED fits to {len(df)} AGN light-curve rows.")
-    if "alpha_lambda" not in out.columns:
-        out["alpha_lambda"] = out["pl_slope"]
-    if "alpha_lambda_err" not in out.columns:
-        out["alpha_lambda_err"] = out["pl_slope_err"]
-    if "alpha_nu" not in out.columns:
-        out["alpha_nu"] = -out["alpha_lambda"] - 2
-    if "alpha_nu_err" not in out.columns:
-        out["alpha_nu_err"] = out["alpha_lambda_err"]
-
     return out
 def populate_sdss_fields(objs, progress_bar=True):
     """
@@ -1045,6 +1245,9 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
                   exclude_object_ids_csv=None,
                   residuals_sigma_clip=None, residuals_csv=None,
                   spectra_fit_h5=None, only_load=False,
+                  allow_spectra_catalog_v1=False,
+                  allow_spectra_catalog_v2=False,
+                  approximate_v1_fhost_2500_psf=False,
                   spectra_sdss_run2d="all",
                   correct_sigma_uv_host=False,
                   lc_info_csv=None,
@@ -1459,7 +1662,18 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
 
     if spectra_fit_h5 is not None:
         print("Populating spectra fit data from:", spectra_fit_h5)
-        df = populate_spectra_fit(df, spectra_fit_h5)
+        spectra_compatibility_kwargs = {}
+        if allow_spectra_catalog_v1:
+            spectra_compatibility_kwargs["allow_spectra_catalog_v1"] = True
+        if allow_spectra_catalog_v2:
+            spectra_compatibility_kwargs["allow_spectra_catalog_v2"] = True
+        if approximate_v1_fhost_2500_psf:
+            spectra_compatibility_kwargs["approximate_v1_fhost_2500_psf"] = True
+        df = populate_spectra_fit(
+            df,
+            spectra_fit_h5,
+            **spectra_compatibility_kwargs,
+        )
     else:
         print("[WARNING] spectra_fit_h5 not provided, assuming spectral fit fields are in agn h5 file")
         if 'alpha_lambda' not in df.columns:
@@ -3021,6 +3235,7 @@ def display_results_summary(
     use_redshift_log_f_term=None,
     use_redshift_mu_term=None,
     sigma_sel_posterior_median=None,
+    model_labels_override=None,
 ):
     """
     Print median and 16/84% intervals for sampled params, plus derived w0 (and wa)
@@ -3028,22 +3243,17 @@ def display_results_summary(
     at the supplied z_pivot_agn.
     """
     samples = np.asarray(samples)
-    option_flags = resolve_model_option_flags(
-        cosmo_model,
-        samples.shape[1],
-        only_sna=False,
-        only_agn=None,
-        use_alpha_lambda_term=use_alpha_lambda_term,
-        use_eta_sigma_term=use_eta_sigma_term,
-        use_redshift_log_f_term=use_redshift_log_f_term,
-        use_redshift_mu_term=use_redshift_mu_term,
-    )
-    if (
-        use_alpha_lambda_term is None
-        or use_eta_sigma_term is None
-        or use_redshift_log_f_term is None
-        or use_redshift_mu_term is None
-    ):
+    if model_labels_override is None:
+        option_flags = resolve_model_option_flags(
+            cosmo_model,
+            samples.shape[1],
+            only_sna=False,
+            only_agn=None,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_log_f_term=use_redshift_log_f_term,
+            use_redshift_mu_term=use_redshift_mu_term,
+        )
         if use_alpha_lambda_term is None:
             use_alpha_lambda_term = option_flags["use_alpha_lambda_term"]
         if use_eta_sigma_term is None:
@@ -3052,14 +3262,18 @@ def display_results_summary(
             use_redshift_log_f_term = option_flags["use_redshift_log_f_term"]
         if use_redshift_mu_term is None:
             use_redshift_mu_term = option_flags["use_redshift_mu_term"]
-    _, model_labels, _ = get_model_params(
-        cosmo_model,
-        only_agn=option_flags["only_agn"],
-        use_alpha_lambda_term=use_alpha_lambda_term,
-        use_eta_sigma_term=use_eta_sigma_term,
-        use_redshift_log_f_term=use_redshift_log_f_term,
-        use_redshift_mu_term=use_redshift_mu_term,
-    )
+        _, model_labels, _ = get_model_params(
+            cosmo_model,
+            only_agn=option_flags["only_agn"],
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_log_f_term=use_redshift_log_f_term,
+            use_redshift_mu_term=use_redshift_mu_term,
+        )
+    else:
+        model_labels = [str(value) for value in model_labels_override]
+        if len(model_labels) != samples.shape[1]:
+            raise ValueError("model_labels_override does not match sample width.")
 
     def _format_interval(median, lo, hi, ndigits=3):
         return (
@@ -3190,6 +3404,7 @@ def compute_age_universe_with_error(
     use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
     use_redshift_mu_term=None,
+    model_labels_override=None,
 ):
     """
     Compute the posterior distribution of the Universe age and summarize it.
@@ -3221,23 +3436,28 @@ def compute_age_universe_with_error(
         }
     """
     # Get parameter names & any needed priors (e.g., zp for FlatwpwaCDM)
-    option_flags = resolve_model_option_flags(
-        cosmo_model,
-        np.asarray(samples).shape[1],
-        only_agn=None,
-        use_alpha_lambda_term=use_alpha_lambda_term,
-        use_eta_sigma_term=use_eta_sigma_term,
-        use_redshift_log_f_term=use_redshift_log_f_term,
-        use_redshift_mu_term=use_redshift_mu_term,
-    )
-    priors, model_labels, _ = get_model_params(
-        cosmo_model,
-        only_agn=option_flags["only_agn"],
-        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
-        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
-        use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
-        use_redshift_mu_term=option_flags["use_redshift_mu_term"],
-    )
+    if model_labels_override is None:
+        option_flags = resolve_model_option_flags(
+            cosmo_model,
+            np.asarray(samples).shape[1],
+            only_agn=None,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_log_f_term=use_redshift_log_f_term,
+            use_redshift_mu_term=use_redshift_mu_term,
+        )
+        _priors, model_labels, _ = get_model_params(
+            cosmo_model,
+            only_agn=option_flags["only_agn"],
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+            use_redshift_mu_term=option_flags["use_redshift_mu_term"],
+        )
+    else:
+        model_labels = [str(value) for value in model_labels_override]
+        if len(model_labels) != np.asarray(samples).shape[1]:
+            raise ValueError("model_labels_override does not match sample width.")
 
     N = samples.shape[0]
     idx = np.arange(N)

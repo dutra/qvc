@@ -1,0 +1,57 @@
+#!/usr/bin/env xonsh
+
+"""Run experiment 1: host-dependent, target-stratified completeness."""
+
+from pathlib import Path
+
+
+runner = Path(__file__).resolve().parent / "run_hubble.xonsh"
+if not runner.is_file():
+    raise FileNotFoundError(f"Hubble runner not found: {runner}")
+
+default_light_curve_h5 = (
+    "results/data/aug23_1256pm_erlang_legacy_svithennuts_"
+    "psflogitnormal_iters3_svi4000w250s250_stonechisq_"
+    "specaug230925am_n8000_dd61211_chisq.h5"
+)
+default_spectra_h5 = (
+    "results/data/aug23_0925am_spectrafit_dd61211_nested_N8000_"
+    "rhat_reprocessed_sdss_metadata.h5"
+)
+light_curve_h5 = __xonsh__.env.get(
+    "QVC_HUBBLE_LIGHT_CURVE_H5", default_light_curve_h5
+)
+spectra_h5 = __xonsh__.env.get(
+    "QVC_HUBBLE_SPECTRA_FIT_H5", default_spectra_h5
+)
+for input_path in (light_curve_h5, spectra_h5):
+    if not Path(input_path).is_file():
+        raise FileNotFoundError(f"Experiment 1 input not found: {input_path}")
+
+speed = __xonsh__.env.get("QVC_HUBBLE_SPEED", "quick")
+default_prefix = f"aug24_exp1_3d_fhost_no_boss_{speed}"
+
+# The spectra input must contain f_host_2500_psf directly; this experiment does
+# not derive or interpolate that field. Environment overrides allow a newly
+# regenerated spectra catalog to be selected without editing this runner.
+$QVC_HUBBLE_LIGHT_CURVE_H5 = light_curve_h5
+$QVC_HUBBLE_SPECTRA_FIT_H5 = spectra_h5
+$QVC_HUBBLE_Z_MIN = "0.44"
+$QVC_HUBBLE_Z_MAX = "3.16"
+$QVC_HUBBLE_SDSS_TARGET_SELECTION = "all"
+$QVC_HUBBLE_COMPLETENESS_STRATIFICATION = "sdss-survey-var-no-boss"
+$QVC_HUBBLE_COMPLETENESS_MODE = "3d_fhost"
+$QVC_HUBBLE_MINIMAL_PLOTS = "true"
+$QVC_HUBBLE_PREFIX = __xonsh__.env.get("QVC_HUBBLE_PREFIX", default_prefix)
+$RAISE_SUBPROC_ERROR = True
+
+print("Running Hubble experiment 1 with:")
+print(f"  prefix: {$QVC_HUBBLE_PREFIX}")
+print(f"  speed: {speed}")
+print("  redshift range: 0.44 <= z <= 3.16")
+print("  target selection: all")
+print("  completeness stratification: sdss-survey-var-no-boss")
+print("  completeness mode: 3d_fhost")
+print("  plots: minimal (retains hubble_diagram_debiased.pdf)")
+
+xonsh @(str(runner))

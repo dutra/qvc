@@ -1,0 +1,85 @@
+#!/usr/bin/env xonsh
+
+"""Run the same baseline Hubble fit at quick and standard speeds."""
+
+from pathlib import Path
+
+
+repo_root = Path(__file__).resolve().parent
+runner = repo_root / "run_hubble.xonsh"
+if not runner.is_file():
+    raise FileNotFoundError(f"Hubble runner not found: {runner}")
+
+spectra_catalog = repo_root / (
+    "results/data/jaxqsofit/"
+    "aug24_0152pm_spectrafit_e5d2897_chisqgt20_N8000_nested_"
+    "fhostpsf_resumed_m2500norm12.h5"
+)
+if not spectra_catalog.is_file():
+    raise FileNotFoundError(
+        f"Pinned v2 spectra catalog not found: {spectra_catalog}"
+    )
+
+if __xonsh__.env.get("QVC_HUBBLE_RESUME", "").strip():
+    raise ValueError(
+        "QVC_HUBBLE_RESUME cannot be shared by the quick and standard runs. "
+        "Resume either generated run directly with run_hubble.xonsh."
+    )
+
+speeds = ("quick", "standard")
+prefix_stem = __xonsh__.env.get(
+    "QVC_HUBBLE_BASELINE_SPEED_COMPARE_PREFIX_STEM",
+    "aug25_shen_type1_attenuated_2d_m2500norm12",
+).strip()
+if not prefix_stem:
+    raise ValueError(
+        "QVC_HUBBLE_BASELINE_SPEED_COMPARE_PREFIX_STEM cannot be empty."
+    )
+
+# Pin one scientifically matched baseline. Only QVC_HUBBLE_SPEED and the
+# collision-safe output prefix change between the two delegated runs.
+$QVC_HUBBLE_SPECTRA_FIT_H5 = str(spectra_catalog)
+$QVC_HUBBLE_ALLOW_SPECTRA_CATALOG_V1 = "false"
+$QVC_HUBBLE_APPROXIMATE_V1_FHOST_2500_PSF = "false"
+$QVC_HUBBLE_COMPLETENESS_LF_MODEL = "shen"
+$QVC_HUBBLE_SHEN_LF_MODE = "type1_attenuated"
+$QVC_HUBBLE_COMPLETENESS_MODE = "2d"
+$QVC_HUBBLE_MAGNITUDE_CONVENTION = "dereddened"
+$QVC_HUBBLE_COMPLETENESS_MAGNITUDE = "attenuated"
+$QVC_HUBBLE_Z_MIN = "0.44"
+$QVC_HUBBLE_Z_MAX = "3.16"
+$QVC_HUBBLE_SPECTRA_SDSS_RUN2D = "all"
+$QVC_HUBBLE_SDSS_TARGET_SELECTION = "all"
+$QVC_HUBBLE_COMPLETENESS_STRATIFICATION = "none"
+$QVC_HUBBLE_NO_CUTS = "false"
+$QVC_CUT_COMPLETENESS_MAG_2500_MIN = "18.5"
+$QVC_CUT_COMPLETENESS_MAG_2500_MAX = "24.0"
+$QVC_HUBBLE_COMPLETENESS_MOCK_OVERSAMPLE = "4"
+$QVC_HUBBLE_COMPLETENESS_MOCK_MAX_ROWS = "2000000"
+$QVC_HUBBLE_COMPLETENESS_MOCK_PROPOSAL_AREA = "full_sky"
+$QVC_HUBBLE_COMPLETENESS_MOCK_REQUIRE_FULL_OVERSAMPLE = "true"
+$QVC_HUBBLE_COMPLETENESS_SIM_FILE = ""
+$QVC_HUBBLE_DYNESTY_SEED = "12345"
+$QVC_HUBBLE_MINIMAL_PLOTS = "false"
+$RAISE_SUBPROC_ERROR = True
+
+print("Running one baseline Hubble model at quick and standard speeds:")
+print("  baseline LF: Shen type1_attenuated")
+print("  completeness: 2d, attenuated M_2500 in [18.5, 24.0]")
+print("  Hubble luminosity: dereddened M_2500")
+print(f"  spectra catalog: {spectra_catalog}")
+print("  plots: full diagnostic set")
+print("  total jobs: 2 (quick, then standard)")
+
+for speed in speeds:
+    run_prefix = f"{prefix_stem}_{speed}"
+    $QVC_HUBBLE_SPEED = speed
+    $QVC_HUBBLE_PREFIX = run_prefix
+    # Re-pin full plots in case the first delegated process mutates the shared
+    # xonsh environment before the standard run begins.
+    $QVC_HUBBLE_MINIMAL_PLOTS = "false"
+    print(
+        f"Starting baseline speed={speed!r} with prefix {run_prefix!r}; "
+        "full plots enabled."
+    )
+    xonsh @(str(runner))

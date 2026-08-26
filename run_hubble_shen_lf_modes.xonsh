@@ -1,0 +1,193 @@
+#!/usr/bin/env xonsh
+
+"""Run a controlled Hubble-fit sweep over explicit luminosity functions."""
+
+from pathlib import Path
+
+
+shen_modes = (
+    "all_nh_attenuated",
+    "type1_intrinsic",
+    "type1_attenuated",
+)
+experiment_specs = {
+    "shen_all_nh_attenuated": ("shen", "all_nh_attenuated"),
+    "shen_type1_intrinsic": ("shen", "type1_intrinsic"),
+    "shen_type1_attenuated": ("shen", "type1_attenuated"),
+    "wang2026_type1_lade_a": ("wang2026_type1_lade_a", None),
+    "palanque2016_ple_lede": ("palanque2016_ple_lede", None),
+    "kulkarni2019_type1_model1": ("kulkarni2019_type1_model1", None),
+    "kulkarni2019_type1_model2": ("kulkarni2019_type1_model2", None),
+    "kulkarni2019_type1_model3": ("kulkarni2019_type1_model3", None),
+}
+default_experiments = (
+    "shen_type1_attenuated",
+    "wang2026_type1_lade_a",
+    "palanque2016_ple_lede",
+    "kulkarni2019_type1_model1",
+    "kulkarni2019_type1_model2",
+    "kulkarni2019_type1_model3",
+)
+completeness_runs = (
+    ("2d", False, "2d"),
+    ("3d_fhost", True, "3d_fhost_v1proxy"),
+)
+
+requested_models = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_LF_MODELS", ""
+).strip()
+legacy_requested_modes = __xonsh__.env.get(
+    "QVC_HUBBLE_SHEN_LF_MODES", ""
+).strip()
+if requested_models:
+    experiments = tuple(
+        item.strip().lower().replace("-", "_")
+        for item in requested_models.split(",")
+        if item.strip()
+    )
+    requested_by = "QVC_HUBBLE_COMPLETENESS_LF_MODELS"
+elif legacy_requested_modes:
+    legacy_modes = tuple(
+        item.strip().lower().replace("-", "_")
+        for item in legacy_requested_modes.split(",")
+        if item.strip()
+    )
+    invalid_legacy = [mode for mode in legacy_modes if mode not in shen_modes]
+    if invalid_legacy:
+        raise ValueError(
+            f"Unknown legacy Shen LF mode(s) {invalid_legacy}; valid modes are "
+            f"{list(shen_modes)}. Use QVC_HUBBLE_COMPLETENESS_LF_MODELS for "
+            "the generic LF sweep."
+        )
+    experiments = tuple(f"shen_{mode}" for mode in legacy_modes)
+    requested_by = "QVC_HUBBLE_SHEN_LF_MODES (legacy compatibility)"
+else:
+    experiments = default_experiments
+    requested_by = "default experiment set"
+
+if not experiments:
+    raise ValueError(f"{requested_by} must contain at least one LF descriptor.")
+invalid = [name for name in experiments if name not in experiment_specs]
+if invalid:
+    raise ValueError(
+        f"Unknown luminosity-function descriptor(s) {invalid}; valid descriptors "
+        f"are {list(experiment_specs)}."
+    )
+if len(set(experiments)) != len(experiments):
+    raise ValueError(f"{requested_by} contains duplicate LF descriptors.")
+if __xonsh__.env.get("QVC_HUBBLE_RESUME", "").strip():
+    raise ValueError(
+        "QVC_HUBBLE_RESUME cannot be shared across the LF 2D/3D sweep. "
+        "Resume the desired generated command directly with run_hubble.xonsh."
+    )
+
+# The standalone sweep retains its explicitly requested temporary v1 support.
+# The all-LF runner sets QVC_HUBBLE_EXACT_V2_SPECTRA=true, which switches the
+# same Cartesian-product driver to the native v2 host posterior without
+# changing any LF, cut, seed, or mock-area setting.
+exact_v2_spectra = __xonsh__.env.get(
+    "QVC_HUBBLE_EXACT_V2_SPECTRA", "false"
+).lower() in {"1", "true", "yes", "on"}
+if exact_v2_spectra:
+    completeness_runs = (
+        ("2d", False, "2d"),
+        ("3d_fhost", False, "3d_fhost"),
+    )
+
+repo_root = Path(__file__).resolve().parent
+runner = repo_root / "run_hubble.xonsh"
+if not runner.is_file():
+    raise FileNotFoundError(f"Hubble runner not found: {runner}")
+
+speed = __xonsh__.env.get("QVC_HUBBLE_SPEED", "quick")
+prefix_stem = __xonsh__.env.get(
+    "QVC_HUBBLE_LF_PREFIX_STEM",
+    __xonsh__.env.get(
+        "QVC_HUBBLE_SHEN_PREFIX_STEM",
+        f"aug24c_lf_areascale_{speed}",
+    ),
+)
+
+$PYTHONPATH = str(repo_root / "src")
+$MPLCONFIGDIR = __xonsh__.env.get(
+    "MPLCONFIGDIR", "/tmp/qvc-matplotlib-shen-lf-modes"
+)
+$SHEN_PUBTOOLS_PATH = __xonsh__.env.get(
+    "SHEN_PUBTOOLS_PATH",
+    str(Path.home() / "sdev" / "quasarlf" / "pubtools"),
+)
+$QVC_HUBBLE_MINIMAL_PLOTS = __xonsh__.env.get(
+    "QVC_HUBBLE_MINIMAL_PLOTS", "true"
+)
+$QVC_HUBBLE_ALLOW_SPECTRA_CATALOG_V1 = (
+    "false" if exact_v2_spectra else "true"
+)
+# Keep the sample selection identical across every LF/completeness mode.  Pin
+# these values instead of inheriting them from the invoking shell: otherwise a
+# stale QVC_HUBBLE_NO_CUTS or QVC_CUT_COMPLETENESS_MAG_2500_* setting could
+# silently change the fitted sample within this controlled sweep.
+$QVC_HUBBLE_NO_CUTS = "false"
+$QVC_HUBBLE_COMPLETENESS_MAGNITUDE = "attenuated"
+$QVC_CUT_COMPLETENESS_MAG_2500_MIN = "18.5"
+$QVC_CUT_COMPLETENESS_MAG_2500_MAX = "24.0"
+$QVC_HUBBLE_COMPLETENESS_MOCK_OVERSAMPLE = "4"
+# Retain the controlled sweep's two-million-row memory/runtime bound while
+# requiring every LF to realize the requested 4x effective-area oversampling.
+$QVC_HUBBLE_COMPLETENESS_MOCK_MAX_ROWS = "2000000"
+$QVC_HUBBLE_COMPLETENESS_MOCK_PROPOSAL_AREA = "full_sky"
+$QVC_HUBBLE_COMPLETENESS_MOCK_REQUIRE_FULL_OVERSAMPLE = "true"
+$QVC_HUBBLE_DYNESTY_SEED = "12345"
+# Force run_hubble to generate a fresh mode-specific mock using its estimated
+# full survey footprint instead of supplying a separately normalized catalog.
+$QVC_HUBBLE_COMPLETENESS_SIM_FILE = ""
+$RAISE_SUBPROC_ERROR = True
+
+print("Running explicit LF comparison with run_hubble footprint defaults:")
+print(f"  experiments ({requested_by}): {', '.join(experiments)}")
+host_mode_description = (
+    "native v2 posterior draws"
+    if exact_v2_spectra
+    else "approximate v1 host proxy"
+)
+print(f"  completeness modes: 2d, 3d_fhost ({host_mode_description})")
+print(f"  planned jobs: {len(experiments) * len(completeness_runs)}")
+print(f"  allow spectra catalog v1: {$QVC_HUBBLE_ALLOW_SPECTRA_CATALOG_V1}")
+print("  sample cuts: enabled")
+print(
+    "  completeness magnitude cut: "
+    f"{$QVC_HUBBLE_COMPLETENESS_MAGNITUDE} "
+    f"[{$QVC_CUT_COMPLETENESS_MAG_2500_MIN}, "
+    f"{$QVC_CUT_COMPLETENESS_MAG_2500_MAX}] (inclusive)"
+)
+print("  mock area: estimated by run_hubble from the full pre-cut footprint")
+print(f"  mock oversampling: {$QVC_HUBBLE_COMPLETENESS_MOCK_OVERSAMPLE}x")
+print(f"  mock maximum rows: {$QVC_HUBBLE_COMPLETENESS_MOCK_MAX_ROWS}")
+print(f"  mock proposal area: {$QVC_HUBBLE_COMPLETENESS_MOCK_PROPOSAL_AREA}")
+print("  require full requested oversampling: true")
+print(f"  shared Dynesty seed: {$QVC_HUBBLE_DYNESTY_SEED}")
+
+for experiment in experiments:
+    lf_model, shen_mode = experiment_specs[experiment]
+    $QVC_HUBBLE_COMPLETENESS_LF_MODEL = lf_model
+    if shen_mode is None:
+        __xonsh__.env.pop("QVC_HUBBLE_SHEN_LF_MODE", None)
+    else:
+        $QVC_HUBBLE_SHEN_LF_MODE = shen_mode
+
+    for completeness_mode, approximate_v1_fhost, completeness_label in completeness_runs:
+        run_prefix = f"{prefix_stem}_{experiment}_{completeness_label}"
+        $QVC_HUBBLE_COMPLETENESS_MODE = completeness_mode
+        $QVC_HUBBLE_APPROXIMATE_V1_FHOST_2500_PSF = (
+            "true" if approximate_v1_fhost else "false"
+        )
+        $QVC_HUBBLE_PREFIX = run_prefix
+        shen_detail = (
+            f", Shen submode {shen_mode!r}" if shen_mode is not None else ""
+        )
+        print(
+            f"Running {completeness_mode} Hubble fit for LF model {lf_model!r}"
+            f"{shen_detail} with prefix {run_prefix!r}; approximate v1 host proxy="
+            f"{$QVC_HUBBLE_APPROXIMATE_V1_FHOST_2500_PSF}. The validated mock "
+            "cache uses run_hubble's estimated footprint area."
+        )
+        xonsh @(str(runner))

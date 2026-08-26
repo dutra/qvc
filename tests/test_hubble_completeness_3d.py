@@ -1,3 +1,5 @@
+import ast
+import json
 import os
 import inspect
 import sys
@@ -23,13 +25,24 @@ from qvc.hubble import hubble_completeness_refactored as hcr
 from qvc.hubble import hubble_fit, hubble_likelihood, hubble_model
 from qvc.hubble.completeness_mock_catalog import (
     AB_ABSOLUTE_MAG_ZEROPOINT,
+    FULL_SKY_AREA_DEG2,
+    KULKARNI2019_TYPE1_MODEL1,
+    KULKARNI2019_TYPE1_MODEL2,
+    KULKARNI2019_TYPE1_MODEL3,
     LOG10_MAG_JACOBIAN,
     NU_2500_HZ,
+    SHEN_DEFAULT_LF_MODE,
     SHEN_GLOBAL_FIT,
+    SHEN_LF_MODES,
     _configure_shen_paths,
+    _shen_type1_nh_bin_fractions,
     build_shen_lf,
     log_nu_lnu_to_ab_absolute_magnitude,
+    normalize_shen_lf_mode,
+    plan_area_scaled_mock_sampling,
     save_mock_catalog,
+    shen_absorbed_fraction,
+    shen_type1_fraction,
 )
 from qvc.hubble.hubble_likelihood import completeness_loglike
 
@@ -89,6 +102,285 @@ def test_build_shen_lf_uses_global_fit_a_extinction_convolved_2500_channel(
         m_grid,
         AB_ABSOLUTE_MAG_ZEROPOINT
         - 2.5 * (log_nu_lnu - np.log10(NU_2500_HZ)),
+    )
+
+
+def test_shen_lf_modes_are_explicit_and_normalized():
+    assert SHEN_LF_MODES == (
+        "all_nh_attenuated",
+        "type1_intrinsic",
+        "type1_attenuated",
+    )
+    assert normalize_shen_lf_mode("type1-intrinsic") == "type1_intrinsic"
+    with pytest.raises(ValueError, match="Unknown Shen LF mode"):
+        normalize_shen_lf_mode("implicit")
+
+
+def test_shen_lf_mode_runner_uses_run_hubble_footprint_for_each_mode():
+    sweep = (ROOT / "run_hubble_shen_lf_modes.xonsh").read_text(encoding="utf-8")
+    runner = (ROOT / "run_hubble.xonsh").read_text(encoding="utf-8")
+
+    # The declarations before the first xonsh environment lookup are ordinary
+    # Python.  Parse them instead of merely counting model-name strings so the
+    # test guards the actual default Cartesian product executed by the sweep.
+    declaration_source = sweep.split("requested_models =", maxsplit=1)[0]
+    declarations = {}
+    for node in ast.parse(declaration_source).body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                declarations[target.id] = ast.literal_eval(node.value)
+
+    experiment_specs = declarations["experiment_specs"]
+    default_experiments = declarations["default_experiments"]
+    completeness_runs = declarations["completeness_runs"]
+    kulkarni_models = (
+        "kulkarni2019_type1_model1",
+        "kulkarni2019_type1_model2",
+        "kulkarni2019_type1_model3",
+    )
+
+    assert default_experiments == (
+        "shen_type1_attenuated",
+        "wang2026_type1_lade_a",
+        "palanque2016_ple_lede",
+        *kulkarni_models,
+    )
+    for model_id in kulkarni_models:
+        assert experiment_specs[model_id] == (model_id, None)
+    default_jobs = {
+        (experiment, completeness_label)
+        for experiment in default_experiments
+        for _, _, completeness_label in completeness_runs
+    }
+    assert len(default_experiments) == 6
+    assert len(completeness_runs) == 2
+    assert len(default_jobs) == 12
+
+    for mode in SHEN_LF_MODES:
+        assert f'"{mode}"' in sweep
+    assert '"shen_type1_attenuated"' in sweep
+    assert '"wang2026_type1_lade_a"' in sweep
+    assert '"palanque2016_ple_lede"' in sweep
+    for model_id in kulkarni_models:
+        assert f'"{model_id}"' in sweep
+    assert 'planned jobs: {len(experiments) * len(completeness_runs)}' in sweep
+    assert "$QVC_HUBBLE_COMPLETENESS_LF_MODEL = lf_model" in sweep
+    assert "$QVC_HUBBLE_SHEN_LF_MODE = shen_mode" in sweep
+    assert '__xonsh__.env.pop("QVC_HUBBLE_SHEN_LF_MODE", None)' in sweep
+    assert '$QVC_HUBBLE_COMPLETENESS_SIM_FILE = ""' in sweep
+    assert "--area-deg2" not in sweep
+    assert "QVC_HUBBLE_SHEN_AREA_DEG2" not in sweep
+    assert "$QVC_HUBBLE_PREFIX = run_prefix" in sweep
+    assert "QVC_HUBBLE_RESUME cannot be shared" in sweep
+    assert '"QVC_HUBBLE_COMPLETENESS_SIM_FILE", ""' in runner
+    assert "@(completeness_sim_args)" in runner
+    assert '$QVC_HUBBLE_ALLOW_SPECTRA_CATALOG_V1 = (' in sweep
+    assert '"false" if exact_v2_spectra else "true"' in sweep
+    assert '$QVC_HUBBLE_NO_CUTS = "false"' in sweep
+    assert '$QVC_HUBBLE_COMPLETENESS_MAGNITUDE = "attenuated"' in sweep
+    assert '$QVC_CUT_COMPLETENESS_MAG_2500_MIN = "18.5"' in sweep
+    assert '$QVC_CUT_COMPLETENESS_MAG_2500_MAX = "24.0"' in sweep
+    assert "completeness magnitude cut:" in sweep
+    assert '("2d", False, "2d")' in sweep
+    assert '("3d_fhost", True, "3d_fhost_v1proxy")' in sweep
+    assert "$QVC_HUBBLE_COMPLETENESS_MODE = completeness_mode" in sweep
+    assert "$QVC_HUBBLE_APPROXIMATE_V1_FHOST_2500_PSF = (" in sweep
+    assert '$QVC_HUBBLE_COMPLETENESS_MOCK_OVERSAMPLE = "4"' in sweep
+    assert '$QVC_HUBBLE_COMPLETENESS_MOCK_MAX_ROWS = "2000000"' in sweep
+    assert '$QVC_HUBBLE_COMPLETENESS_MOCK_PROPOSAL_AREA = "full_sky"' in sweep
+    assert '$QVC_HUBBLE_COMPLETENESS_MOCK_REQUIRE_FULL_OVERSAMPLE = "true"' in sweep
+    assert '$QVC_HUBBLE_DYNESTY_SEED = "12345"' in sweep
+    assert 'f"aug24c_lf_areascale_{speed}"' in sweep
+    assert 'f"aug24_shen_lf_modes_{speed}"' not in sweep
+    assert "--completeness-mock-oversample" in runner
+    assert "--completeness-mock-max-rows" in runner
+    assert "--completeness-mock-proposal-area" in runner
+    assert "--dynesty-seed @(dynesty_seed)" in runner
+    assert "--completeness-lf-model @(completeness_lf_model)" in runner
+    assert "@(allow_spectra_catalog_v1_args)" in runner
+    assert "@(approximate_v1_fhost_args)" in runner
+
+
+def test_all_lf_runner_pins_the_complete_matched_twelve_job_suite():
+    runner_path = ROOT / "run_hubble_all_lf_models.xonsh"
+    runner = runner_path.read_text(encoding="utf-8")
+
+    declaration_source = runner.split("repo_root =", maxsplit=1)[0]
+    declarations = {}
+    for node in ast.parse(declaration_source).body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                declarations[target.id] = ast.literal_eval(node.value)
+
+    assert declarations["lf_experiments"] == (
+        "shen_type1_attenuated",
+        "wang2026_type1_lade_a",
+        "palanque2016_ple_lede",
+        "kulkarni2019_type1_model1",
+        "kulkarni2019_type1_model2",
+        "kulkarni2019_type1_model3",
+    )
+    assert len(set(declarations["lf_experiments"])) == 6
+    assert "run_hubble_shen_lf_modes.xonsh" in runner
+    assert '$QVC_HUBBLE_COMPLETENESS_LF_MODELS = ",".join(lf_experiments)' in runner
+    assert '$QVC_HUBBLE_LF_PREFIX_STEM = prefix_stem' in runner
+    assert '$QVC_HUBBLE_SPECTRA_FIT_H5 = str(spectra_catalog)' in runner
+    assert '$QVC_HUBBLE_EXACT_V2_SPECTRA = "true"' in runner
+    assert '$QVC_HUBBLE_ALLOW_SPECTRA_CATALOG_V1 = "false"' in runner
+    assert '$QVC_HUBBLE_APPROXIMATE_V1_FHOST_2500_PSF = "false"' in runner
+    assert '$QVC_HUBBLE_MAGNITUDE_CONVENTION = "dereddened"' in runner
+    assert '$QVC_HUBBLE_COMPLETENESS_MAGNITUDE = "attenuated"' in runner
+    assert 'fhostpsf_resumed_m2500norm12.h5' in runner
+    assert '__xonsh__.env.pop("QVC_HUBBLE_SHEN_LF_MODES", None)' in runner
+    assert 'f"aug25_all_lf_models_m2500norm12_{speed}"' in runner
+    assert 'total Hubble jobs: {2 * len(lf_experiments)}' in runner
+    assert "xonsh @(str(sweep_runner))" in runner
+
+
+def test_controlled_lf_sweep_switches_from_v1_proxy_to_exact_v2_host_draws():
+    sweep = (ROOT / "run_hubble_shen_lf_modes.xonsh").read_text(
+        encoding="utf-8"
+    )
+
+    assert '"QVC_HUBBLE_EXACT_V2_SPECTRA", "false"' in sweep
+    assert '("3d_fhost", False, "3d_fhost")' in sweep
+    assert '"false" if exact_v2_spectra else "true"' in sweep
+    assert '"native v2 posterior draws"' in sweep
+
+
+def test_baseline_quick_standard_runner_runs_only_one_matched_model_twice():
+    runner = (ROOT / "run_hubble_baseline_quick_standard.xonsh").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'speeds = ("quick", "standard")' in runner
+    assert "for speed in speeds:" in runner
+    assert "$QVC_HUBBLE_SPEED = speed" in runner
+    assert '$QVC_HUBBLE_MINIMAL_PLOTS = "false"' in runner
+    assert '$QVC_HUBBLE_COMPLETENESS_LF_MODEL = "shen"' in runner
+    assert '$QVC_HUBBLE_SHEN_LF_MODE = "type1_attenuated"' in runner
+    assert '$QVC_HUBBLE_COMPLETENESS_MODE = "2d"' in runner
+    assert '$QVC_HUBBLE_MAGNITUDE_CONVENTION = "dereddened"' in runner
+    assert '$QVC_HUBBLE_COMPLETENESS_MAGNITUDE = "attenuated"' in runner
+    assert '$QVC_CUT_COMPLETENESS_MAG_2500_MIN = "18.5"' in runner
+    assert '$QVC_CUT_COMPLETENESS_MAG_2500_MAX = "24.0"' in runner
+    assert '$QVC_HUBBLE_SPECTRA_FIT_H5 = str(spectra_catalog)' in runner
+    assert 'fhostpsf_resumed_m2500norm12.h5' in runner
+    assert '$QVC_HUBBLE_PREFIX = run_prefix' in runner
+    assert 'run_prefix = f"{prefix_stem}_{speed}"' in runner
+    assert 'runner = repo_root / "run_hubble.xonsh"' in runner
+    assert "xonsh @(str(runner))" in runner
+    assert "QVC_HUBBLE_RESUME cannot be shared" in runner
+    assert "total jobs: 2 (quick, then standard)" in runner
+    assert "run_hubble_all_lf_models.xonsh" not in runner
+
+
+def test_shen_type1_fraction_matches_fiducial_formula_and_caps_at_z2():
+    log_lx = np.array([43.0, 44.0, 45.0])
+    psi = shen_absorbed_fraction(log_lx, 1.0)
+
+    np.testing.assert_allclose(
+        shen_type1_fraction(log_lx, 1.0),
+        (1.0 - psi) / (1.0 + psi),
+    )
+    np.testing.assert_allclose(
+        shen_type1_fraction(log_lx, 2.0),
+        shen_type1_fraction(log_lx, 5.0),
+    )
+    assert np.all((psi >= 0.20) & (psi <= 0.84))
+
+
+def test_shen_type1_nh_bins_sum_to_total_population_fraction():
+    log_lx = np.linspace(42.0, 47.0, 30)
+    f_20_21, f_21_22 = _shen_type1_nh_bin_fractions(log_lx, 1.4)
+
+    np.testing.assert_allclose(
+        f_20_21 + f_21_22,
+        shen_type1_fraction(log_lx, 1.4),
+        rtol=1e-12,
+        atol=1e-14,
+    )
+    assert np.all(f_20_21 >= 0.0)
+    assert np.all(f_21_22 >= 0.0)
+
+
+def test_build_shen_type1_modes_use_bolometric_lf_and_attenuation(
+    tmp_path,
+    monkeypatch,
+):
+    log_lbol = np.linspace(43.0, 49.0, 80)
+    log_phi = -5.0 - 0.15 * (log_lbol - 45.0) ** 2
+    calls = {"bolometric": 0, "tau": 0, "log_nh": []}
+
+    def fake_return_bolometric_qlf(redshift, model):
+        calls["bolometric"] += 1
+        assert model == SHEN_GLOBAL_FIT
+        return log_lbol, log_phi - 0.05 * redshift
+
+    fake_utilities = types.ModuleType("utilities")
+    fake_utilities.return_bolometric_qlf = fake_return_bolometric_qlf
+    fake_utilities.return_dtg = lambda redshift: 1.0 + 0.1 * redshift
+    monkeypatch.setitem(sys.modules, "utilities", fake_utilities)
+
+    class FakeBackend:
+        @staticmethod
+        def l_band(log_lbol_lsun, nu):
+            offset = 1.0 if nu == -4.0 else 0.5
+            return 10.0 ** (log_lbol_lsun - offset)
+
+        @staticmethod
+        def l_band_dispersion(log_lbol_lsun, nu):
+            return 0.20
+
+        @staticmethod
+        def return_tau(log_nh, nu, dust_to_gas):
+            calls["tau"] += 1
+            calls["log_nh"].append(log_nh)
+            return np.log(10.0) * 0.15 * (log_nh - 20.0) * dust_to_gas
+
+    monkeypatch.setattr(
+        "qvc.hubble.completeness_mock_catalog._load_shen_c_backend",
+        lambda _: FakeBackend(),
+    )
+
+    intrinsic, intrinsic_m, z_bins = build_shen_lf(
+        tmp_path,
+        mode="type1_intrinsic",
+    )
+    attenuated, attenuated_m, attenuated_z = build_shen_lf(
+        tmp_path,
+        mode="type1_attenuated",
+    )
+
+    assert intrinsic.shape == attenuated.shape == (40, log_lbol.size)
+    np.testing.assert_allclose(intrinsic_m, attenuated_m)
+    np.testing.assert_allclose(z_bins, attenuated_z)
+    assert calls["bolometric"] == 80
+    assert calls["tau"] > 0
+    assert min(calls["log_nh"]) >= 20.0
+    assert max(calls["log_nh"]) < 22.0
+    assert np.all(np.isfinite(intrinsic))
+    assert np.all(np.isfinite(attenuated))
+    assert np.sum(10.0**attenuated) < np.sum(10.0**intrinsic)
+
+    monkeypatch.setattr(
+        FakeBackend,
+        "return_tau",
+        staticmethod(lambda log_nh, nu, dust_to_gas: 0.0),
+    )
+    zero_attenuation, zero_attenuation_m, zero_attenuation_z = build_shen_lf(
+        tmp_path,
+        mode="type1_attenuated",
+    )
+    np.testing.assert_allclose(zero_attenuation_m, intrinsic_m)
+    np.testing.assert_allclose(zero_attenuation_z, z_bins)
+    np.testing.assert_allclose(
+        zero_attenuation,
+        intrinsic,
+        rtol=2e-12,
+        atol=2e-12,
     )
 
 
@@ -580,7 +872,10 @@ def _write_fake_sim_file(
         handle.create_dataset("apparent_mag_2500", data=m2500)
         if include_alpha:
             alpha_lambda = alpha_center + 0.12 * (z - np.mean(z)) + rng.normal(0.0, 0.08, size=n)
-            handle.create_dataset("alpha_lambda", data=alpha_lambda)
+            handle.create_dataset(
+                "alpha_nu_lf_conversion",
+                data=-alpha_lambda - 2.0,
+            )
         if include_fhost:
             f_host = np.clip(0.25 + 0.08 * (z - np.mean(z)) + rng.normal(0.0, 0.05, size=n), 0.01, 0.9)
             handle.create_dataset("f_host_2500_psf", data=f_host)
@@ -859,6 +1154,45 @@ def test_completeness_callables_return_zero_for_nonfinite_queries():
     )
 
 
+def test_completeness3d_warning_uses_physical_bin_edges_and_axis_counts(capsys):
+    mag_edges = np.linspace(18.5, 24.0, 31)
+    z_edges = np.linspace(0.0, 4.0, 41)
+    fhost_edges = np.linspace(0.0, 1.0, 21)
+    mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
+    z_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
+    fhost_centers = 0.5 * (fhost_edges[:-1] + fhost_edges[1:])
+    cube = np.ones(
+        (len(mag_centers), len(z_centers), len(fhost_centers)),
+        dtype=float,
+    )
+    comp3 = hcr.Completeness3D(
+        mag_centers,
+        z_centers,
+        fhost_centers,
+        cube,
+        magnitude_support=(18.5, 24.0),
+    )
+
+    comp3(
+        np.array([18.5, 24.0]),
+        np.array([0.0, 4.0]),
+        np.array([0.0, 1.0]),
+    )
+    assert "[WARNING]" not in capsys.readouterr().out
+
+    comp3(
+        np.array([18.4, 20.0, 20.0, np.nan]),
+        np.array([1.0, -0.1, 1.0, 1.0]),
+        np.array([0.5, 0.5, 1.1, 0.5]),
+    )
+    warning = capsys.readouterr().out
+    assert "calibrated physical support" in warning
+    assert "m=[18.50, 24.00]" in warning
+    assert "z=[0.00, 4.00]" in warning
+    assert "f_host=[0.000, 1.000]" in warning
+    assert "counts: m=1, z=1, f_host=1, nonfinite=1, any=4" in warning
+
+
 def test_completeness_callables_linearly_extrapolate_redshift_without_edge_clipping():
     mag_centers = np.array([20.0, 21.0])
     z_centers = np.array([1.0, 2.0])
@@ -903,7 +1237,9 @@ def test_get_completeness_function_4d_fhost_alpha_uses_mock_alpha_dataset(tmp_pa
 
     assert completeness_params[0].mode == "4d_fhost_alpha"
     alpha_model = completeness_params[-1]
-    assert alpha_model["source"] == "mock_h5_dataset:alpha_lambda"
+    assert alpha_model["source"] == (
+        "mock_h5_dataset:alpha_nu_lf_conversion_converted_to_alpha_lambda"
+    )
     assert alpha_model["n_mock"] > 0
     assert abs(alpha_model["alpha_mean"] - (-0.95)) < 0.25
     host_model = completeness_params[-2]
@@ -938,33 +1274,161 @@ def test_get_completeness_function_4d_fhost_alpha_falls_back_to_observed_alpha(t
     assert abs(alpha_model["alpha_mean"] - np.median(df_agn["alpha_lambda"])) < 0.05
 
 
-def test_save_mock_catalog_persists_alpha_lambda(tmp_path):
+@pytest.mark.parametrize("ambiguous_name", ("PL_slope", "alpha_nu"))
+def test_mock_alpha_reader_rejects_ambiguous_legacy_slope_aliases(
+    tmp_path,
+    ambiguous_name,
+):
+    path = tmp_path / f"ambiguous_{ambiguous_name}.h5"
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset(ambiguous_name, data=np.array([-1.5, -1.4]))
+
+    with h5py.File(path, "r") as handle:
+        values, source = hcr._read_mock_alpha_lambda(handle)
+
+    assert values is None
+    assert source is None
+
+
+def test_mock_alpha_reader_retains_explicit_pre_schema4_alpha_lambda(tmp_path):
+    path = tmp_path / "legacy_explicit_alpha_lambda.h5"
+    expected = np.array([-1.5, -1.4])
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("alpha_lambda", data=expected)
+
+    with h5py.File(path, "r") as handle:
+        values, source = hcr._read_mock_alpha_lambda(handle)
+
+    np.testing.assert_array_equal(values, expected)
+    assert source == "mock_h5_dataset:alpha_lambda"
+
+
+def test_mock_alpha_attr_reader_uses_only_explicit_lf_conversion_alpha_nu():
+    model = hcr._alpha_lambda_model_from_h5_attrs(
+        {
+            "alpha_nu_lf_conversion_parent_mean": -0.4,
+            "alpha_nu_lf_conversion_parent_sigma": 0.25,
+        }
+    )
+
+    assert model["alpha_mean"] == pytest.approx(-1.6)
+    assert model["alpha_sigma"] == pytest.approx(0.25)
+    assert model["source"] == (
+        "mock_h5_attrs:alpha_nu_lf_conversion_converted_to_alpha_lambda"
+    )
+
+
+@pytest.mark.parametrize(
+    "attrs",
+    (
+        {"alpha_nu_parent_mean": -0.4, "alpha_nu_parent_sigma": 0.25},
+        {"alpha_nu_input_mean": -0.4, "alpha_nu_input_sigma": 0.25},
+        {"alpha_nu_mean": -0.4, "alpha_nu_sigma": 0.25},
+    ),
+)
+def test_mock_alpha_attr_reader_rejects_generic_alpha_nu_aliases(attrs):
+    assert hcr._alpha_lambda_model_from_h5_attrs(attrs) is None
+
+
+def test_save_mock_catalog_persists_explicit_lf_conversion_slope(tmp_path):
     out = tmp_path / "mock_with_alpha.h5"
     z = np.array([0.5, 1.0, 1.5])
     m_i = np.array([20.1, 21.2, 22.3])
     m2500 = np.array([19.9, 21.0, 22.1])
-    alpha_lambda = np.array([-1.2, -1.4, -1.6])
+    alpha_nu = np.array([-0.8, -0.6, -0.4])
 
     save_mock_catalog(
         out,
         z,
         m_i,
         m2500,
-        alpha_lambda_all=alpha_lambda,
-        alpha_nu_parent_mean=-0.5,
-        alpha_nu_parent_sigma=0.3,
+        alpha_nu_lf_conversion_all=alpha_nu,
+        alpha_nu_lf_conversion_parent_mean=-0.5,
+        alpha_nu_lf_conversion_parent_sigma=0.3,
+        lf_model="shen",
+        shen_lf_mode="type1_attenuated",
     )
 
     with h5py.File(out, "r") as handle:
-        np.testing.assert_allclose(handle["alpha_lambda"][:], alpha_lambda)
-        np.testing.assert_allclose(handle["alpha_nu"][:], -alpha_lambda - 2.0)
-        assert handle.attrs["alpha_lambda_parent_mean"] == -1.5
-        assert handle.attrs["alpha_lambda_parent_sigma"] == 0.3
+        np.testing.assert_allclose(
+            handle["alpha_nu_lf_conversion"][:], alpha_nu
+        )
+        assert "alpha_lambda_lf_conversion" not in handle
+        assert "alpha_lambda_lf_conversion_parent_mean" not in handle.attrs
+        assert "alpha_lambda_lf_conversion_parent_sigma" not in handle.attrs
+        assert handle.attrs["alpha_nu_lf_conversion_mean"] == pytest.approx(
+            np.mean(alpha_nu)
+        )
+        assert handle.attrs["alpha_nu_lf_conversion_sigma"] == pytest.approx(
+            np.std(alpha_nu, ddof=1)
+        )
+        assert handle.attrs["alpha_nu_lf_conversion_parent_mean"] == -0.5
+        assert handle.attrs["alpha_nu_lf_conversion_parent_sigma"] == 0.3
         assert handle.attrs["thinning_probability"] == 1.0
         assert handle.attrs["mock_count_scale"] == 1.0
+        assert handle.attrs["lf_model"] == "shen"
+        assert handle.attrs["shen_lf_mode"] == "type1_attenuated"
 
 
-def test_generate_fresh_completeness_uses_full_area_without_thinning(
+def test_area_scaled_sampling_plan_and_histogram_normalization_are_invariant():
+    plan = plan_area_scaled_mock_sampling(
+        273.25,
+        proposal_area_deg2=FULL_SKY_AREA_DEG2,
+        oversample=8.0,
+    )
+    assert plan["effective_sampled_area_deg2"] == pytest.approx(8.0 * 273.25)
+    assert plan["thinning_probability"] == pytest.approx(
+        8.0 * 273.25 / FULL_SKY_AREA_DEG2
+    )
+    assert plan["mock_count_scale"] == pytest.approx(1.0 / 8.0)
+    assert plan["realized_oversample"] == pytest.approx(8.0)
+
+    observed = np.array([[4.0, 8.0], [3.0, 6.0]])
+    target_mock = np.array([[8.0, 16.0], [6.0, 12.0]])
+    mag_centers = np.array([19.0, 21.0])
+    baseline = hcr._scaled_completeness_ratio(
+        observed,
+        target_mock,
+        mag_centers,
+        label="baseline",
+        count_scale=1.0,
+    )
+    oversampled = hcr._scaled_completeness_ratio(
+        observed,
+        8.0 * target_mock,
+        mag_centers,
+        label="oversampled",
+        count_scale=1.0 / 8.0,
+    )
+    np.testing.assert_allclose(oversampled, baseline)
+
+
+def test_area_oversampling_reduces_parent_count_noise():
+    rng = np.random.default_rng(123)
+    expected_target_count = 100.0
+    one_x = rng.poisson(expected_target_count, size=20_000)
+    eight_x = rng.poisson(8.0 * expected_target_count, size=20_000) / 8.0
+
+    assert np.std(eight_x) < 0.4 * np.std(one_x)
+
+
+def test_area_scaled_mock_metadata_is_strictly_validated(tmp_path):
+    path = tmp_path / "bad_area_metadata.h5"
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset("z", data=np.array([1.0, 2.0]))
+        handle.attrs["mock_count_scale"] = 0.5
+        handle.attrs["target_area_deg2"] = 100.0
+        handle.attrs["proposal_area_deg2"] = 1000.0
+        handle.attrs["effective_sampled_area_deg2"] = 200.0
+        handle.attrs["thinning_probability"] = 0.1
+        handle.attrs["stored_object_count"] = 2
+
+    with h5py.File(path, "r") as handle:
+        with pytest.raises(ValueError, match="effective area inconsistent"):
+            hcr._read_mock_count_scale(handle, path)
+
+
+def test_generate_fresh_completeness_uses_scaled_full_sky_and_cache(
     tmp_path,
     monkeypatch,
 ):
@@ -972,16 +1436,34 @@ def test_generate_fresh_completeness_uses_full_area_without_thinning(
     z_all = np.array([0.5, 1.0])
     m_all = np.array([20.0, 21.0])
     m_2500_all = np.array([19.8, 20.8])
-    alpha_lambda_all = np.array([-1.5, -1.6])
+    alpha_nu_all = np.array([-0.5, -0.4])
+
+    monkeypatch.setenv("QVC_HUBBLE_SHEN_LF_MODE", "type1_attenuated")
+
+    def fake_build_completeness_lf(
+        lf_model,
+        *,
+        shen_lf_mode,
+        z_range,
+        target_cosmology,
+        progress=False,
+    ):
+        calls["lf_model"] = lf_model
+        calls["shen_lf_mode"] = shen_lf_mode
+        calls["lf_progress"] = progress
+        return types.SimpleNamespace(
+            model_id=lf_model,
+            phi_log10=np.zeros((2, 2)),
+            native_magnitude_grid=np.array([-24.0, -23.0]),
+            redshift_grid=np.array([0.0, 1.0]),
+            reference_wavelength_angstrom=2500.0,
+            native_to_monochromatic_ab_offset=0.0,
+        )
 
     monkeypatch.setattr(
         hubble_fit,
-        "build_shen_lf",
-        lambda _: (
-            np.zeros((2, 2)),
-            np.array([-24.0, -23.0]),
-            np.array([0.0, 1.0]),
-        ),
+        "build_completeness_lf",
+        fake_build_completeness_lf,
     )
 
     def fake_mock_m_per_zbin(
@@ -993,8 +1475,10 @@ def test_generate_fresh_completeness_uses_full_area_without_thinning(
         thinning_probability,
         **kwargs,
     ):
+        calls["mock_calls"] = calls.get("mock_calls", 0) + 1
         calls["mock_area_deg2"] = area_deg2
         calls["mock_thinning_probability"] = thinning_probability
+        calls["mock_progress"] = kwargs.get("progress")
         return (
             [],
             np.array([]),
@@ -1004,37 +1488,350 @@ def test_generate_fresh_completeness_uses_full_area_without_thinning(
             m_all,
             m_2500_all,
             np.array([0, 0]),
-            alpha_lambda_all,
+            alpha_nu_all,
         )
 
-    def fake_save_mock_catalog(
-        output_path,
-        z,
-        m,
-        m_2500,
-        *,
-        thinning_probability,
-        area_deg2,
-        **kwargs,
-    ):
-        calls["save_thinning_probability"] = thinning_probability
-        calls["save_area_deg2"] = area_deg2
-
     monkeypatch.setattr(hubble_fit, "mock_m_per_zbin", fake_mock_m_per_zbin)
-    monkeypatch.setattr(hubble_fit, "save_mock_catalog", fake_save_mock_catalog)
 
     output_path = hubble_fit.generate_fresh_completeness_sim_file(
         tmp_path,
         area_deg2=74.1,
+        cache_dir=tmp_path / "cache",
     )
 
-    assert output_path.endswith("completeness/mock_completeness_catalog_fresh.h5")
-    assert calls == {
-        "mock_area_deg2": 74.1,
-        "mock_thinning_probability": 1.0,
-        "save_thinning_probability": 1.0,
-        "save_area_deg2": 74.1,
+    assert Path(output_path).parent == tmp_path / "cache"
+    assert calls["shen_lf_mode"] == "type1_attenuated"
+    assert calls["lf_progress"] is True
+    assert calls["mock_area_deg2"] == pytest.approx(hubble_fit.FULL_SKY_AREA_DEG2)
+    assert calls["mock_thinning_probability"] == pytest.approx(
+        4.0 * 74.1 / hubble_fit.FULL_SKY_AREA_DEG2
+    )
+    assert calls["mock_progress"] is True
+    with h5py.File(output_path, "r") as handle:
+        assert handle.attrs["target_area_deg2"] == pytest.approx(74.1)
+        assert handle.attrs["proposal_area_deg2"] == pytest.approx(
+            hubble_fit.FULL_SKY_AREA_DEG2
+        )
+        assert handle.attrs["effective_sampled_area_deg2"] == pytest.approx(
+            4.0 * 74.1
+        )
+        assert handle.attrs["mock_count_scale"] == pytest.approx(1.0 / 4.0)
+        assert handle.attrs["shen_lf_mode"] == "type1_attenuated"
+        np.testing.assert_array_equal(
+            handle["alpha_nu_lf_conversion"][:],
+            alpha_nu_all,
+        )
+        assert "alpha_lambda_lf_conversion" not in handle
+
+    calls_before_reuse = dict(calls)
+    reused_path = hubble_fit.generate_fresh_completeness_sim_file(
+        tmp_path,
+        area_deg2=74.1,
+        cache_dir=tmp_path / "cache",
+    )
+    assert reused_path == output_path
+    assert calls == calls_before_reuse
+
+    with h5py.File(output_path, "r+") as handle:
+        handle.create_dataset(
+            "alpha_lambda_lf_conversion",
+            data=-handle["alpha_nu_lf_conversion"][:] - 2.0,
+        )
+    regenerated_path = hubble_fit.generate_fresh_completeness_sim_file(
+        tmp_path,
+        area_deg2=74.1,
+        cache_dir=tmp_path / "cache",
+    )
+    assert regenerated_path == output_path
+    assert calls["mock_calls"] == 2
+    with h5py.File(regenerated_path, "r") as handle:
+        assert "alpha_lambda_lf_conversion" not in handle
+
+    with h5py.File(output_path, "r+") as handle:
+        handle.attrs["mock_count_scale"] = 999.0
+    regenerated_path = hubble_fit.generate_fresh_completeness_sim_file(
+        tmp_path,
+        area_deg2=74.1,
+        cache_dir=tmp_path / "cache",
+    )
+    assert regenerated_path == output_path
+    assert calls["mock_calls"] == 3
+    with h5py.File(regenerated_path, "r") as handle:
+        assert handle.attrs["mock_count_scale"] == pytest.approx(1.0 / 4.0)
+
+
+@pytest.mark.parametrize(
+    ("lf_model", "z_range", "expected_interpretation"),
+    (
+        (
+            KULKARNI2019_TYPE1_MODEL1,
+            (0.44, 3.9),
+            {
+                "low_redshift_extrapolation": True,
+                "boss_excluded_interval_overlap": True,
+                "model1_sharp_beta_feature_overlap": True,
+            },
+        ),
+        (
+            KULKARNI2019_TYPE1_MODEL1,
+            (0.44, 2.2),
+            {
+                "low_redshift_extrapolation": True,
+                "boss_excluded_interval_overlap": False,
+                "model1_sharp_beta_feature_overlap": False,
+            },
+        ),
+        (
+            KULKARNI2019_TYPE1_MODEL1,
+            (0.6, 3.5),
+            {
+                "low_redshift_extrapolation": False,
+                "boss_excluded_interval_overlap": True,
+                "model1_sharp_beta_feature_overlap": False,
+            },
+        ),
+        (
+            KULKARNI2019_TYPE1_MODEL1,
+            (3.5, 4.0),
+            {
+                "low_redshift_extrapolation": False,
+                "boss_excluded_interval_overlap": False,
+                "model1_sharp_beta_feature_overlap": True,
+            },
+        ),
+        (
+            KULKARNI2019_TYPE1_MODEL2,
+            (0.7, 3.16),
+            {
+                "low_redshift_extrapolation": False,
+                "boss_excluded_interval_overlap": True,
+                "model1_sharp_beta_feature_overlap": False,
+            },
+        ),
+        (
+            KULKARNI2019_TYPE1_MODEL3,
+            (0.7, 2.0),
+            {
+                "low_redshift_extrapolation": False,
+                "boss_excluded_interval_overlap": False,
+                "model1_sharp_beta_feature_overlap": False,
+            },
+        ),
+    ),
+)
+def test_kulkarni_requested_range_interpretation_is_cached(
+    tmp_path,
+    monkeypatch,
+    lf_model,
+    z_range,
+    expected_interpretation,
+):
+    calls = {"build": 0, "mock": 0}
+    monkeypatch.setenv(
+        "QVC_HUBBLE_COMPLETENESS_MOCK_REQUIRE_FULL_OVERSAMPLE",
+        "false",
+    )
+
+    def fake_build_completeness_lf(model_id, **kwargs):
+        calls["build"] += 1
+        return types.SimpleNamespace(
+            model_id=model_id,
+            phi_log10=np.zeros((2, 2)),
+            native_magnitude_grid=np.array([-24.0, -23.0]),
+            redshift_grid=np.asarray(z_range),
+            reference_wavelength_angstrom=1450.0,
+            native_to_monochromatic_ab_offset=0.0,
+        )
+
+    midpoint = 0.5 * (z_range[0] + z_range[1])
+
+    def fake_mock_m_per_zbin(*args, **kwargs):
+        calls["mock"] += 1
+        return (
+            [],
+            np.array([2.0]),
+            [],
+            np.array([2]),
+            np.array([midpoint, midpoint]),
+            np.array([20.0, 21.0]),
+            np.array([19.0, 23.0]),
+            np.array([0, 0]),
+            np.array([-1.5, -1.6]),
+        )
+
+    monkeypatch.setattr(
+        hubble_fit,
+        "build_completeness_lf",
+        fake_build_completeness_lf,
+    )
+    monkeypatch.setattr(
+        hubble_fit,
+        "mock_m_per_zbin",
+        fake_mock_m_per_zbin,
+    )
+
+    generation_kwargs = {
+        "area_deg2": 1.0,
+        "proposal_area_deg2": 10.0,
+        "oversample": 4.0,
+        "max_rows": 100,
+        "cache_dir": tmp_path / lf_model,
+        "lf_model": lf_model,
+        "z_range": z_range,
     }
+    output_path = hubble_fit.generate_fresh_completeness_sim_file(
+        tmp_path,
+        **generation_kwargs,
+    )
+
+    assert Path(output_path).name.startswith(f"{lf_model}_")
+    with h5py.File(output_path, "r") as handle:
+        metadata = json.loads(handle.attrs["lf_metadata_json"])
+        config_hash = str(handle.attrs["config_hash"])
+        assert handle.attrs["lf_model"] == lf_model
+        assert Path(output_path).stem.endswith(config_hash[:16])
+        assert metadata["requested_redshift_range"] == list(z_range)
+        assert metadata["redshift_extrapolation"] is expected_interpretation[
+            "low_redshift_extrapolation"
+        ]
+        assert metadata["sample_provenance"][
+            "boss_dr9_excluded_redshift_interval"
+        ] == [2.2, 3.5]
+        assert (
+            metadata["requested_range_interpretation"]
+            == expected_interpretation
+        )
+
+    calls_after_first_generation = dict(calls)
+    reused_path = hubble_fit.generate_fresh_completeness_sim_file(
+        tmp_path,
+        **generation_kwargs,
+    )
+    assert reused_path == output_path
+    assert calls == calls_after_first_generation
+
+    # The cache validator compares the complete serialized LF metadata, not
+    # only the filename hash.  Corrupting one interpretation flag must force
+    # regeneration and restore the authoritative requested-range provenance.
+    with h5py.File(output_path, "r+") as handle:
+        tampered = json.loads(handle.attrs["lf_metadata_json"])
+        interpretation = tampered["requested_range_interpretation"]
+        interpretation["boss_excluded_interval_overlap"] = not interpretation[
+            "boss_excluded_interval_overlap"
+        ]
+        handle.attrs["lf_metadata_json"] = json.dumps(
+            tampered,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    regenerated_path = hubble_fit.generate_fresh_completeness_sim_file(
+        tmp_path,
+        **generation_kwargs,
+    )
+    assert regenerated_path == output_path
+    assert calls["build"] == calls_after_first_generation["build"] + 1
+    assert calls["mock"] == calls_after_first_generation["mock"] + 1
+    with h5py.File(regenerated_path, "r") as handle:
+        restored = json.loads(handle.attrs["lf_metadata_json"])
+        assert (
+            restored["requested_range_interpretation"]
+            == expected_interpretation
+        )
+
+
+def test_generate_fresh_completeness_row_cap_updates_effective_area(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.delenv("QVC_HUBBLE_SHEN_LF_MODE", raising=False)
+    monkeypatch.setattr(
+        hubble_fit,
+        "build_completeness_lf",
+        lambda lf_model, **kwargs: types.SimpleNamespace(
+            model_id=lf_model,
+            phi_log10=np.zeros((2, 2)),
+            native_magnitude_grid=np.array([-24.0, -23.0]),
+            redshift_grid=np.array([0.0, 1.0]),
+            reference_wavelength_angstrom=2500.0,
+            native_to_monochromatic_ab_offset=0.0,
+        ),
+    )
+    values = np.arange(10, dtype=float)
+
+    def fake_mock(*args, thinning_probability, **kwargs):
+        assert thinning_probability == pytest.approx(0.4)
+        return (
+            [],
+            np.array([100.0]),
+            [],
+            np.array([10]),
+            0.5 + values / 100.0,
+            20.0 + values / 100.0,
+            19.8 + values / 100.0,
+            np.zeros(10, dtype=int),
+            np.full(10, -1.5),
+        )
+
+    monkeypatch.setattr(hubble_fit, "mock_m_per_zbin", fake_mock)
+    output_path = hubble_fit.generate_fresh_completeness_sim_file(
+        tmp_path,
+        area_deg2=100.0,
+        proposal_area_deg2=1000.0,
+        oversample=4.0,
+        max_rows=4,
+        cache_dir=tmp_path / "cache",
+    )
+
+    with h5py.File(output_path, "r") as handle:
+        assert len(handle["z"]) == 4
+        assert handle.attrs["stored_object_count"] == 4
+        assert handle.attrs["thinning_probability"] == pytest.approx(0.16)
+        assert handle.attrs["effective_sampled_area_deg2"] == pytest.approx(160.0)
+        assert handle.attrs["realized_oversample"] == pytest.approx(1.6)
+        assert handle.attrs["mock_count_scale"] == pytest.approx(0.625)
+
+
+def test_strict_mock_oversampling_rejects_row_cap(tmp_path, monkeypatch):
+    monkeypatch.setenv("QVC_HUBBLE_COMPLETENESS_MOCK_REQUIRE_FULL_OVERSAMPLE", "true")
+    monkeypatch.setattr(
+        hubble_fit,
+        "build_completeness_lf",
+        lambda lf_model, **kwargs: types.SimpleNamespace(
+            model_id=lf_model,
+            phi_log10=np.zeros((2, 2)),
+            native_magnitude_grid=np.array([-24.0, -23.0]),
+            redshift_grid=np.array([0.0, 1.0]),
+            reference_wavelength_angstrom=2500.0,
+            native_to_monochromatic_ab_offset=0.0,
+        ),
+    )
+    values = np.arange(10, dtype=float)
+    monkeypatch.setattr(
+        hubble_fit,
+        "mock_m_per_zbin",
+        lambda *args, **kwargs: (
+            [],
+            np.array([100.0]),
+            [],
+            np.array([10]),
+            0.5 + values / 100.0,
+            20.0 + values / 100.0,
+            19.8 + values / 100.0,
+            np.zeros(10, dtype=int),
+            np.full(10, -1.5),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="strict oversampling is enabled"):
+        hubble_fit.generate_fresh_completeness_sim_file(
+            tmp_path,
+            area_deg2=100.0,
+            proposal_area_deg2=1000.0,
+            oversample=4.0,
+            max_rows=4,
+            cache_dir=tmp_path / "cache",
+        )
 
 
 def test_get_completeness_function_3d_fhost_and_loglikelihood_smoke(tmp_path):
@@ -1133,3 +1930,24 @@ def test_get_completeness_function_3d_fhost_fits_host_population_on_precut_sampl
     assert host_model["observed_fit_source"] == "precut_f_host_2500_psf_vs_l2500"
     assert host_model["n_observed_population"] == len(df_precut)
     assert host_model["n_fit"] == len(df_precut)
+
+
+def test_fhost_population_model_records_approximate_v1_provenance():
+    df_postcut = _make_fake_agn_sample_with_fhost(n_agn=12, seed=123)
+    df_precut = _make_fake_agn_sample_with_fhost(n_agn=48, seed=456)
+    df_precut["f_host_2500_psf_is_approximate"] = True
+    df_precut["f_host_2500_psf_proxy_edge_clamped"] = False
+    df_precut.loc[df_precut.index[:7], "f_host_2500_psf_proxy_edge_clamped"] = True
+
+    host_model = hcr._fit_fhost_population_model(
+        df_postcut,
+        df_precut,
+        fit_logL_max=99.0,
+    )
+
+    assert host_model["f_host_2500_psf_is_approximate"] is True
+    assert host_model["n_approximate_f_host_2500_psf"] == len(df_precut)
+    assert host_model["n_edge_clamped_f_host_2500_psf"] == 7
+    assert host_model["observed_fit_source"].endswith(
+        "_approximate_v1_psf_band_interpolation"
+    )

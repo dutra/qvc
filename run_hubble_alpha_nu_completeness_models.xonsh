@@ -1,0 +1,238 @@
+#!/usr/bin/env xonsh
+
+"""Run the Wang LF through increasingly complex alpha_nu completeness models.
+
+The experiment order is intentional: the ordinary host-aware baseline runs
+first, fixed-dimension latent models follow, and the largest joint
+luminosity-plus-magnitude response runs last.  Every job uses the same v3
+spectra catalog, Wang LF, cuts, mock settings, seed, and complete plot set.
+"""
+
+import math
+from pathlib import Path
+
+
+repo_root = Path(__file__).resolve().parent
+runner = repo_root / "run_hubble.xonsh"
+if not runner.is_file():
+    raise FileNotFoundError(f"Hubble runner not found: {runner}")
+
+spectra_catalog = repo_root / (
+    "results/data/jaxqsofit/"
+    "aug24_0152pm_spectrafit_e5d2897_chisqgt20_N8000_nested_"
+    "fhostpsf_resumed_m2500norm12_v3.h5"
+)
+dry_run = __xonsh__.env.get(
+    "QVC_HUBBLE_ALPHA_COMPLETENESS_DRY_RUN", "false"
+).lower() in {"1", "true", "yes", "on"}
+if not spectra_catalog.is_file() and not dry_run:
+    raise FileNotFoundError(
+        "The latent-alpha sweep requires the completed v3 spectra catalog: "
+        f"{spectra_catalog}. Generate it first with "
+        "python3 run_resume_spectra_local.py --parallel N."
+    )
+
+if __xonsh__.env.get("QVC_HUBBLE_RESUME", "").strip():
+    raise ValueError(
+        "QVC_HUBBLE_RESUME cannot be shared across an alpha_nu model sweep. "
+        "Resume one generated run directly with run_hubble.xonsh."
+    )
+
+# Positive beta_alpha_L means more luminous quasars are bluer.  The two
+# nonzero fixed values are deliberately symmetric direction tests; override
+# them without editing this script when a different physically motivated
+# coefficient is desired.
+fixed_beta_negative = __xonsh__.env.get(
+    "QVC_HUBBLE_ALPHA_FIXED_BETA_NEGATIVE", "-0.2"
+).strip()
+fixed_beta_positive = __xonsh__.env.get(
+    "QVC_HUBBLE_ALPHA_FIXED_BETA_POSITIVE", "0.2"
+).strip()
+try:
+    fixed_beta_negative_value = float(fixed_beta_negative)
+    fixed_beta_positive_value = float(fixed_beta_positive)
+except ValueError as exc:
+    raise ValueError("Fixed alpha-luminosity beta overrides must be numeric.") from exc
+if not math.isfinite(fixed_beta_negative_value) or fixed_beta_negative_value >= 0:
+    raise ValueError("QVC_HUBBLE_ALPHA_FIXED_BETA_NEGATIVE must be finite and < 0.")
+if not math.isfinite(fixed_beta_positive_value) or fixed_beta_positive_value <= 0:
+    raise ValueError("QVC_HUBBLE_ALPHA_FIXED_BETA_POSITIVE must be finite and > 0.")
+
+# name: (completeness mode, luminosity mode, fixed beta or empty,
+#        include apparent-magnitude interactions, interpretation)
+experiments = {
+    "baseline_3d_fhost": (
+        "3d_fhost",
+        "off",
+        "",
+        False,
+        "ordinary host-aware C3 baseline; no alpha_nu model",
+    ),
+    "latent_off": (
+        "3d_fhost_latent_alpha",
+        "off",
+        "",
+        False,
+        "redshift-independent alpha_nu parent with beta_alpha_L=0",
+    ),
+    "latent_fixed0": (
+        "3d_fhost_latent_alpha",
+        "fixed",
+        "0.0",
+        False,
+        "fixed-zero numerical equivalence control for latent_off",
+    ),
+    "latent_fixed_beta_negative": (
+        "3d_fhost_latent_alpha",
+        "fixed",
+        fixed_beta_negative,
+        False,
+        "fixed luminosity trend; more luminous quasars are redder",
+    ),
+    "latent_fixed_beta_positive": (
+        "3d_fhost_latent_alpha",
+        "fixed",
+        fixed_beta_positive,
+        False,
+        "fixed luminosity trend; more luminous quasars are bluer",
+    ),
+    "latent_joint_beta": (
+        "3d_fhost_latent_alpha",
+        "joint",
+        "",
+        False,
+        "sample beta_alpha_L jointly with cosmology",
+    ),
+    "latent_off_maginteraction": (
+        "3d_fhost_latent_alpha",
+        "off",
+        "",
+        True,
+        "beta_alpha_L=0 with the expanded apparent-magnitude response",
+    ),
+    "latent_joint_beta_maginteraction": (
+        "3d_fhost_latent_alpha",
+        "joint",
+        "",
+        True,
+        "largest model: joint beta_alpha_L and magnitude interactions",
+    ),
+}
+default_experiment_names = (
+    "baseline_3d_fhost",
+    "latent_off",
+    "latent_fixed0",
+    "latent_fixed_beta_negative",
+    "latent_fixed_beta_positive",
+    "latent_joint_beta",
+    "latent_off_maginteraction",
+    "latent_joint_beta_maginteraction",
+)
+
+requested = __xonsh__.env.get(
+    "QVC_HUBBLE_ALPHA_COMPLETENESS_EXPERIMENTS",
+    ",".join(default_experiment_names),
+)
+experiment_names = tuple(
+    name.strip() for name in requested.split(",") if name.strip()
+)
+if not experiment_names:
+    raise ValueError(
+        "QVC_HUBBLE_ALPHA_COMPLETENESS_EXPERIMENTS selected no experiments."
+    )
+if len(set(experiment_names)) != len(experiment_names):
+    raise ValueError("The alpha_nu completeness experiment list has duplicates.")
+unknown = tuple(name for name in experiment_names if name not in experiments)
+if unknown:
+    raise ValueError(
+        "Unknown alpha_nu completeness experiment(s): "
+        f"{', '.join(unknown)}. Valid names: {', '.join(experiments)}"
+    )
+
+speed = __xonsh__.env.get("QVC_HUBBLE_SPEED", "quick").strip()
+prefix_stem = __xonsh__.env.get(
+    "QVC_HUBBLE_ALPHA_COMPLETENESS_PREFIX_STEM",
+    f"aug25_wang_latent_alpha_m2500norm12_{speed}",
+).strip()
+if not prefix_stem:
+    raise ValueError("QVC_HUBBLE_ALPHA_COMPLETENESS_PREFIX_STEM cannot be empty.")
+
+# Pin every non-alpha choice so the jobs are an apples-to-apples model sweep.
+$QVC_HUBBLE_SPECTRA_FIT_H5 = str(spectra_catalog)
+$QVC_HUBBLE_ALLOW_SPECTRA_CATALOG_V1 = "false"
+$QVC_HUBBLE_ALLOW_SPECTRA_CATALOG_V2 = "false"
+$QVC_HUBBLE_APPROXIMATE_V1_FHOST_2500_PSF = "false"
+$QVC_HUBBLE_COMPLETENESS_LF_MODEL = "wang2026_type1_lade_a"
+$QVC_HUBBLE_MAGNITUDE_CONVENTION = "dereddened"
+$QVC_HUBBLE_COMPLETENESS_MAGNITUDE = "attenuated"
+$QVC_HUBBLE_Z_MIN = "0.44"
+$QVC_HUBBLE_Z_MAX = "3.16"
+$QVC_HUBBLE_SPECTRA_SDSS_RUN2D = "all"
+$QVC_HUBBLE_SDSS_TARGET_SELECTION = "all"
+$QVC_HUBBLE_COMPLETENESS_STRATIFICATION = "none"
+$QVC_HUBBLE_NO_CUTS = "false"
+$QVC_CUT_COMPLETENESS_MAG_2500_MIN = "18.5"
+$QVC_CUT_COMPLETENESS_MAG_2500_MAX = "24.0"
+$QVC_HUBBLE_COMPLETENESS_MOCK_OVERSAMPLE = "4"
+$QVC_HUBBLE_COMPLETENESS_MOCK_MAX_ROWS = "2000000"
+$QVC_HUBBLE_COMPLETENESS_MOCK_PROPOSAL_AREA = "full_sky"
+$QVC_HUBBLE_COMPLETENESS_MOCK_REQUIRE_FULL_OVERSAMPLE = "true"
+$QVC_HUBBLE_COMPLETENESS_SIM_FILE = ""
+$QVC_HUBBLE_DYNESTY_SEED = "12345"
+$QVC_HUBBLE_MINIMAL_PLOTS = "false"
+$QVC_HUBBLE_SPEED = speed
+
+# Keep the parent assumptions identical unless deliberately overridden for a
+# separate sensitivity experiment.
+$QVC_HUBBLE_COMPLETENESS_ALPHA_PARENT_MEAN = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_ALPHA_PARENT_MEAN", "-0.5"
+)
+$QVC_HUBBLE_COMPLETENESS_ALPHA_PARENT_SIGMA = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_ALPHA_PARENT_SIGMA", "0.3"
+)
+$QVC_HUBBLE_COMPLETENESS_ALPHA_PARENT_LOGL_PIVOT = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_ALPHA_PARENT_LOGL_PIVOT", "45.5"
+)
+$QVC_HUBBLE_COMPLETENESS_ALPHA_PARENT_BETA_L_PRIOR = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_ALPHA_PARENT_BETA_L_PRIOR", "-0.5 0.5"
+)
+__xonsh__.env.pop("QVC_HUBBLE_SHEN_LF_MODE", None)
+$XONSH_SUBPROC_CMD_RAISE_ERROR = True
+
+print("Running the Wang alpha_nu completeness model sweep:")
+print(f"  jobs ({len(experiment_names)}): {', '.join(experiment_names)}")
+print("  order: simplest first; joint magnitude-interaction model last")
+print(f"  speed: {speed}")
+print(f"  spectra catalog: {spectra_catalog}")
+print("  Hubble magnitude: dereddened M_2500")
+print("  LF/completeness magnitude: attenuation-retaining M_2500")
+print("  parent alpha_nu: mean=-0.5, sigma=0.3 unless environment-overridden")
+print("  plots: full diagnostic set")
+if dry_run:
+    print("  dry run: delegated Hubble jobs will only be listed")
+
+for job_index, experiment_name in enumerate(experiment_names, start=1):
+    (
+        completeness_mode,
+        luminosity_mode,
+        fixed_beta,
+        magnitude_interaction,
+        description,
+    ) = experiments[experiment_name]
+    run_prefix = f"{prefix_stem}_{experiment_name}"
+
+    $QVC_HUBBLE_COMPLETENESS_MODE = completeness_mode
+    $QVC_HUBBLE_COMPLETENESS_ALPHA_LUMINOSITY_MODE = luminosity_mode
+    $QVC_HUBBLE_COMPLETENESS_ALPHA_PARENT_BETA_L = fixed_beta
+    $QVC_HUBBLE_COMPLETENESS_ALPHA_MAGNITUDE_INTERACTION = (
+        "true" if magnitude_interaction else "false"
+    )
+    $QVC_HUBBLE_PREFIX = run_prefix
+    $QVC_HUBBLE_MINIMAL_PLOTS = "false"
+
+    print(
+        f"[{job_index}/{len(experiment_names)}] {experiment_name}: "
+        f"{description}; prefix={run_prefix!r}"
+    )
+    if not dry_run:
+        xonsh @(str(runner))

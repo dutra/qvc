@@ -12,11 +12,27 @@ import pandas as pd
 from astropy.cosmology import FlatLambdaCDM
 
 
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from qvc.hubble.empirical_luminosity_functions import (
+    KULKARNI2019_TYPE1_MODEL_IDS,
+    build_empirical_lf,
+)
+
+
 ALPHA_NU = -0.5
 COSMO = FlatLambdaCDM(H0=70.0, Om0=0.3)
 LOG10_LSUN_ERG_S = np.log10(3.9e33)
 NU_2500_HZ = 2.99792458e18 / 2500.0
 AB_ABSOLUTE_MAG_ZEROPOINT = 51.59477721004232
+KULKARNI2019_PLOT_STYLES = {
+    "kulkarni2019_type1_model1": ("tab:purple", "--", "Kulkarni+19 Model 1"),
+    "kulkarni2019_type1_model2": ("tab:brown", "-.", "Kulkarni+19 Model 2"),
+    "kulkarni2019_type1_model3": ("tab:pink", ":", "Kulkarni+19 Model 3"),
+}
 
 # Shen et al. (2020), Table 3, local "polished" bolometric DPL fits.
 # Columns are z, gamma1, gamma2, log10(phi* / Mpc^-3 dex^-1), and
@@ -50,6 +66,30 @@ def m1450_to_m2500(m1450, alpha_nu=ALPHA_NU):
     return np.asarray(m1450) - 2.5 * alpha_nu * np.log10(1450.0 / 2500.0)
 
 
+def m2500_to_m1450(m2500, alpha_nu=ALPHA_NU):
+    """Invert :func:`m1450_to_m2500` using the same power-law slope."""
+    return np.asarray(m2500) + 2.5 * alpha_nu * np.log10(1450.0 / 2500.0)
+
+
+def evaluate_kulkarni2019_modes(m2500, redshift, alpha_nu=ALPHA_NU):
+    """Evaluate QVC's final Kulkarni et al. (2019) models on an M_2500 grid.
+
+    The analytic models live in their published M_1450 convention.  This
+    diagnostic alone applies the fixed-slope color conversion used by its
+    other literature overlays; the completeness sampler performs this
+    conversion draw by draw instead.
+    """
+    m1450 = np.atleast_1d(m2500_to_m1450(m2500, alpha_nu=alpha_nu)).astype(float)
+    redshift_grid = np.array([float(redshift)])
+    return {
+        model_id: np.asarray(
+            build_empirical_lf(model_id, m1450, redshift_grid, COSMO).phi_log10[0],
+            dtype=float,
+        )
+        for model_id in KULKARNI2019_TYPE1_MODEL_IDS
+    }
+
+
 def log_nu_lnu_to_ab_absolute_magnitude(log_nu_lnu, frequency_hz):
     log_lnu = np.asarray(log_nu_lnu) - np.log10(frequency_hz)
     return AB_ABSOLUTE_MAG_ZEROPOINT - 2.5 * log_lnu
@@ -78,10 +118,19 @@ def main():
     old_cwd = Path.cwd()
     os.chdir(pubtools)
     try:
+        # The archived checkout keeps a machine-specific absolute path in
+        # config.py.  Override the imported module before data_copy loads its
+        # shared library so --shen-pubtools is the authoritative location.
+        import config as shen_config
+
+        shen_homepath = f"{pubtools}{os.sep}"
+        shen_config.homepath = shen_homepath
+        shen_config.datapath = f"{shen_homepath}data{os.sep}"
+        sys.path.insert(0, f"{shen_homepath}obdata_copy{os.sep}")
+
         from utilities import return_bolometric_qlf, return_qlf_in_band
         from obdata_copy.new_load_palanque16_lf_data import load_palanque16_lf_data
         from obdata_copy import new_load_ross13_lf_data as ross13
-        from obdata_copy.new_load_kk18_lf_shape import return_kk18_lf_fitted
         # The archived pubtools config concatenates ``pubtools`` and ``data``
         # without a path separator in this loader. Point it explicitly at the
         # data directory shipped with the same Shen checkout.
@@ -172,25 +221,36 @@ def main():
                 ax.errorbar(m2500, log_phi_obs, yerr=log_phi_err, fmt="o", ms=3, capsize=2, label=label)
 
             m_eval = np.linspace(max(relevant_lo, -30.0), min(relevant_hi, -19.0), 80)
-            kk18 = return_kk18_lf_fitted(
-                m_eval + 2.5 * ALPHA_NU * np.log10(1450.0 / 2500.0),
-                redshift,
-            )
             qvc_eval = np.interp(m_eval, m2500_model, log_phi_mag)
-            ax.plot(m_eval, kk18, color="tab:purple", ls="--", lw=1.5, label="Kulkarni+19 Model 2")
-            for m_value, observed, predicted in zip(m_eval, kk18, qvc_eval):
-                rows.append(
-                    {
-                        "reference": "Kulkarni+19 Model 2",
-                        "z": redshift,
-                        "M2500": m_value,
-                        "log_phi_observed": observed,
-                        "log_phi_error": np.nan,
-                        "log_phi_qvc": predicted,
-                        "delta_log_phi_qvc_minus_observed": predicted - observed,
-                        "in_completeness_magnitude_window": True,
-                    }
+            kulkarni_modes = evaluate_kulkarni2019_modes(m_eval, redshift)
+            for model_id, log_phi_kulkarni in kulkarni_modes.items():
+                color, linestyle, label = KULKARNI2019_PLOT_STYLES[model_id]
+                ax.plot(
+                    m_eval,
+                    log_phi_kulkarni,
+                    color=color,
+                    ls=linestyle,
+                    lw=1.5,
+                    label=label,
                 )
+                for m_value, observed, predicted in zip(
+                    m_eval,
+                    log_phi_kulkarni,
+                    qvc_eval,
+                ):
+                    rows.append(
+                        {
+                            "reference": label,
+                            "lf_model": model_id,
+                            "z": redshift,
+                            "M2500": m_value,
+                            "log_phi_observed": observed,
+                            "log_phi_error": np.nan,
+                            "log_phi_qvc": predicted,
+                            "delta_log_phi_qvc_minus_observed": predicted - observed,
+                            "in_completeness_magnitude_window": True,
+                        }
+                    )
 
             ax.set_title(f"z = {redshift:.2f}")
             ax.set_xlim(-30, -19)

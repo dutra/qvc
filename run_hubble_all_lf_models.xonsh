@@ -1,0 +1,80 @@
+#!/usr/bin/env xonsh
+
+"""Run the matched baseline and every fixed empirical LF in 2D and 3D."""
+
+from pathlib import Path
+
+
+# Descriptor names are resolved by run_hubble_shen_lf_modes.xonsh.  Keep the
+# scientifically matched Shen Type-1 attenuated run as the baseline, then test
+# every empirical Type-1 LF implemented in QVC.
+lf_experiments = (
+    "shen_type1_attenuated",
+    "wang2026_type1_lade_a",
+    "palanque2016_ple_lede",
+    "kulkarni2019_type1_model1",
+    "kulkarni2019_type1_model2",
+    "kulkarni2019_type1_model3",
+)
+
+repo_root = Path(__file__).resolve().parent
+sweep_runner = repo_root / "run_hubble_shen_lf_modes.xonsh"
+if not sweep_runner.is_file():
+    raise FileNotFoundError(f"Controlled LF sweep runner not found: {sweep_runner}")
+
+# This experiment is pinned to the post-5ad45da v2 catalog whose M_2500
+# attenuation summaries use the same GRAHSP normalization (N=1.2) as the
+# fitted JAXSedFit model.  Do not silently fall back to run_hubble's legacy
+# catalog default or to the temporary v1 host-fraction approximation.
+spectra_catalog = repo_root / (
+    "results/data/jaxqsofit/"
+    "aug24_0152pm_spectrafit_e5d2897_chisqgt20_N8000_nested_"
+    "fhostpsf_resumed_m2500norm12.h5"
+)
+if not spectra_catalog.is_file():
+    raise FileNotFoundError(
+        f"Pinned v2 spectra catalog not found: {spectra_catalog}"
+    )
+
+speed = __xonsh__.env.get("QVC_HUBBLE_SPEED", "quick")
+prefix_stem = __xonsh__.env.get(
+    "QVC_HUBBLE_ALL_LF_PREFIX_STEM",
+    __xonsh__.env.get(
+        "QVC_HUBBLE_LF_PREFIX_STEM",
+        f"aug25_all_lf_models_m2500norm12_{speed}",
+    ),
+)
+
+# Pin the complete suite so a stale generic/legacy model-selection variable in
+# the invoking shell cannot silently omit an LF.  The delegated controlled
+# runner pins the common cuts, catalog compatibility, mock-area scaling,
+# oversampling, and random seed, and crosses these six LFs with 2D/3D.
+$QVC_HUBBLE_COMPLETENESS_LF_MODELS = ",".join(lf_experiments)
+$QVC_HUBBLE_LF_PREFIX_STEM = prefix_stem
+$QVC_HUBBLE_SPECTRA_FIT_H5 = str(spectra_catalog)
+$QVC_HUBBLE_EXACT_V2_SPECTRA = "true"
+$QVC_HUBBLE_ALLOW_SPECTRA_CATALOG_V1 = "false"
+$QVC_HUBBLE_APPROXIMATE_V1_FHOST_2500_PSF = "false"
+# The Hubble relation continues to use the internally dereddened AGN
+# luminosity.  Only the LF/completeness selection coordinate is attenuated,
+# matching the empirical Type-1 samples and Shen type1_attenuated baseline.
+$QVC_HUBBLE_MAGNITUDE_CONVENTION = "dereddened"
+$QVC_HUBBLE_COMPLETENESS_MAGNITUDE = "attenuated"
+$QVC_HUBBLE_Z_MIN = "0.44"
+$QVC_HUBBLE_Z_MAX = "3.16"
+$QVC_HUBBLE_SPECTRA_SDSS_RUN2D = "all"
+$QVC_HUBBLE_SDSS_TARGET_SELECTION = "all"
+$QVC_HUBBLE_COMPLETENESS_STRATIFICATION = "none"
+__xonsh__.env.pop("QVC_HUBBLE_SHEN_LF_MODES", None)
+
+print("Running the complete QVC luminosity-function comparison:")
+print(f"  luminosity functions ({len(lf_experiments)}): {', '.join(lf_experiments)}")
+print("  completeness modes per LF: 2d and 3d_fhost")
+print(f"  total Hubble jobs: {2 * len(lf_experiments)}")
+print(f"  shared prefix stem: {prefix_stem}")
+print(f"  spectra catalog: {spectra_catalog}")
+print("  spectra format: v2; 3D host fraction: exact posterior draws")
+print("  Hubble magnitude: dereddened")
+print("  LF/completeness magnitude: internally attenuated")
+
+xonsh @(str(sweep_runner))

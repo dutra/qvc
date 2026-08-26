@@ -4722,6 +4722,8 @@ def plot_dynesty(
     use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
     use_redshift_mu_term=None,
+    model_labels_override=None,
+    model_labels_latex_override=None,
 ):
     """
     Plot dynesty diagnostics: runplot, traceplot, and cornerpoints using dyplot.
@@ -4729,25 +4731,35 @@ def plot_dynesty(
     """
 
     os.makedirs(os.path.dirname(plot_path), exist_ok=True)
-    option_flags = resolve_model_option_flags(
-        cosmo_model,
-        np.asarray(results.samples).shape[1],
-        only_sna=bool(only_sna),
-        only_agn=bool(only_agn),
-        use_alpha_lambda_term=use_alpha_lambda_term,
-        use_eta_sigma_term=use_eta_sigma_term,
-        use_redshift_log_f_term=use_redshift_log_f_term,
-        use_redshift_mu_term=use_redshift_mu_term,
-    )
-    priors, model_labels, model_labels_latex = get_model_params(
-        cosmo_model,
-        only_sna=bool(only_sna),
-        only_agn=option_flags["only_agn"],
-        use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
-        use_eta_sigma_term=option_flags["use_eta_sigma_term"],
-        use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
-        use_redshift_mu_term=option_flags["use_redshift_mu_term"],
-    )
+    if model_labels_override is None:
+        option_flags = resolve_model_option_flags(
+            cosmo_model,
+            np.asarray(results.samples).shape[1],
+            only_sna=bool(only_sna),
+            only_agn=bool(only_agn),
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_log_f_term=use_redshift_log_f_term,
+            use_redshift_mu_term=use_redshift_mu_term,
+        )
+        _priors, model_labels, model_labels_latex = get_model_params(
+            cosmo_model,
+            only_sna=bool(only_sna),
+            only_agn=option_flags["only_agn"],
+            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
+            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+            use_redshift_mu_term=option_flags["use_redshift_mu_term"],
+        )
+    else:
+        model_labels = [str(value) for value in model_labels_override]
+        if len(model_labels) != np.asarray(results.samples).shape[1]:
+            raise ValueError("model_labels_override does not match sample width.")
+        model_labels_latex = (
+            [str(value) for value in model_labels_latex_override]
+            if model_labels_latex_override is not None
+            else model_labels
+        )
 
     # Cornerplot
     fig_corner, axes_corner = dyplot.cornerplot(results, labels=model_labels_latex, quantiles=[0.16, 0.5, 0.84],
@@ -7006,6 +7018,235 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 print(f"\tz: {z:.2f} | object_id: {object_id} | npca_qso: {npca_qso} | SDSS: {sdss_name} | RA: {ra:.5f} | DEC: {dec:.5f} | Residual: {residuals[idx]:.1f}")
 
     return residuals, clipping_sigma, mu_pred_median, mu_pred_std, mu_pred_std_with_scatter
+
+
+def plot_hubble_reddening_redshift_diagnostic(
+    df_agn,
+    residuals,
+    *,
+    plot_path="plots/hubble",
+    show=False,
+    filename="hubble_reddening_redshift_diagnostic.pdf",
+    sample_label=None,
+    n_bins=10,
+):
+    """Plot joint residual, fitted-reddening, and redshift diagnostics.
+
+    Each fitted spectral reddening component gets a row containing residual
+    versus reddening, residual versus redshift, and reddening versus redshift.
+    Colors expose the third variable in each projection.  Black curves are
+    medians in equal-count bins; annotations report pairwise Spearman tests.
+    """
+    residuals = np.asarray(residuals, dtype=float)
+    if residuals.ndim != 1 or residuals.size != len(df_agn):
+        raise ValueError(
+            "residuals must be one-dimensional and aligned with df_agn; "
+            f"got {residuals.shape} for {len(df_agn)} rows."
+        )
+    if "z" not in df_agn.columns:
+        raise KeyError("plot_hubble_reddening_redshift_diagnostic requires 'z'.")
+    if int(n_bins) < 1:
+        raise ValueError("n_bins must be at least 1.")
+
+    reddening_columns = ("ebv_agn", "ebv_gal")
+    reddening_labels = {
+        "ebv_agn": r"$E(B-V)_{\mathrm{AGN}}$",
+        "ebv_gal": r"$E(B-V)_{\mathrm{Gal}}$",
+    }
+    redshift_all = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
+
+    finite_z = redshift_all[np.isfinite(redshift_all)]
+    if finite_z.size:
+        z_min, z_max = np.nanmin(finite_z), np.nanmax(finite_z)
+        if z_min == z_max:
+            z_min -= 0.5
+            z_max += 0.5
+        redshift_norm = colors.Normalize(z_min, z_max)
+    else:
+        redshift_norm = colors.Normalize(0.0, 1.0)
+
+    finite_residuals = residuals[np.isfinite(residuals)]
+    residual_limit = (
+        float(np.nanpercentile(np.abs(finite_residuals), 99.0))
+        if finite_residuals.size
+        else 1.0
+    )
+    residual_limit = max(residual_limit, np.finfo(float).eps)
+    residual_norm = colors.TwoSlopeNorm(
+        vmin=-residual_limit,
+        vcenter=0.0,
+        vmax=residual_limit,
+    )
+
+    def _quantile_medians(x, y):
+        edges = np.unique(np.nanquantile(x, np.linspace(0.0, 1.0, int(n_bins) + 1)))
+        x_medians, y_medians = [], []
+        for index, (low, high) in enumerate(zip(edges[:-1], edges[1:])):
+            selected = (x >= low) & (
+                x <= high if index == len(edges) - 2 else x < high
+            )
+            if np.count_nonzero(selected) < 3:
+                continue
+            x_medians.append(np.nanmedian(x[selected]))
+            y_medians.append(np.nanmedian(y[selected]))
+        return np.asarray(x_medians), np.asarray(y_medians)
+
+    def _annotate_correlation(ax, x, y):
+        if x.size < 3 or np.nanmin(x) == np.nanmax(x) or np.nanmin(y) == np.nanmax(y):
+            text = "Spearman unavailable"
+        else:
+            rho, p_value = spearmanr(x, y)
+            text = rf"Spearman $\rho={rho:.3f}$" + "\n" + rf"$p={p_value:.2g}$"
+        ax.text(
+            0.03,
+            0.96,
+            text,
+            transform=ax.transAxes,
+            va="top",
+            fontsize=8.5,
+            bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.82},
+        )
+
+    def _scatter_with_trend(
+        ax,
+        x,
+        y,
+        color_values,
+        *,
+        cmap,
+        norm_value,
+        color_label,
+        log_x=False,
+    ):
+        points = ax.scatter(
+            x,
+            y,
+            c=color_values,
+            cmap=cmap,
+            norm=norm_value,
+            s=10,
+            alpha=0.30,
+            linewidths=0,
+            rasterized=True,
+        )
+        x_bin, y_bin = _quantile_medians(x, y)
+        ax.plot(
+            x_bin,
+            y_bin,
+            "o-",
+            color="black",
+            markerfacecolor="white",
+            markersize=3.5,
+            linewidth=1.1,
+            zorder=5,
+        )
+        if log_x:
+            ax.set_xscale("log")
+        ax.grid(alpha=0.18)
+        _annotate_correlation(ax, x, y)
+        colorbar = ax.figure.colorbar(points, ax=ax, pad=0.015, fraction=0.05)
+        colorbar.set_label(color_label, fontsize=8)
+        colorbar.ax.tick_params(labelsize=7)
+
+    fig, axes = plt.subplots(2, 3, figsize=(15.0, 8.0), constrained_layout=True)
+    for row, reddening_column in enumerate(reddening_columns):
+        ax_row = axes[row]
+        if reddening_column not in df_agn.columns:
+            for ax in ax_row:
+                ax.axis("off")
+                ax.text(
+                    0.5,
+                    0.5,
+                    f"{reddening_column} unavailable",
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="center",
+                )
+            continue
+
+        reddening_all = pd.to_numeric(
+            df_agn[reddening_column], errors="coerce"
+        ).to_numpy(dtype=float)
+        valid = (
+            np.isfinite(reddening_all)
+            & np.isfinite(residuals)
+            & np.isfinite(redshift_all)
+            & (reddening_all > 0.0)
+        )
+        if np.count_nonzero(valid) < 3:
+            for ax in ax_row:
+                ax.axis("off")
+                ax.text(
+                    0.5,
+                    0.5,
+                    f"Insufficient valid {reddening_column} data",
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="center",
+                )
+            continue
+
+        reddening = reddening_all[valid]
+        residual = residuals[valid]
+        redshift = redshift_all[valid]
+        ebv_min, ebv_max = np.nanpercentile(reddening, [1.0, 99.0])
+        if not np.isfinite(ebv_min) or ebv_min <= 0.0:
+            ebv_min = np.nanmin(reddening)
+        if ebv_max <= ebv_min:
+            ebv_max = ebv_min * (1.0 + 1e-6)
+        reddening_norm = colors.LogNorm(vmin=ebv_min, vmax=ebv_max)
+        reddening_label = reddening_labels[reddening_column]
+
+        _scatter_with_trend(
+            ax_row[0],
+            reddening,
+            residual,
+            redshift,
+            cmap="viridis",
+            norm_value=redshift_norm,
+            color_label="redshift $z$",
+            log_x=True,
+        )
+        ax_row[0].axhline(0.0, color="0.35", linestyle="--", linewidth=0.8)
+        ax_row[0].set_xlabel(reddening_label)
+        ax_row[0].set_ylabel("Hubble residual (mag)")
+
+        _scatter_with_trend(
+            ax_row[1],
+            redshift,
+            residual,
+            reddening,
+            cmap="magma",
+            norm_value=reddening_norm,
+            color_label=reddening_label,
+        )
+        ax_row[1].axhline(0.0, color="0.35", linestyle="--", linewidth=0.8)
+        ax_row[1].set_xlabel("redshift $z$")
+        ax_row[1].set_ylabel("Hubble residual (mag)")
+
+        _scatter_with_trend(
+            ax_row[2],
+            redshift,
+            reddening,
+            residual,
+            cmap="coolwarm",
+            norm_value=residual_norm,
+            color_label="Hubble residual (mag)",
+        )
+        ax_row[2].set_yscale("log")
+        ax_row[2].set_xlabel("redshift $z$")
+        ax_row[2].set_ylabel(reddening_label)
+
+    axes[0, 0].set_title("residual vs. reddening; color = redshift")
+    axes[0, 1].set_title("residual vs. redshift; color = reddening")
+    axes[0, 2].set_title("reddening vs. redshift; color = residual")
+    title = "Joint Hubble-residual, spectral-reddening, and redshift diagnostics"
+    if sample_label:
+        title += f" — {sample_label}"
+    title += f"  ($N={len(df_agn)}$)"
+    fig.suptitle(title, fontsize=14)
+    output_path = os.path.join(plot_path, filename)
+    return _save_figure(fig, output_path, dpi=200, show=show)
 
 
 def plot_hubble_residual_normality(
