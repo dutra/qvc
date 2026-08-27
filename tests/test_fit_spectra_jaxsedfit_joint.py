@@ -598,7 +598,7 @@ def test_save_spectrum_figure_uses_separate_spectrum_filename(tmp_path):
             self.show_plot = None
             self.plot_residual = None
 
-        def plot_jaxqsofit_spectrum(self, *, show_plot, plot_residual):
+        def plot_spectrum(self, *, show_plot, plot_residual):
             self.show_plot = show_plot
             self.plot_residual = plot_residual
             return plt.figure()
