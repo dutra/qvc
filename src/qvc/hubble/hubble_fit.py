@@ -66,6 +66,7 @@ from qvc.hubble.hubble_plotting import (
     get_hubble_posterior_sample_indices,
     plot_blr_diagnostics_summary,
     plot_blr_line_lags_vs_l2500,
+    plot_completeness_pre_post_cut_audit,
     plot_completeness_diagnostics,
     plot_completeness_vs_mag_at_redshifts,
     plot_cosmo_corner,
@@ -1594,6 +1595,36 @@ def _build_completeness_params(
     )
 
 
+def _plot_completeness_cut_audit(
+    completeness_params,
+    before_cuts,
+    after_cuts,
+    *,
+    plot_path,
+    completeness_mode,
+    completeness_magnitude,
+):
+    """Render one pre/post-cut audit for each active completeness map."""
+
+    magnitude_label = (
+        r"attenuated $m_{2500}$"
+        if completeness_magnitude == "attenuated"
+        else r"dereddened $m_{2500}$"
+    )
+    map_label = r"$C(m,z)$"
+
+    plot_completeness_pre_post_cut_audit(
+        completeness_params[0],
+        completeness_params[1],
+        completeness_params[2],
+        before_cuts,
+        after_cuts,
+        magnitude_col=COMPLETENESS_MAG_COL,
+        plot_path=plot_path,
+        map_label=map_label,
+        magnitude_label=magnitude_label,
+    )
+
 def _map_fit_values_to_plot_sample(
     df_plot,
     df_fit_selection,
@@ -2260,6 +2291,15 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             plot_path=plot_path,
             plot=not (compare_sigma_only or minimal_plots),
         )
+        if not compare_sigma_only:
+            _plot_completeness_cut_audit(
+                completeness_params,
+                df_agn_all,
+                df_agn_completeness,
+                plot_path=plot_path,
+                completeness_mode="2d",
+                completeness_magnitude=completeness_magnitude,
+            )
     else:
         completeness_params = None
 
@@ -3320,7 +3360,10 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             agn_pivot_context=agn_pivot_context,
         )
         print(
-            "minimal_plots=True: retained hubble_diagram_debiased.pdf and "
+            "minimal_plots=True: retained the raw and debiased Hubble diagrams, "
+            "debiased-residual diagnostic, Dynesty corner plot, redshift "
+            "histogram, completeness pre/post-cut audit, two predicted-L2500 "
+            "band plots, and "
             "hubble_plot_residuals.csv; skipped other figures."
         )
         return (

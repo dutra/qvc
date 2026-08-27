@@ -197,6 +197,37 @@ def test_completeness_magnitude_changes_run_tag():
     assert default_tag != attenuated_tag
 
 
+def test_plot_completeness_pre_post_cut_audit_writes_four_panel_pdf(tmp_path):
+    class SmoothCompleteness:
+        def __call__(self, magnitude, redshift):
+            magnitude = np.asarray(magnitude, dtype=float)
+            redshift = np.asarray(redshift, dtype=float)
+            return np.clip(
+                0.85 - 0.10 * (magnitude - 19.0) - 0.03 * redshift,
+                2e-4,
+                1.0,
+            )
+
+    before = pd.DataFrame(
+        {
+            hubble_fit.COMPLETENESS_MAG_COL: [18.0, 19.2, 20.5, 24.5, np.nan],
+            "z": [0.2, 0.8, 1.6, 3.8, 1.0],
+        }
+    )
+    after = before.iloc[[1, 2]].copy()
+    output = hubble_plotting.plot_completeness_pre_post_cut_audit(
+        SmoothCompleteness(),
+        np.linspace(18.5, 24.0, 16),
+        np.linspace(0.05, 3.95, 20),
+        before,
+        after,
+        plot_path=tmp_path,
+    )
+
+    expected = tmp_path / "completeness_audit_pre_post_cuts.pdf"
+    assert expected.exists()
+    assert expected.stat().st_size > 0
+    assert output is not None
 def test_completeness_magnitude_never_falls_back_to_another_source():
     attenuated_only = pd.DataFrame(
         {
@@ -3611,7 +3642,13 @@ def test_run_mcmc_pipeline_uses_explicit_parent_sample_for_completeness_map(monk
         lambda df_arg, *args, **kwargs: (
             completeness_sample_ids.append(df_arg["object_id"].tolist()),
             (
-                np.ones((2, 2)),
+                lambda magnitude, redshift: np.ones(
+                    np.broadcast_shapes(
+                        np.shape(magnitude),
+                        np.shape(redshift),
+                    ),
+                    dtype=float,
+                ),
                 np.array([19.0, 20.0]),
                 np.array([0.5, 1.0]),
                 0.5,
@@ -3648,6 +3685,13 @@ def test_run_mcmc_pipeline_uses_explicit_parent_sample_for_completeness_map(monk
 
     assert result[6].shape == (len(df_fit),)
     assert completeness_sample_ids == [df_parent["object_id"].tolist()]
+    audit_paths = list(
+        (tmp_path / "plots" / "hubble" / "unit").glob(
+            "*/completeness_audit_pre_post_cuts.pdf"
+        )
+    )
+    assert len(audit_paths) == 1
+    assert audit_paths[0].stat().st_size > 0
 
 
 def _patch_run_single_plot_stack(monkeypatch):

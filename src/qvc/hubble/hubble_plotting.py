@@ -7693,6 +7693,149 @@ def plot_completeness_vs_mag_at_redshifts(
     _save_figure(fig, os.path.join(completeness_path, "completeness_vs_mag_at_redshifts.pdf"), dpi=300, show=show)
 
 
+def plot_completeness_pre_post_cut_audit(
+    p_detect,
+    mag_centers,
+    z_centers,
+    before_cuts,
+    after_cuts,
+    *,
+    magnitude_col=COMPLETENESS_MAG_COL,
+    plot_path="plots/hubble",
+    filename="completeness_audit_pre_post_cuts.pdf",
+    map_label=r"$C(m,z)$",
+    magnitude_label=r"$m_{2500}$",
+    show=False,
+):
+    """Plot the frozen completeness map against samples before and after cuts.
+
+    The two rows use one identical map and color normalization.  The left
+    panels show the catalog locations over the map; the right panels show the
+    completeness evaluated at each object's observed ``(m, z)``.  Counts
+    outside the finite map-center rectangle are reported rather than silently
+    hidden by the axes limits.
+    """
+
+    required = {magnitude_col, "z"}
+    for sample_name, sample in (
+        ("before cuts", before_cuts),
+        ("after cuts", after_cuts),
+    ):
+        missing = required - set(sample.columns)
+        if missing:
+            raise KeyError(
+                f"Completeness audit {sample_name} sample is missing "
+                f"{sorted(missing)}."
+            )
+
+    mag_centers = np.asarray(mag_centers, dtype=float)
+    z_centers = np.asarray(z_centers, dtype=float)
+    if (
+        mag_centers.ndim != 1
+        or z_centers.ndim != 1
+        or len(mag_centers) < 2
+        or len(z_centers) < 2
+        or np.any(~np.isfinite(mag_centers))
+        or np.any(~np.isfinite(z_centers))
+    ):
+        raise ValueError("Completeness audit requires finite one-dimensional grids.")
+
+    mesh_mag, mesh_z = np.meshgrid(mag_centers, z_centers, indexing="ij")
+    mesh_completeness = np.asarray(p_detect(mesh_mag, mesh_z), dtype=float)
+    if mesh_completeness.shape != mesh_mag.shape:
+        raise ValueError(
+            "Completeness map returned an incompatible audit-grid shape: "
+            f"{mesh_completeness.shape}, expected {mesh_mag.shape}."
+        )
+
+    dm = float(np.median(np.diff(mag_centers)))
+    dz = float(np.median(np.diff(z_centers)))
+    mag_edges = np.concatenate(
+        ([mag_centers[0] - 0.5 * dm], mag_centers + 0.5 * dm)
+    )
+    z_edges = np.concatenate(([z_centers[0] - 0.5 * dz], z_centers + 0.5 * dz))
+    norm = colors.LogNorm(vmin=1e-5, vmax=1.0, clip=True)
+
+    fig, axes = plt.subplots(2, 2, figsize=(14.5, 10), constrained_layout=True)
+    samples = (("Before Hubble-quality cuts", before_cuts),
+               ("After Hubble-quality cuts", after_cuts))
+    image = None
+    for row, (sample_label, sample) in enumerate(samples):
+        mag = pd.to_numeric(sample[magnitude_col], errors="coerce").to_numpy(dtype=float)
+        redshift = pd.to_numeric(sample["z"], errors="coerce").to_numpy(dtype=float)
+        finite = np.isfinite(mag) & np.isfinite(redshift)
+        completeness = np.full(len(sample), np.nan, dtype=float)
+        if np.any(finite):
+            completeness[finite] = np.asarray(
+                p_detect(mag[finite], redshift[finite]), dtype=float
+            )
+        finite_value = finite & np.isfinite(completeness)
+        outside = finite & (
+            (mag < mag_edges[0])
+            | (mag > mag_edges[-1])
+            | (redshift < z_edges[0])
+            | (redshift > z_edges[-1])
+        )
+        below_floor = finite_value & (completeness < norm.vmin)
+
+        ax_map = axes[row, 0]
+        image = ax_map.pcolormesh(
+            mag_edges,
+            z_edges,
+            np.clip(mesh_completeness.T, norm.vmin, norm.vmax),
+            shading="auto",
+            cmap="viridis",
+            norm=norm,
+            rasterized=True,
+        )
+        ax_map.scatter(
+            mag[finite], redshift[finite], s=5, color="white", alpha=0.32,
+            linewidths=0, rasterized=True,
+        )
+        ax_map.set_xlim(mag_edges[0], mag_edges[-1])
+        ax_map.set_ylim(z_edges[0], z_edges[-1])
+        ax_map.set_xlabel(magnitude_label)
+        ax_map.set_ylabel("z")
+        ax_map.set_title(f"{sample_label}: {np.count_nonzero(finite):,} finite objects")
+        ax_map.text(
+            0.02, 0.02,
+            f"outside grid: {np.count_nonzero(outside):,}\n"
+            f"nonfinite: {len(sample) - np.count_nonzero(finite):,}",
+            transform=ax_map.transAxes, ha="left", va="bottom", fontsize=10,
+            color="white", bbox={"facecolor": "black", "alpha": 0.45, "pad": 3},
+        )
+
+        ax_value = axes[row, 1]
+        if np.any(finite_value):
+            ax_value.scatter(
+                redshift[finite_value],
+                np.clip(completeness[finite_value], norm.vmin, norm.vmax),
+                c=np.clip(completeness[finite_value], norm.vmin, norm.vmax),
+                cmap="viridis", norm=norm, s=8, alpha=0.38, linewidths=0,
+                rasterized=True,
+            )
+            minimum = float(np.min(completeness[finite_value]))
+            minimum_text = f"{minimum:.3g}"
+        else:
+            minimum_text = "n/a"
+        ax_value.set_yscale("log")
+        ax_value.set_ylim(norm.vmin, 1.05)
+        ax_value.set_xlim(z_edges[0], z_edges[-1])
+        ax_value.set_xlabel("z")
+        ax_value.set_ylabel(f"{map_label} at observed $(m,z)$")
+        ax_value.set_title(
+            f"{sample_label}: minimum={minimum_text}; "
+            f"below $10^{{-5}}$={np.count_nonzero(below_floor):,}"
+        )
+
+    if image is not None:
+        colorbar = fig.colorbar(image, ax=axes[:, 0], pad=0.015)
+        colorbar.set_label(map_label)
+    fig.suptitle("Completeness audit before and after Hubble-quality cuts", fontsize=17)
+    output_path = os.path.join(plot_path or "plots/hubble", filename)
+    return _save_figure(fig, output_path, dpi=250, show=show)
+
+
 def _residual_axis_label(residual_label):
     if residual_label == "residuals":
         return "Residuals (mag)"
