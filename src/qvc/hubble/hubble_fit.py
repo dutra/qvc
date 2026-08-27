@@ -99,6 +99,7 @@ from qvc.hubble.hubble_plotting import (
     get_hubble_posterior_sample_indices,
     plot_blr_diagnostics_summary,
     plot_blr_line_lags_vs_l2500,
+    plot_completeness_pre_post_cut_audit,
     plot_completeness_diagnostics,
     plot_completeness_vs_mag_at_redshifts,
     plot_cosmo_corner,
@@ -2095,6 +2096,67 @@ def _build_completeness_params(
     )
 
 
+def _plot_completeness_cut_audit(
+    completeness_params,
+    before_cuts,
+    after_cuts,
+    *,
+    plot_path,
+    completeness_mode,
+    completeness_magnitude,
+):
+    """Render one pre/post-cut audit for each active completeness map."""
+
+    magnitude_label = (
+        r"attenuated $m_{2500}$"
+        if completeness_magnitude == "attenuated"
+        else r"dereddened $m_{2500}$"
+    )
+    map_label = {
+        "old": r"$C_{\rm old}$",
+        "color-host": r"$C_{\rm color,host}$",
+        "host-removal": r"$C_{\rm host-removal}$",
+    }.get(completeness_mode, r"$C(m,z)$")
+
+    if isinstance(completeness_params, StratifiedCompletenessBundle):
+        for code, (stratum_name, params) in enumerate(
+            zip(
+                completeness_params.stratum_names,
+                completeness_params.params_by_stratum,
+            )
+        ):
+            before = before_cuts[
+                before_cuts[COMPLETENESS_STRATUM_CODE_COL].to_numpy(dtype=int)
+                == code
+            ]
+            after = after_cuts[
+                after_cuts[COMPLETENESS_STRATUM_CODE_COL].to_numpy(dtype=int)
+                == code
+            ]
+            safe_name = str(stratum_name).replace("/", "-").replace(" ", "_")
+            plot_completeness_pre_post_cut_audit(
+                params[0], params[1], params[2], before, after,
+                magnitude_col=COMPLETENESS_MAG_COL,
+                plot_path=plot_path,
+                filename=f"completeness_audit_pre_post_cuts_{safe_name}.pdf",
+                map_label=f"{map_label} ({stratum_name})",
+                magnitude_label=magnitude_label,
+            )
+        return
+
+    plot_completeness_pre_post_cut_audit(
+        completeness_params[0],
+        completeness_params[1],
+        completeness_params[2],
+        before_cuts,
+        after_cuts,
+        magnitude_col=COMPLETENESS_MAG_COL,
+        plot_path=plot_path,
+        map_label=map_label,
+        magnitude_label=magnitude_label,
+    )
+
+
 
 
 
@@ -3449,6 +3511,15 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 float(np.diff(resolved_model.mag_centers)[0]),
                 float(np.diff(resolved_model.z_centers)[0]),
                 0.0,
+            )
+        if not compare_sigma_only:
+            _plot_completeness_cut_audit(
+                completeness_params,
+                df_agn_all,
+                df_agn_completeness,
+                plot_path=plot_path,
+                completeness_mode=completeness_mode,
+                completeness_magnitude=completeness_magnitude,
             )
     else:
         completeness_params = None
@@ -5011,7 +5082,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         print(
             "minimal_plots=True: retained the raw and debiased Hubble diagrams, "
             "debiased-residual diagnostic, Dynesty corner plot, redshift "
-            "histogram, two predicted-L2500 band plots, and "
+            "histogram, completeness pre/post-cut audit, two predicted-L2500 "
+            "band plots, and "
             "hubble_plot_residuals.csv; skipped other figures."
         )
         return (
