@@ -25,6 +25,21 @@ from qvc.hubble.completeness_strata import (
 _LOG_2PI = np.log(2.0 * np.pi)
 _INV_SQRT_2PI = 1.0 / np.sqrt(2.0 * np.pi)
 
+SELECTION_ATTENUATION_MODES = ("fixed-offset", "joint-posterior")
+JOINT_DEREDDENED_MAG_DRAWS_COL = "m_2500_dereddened_draws"
+JOINT_ATTENUATED_MAG_DRAWS_COL = "m_2500_attenuated_model_draws"
+JOINT_POSTERIOR_VALID_COUNT_COL = "joint_posterior_valid_count"
+
+
+def normalize_selection_attenuation_mode(mode):
+    normalized = str(mode).strip().lower()
+    if normalized not in SELECTION_ATTENUATION_MODES:
+        raise ValueError(
+            f"Invalid selection_attenuation_mode={mode!r}; expected one of "
+            f"{SELECTION_ATTENUATION_MODES}."
+        )
+    return normalized
+
 
 def _normal_logpdf_sum(residuals, sigma):
     residuals = np.asarray(residuals, dtype=float)
@@ -318,6 +333,238 @@ def completeness_loglike(
     loglike_terms = np.log(Z)
 
     return np.sum(loglike_terms), blob
+
+
+def _joint_attenuation_draw_arrays(agn_data, hubble_magnitude):
+    """Return validated paired v3 magnitude draws and their valid mask."""
+
+    required = {
+        JOINT_DEREDDENED_MAG_DRAWS_COL,
+        JOINT_ATTENUATED_MAG_DRAWS_COL,
+        JOINT_POSTERIOR_VALID_COUNT_COL,
+    }
+    missing = sorted(required - set(agn_data))
+    if missing:
+        raise KeyError(
+            "joint-posterior attenuation selection requires aligned v3 "
+            f"spectral posterior fields {missing}."
+        )
+    def draw_matrix(column):
+        raw = np.asarray(agn_data[column])
+        if raw.ndim == 1 and raw.dtype == object:
+            try:
+                raw = np.stack(raw)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Could not stack aligned posterior field {column!r}."
+                ) from exc
+        return np.asarray(raw, dtype=float)
+
+    dereddened = draw_matrix(JOINT_DEREDDENED_MAG_DRAWS_COL)
+    attenuated = draw_matrix(JOINT_ATTENUATED_MAG_DRAWS_COL)
+    counts_raw = np.asarray(
+        agn_data[JOINT_POSTERIOR_VALID_COUNT_COL]
+    )
+    hubble_magnitude = np.asarray(hubble_magnitude, dtype=float)
+    if dereddened.ndim != 2 or attenuated.shape != dereddened.shape:
+        raise ValueError(
+            "joint-posterior magnitude draws must be aligned two-dimensional "
+            "arrays with identical shapes."
+        )
+    n_objects, n_draws = dereddened.shape
+    if hubble_magnitude.shape != (n_objects,) or counts_raw.shape != (n_objects,):
+        raise ValueError(
+            "joint-posterior magnitude draws, valid counts, and Hubble "
+            "magnitudes must share the same object axis."
+        )
+    if not np.issubdtype(counts_raw.dtype, np.integer):
+        if not np.all(np.isfinite(counts_raw)) or not np.all(
+            counts_raw == np.floor(counts_raw)
+        ):
+            raise ValueError("joint posterior valid counts must be exact integers.")
+    counts = counts_raw.astype(int)
+    if np.any((counts <= 0) | (counts > n_draws)):
+        raise ValueError(
+            "joint posterior valid counts must be between one and the stored "
+            "draw-axis length."
+        )
+    valid = np.arange(n_draws)[None, :] < counts[:, None]
+    if np.any(~np.isfinite(dereddened[valid])) or np.any(
+        ~np.isfinite(attenuated[valid])
+    ):
+        raise ValueError("joint-posterior valid magnitude draws must be finite.")
+    if np.any(attenuated[valid] < dereddened[valid] - 1e-12):
+        raise ValueError(
+            "joint-posterior attenuated magnitude draws cannot be brighter "
+            "than their paired dereddened draws."
+        )
+    if np.any(~np.isfinite(hubble_magnitude)):
+        raise ValueError("joint-posterior Hubble magnitudes must be finite.")
+    return dereddened, attenuated, counts, valid
+
+
+def completeness_loglike_joint_posterior(
+    *,
+    hubble_magnitude,
+    hubble_model_magnitude,
+    external_error,
+    z,
+    dereddened_draws,
+    attenuated_draws,
+    valid_draw_counts,
+    completeness_model,
+    m_grid,
+    magnitude_support,
+    tiny=1e-300,
+):
+    """Marginalize an attenuated completeness integral over paired v3 draws."""
+
+    hubble_magnitude = np.asarray(hubble_magnitude, dtype=float)
+    hubble_model_magnitude = np.asarray(hubble_model_magnitude, dtype=float)
+    external_error = np.asarray(external_error, dtype=float)
+    z = np.asarray(z, dtype=float)
+    dereddened_draws = np.asarray(dereddened_draws, dtype=float)
+    attenuated_draws = np.asarray(attenuated_draws, dtype=float)
+    valid_draw_counts = np.asarray(valid_draw_counts, dtype=int)
+    n_objects, n_draws = dereddened_draws.shape
+    expected_vector = (n_objects,)
+    for name, values in (
+        ("hubble_magnitude", hubble_magnitude),
+        ("hubble_model_magnitude", hubble_model_magnitude),
+        ("external_error", external_error),
+        ("z", z),
+        ("valid_draw_counts", valid_draw_counts),
+    ):
+        if values.shape != expected_vector:
+            raise ValueError(f"{name} has shape {values.shape}; expected {expected_vector}.")
+    if attenuated_draws.shape != dereddened_draws.shape:
+        raise ValueError("Paired joint-posterior magnitude draws have different shapes.")
+    if np.any(~np.isfinite(external_error)) or np.any(external_error <= 0.0):
+        raise ValueError("joint-posterior external errors must be finite and positive.")
+    valid = np.arange(n_draws)[None, :] < valid_draw_counts[:, None]
+
+    m_grid = np.asarray(m_grid, dtype=float)
+    magnitude_support = _validate_magnitude_support(magnitude_support)
+    integration_grid = _cached_magnitude_integration_grid(
+        completeness_model, m_grid, magnitude_support
+    )
+    p_det = _cached_completeness_pdet(
+        completeness_model, integration_grid, z
+    )
+
+    safe_dereddened = np.where(valid, dereddened_draws, hubble_magnitude[:, None])
+    safe_attenuated = np.where(valid, attenuated_draws, hubble_magnitude[:, None])
+    epsilon = safe_dereddened - hubble_magnitude[:, None]
+    attenuation = safe_attenuated - safe_dereddened
+    centers = hubble_model_magnitude[:, None] + epsilon + attenuation
+    sig = external_error[:, None, None]
+    dx = (integration_grid[None, None, :] - centers[:, :, None]) / sig
+    pdf = np.exp(-0.5 * dx**2) * (_INV_SQRT_2PI / sig)
+    weighted_pdf = pdf * p_det[:, None, :]
+    weighted_pdf = np.where(valid[:, :, None], weighted_pdf, 0.0)
+
+    component_Z = np.trapezoid(weighted_pdf, integration_grid, axis=2)
+    hubble_grid = integration_grid[None, None, :] - attenuation[:, :, None]
+    component_mZ = np.trapezoid(
+        weighted_pdf * hubble_grid, integration_grid, axis=2
+    )
+    component_m2Z = np.trapezoid(
+        weighted_pdf * hubble_grid**2, integration_grid, axis=2
+    )
+    draw_norm = valid_draw_counts.astype(float)
+    Z_raw = np.sum(component_Z, axis=1) / draw_norm
+    m_Z = np.sum(component_mZ, axis=1) / draw_norm
+    m2_Z = np.sum(component_m2Z, axis=1) / draw_norm
+    Z = np.clip(Z_raw, tiny, None)
+    valid_Z = Z_raw > (100.0 * tiny)
+    expectation = np.where(valid_Z, m_Z / Z, hubble_model_magnitude)
+    expectation2 = np.where(
+        valid_Z, m2_Z / Z, hubble_model_magnitude**2
+    )
+    dmi = expectation - hubble_model_magnitude
+    sigma_selection = np.sqrt(
+        np.clip(expectation2 - expectation**2, 0.0, None)
+    )
+    blob = np.vstack([Z, dmi, sigma_selection]).astype(float)
+    return float(np.sum(np.log(Z))), blob
+
+
+def joint_posterior_completeness_loglike_for_data(
+    *,
+    completeness_params,
+    agn_data,
+    hubble_magnitude,
+    hubble_magnitude_error,
+    hubble_model_magnitude,
+    hubble_total_error,
+    z,
+):
+    """Evaluate paired-draw attenuation marginalization, including strata."""
+
+    if COMPLETENESS_MAG_COL not in agn_data:
+        raise KeyError(
+            "joint-posterior attenuation selection requires the prepared "
+            f"selection magnitude field {COMPLETENESS_MAG_COL!r}."
+        )
+    selection_magnitude = np.asarray(
+        agn_data[COMPLETENESS_MAG_COL], dtype=float
+    )
+    dereddened, attenuated, counts, _ = _joint_attenuation_draw_arrays(
+        agn_data, hubble_magnitude
+    )
+    hubble_total_error = np.asarray(hubble_total_error, dtype=float)
+    hubble_magnitude_error = np.asarray(hubble_magnitude_error, dtype=float)
+    external_error = np.sqrt(
+        np.clip(
+            hubble_total_error**2 - hubble_magnitude_error**2,
+            0.0,
+            None,
+        )
+    )
+    n_objects = len(np.asarray(z))
+
+    def evaluate(params, mask):
+        model, mag_centers = params[:2]
+        support = getattr(
+            model,
+            "magnitude_support",
+            (float(mag_centers[0]), float(mag_centers[-1])),
+        )
+        _validate_observed_magnitude_support(
+            selection_magnitude[mask], support
+        )
+        return completeness_loglike_joint_posterior(
+            hubble_magnitude=np.asarray(hubble_magnitude)[mask],
+            hubble_model_magnitude=np.asarray(hubble_model_magnitude)[mask],
+            external_error=external_error[mask],
+            z=np.asarray(z)[mask],
+            dereddened_draws=dereddened[mask],
+            attenuated_draws=attenuated[mask],
+            valid_draw_counts=counts[mask],
+            completeness_model=model,
+            m_grid=mag_centers,
+            magnitude_support=support,
+        )
+
+    if not isinstance(completeness_params, StratifiedCompletenessBundle):
+        return evaluate(completeness_params, np.ones(n_objects, dtype=bool))
+    if COMPLETENESS_STRATUM_CODE_COL not in agn_data:
+        raise KeyError(
+            f"Stratified completeness requires {COMPLETENESS_STRATUM_CODE_COL!r}."
+        )
+    codes = np.asarray(agn_data[COMPLETENESS_STRATUM_CODE_COL], dtype=int)
+    blob = empty_blob(n_objects)
+    total = 0.0
+    for code, params in enumerate(completeness_params.params_by_stratum):
+        mask = codes == code
+        if not np.any(mask):
+            raise ValueError(
+                f"No object for completeness stratum {completeness_params.stratum_names[code]!r}."
+            )
+        group_loglike, group_blob = evaluate(params, mask)
+        total += group_loglike
+        blob[:, mask] = group_blob
+    return total, blob
 
 
 
@@ -703,7 +950,11 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
                    early_de_guard=False,
                    only_sna=False,
                    only_agn=False,
-                   use_full_cov=False):
+                   use_full_cov=False,
+                   selection_attenuation_mode="fixed-offset"):
+    selection_attenuation_mode = normalize_selection_attenuation_mode(
+        selection_attenuation_mode
+    )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         only_sna=only_sna,
@@ -779,15 +1030,32 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     ll_completeness = 0.0
     comp_blob = empty_blob(N_obj)
     if completeness_params is not None:
-        ll_completeness, comp_blob = completeness_loglike_for_data(
-            completeness_params=completeness_params,
-            agn_data=agn_data,
-            m_obs=prediction["selection_magnitude"],
-            m_obs_err=prediction["selection_magnitude_error"],
-            m_model=prediction["selection_model_magnitude"],
-            mu_err=prediction["selection_total_error"],
-            z=z,
-        )
+        if selection_attenuation_mode == "fixed-offset":
+            ll_completeness, comp_blob = completeness_loglike_for_data(
+                completeness_params=completeness_params,
+                agn_data=agn_data,
+                m_obs=prediction["selection_magnitude"],
+                m_obs_err=prediction["selection_magnitude_error"],
+                m_model=prediction["selection_model_magnitude"],
+                mu_err=prediction["selection_total_error"],
+                z=z,
+            )
+        else:
+            ll_completeness, comp_blob = (
+                joint_posterior_completeness_loglike_for_data(
+                    completeness_params=completeness_params,
+                    agn_data=agn_data,
+                    hubble_magnitude=np.asarray(
+                        agn_data["apparent_mag_2500"], dtype=float
+                    ),
+                    hubble_magnitude_error=np.asarray(
+                        agn_data["apparent_mag_2500_err"], dtype=float
+                    ),
+                    hubble_model_magnitude=prediction["model_magnitude"],
+                    hubble_total_error=prediction["total_error"],
+                    z=z,
+                )
+            )
 
     # ll_cmb, _ = loglike_cmb_theta_simple(cosmo)
     
@@ -813,7 +1081,8 @@ def log_likelihood_nearbylcs(
     early_de_guard=False,
     only_sna=False,
     only_agn=False,
-    use_full_cov=False
+    use_full_cov=False,
+    selection_attenuation_mode="fixed-offset",
 ):
     """
     AGN likelihood with separate calibrators table.
@@ -823,6 +1092,9 @@ def log_likelihood_nearbylcs(
         replace mu_cosmo with MU_CAL and use MU_CAL_ERR (plus model & intrinsic terms).
     """
 
+    selection_attenuation_mode = normalize_selection_attenuation_mode(
+        selection_attenuation_mode
+    )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         only_sna=only_sna,
@@ -1056,15 +1328,28 @@ def log_likelihood_nearbylcs(
             hubble_model_magnitude=m_model_nc,
             hubble_total_error=mu_err_nc,
         )
-        ll_completeness, noncal_blob = completeness_loglike_for_data(
-            completeness_params=completeness_params,
-            agn_data=agn_data_nc,
-            m_obs=selection_magnitude_nc,
-            m_obs_err=selection_magnitude_error_nc,
-            m_model=selection_model_magnitude_nc,
-            mu_err=selection_total_error_nc,
-            z=z_nc,
-        )
+        if selection_attenuation_mode == "fixed-offset":
+            ll_completeness, noncal_blob = completeness_loglike_for_data(
+                completeness_params=completeness_params,
+                agn_data=agn_data_nc,
+                m_obs=selection_magnitude_nc,
+                m_obs_err=selection_magnitude_error_nc,
+                m_model=selection_model_magnitude_nc,
+                mu_err=selection_total_error_nc,
+                z=z_nc,
+            )
+        else:
+            ll_completeness, noncal_blob = (
+                joint_posterior_completeness_loglike_for_data(
+                    completeness_params=completeness_params,
+                    agn_data=agn_data_nc,
+                    hubble_magnitude=m_obs_nc,
+                    hubble_magnitude_error=m_err_nc,
+                    hubble_model_magnitude=m_model_nc,
+                    hubble_total_error=mu_err_nc,
+                    z=z_nc,
+                )
+            )
         comp_blob[:, mask_noncal] = noncal_blob
 
     # ========================

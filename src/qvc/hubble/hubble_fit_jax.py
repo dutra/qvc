@@ -81,6 +81,7 @@ from qvc.hubble.hubble_fit import (
     standardization_plot_posterior_view,
     _validate_agn_pivot_context_for_reference,
     validate_completeness_mode,
+    validate_selection_attenuation_configuration,
     z_pivot_agn,
     z_pivot_sna,
 )
@@ -96,6 +97,9 @@ from qvc.hubble.completeness_strata import (
     write_completeness_stratum_counts,
 )
 from qvc.hubble.hubble_likelihood import (
+    JOINT_ATTENUATED_MAG_DRAWS_COL,
+    JOINT_DEREDDENED_MAG_DRAWS_COL,
+    JOINT_POSTERIOR_VALID_COUNT_COL,
     _magnitude_integration_grid,
     _validate_observed_magnitude_support,
     log_likelihood,
@@ -458,6 +462,77 @@ def _completeness_loglike_jax(
     normalization = _trapz_jax(pdf_model * p_det, m_grid, axis=1)
     return jnp.sum(jnp.log(jnp.clip(normalization, 1e-300)))
 
+
+def _completeness_loglike_joint_posterior_jax(
+    *,
+    hubble_magnitude,
+    hubble_model_magnitude,
+    external_error,
+    z,
+    dereddened_draws,
+    attenuated_draws,
+    valid_draw_counts,
+    completeness,
+    stratum_codes=None,
+):
+    """JAX normalization for the experimental paired-draw attenuation mode."""
+
+    m_grid = completeness.get(
+        "integration_mag_grid", completeness["mag_centers"]
+    )
+    map_m_grid = jnp.clip(
+        m_grid,
+        completeness["mag_centers"][0],
+        completeness["mag_centers"][-1],
+    )
+
+    def interpolate(cube):
+        return _interp_regular_2d(
+            map_m_grid[None, :],
+            z[:, None],
+            completeness["mag_centers"],
+            completeness["z_centers"],
+            cube,
+        )
+
+    if bool(completeness.get("stratified", False)):
+        if stratum_codes is None:
+            raise ValueError(
+                "Stratified JAX completeness requires stratum codes."
+            )
+        stratum_codes = jnp.asarray(stratum_codes, dtype=jnp.int32)
+        all_values = jax.vmap(interpolate)(completeness["cube"])
+        p_det = all_values[stratum_codes, jnp.arange(z.shape[0]), :]
+    else:
+        p_det = interpolate(completeness["cube"])
+
+    n_draws = dereddened_draws.shape[1]
+    valid = jnp.arange(n_draws)[None, :] < valid_draw_counts[:, None]
+    safe_dereddened = jnp.where(
+        valid, dereddened_draws, hubble_magnitude[:, None]
+    )
+    safe_attenuated = jnp.where(
+        valid, attenuated_draws, hubble_magnitude[:, None]
+    )
+    epsilon = safe_dereddened - hubble_magnitude[:, None]
+    attenuation = safe_attenuated - safe_dereddened
+    centers = hubble_model_magnitude[:, None] + epsilon + attenuation
+    sig = external_error[:, None, None]
+    pdf = jnp.exp(
+        _normal_logpdf(
+            m_grid[None, None, :], centers[:, :, None], sig
+        )
+    )
+    weighted = jnp.where(
+        valid[:, :, None], pdf * p_det[:, None, :], 0.0
+    )
+    component_normalization = _trapz_jax(weighted, m_grid, axis=2)
+    normalization = (
+        jnp.sum(component_normalization, axis=1)
+        / valid_draw_counts.astype(component_normalization.dtype)
+    )
+    return jnp.sum(jnp.log(jnp.clip(normalization, 1e-300)))
+
 def _prepare_agn_arrays(
     agn_data: dict[str, np.ndarray],
     *,
@@ -573,6 +648,7 @@ def _log_likelihood_jax(
     use_ceph_dist_calibration: bool,
     early_de_guard: bool,
     use_redshift_mu_term: bool = False,
+    selection_attenuation_mode: str = "fixed-offset",
 ) -> jnp.ndarray:
     params = _pack_param_dict(theta, model_labels)
     if early_de_guard and cosmo_model == "Flatw0waCDM":
@@ -653,26 +729,47 @@ def _log_likelihood_jax(
 
     m_model = M_pred + mu_model
     if completeness_jax is not None:
-        selection_magnitude = agn_data_jax[COMPLETENESS_MAG_COL]
-        selection_magnitude_error = agn_data_jax[COMPLETENESS_MAG_ERR_COL]
-        attenuation_offset = (
-            selection_magnitude - agn_data_jax["apparent_mag_2500"]
-        )
-        selection_model_magnitude = m_model + attenuation_offset
         non_magnitude_variance = jnp.maximum(
             mu_err**2 - agn_data_jax["apparent_mag_2500_err"] ** 2,
             0.0,
         )
-        selection_total_error = jnp.sqrt(
-            non_magnitude_variance + selection_magnitude_error**2
-        )
-        ll_comp = _completeness_loglike_jax(
-            selection_model_magnitude,
-            selection_total_error,
-            z_agn,
-            completeness_jax,
-            agn_data_jax.get(COMPLETENESS_STRATUM_CODE_COL),
-        )
+        if selection_attenuation_mode == "fixed-offset":
+            selection_magnitude = agn_data_jax[COMPLETENESS_MAG_COL]
+            selection_magnitude_error = agn_data_jax[COMPLETENESS_MAG_ERR_COL]
+            attenuation_offset = (
+                selection_magnitude - agn_data_jax["apparent_mag_2500"]
+            )
+            selection_model_magnitude = m_model + attenuation_offset
+            selection_total_error = jnp.sqrt(
+                non_magnitude_variance + selection_magnitude_error**2
+            )
+            ll_comp = _completeness_loglike_jax(
+                selection_model_magnitude,
+                selection_total_error,
+                z_agn,
+                completeness_jax,
+                agn_data_jax.get(COMPLETENESS_STRATUM_CODE_COL),
+            )
+        else:
+            ll_comp = _completeness_loglike_joint_posterior_jax(
+                hubble_magnitude=agn_data_jax["apparent_mag_2500"],
+                hubble_model_magnitude=m_model,
+                external_error=jnp.sqrt(non_magnitude_variance),
+                z=z_agn,
+                dereddened_draws=agn_data_jax[
+                    JOINT_DEREDDENED_MAG_DRAWS_COL
+                ],
+                attenuated_draws=agn_data_jax[
+                    JOINT_ATTENUATED_MAG_DRAWS_COL
+                ],
+                valid_draw_counts=agn_data_jax[
+                    JOINT_POSTERIOR_VALID_COUNT_COL
+                ],
+                completeness=completeness_jax,
+                stratum_codes=agn_data_jax.get(
+                    COMPLETENESS_STRATUM_CODE_COL
+                ),
+            )
     else:
         ll_comp = 0.0
     return jnp.where(early_de_ok, ll_sn + ll_agn - ll_comp, -jnp.inf)
@@ -814,6 +911,7 @@ def _compute_numpy_blobs_from_samples(
     use_planck_om_prior,
     use_redshift_mu_term=False,
     early_de_guard=False,
+    selection_attenuation_mode="fixed-offset",
 ):
     logls = []
     blobs = []
@@ -838,6 +936,7 @@ def _compute_numpy_blobs_from_samples(
             only_sna=only_sna,
             only_agn=only_agn,
             use_full_cov=True,
+            selection_attenuation_mode=selection_attenuation_mode,
         )
         logls.append(float(logl))
         blobs.append(np.asarray(blob, dtype=float))
@@ -864,6 +963,7 @@ def run_single_jax(
     color_completeness_artifact=None,
     completeness_stratification="none",
     completeness_magnitude="dereddened",
+    selection_attenuation_mode="fixed-offset",
     only_sna=False,
     N=None,
     uniform_redshift_distribution=False,
@@ -926,6 +1026,13 @@ def run_single_jax(
                 df_agn_completeness_parent,
                 completeness_magnitude,
             )
+    selection_attenuation_mode = validate_selection_attenuation_configuration(
+        df_agn,
+        selection_attenuation_mode=selection_attenuation_mode,
+        completeness=completeness,
+        completeness_magnitude=completeness_magnitude,
+        only_sna=only_sna,
+    )
     speed = normalize_speed(speed)
     if only_sna and only_agn:
         raise ValueError("only_sna and only_agn cannot both be True.")
@@ -948,6 +1055,7 @@ def run_single_jax(
         use_eta_sigma_term=False,
         use_redshift_mu_term=use_redshift_mu_term,
         completeness_stratification=completeness_stratification,
+        selection_attenuation_mode=selection_attenuation_mode,
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -1082,6 +1190,12 @@ def run_single_jax(
     agn_fields += ("apparent_mag_2500", "apparent_mag_2500_err", "z", "z_err", "object_id")
     if completeness:
         agn_fields += (COMPLETENESS_MAG_COL, COMPLETENESS_MAG_ERR_COL)
+    if selection_attenuation_mode == "joint-posterior":
+        agn_fields += (
+            JOINT_DEREDDENED_MAG_DRAWS_COL,
+            JOINT_ATTENUATED_MAG_DRAWS_COL,
+            JOINT_POSTERIOR_VALID_COUNT_COL,
+        )
     if active_stratification is not None:
         agn_fields += (COMPLETENESS_STRATUM_COL, COMPLETENESS_STRATUM_CODE_COL)
     if "alpha_lambda" in df_agn_fit.columns:
@@ -1137,6 +1251,7 @@ def run_single_jax(
             use_ceph_dist_calibration=not disable_ceph_dist_calibration,
             early_de_guard=early_de_guard,
             use_redshift_mu_term=use_redshift_mu_term,
+            selection_attenuation_mode=selection_attenuation_mode,
         )
     )
     model = _build_numpyro_nested_model(model_labels, priors, loglike_fn)
@@ -1174,6 +1289,7 @@ def run_single_jax(
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
         early_de_guard=early_de_guard,
+        selection_attenuation_mode=selection_attenuation_mode,
     )
     idx_max_weight = int(np.argmax(logls))
     integrals_max_w = blobs[idx_max_weight, 0, :]
@@ -1213,6 +1329,7 @@ def run_single_jax(
         model_labels=np.asarray(model_labels, dtype=str),
         use_redshift_mu_term=bool(use_redshift_mu_term),
         completeness_mode=str(completeness_mode),
+        selection_attenuation_mode=str(selection_attenuation_mode),
     )
     if completeness and not isinstance(completeness_params, StratifiedCompletenessBundle):
         active_map = completeness_params[0]
@@ -1241,7 +1358,15 @@ def run_single_jax(
     )
     save_chains(checkpoint_file, **checkpoint_payload)
 
-    if completeness_closure_test and completeness and not only_sna:
+    if (
+        completeness_closure_test
+        and selection_attenuation_mode == "joint-posterior"
+    ):
+        print(
+            "Skipping the scalar completeness closure test for the "
+            "experimental joint-posterior attenuation mode."
+        )
+    elif completeness_closure_test and completeness and not only_sna:
         closure_bin_width = 0.2
         closure_z_lo = closure_bin_width * np.floor(z_range[0] / closure_bin_width)
         closure_z_hi = closure_bin_width * np.ceil(z_range[1] / closure_bin_width)

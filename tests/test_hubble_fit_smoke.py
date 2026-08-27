@@ -256,6 +256,22 @@ def test_completeness_magnitude_changes_run_tag():
     assert default_tag != attenuated_tag
 
 
+def test_joint_attenuation_mode_has_opt_in_run_tag_only():
+    common = ("FlatLambdaCDM", False, "quick", 100, (0.44, 3.16))
+    default_tag = hubble_fit.make_run_tag(*common)
+    explicit_fixed_tag = hubble_fit.make_run_tag(
+        *common,
+        selection_attenuation_mode="fixed-offset",
+    )
+    joint_tag = hubble_fit.make_run_tag(
+        *common,
+        selection_attenuation_mode="joint-posterior",
+    )
+    assert default_tag == explicit_fixed_tag
+    assert "attsel" not in default_tag
+    assert "_attsel-jointpost" in joint_tag
+
+
 def test_completeness_magnitude_never_falls_back_to_another_source():
     attenuated_only = pd.DataFrame(
         {
@@ -396,6 +412,227 @@ def test_attenuated_selection_inputs_shift_model_and_replace_magnitude_error():
             + selection_magnitude_error**2
         ),
     )
+
+
+def _joint_test_completeness_model():
+    mag_centers = np.linspace(18.75, 23.75, 11)
+    z_centers = np.array([0.5, 1.5])
+    completeness = np.clip(
+        1.0 - 0.16 * (mag_centers[:, None] - 18.75),
+        0.1,
+        1.0,
+    ) * np.ones((1, len(z_centers)))
+    return hubble_completeness_refactored.Completeness2D(
+        mag_centers,
+        z_centers,
+        completeness,
+        magnitude_support=(18.5, 24.0),
+    )
+
+
+def test_joint_posterior_completeness_matches_explicit_weighted_components():
+    model = _joint_test_completeness_model()
+    m_grid = model.mag_centers
+    hubble_magnitude = np.array([21.0])
+    hubble_model = np.array([22.7])
+    external_error = np.array([0.35])
+    z = np.array([0.8])
+    dereddened_draws = np.array([[20.8, 21.1, 21.25]])
+    attenuation = np.array([[0.15, 0.55, 0.9]])
+    attenuated_draws = dereddened_draws + attenuation
+
+    loglike, blob = hubble_likelihood.completeness_loglike_joint_posterior(
+        hubble_magnitude=hubble_magnitude,
+        hubble_model_magnitude=hubble_model,
+        external_error=external_error,
+        z=z,
+        dereddened_draws=dereddened_draws,
+        attenuated_draws=attenuated_draws,
+        valid_draw_counts=np.array([3]),
+        completeness_model=model,
+        m_grid=m_grid,
+        magnitude_support=model.magnitude_support,
+    )
+
+    components = []
+    for epsilon, a2500 in zip(
+        dereddened_draws[0] - hubble_magnitude[0], attenuation[0]
+    ):
+        _, component_blob = hubble_likelihood.completeness_loglike(
+            m_obs=np.array([hubble_magnitude[0] + a2500]),
+            m_obs_err=np.array([0.0]),
+            m_model=np.array([hubble_model[0] + epsilon + a2500]),
+            mu_err=external_error,
+            z=z,
+            completeness_model=model,
+            m_grid=m_grid,
+            magnitude_support=model.magnitude_support,
+        )
+        components.append(component_blob[:, 0])
+    components = np.asarray(components)
+    weights = components[:, 0]
+    component_h_means = (
+        hubble_model[0]
+        + (dereddened_draws[0] - hubble_magnitude[0])
+        + components[:, 1]
+    )
+    expected_mean = np.sum(weights * component_h_means) / np.sum(weights)
+    component_h_second = components[:, 2] ** 2 + component_h_means**2
+    expected_second = np.sum(weights * component_h_second) / np.sum(weights)
+
+    np.testing.assert_allclose(np.exp(loglike), np.mean(weights), rtol=1e-12)
+    np.testing.assert_allclose(
+        blob[1, 0], expected_mean - hubble_model[0], rtol=1e-12
+    )
+    np.testing.assert_allclose(
+        blob[2, 0],
+        np.sqrt(max(expected_second - expected_mean**2, 0.0)),
+        rtol=1e-12,
+    )
+
+
+def test_joint_posterior_identical_draws_reduce_to_fixed_offset():
+    model = _joint_test_completeness_model()
+    hubble_magnitude = np.array([21.0])
+    hubble_model = np.array([22.3])
+    external_error = np.array([0.4])
+    attenuation = 0.6
+    z = np.array([0.8])
+    draws_dereddened = np.full((1, 4), hubble_magnitude[0])
+    draws_attenuated = draws_dereddened + attenuation
+
+    fixed_loglike, fixed_blob = hubble_likelihood.completeness_loglike(
+        m_obs=hubble_magnitude + attenuation,
+        m_obs_err=np.zeros(1),
+        m_model=hubble_model + attenuation,
+        mu_err=external_error,
+        z=z,
+        completeness_model=model,
+        m_grid=model.mag_centers,
+        magnitude_support=model.magnitude_support,
+    )
+    joint_loglike, joint_blob = (
+        hubble_likelihood.completeness_loglike_joint_posterior(
+            hubble_magnitude=hubble_magnitude,
+            hubble_model_magnitude=hubble_model,
+            external_error=external_error,
+            z=z,
+            dereddened_draws=draws_dereddened,
+            attenuated_draws=draws_attenuated,
+            valid_draw_counts=np.array([4]),
+            completeness_model=model,
+            m_grid=model.mag_centers,
+            magnitude_support=model.magnitude_support,
+        )
+    )
+    np.testing.assert_allclose(joint_loglike, fixed_loglike, rtol=1e-12)
+    np.testing.assert_allclose(joint_blob, fixed_blob, rtol=1e-12)
+
+
+def test_joint_posterior_completeness_numpy_jax_parity():
+    pytest.importorskip("jax")
+    from qvc.hubble import hubble_fit_jax
+
+    model = _joint_test_completeness_model()
+    completeness_params = (
+        model,
+        model.mag_centers,
+        model.z_centers,
+        0.5,
+        1.0,
+        0.0,
+    )
+    hubble_magnitude = np.array([21.0, 21.5])
+    hubble_model = np.array([22.1, 22.8])
+    external_error = np.array([0.35, 0.45])
+    z = np.array([0.8, 1.2])
+    dereddened_draws = np.array(
+        [[20.9, 21.1, np.nan], [21.3, 21.55, 21.7]]
+    )
+    attenuated_draws = np.array(
+        [[21.2, 21.7, np.nan], [21.5, 22.0, 22.5]]
+    )
+    counts = np.array([2, 3])
+    numpy_loglike, _ = (
+        hubble_likelihood.completeness_loglike_joint_posterior(
+            hubble_magnitude=hubble_magnitude,
+            hubble_model_magnitude=hubble_model,
+            external_error=external_error,
+            z=z,
+            dereddened_draws=dereddened_draws,
+            attenuated_draws=attenuated_draws,
+            valid_draw_counts=counts,
+            completeness_model=model,
+            m_grid=model.mag_centers,
+            magnitude_support=model.magnitude_support,
+        )
+    )
+    prepared = hubble_fit_jax._prepare_completeness_for_jax(
+        completeness_params,
+        selection_magnitude=hubble_magnitude + 0.5,
+    )
+    jax_loglike = hubble_fit_jax._completeness_loglike_joint_posterior_jax(
+        hubble_magnitude=hubble_magnitude,
+        hubble_model_magnitude=hubble_model,
+        external_error=external_error,
+        z=z,
+        dereddened_draws=dereddened_draws,
+        attenuated_draws=attenuated_draws,
+        valid_draw_counts=counts,
+        completeness=prepared,
+    )
+    np.testing.assert_allclose(float(jax_loglike), numpy_loglike, rtol=1e-10)
+
+
+def test_joint_posterior_configuration_requires_dereddened_v3_draws():
+    frame = pd.DataFrame(
+        {
+            "apparent_mag_2500": [20.0],
+            "m_2500_dereddened": [20.0],
+            "m_2500_dereddened_draws": [np.array([19.9, 20.1])],
+            "m_2500_attenuated_model_draws": [np.array([20.2, 20.5])],
+            "joint_posterior_valid_count": [2],
+        }
+    )
+    assert (
+        hubble_fit.validate_selection_attenuation_configuration(
+            frame,
+            selection_attenuation_mode="joint-posterior",
+            completeness=True,
+            completeness_magnitude="attenuated",
+        )
+        == "joint-posterior"
+    )
+    dereddened, attenuated, counts, valid = (
+        hubble_likelihood._joint_attenuation_draw_arrays(
+            frame,
+            frame["apparent_mag_2500"].to_numpy(dtype=float),
+        )
+    )
+    assert dereddened.shape == attenuated.shape == (1, 2)
+    np.testing.assert_array_equal(counts, [2])
+    np.testing.assert_array_equal(valid, [[True, True]])
+    with pytest.raises(ValueError, match="dereddened"):
+        hubble_fit.validate_selection_attenuation_configuration(
+            frame.assign(apparent_mag_2500=20.2),
+            selection_attenuation_mode="joint-posterior",
+            completeness=True,
+            completeness_magnitude="attenuated",
+        )
+    with pytest.raises(ValueError, match="completeness_magnitude attenuated"):
+        hubble_fit.validate_selection_attenuation_configuration(
+            frame,
+            selection_attenuation_mode="joint-posterior",
+            completeness=True,
+            completeness_magnitude="dereddened",
+        )
+    with pytest.raises(ValueError, match="between one"):
+        hubble_fit.validate_selection_attenuation_configuration(
+            frame.assign(joint_posterior_valid_count=0),
+            selection_attenuation_mode="joint-posterior",
+            completeness=True,
+            completeness_magnitude="attenuated",
+        )
 
 
 def test_alpha_ox_cosmology_uses_equal_weight_posterior_medians(monkeypatch):
@@ -3310,6 +3547,156 @@ def test_run_single_minimal_plots_keeps_focused_diagnostic_set(monkeypatch, tmp_
     assert result[5].tolist() == list(range(len(df_agn)))
 
 
+def test_resume_replot_minimal_plots_debiases_plot_only_objects(monkeypatch, tmp_path):
+    df_agn = _make_fake_agn_sample(n_agn=4)
+    df_agn.loc[:, "z"] = np.array([0.5, 1.2, 3.3, 2.0], dtype=float)
+    df_pantheon = _make_fake_pantheon_sample()
+    priors, model_labels, _ = hubble_model.get_model_params(
+        "FlatLambdaCDM",
+        only_sna=False,
+    )
+    theta = np.array(
+        [(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels],
+        dtype=float,
+    )
+    flat_samples = np.tile(theta[None, :], (8, 1))
+    debiased_calls = []
+    replay_ids = []
+
+    monkeypatch.chdir(tmp_path)
+    _patch_run_single_plot_stack(monkeypatch)
+    generated_completeness = tmp_path / "generated_completeness.h5"
+    monkeypatch.setattr(
+        hubble_fit,
+        "estimate_sky_box_area_deg2",
+        lambda *args, **kwargs: 5.0,
+    )
+    monkeypatch.setattr(
+        hubble_fit,
+        "generate_fresh_completeness_sim_file",
+        lambda *args, **kwargs: str(generated_completeness),
+    )
+    monkeypatch.setattr(
+        hubble_fit,
+        "get_completeness_function_2d",
+        lambda *args, **kwargs: (
+            np.ones((2, 2)),
+            np.array([19.0, 20.0]),
+            np.array([0.5, 1.0]),
+            0.5,
+            0.1,
+            0.0,
+        ),
+    )
+    monkeypatch.setattr(
+        hubble_fit,
+        "plot_completeness_vs_mag_at_redshifts",
+        lambda *args, **kwargs: None,
+    )
+
+    def fake_run_mcmc_pipeline(df_agn_arg, *args, **kwargs):
+        assert df_agn_arg["object_id"].tolist() == [
+            "agn_000",
+            "agn_001",
+            "agn_003",
+        ]
+        return (
+            flat_samples,
+            model_labels,
+            lambda pts: np.zeros(len(np.atleast_2d(pts))),
+            None,
+            -20.0,
+            0.1,
+            np.array([10.0, 20.0, 30.0]),
+            np.array([0.1, 0.2, 0.3]),
+            np.array([1.0, 2.0, 3.0]),
+        )
+
+    def fake_direct_completeness_summaries(
+        *args,
+        df_agn_plot_sample,
+        **kwargs,
+    ):
+        replay_ids.extend(df_agn_plot_sample["object_id"].tolist())
+        return (
+            np.array([40.0]),
+            np.array([0.4]),
+            np.array([4.0]),
+        )
+
+    def fake_plot_hubble(*args, **kwargs):
+        if kwargs.get("debias"):
+            debiased_calls.append(kwargs)
+        n = len(args[1])
+        return (
+            np.zeros(n),
+            np.ones(n),
+            np.zeros(n),
+            np.ones(n),
+            np.ones(n),
+        )
+
+    monkeypatch.setattr(hubble_fit, "run_mcmc_pipeline", fake_run_mcmc_pipeline)
+    monkeypatch.setattr(
+        hubble_fit,
+        "_compute_direct_full_sample_completeness_summaries",
+        fake_direct_completeness_summaries,
+    )
+    monkeypatch.setattr(hubble_fit, "plot_hubble", fake_plot_hubble)
+    monkeypatch.setattr(
+        hubble_fit,
+        "compute_agn_likelihood_space_reduced_chi2",
+        lambda *args, **kwargs: pytest.fail(
+            "minimal plots must not compute likelihood-space chi-squared"
+        ),
+    )
+
+    stored_pivot_context = _agn_pivot_context(df_agn, (0.44, 3.16))
+    resume_path = tmp_path / "posterior.h5"
+    hubble_fit.save_chains(
+        str(resume_path),
+        **hubble_fit._agn_pivot_checkpoint_payload(stored_pivot_context),
+        sigma_clip_pass_stage="single",
+        object_id_fit_selection=np.asarray(
+            stored_pivot_context.reference_object_ids,
+            dtype=str,
+        ),
+    )
+
+    hubble_fit.run_single(
+        df_agn,
+        df_agn.copy(),
+        df_pantheon,
+        None,
+        True,
+        None,
+        cosmo_model="FlatLambdaCDM",
+        completeness=True,
+        use_full_cov=False,
+        resume=str(resume_path),
+        speed="fastest",
+        prefix="unit",
+        resume_replot_with_cuts=True,
+        minimal_plots=True,
+    )
+
+    assert replay_ids == ["agn_002"]
+    assert len(debiased_calls) == 1
+    np.testing.assert_array_equal(
+        debiased_calls[0]["dmi_values"],
+        np.array([10.0, 20.0, 40.0, 30.0]),
+    )
+    np.testing.assert_array_equal(
+        debiased_calls[0]["dmi_sigma"],
+        np.array([0.1, 0.2, 0.4, 0.3]),
+    )
+    np.testing.assert_array_equal(
+        debiased_calls[0]["dmi_selection_sigma"],
+        np.array([1.0, 2.0, 4.0, 3.0]),
+    )
+    assert debiased_calls[0]["dmi_posterior_draws"] is None
+
+
 @pytest.mark.parametrize(
     ("conflicting_flag", "message"),
     [
@@ -5792,6 +6179,18 @@ def test_mean_redshift_evolution_checkpoint_labels_disambiguate_optional_models(
         expected_model_labels=mu_labels,
         expected_use_redshift_mu_term=True,
     )
+    joint_payload = {
+        **payload,
+        "selection_attenuation_mode": "joint-posterior",
+    }
+    with pytest.raises(RuntimeError, match="selection attenuation mode"):
+        hubble_fit.validate_resume_checkpoint(
+            joint_payload,
+            "wrong-attenuation-mode.h5",
+            len(mu_labels),
+            n_agn,
+            expected_selection_attenuation_mode="fixed-offset",
+        )
 
 
 def test_redshift_mu_cli_is_declared_and_forwarded_in_both_entry_points():

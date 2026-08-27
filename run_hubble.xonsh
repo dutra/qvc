@@ -97,6 +97,9 @@ completeness_stratification = __xonsh__.env.get(
     "QVC_HUBBLE_COMPLETENESS_STRATIFICATION", "none"
 )
 completeness_mode = __xonsh__.env.get("QVC_HUBBLE_COMPLETENESS_MODE", "old")
+selection_attenuation_mode = __xonsh__.env.get(
+    "QVC_HUBBLE_SELECTION_ATTENUATION_MODE", "fixed-offset"
+)
 color_artifact = __xonsh__.env.get("QVC_COLOR_COMPLETENESS_ARTIFACT", "").strip()
 color_artifact_args = (
     ["--color-completeness-artifact", color_artifact]
@@ -214,6 +217,7 @@ taskset --cpu-list @(hubble_cpu_set) nice --adjustment @(hubble_nice_level) \
     --sdss-target-selection @(sdss_target_selection) \
     --completeness-stratification @(completeness_stratification) \
     --completeness-mode @(completeness_mode) \
+    --selection-attenuation-mode @(selection_attenuation_mode) \
     @(color_artifact_args) \
     @(color_support_cut_args) \
     --completeness-lf-model @(completeness_lf_model) \

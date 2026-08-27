@@ -82,8 +82,14 @@ from qvc.hubble.hubble_utils import (
     write_results_tex_variables,
 )
 from qvc.hubble.hubble_likelihood import (
+    JOINT_ATTENUATED_MAG_DRAWS_COL,
+    JOINT_DEREDDENED_MAG_DRAWS_COL,
+    JOINT_POSTERIOR_VALID_COUNT_COL,
+    SELECTION_ATTENUATION_MODES,
+    _joint_attenuation_draw_arrays,
     log_likelihood,
     log_likelihood_nearbylcs,
+    normalize_selection_attenuation_mode,
     sigma_lens_from_dc,
     sigma_mu_from_z_err,
     sigma_mu_model_from_z_err,
@@ -706,6 +712,69 @@ def build_warm_start_live_points(
 
 
 
+def validate_selection_attenuation_configuration(
+    df_agn,
+    *,
+    selection_attenuation_mode,
+    completeness,
+    completeness_magnitude,
+    only_sna=False,
+):
+    """Validate the opt-in paired-draw attenuation experiment."""
+
+    mode = normalize_selection_attenuation_mode(selection_attenuation_mode)
+    if mode == "fixed-offset":
+        return mode
+    if not completeness or only_sna:
+        raise ValueError(
+            "joint-posterior attenuation selection requires an active AGN "
+            "completeness likelihood."
+        )
+    if normalize_completeness_magnitude(completeness_magnitude) != "attenuated":
+        raise ValueError(
+            "joint-posterior attenuation selection requires "
+            "--completeness_magnitude attenuated."
+        )
+    required = {
+        "apparent_mag_2500",
+        "m_2500_dereddened",
+        JOINT_DEREDDENED_MAG_DRAWS_COL,
+        JOINT_ATTENUATED_MAG_DRAWS_COL,
+        JOINT_POSTERIOR_VALID_COUNT_COL,
+    }
+    missing = sorted(required - set(df_agn.columns))
+    if missing:
+        raise KeyError(
+            "joint-posterior attenuation selection requires v3 spectral "
+            f"fields {missing}."
+        )
+    hubble_magnitude = df_agn["apparent_mag_2500"].to_numpy(dtype=float)
+    dereddened_magnitude = df_agn["m_2500_dereddened"].to_numpy(dtype=float)
+    if not np.allclose(
+        hubble_magnitude,
+        dereddened_magnitude,
+        rtol=0.0,
+        atol=1e-12,
+    ):
+        raise ValueError(
+            "joint-posterior attenuation selection requires dereddened "
+            "m_2500 as the Hubble magnitude."
+        )
+    draw_data = {
+        JOINT_DEREDDENED_MAG_DRAWS_COL: np.stack(
+            df_agn[JOINT_DEREDDENED_MAG_DRAWS_COL].to_numpy()
+        ),
+        JOINT_ATTENUATED_MAG_DRAWS_COL: np.stack(
+            df_agn[JOINT_ATTENUATED_MAG_DRAWS_COL].to_numpy()
+        ),
+        JOINT_POSTERIOR_VALID_COUNT_COL: df_agn[
+            JOINT_POSTERIOR_VALID_COUNT_COL
+        ].to_numpy(),
+    }
+    _joint_attenuation_draw_arrays(draw_data, hubble_magnitude)
+    return mode
+
+
 def make_run_tag(
     cosmo_model,
     only_sna,
@@ -724,6 +793,7 @@ def make_run_tag(
     use_redshift_log_f_term=False,
     use_redshift_mu_term=False,
     completeness_stratification="none",
+    selection_attenuation_mode="fixed-offset",
 ):
     speed = normalize_speed(speed)
     zmin, zmax = z_range
@@ -736,6 +806,14 @@ def make_run_tag(
         f"_{completeness_mode}_compmag-{completeness_magnitude}"
         if completeness
         else "_disable_completeness"
+    )
+    selection_attenuation_mode = normalize_selection_attenuation_mode(
+        selection_attenuation_mode
+    )
+    attenuation_tag = (
+        "_attsel-jointpost"
+        if selection_attenuation_mode == "joint-posterior"
+        else ""
     )
     completeness_stratification = normalize_completeness_stratification(
         completeness_stratification
@@ -758,7 +836,7 @@ def make_run_tag(
     muz_tag = "_muz" if use_redshift_mu_term else ""
     return (
         f"{cosmo_model}_{_fit_mode_label(only_sna, only_agn)}_{speed}_{n_tag}_{z_tag}"
-        f"{completeness_tag}{stratification_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}{muz_tag}"
+        f"{completeness_tag}{stratification_tag}{attenuation_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}{muz_tag}"
     )
 
 
@@ -781,6 +859,7 @@ def make_multi_cosmology_comparison_tag(
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
     use_redshift_mu_term=False,
+    selection_attenuation_mode="fixed-offset",
 ):
     """Build the directory tag shared by multi-cosmology comparisons.
 
@@ -806,6 +885,11 @@ def make_multi_cosmology_comparison_tag(
     )
     if completeness and completeness_stratification != "none":
         completeness_tag += f"_cstrat-{completeness_stratification}"
+    selection_attenuation_mode = normalize_selection_attenuation_mode(
+        selection_attenuation_mode
+    )
+    if selection_attenuation_mode == "joint-posterior":
+        completeness_tag += "_attsel-jointpost"
     ceph_tag = "_nocephdist_planckh0" if disable_ceph_dist_calibration else ""
     planck_h0_tag = (
         "_planckh0"
@@ -1152,6 +1236,7 @@ def validate_resume_checkpoint(
     expected_use_redshift_mu_term=None,
     expected_completeness_stratification="none",
     expected_completeness_stratum_codes=None,
+    expected_selection_attenuation_mode="fixed-offset",
 ):
     required_keys = {
         "flat_samples",
@@ -1211,6 +1296,21 @@ def validate_resume_checkpoint(
         expected_stratification=expected_completeness_stratification,
         expected_codes=expected_completeness_stratum_codes,
     )
+    expected_selection_attenuation_mode = normalize_selection_attenuation_mode(
+        expected_selection_attenuation_mode
+    )
+    stored_selection_attenuation_mode = str(
+        np.asarray(
+            results.get("selection_attenuation_mode", "fixed-offset")
+        ).reshape(()).item()
+    )
+    if stored_selection_attenuation_mode != expected_selection_attenuation_mode:
+        raise RuntimeError(
+            f"Resume checkpoint '{checkpoint_file}' selection attenuation "
+            "mode does not match the current run: "
+            f"stored={stored_selection_attenuation_mode!r}, "
+            f"expected={expected_selection_attenuation_mode!r}."
+        )
 
     for key in ("dmi_max_w", "integrals_max_w"):
         value = np.asarray(results[key])
@@ -1257,6 +1357,7 @@ def _validate_resume_replot_checkpoint_params(
     expected_model_labels=None,
     expected_use_redshift_mu_term=None,
     expected_completeness_stratification="none",
+    expected_selection_attenuation_mode="fixed-offset",
 ):
     if "flat_samples" not in results:
         raise RuntimeError(
@@ -1295,6 +1396,19 @@ def _validate_resume_replot_checkpoint_params(
         expected_stratification=expected_completeness_stratification,
         expected_codes=None,
     )
+    stored_mode = str(
+        np.asarray(
+            results.get("selection_attenuation_mode", "fixed-offset")
+        ).reshape(()).item()
+    )
+    expected_mode = normalize_selection_attenuation_mode(
+        expected_selection_attenuation_mode
+    )
+    if stored_mode != expected_mode:
+        raise RuntimeError(
+            f"Resume-replot checkpoint '{checkpoint_file}' selection "
+            "attenuation mode does not match the current run."
+        )
 
 
 def _remap_resume_replot_checkpoint(
@@ -1306,6 +1420,7 @@ def _remap_resume_replot_checkpoint(
     expected_model_labels=None,
     expected_use_redshift_mu_term=None,
     expected_completeness_stratification="none",
+    expected_selection_attenuation_mode="fixed-offset",
 ):
     """Return checkpoint payload remapped to the current cut AGN fit selection."""
 
@@ -1316,6 +1431,7 @@ def _remap_resume_replot_checkpoint(
         expected_model_labels=expected_model_labels,
         expected_use_redshift_mu_term=expected_use_redshift_mu_term,
         expected_completeness_stratification=expected_completeness_stratification,
+        expected_selection_attenuation_mode=expected_selection_attenuation_mode,
     )
     if "object_id_fit_selection" not in results:
         raise RuntimeError(
@@ -1844,6 +1960,7 @@ def _prepare_shared_agn_pivot_context(
     prefix,
     completeness_magnitude="dereddened",
     completeness_stratification="none",
+    selection_attenuation_mode="fixed-offset",
     resume_replot_with_cuts=False,
 ):
     """Build once, or strictly load once, for cosmologies sharing a fit sample."""
@@ -1882,6 +1999,7 @@ def _prepare_shared_agn_pivot_context(
             use_redshift_log_f_term=use_redshift_log_f_term,
             use_redshift_mu_term=use_redshift_mu_term,
             completeness_stratification=completeness_stratification,
+            selection_attenuation_mode=selection_attenuation_mode,
         )
         checkpoint_paths = _build_checkpoint_paths(prefix, run_tag)
         apply_two_pass = (
@@ -2061,6 +2179,7 @@ def _compute_direct_full_sample_completeness_summaries(
     use_redshift_log_f_term=False,
     use_redshift_mu_term=False,
     early_de_guard=False,
+    selection_attenuation_mode="fixed-offset",
     dmi_draw_indices=None,
 ):
     """Replay completeness for the full plotting sample.
@@ -2182,6 +2301,7 @@ def _compute_direct_full_sample_completeness_summaries(
             only_sna=False,
             only_agn=only_agn,
             use_full_cov=use_full_cov,
+            selection_attenuation_mode=selection_attenuation_mode,
         )
         blob = np.asarray(blob, dtype=float)
         dmi_draws.append(blob[1])
@@ -2391,6 +2511,7 @@ def _run_fit_stage(
     completeness_mode,
     color_completeness_artifact,
     completeness_stratification,
+    selection_attenuation_mode,
     compare_sigma_only,
     minimal_plots=False,
     disable_ceph_dist_calibration,
@@ -2442,6 +2563,7 @@ def _run_fit_stage(
         completeness_mode=completeness_mode,
         color_completeness_artifact=color_completeness_artifact,
         completeness_stratification=completeness_stratification,
+        selection_attenuation_mode=selection_attenuation_mode,
         completeness_magnitude=df_agn_fit_selection.attrs.get(
             "completeness_magnitude",
             "dereddened",
@@ -3116,6 +3238,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       color_completeness_artifact=None,
                       completeness_stratification="none",
                       completeness_magnitude="dereddened",
+                      selection_attenuation_mode="fixed-offset",
                       N=None,
                       compare_sigma_only=False,
                       minimal_plots=False,
@@ -3142,6 +3265,13 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         )
     completeness_magnitude = normalize_completeness_magnitude(
         df_agn.attrs.get("completeness_magnitude", completeness_magnitude)
+    )
+    selection_attenuation_mode = validate_selection_attenuation_configuration(
+        df_agn,
+        selection_attenuation_mode=selection_attenuation_mode,
+        completeness=completeness,
+        completeness_magnitude=completeness_magnitude,
+        only_sna=only_sna,
     )
     if completeness and COMPLETENESS_MAG_COL not in df_agn.columns:
         df_agn = prepare_completeness_magnitude_columns(
@@ -3198,6 +3328,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         use_redshift_log_f_term=use_redshift_log_f_term,
         use_redshift_mu_term=use_redshift_mu_term,
         completeness_stratification=completeness_stratification,
+        selection_attenuation_mode=selection_attenuation_mode,
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -3330,6 +3461,12 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     agn_fields += ('apparent_mag_2500', 'apparent_mag_2500_err', 'z', 'z_err', 'object_id')
     if completeness:
         agn_fields += (COMPLETENESS_MAG_COL, COMPLETENESS_MAG_ERR_COL)
+    if selection_attenuation_mode == "joint-posterior":
+        agn_fields += (
+            JOINT_DEREDDENED_MAG_DRAWS_COL,
+            JOINT_ATTENUATED_MAG_DRAWS_COL,
+            JOINT_POSTERIOR_VALID_COUNT_COL,
+        )
     if active_stratification is not None:
         agn_fields += (COMPLETENESS_STRATUM_COL, COMPLETENESS_STRATUM_CODE_COL)
     if COMPLETENESS_FHOST_COL in df_agn.columns:
@@ -3402,6 +3539,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     expected_model_labels=model_labels,
                     expected_use_redshift_mu_term=use_redshift_mu_term,
                     expected_completeness_stratification=completeness_stratification,
+                    expected_selection_attenuation_mode=selection_attenuation_mode,
                 )
                 print(
                     "Resume-replot with cuts: loaded posterior samples and remapped "
@@ -3421,6 +3559,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                         if active_stratification is not None
                         else None
                     ),
+                    expected_selection_attenuation_mode=selection_attenuation_mode,
                 )
             if not only_sna:
                 if stored_pivot_context != agn_pivot_context:
@@ -3490,6 +3629,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 use_redshift_mu_term=use_redshift_mu_term,
                 early_de_guard=early_de_guard,
+                selection_attenuation_mode=selection_attenuation_mode,
             )
             ptform_kwargs = dict(priors=priors, model_labels=model_labels)
             loglike_func = (
@@ -3660,6 +3800,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             use_redshift_mu_term=bool(use_redshift_mu_term),
             dynesty_seed=int(dynesty_seed),
             completeness_mode=str(completeness_mode),
+            selection_attenuation_mode=str(selection_attenuation_mode),
         )
         if completeness and not isinstance(completeness_params, StratifiedCompletenessBundle):
             active_map = completeness_params[0]
@@ -3755,6 +3896,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                color_completeness_artifact=None,
                completeness_stratification="none",
                completeness_magnitude="dereddened",
+               selection_attenuation_mode="fixed-offset",
                compare_sigma_only=False,
                minimal_plots=False,
                disable_ceph_dist_calibration=False,
@@ -3795,6 +3937,13 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         df_agn_all,
         completeness_magnitude,
     )
+    selection_attenuation_mode = validate_selection_attenuation_configuration(
+        df_agn,
+        selection_attenuation_mode=selection_attenuation_mode,
+        completeness=completeness,
+        completeness_magnitude=completeness_magnitude,
+        only_sna=only_sna,
+    )
     if df_agn_completeness_parent is None:
         df_agn_completeness_parent = df_agn.copy()
     else:
@@ -3824,6 +3973,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_redshift_log_f_term=use_redshift_log_f_term,
         use_redshift_mu_term=use_redshift_mu_term,
         completeness_stratification=completeness_stratification,
+        selection_attenuation_mode=selection_attenuation_mode,
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -4006,6 +4156,81 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 )
         return direct_completeness_params
 
+    def _write_joint_attenuation_diagnostic(samples):
+        if (
+            selection_attenuation_mode != "joint-posterior"
+            or not completeness
+            or only_sna
+        ):
+            return
+        median_sample = np.median(np.asarray(samples, dtype=float), axis=0)[
+            None, :
+        ]
+
+        def evaluate(mode):
+            dmi, _, _ = _compute_direct_full_sample_completeness_summaries(
+                median_sample,
+                df_agn_fit_selection=df_agn_pass2_fit_selection,
+                df_agn_plot_sample=df_agn_pass2_plot_sample,
+                df_pantheon=df_pantheon,
+                _sna_L=_sna_L,
+                _sna_Lower=_sna_Lower,
+                _sna_LogdetCov=_sna_LogdetCov,
+                cosmo_model=cosmo_model,
+                completeness_params=_get_direct_completeness_params(),
+                z_pivot_agn=z_pivot_agn,
+                agn_pivot_context=agn_pivot_context,
+                use_full_cov=use_full_cov,
+                disable_ceph_dist_calibration=disable_ceph_dist_calibration,
+                use_planck_h0_prior=use_planck_h0_prior,
+                use_planck_om_prior=use_planck_om_prior,
+                only_agn=only_agn,
+                use_alpha_lambda_term=use_alpha_lambda_term,
+                use_eta_sigma_term=use_eta_sigma_term,
+                use_redshift_log_f_term=use_redshift_log_f_term,
+                use_redshift_mu_term=use_redshift_mu_term,
+                early_de_guard=early_de_guard,
+                selection_attenuation_mode=mode,
+            )
+            return dmi
+
+        fixed = evaluate("fixed-offset")
+        joint = evaluate("joint-posterior")
+        delta = joint - fixed
+        diagnostic = pd.DataFrame(
+            {
+                "object_id": df_agn_pass2_plot_sample["object_id"]
+                .astype(str)
+                .to_numpy(),
+                "z": df_agn_pass2_plot_sample["z"].to_numpy(dtype=float),
+                "dmi_fixed_offset": fixed,
+                "dmi_joint_posterior": joint,
+                "delta_dmi_joint_minus_fixed": delta,
+            }
+        )
+        csv_path = Path(plot_path) / "dmi_joint_minus_fixed_vs_redshift.csv"
+        diagnostic.to_csv(csv_path, index=False)
+        fig, ax = plt.subplots(figsize=(7.0, 4.5))
+        ax.axhline(0.0, color="0.35", linewidth=1.0)
+        ax.scatter(
+            diagnostic["z"],
+            diagnostic["delta_dmi_joint_minus_fixed"],
+            s=9,
+            alpha=0.45,
+            rasterized=True,
+        )
+        ax.set_xlabel("Redshift")
+        ax.set_ylabel(r"$d m_i^{\rm joint}-d m_i^{\rm fixed}$ [mag]")
+        ax.set_title("Experimental attenuation-selection comparison")
+        fig.tight_layout()
+        figure_path = Path(plot_path) / "dmi_joint_minus_fixed_vs_redshift.pdf"
+        fig.savefig(figure_path)
+        plt.close(fig)
+        print(
+            "Saved joint-attenuation diagnostic: "
+            f"{csv_path} and {figure_path}."
+        )
+
     skip_pass1_sampling = False
     pass1_resume_arg = False
     pass2_resume_arg = False
@@ -4088,6 +4313,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 completeness_mode=completeness_mode,
                 color_completeness_artifact=color_completeness_artifact,
                 completeness_stratification=completeness_stratification,
+                selection_attenuation_mode=selection_attenuation_mode,
                 compare_sigma_only=compare_sigma_only,
                 minimal_plots=minimal_plots,
                 disable_ceph_dist_calibration=disable_ceph_dist_calibration,
@@ -4134,6 +4360,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 use_redshift_mu_term=use_redshift_mu_term,
                 early_de_guard=early_de_guard,
+                selection_attenuation_mode=selection_attenuation_mode,
                 dmi_draw_indices=posterior_sample_indices_pass1,
             )
             flat_samples_pass1_for_plot = flat_samples_pass1
@@ -4430,6 +4657,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         completeness_mode=completeness_mode,
         color_completeness_artifact=color_completeness_artifact,
         completeness_stratification=completeness_stratification,
+        selection_attenuation_mode=selection_attenuation_mode,
         compare_sigma_only=compare_sigma_only,
         minimal_plots=minimal_plots,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
@@ -4445,6 +4673,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         logZ_is_approximate=warm_start_pass2,
         df_agn_completeness=df_agn_completeness_parent,
     )
+    _write_joint_attenuation_diagnostic(flat_samples)
     if apply_two_pass_sigma_clip:
         _write_stage_checkpoint(
             pass2_checkpoint_file,
@@ -4466,7 +4695,15 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         print("Skipping plots, returning results...")
         return flat_samples, model_labels, dm_interp, logZ, logZerr, None, age, age_err
 
-    if completeness_closure_test and completeness and not minimal_plots:
+    if (
+        completeness_closure_test
+        and selection_attenuation_mode == "joint-posterior"
+    ):
+        print(
+            "Skipping the scalar completeness closure test for the "
+            "experimental joint-posterior attenuation mode."
+        )
+    elif completeness_closure_test and completeness and not minimal_plots:
         closure_bin_width = 0.2
         closure_z_lo = closure_bin_width * np.floor(z_range[0] / closure_bin_width)
         closure_z_hi = closure_bin_width * np.ceil(z_range[1] / closure_bin_width)
@@ -4515,27 +4752,107 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     if minimal_plots:
         if resume_replot_with_cuts:
             # The checkpoint arrays have already been remapped by object ID to
-            # the current cut sample.  Reuse them for this fixed-posterior
-            # diagnostic instead of recomputing completeness for each scan.
+            # the current fit selection.  Preserve those values, but directly
+            # replay the frozen completeness model for objects retained only
+            # in the wider plotting sample.  Plot-only objects must not be
+            # represented by zero dmi merely because they were outside the
+            # likelihood redshift interval (or otherwise absent from the fit).
             posterior_sample_indices = None
-            plot_in_fit_range = df_agn_pass2_plot_sample["z"].between(
-                z_range[0], z_range[1]
-            ).to_numpy()
-            n_plot_in_fit_range = int(np.count_nonzero(plot_in_fit_range))
-            if len(dmi_posterior_median) != n_plot_in_fit_range:
+            if "object_id" not in df_agn_pass2_fit_selection or "object_id" not in df_agn_pass2_plot_sample:
+                raise RuntimeError(
+                    "Resume-replot debias alignment requires object_id in both "
+                    "the fit selection and plotting sample."
+                )
+
+            fit_ids = df_agn_pass2_fit_selection["object_id"].astype(str).to_numpy()
+            plot_ids = df_agn_pass2_plot_sample["object_id"].astype(str).to_numpy()
+            if len(np.unique(fit_ids)) != len(fit_ids) or len(np.unique(plot_ids)) != len(plot_ids):
+                raise RuntimeError(
+                    "Resume-replot debias alignment requires unique object_id values."
+                )
+            plot_positions = {object_id: index for index, object_id in enumerate(plot_ids)}
+            missing_fit_ids = [object_id for object_id in fit_ids if object_id not in plot_positions]
+            if missing_fit_ids:
+                raise RuntimeError(
+                    "Resume-replot plotting sample is missing fitted object_id values: "
+                    f"{missing_fit_ids[:10]}."
+                )
+            if len(dmi_posterior_median) != len(fit_ids) or len(dmi_posterior_sigma) != len(fit_ids):
                 raise RuntimeError(
                     "Resume-replot checkpoint debias arrays do not match the "
-                    "current in-range cut sample."
+                    "current fit selection."
                 )
-            dmi_posterior_median_full = np.zeros(len(df_agn_pass2_plot_sample))
-            dmi_posterior_median_full[plot_in_fit_range] = dmi_posterior_median
-            dmi_posterior_sigma_full = np.zeros(len(df_agn_pass2_plot_sample))
-            dmi_posterior_sigma_full[plot_in_fit_range] = dmi_posterior_sigma
+
+            fit_positions = np.asarray(
+                [plot_positions[object_id] for object_id in fit_ids],
+                dtype=int,
+            )
+            plot_only = np.ones(len(df_agn_pass2_plot_sample), dtype=bool)
+            plot_only[fit_positions] = False
+
+            dmi_posterior_median_full = np.full(len(df_agn_pass2_plot_sample), np.nan)
+            dmi_posterior_median_full[fit_positions] = dmi_posterior_median
+            dmi_posterior_sigma_full = np.full(len(df_agn_pass2_plot_sample), np.nan)
+            dmi_posterior_sigma_full[fit_positions] = dmi_posterior_sigma
             dmi_selection_sigma_full = None
             if dmi_selection_sigma_posterior_median is not None:
-                dmi_selection_sigma_full = np.zeros(len(df_agn_pass2_plot_sample))
-                dmi_selection_sigma_full[plot_in_fit_range] = (
+                if len(dmi_selection_sigma_posterior_median) != len(fit_ids):
+                    raise RuntimeError(
+                        "Resume-replot checkpoint selection-width array does "
+                        "not match the current fit selection."
+                    )
+                dmi_selection_sigma_full = np.full(
+                    len(df_agn_pass2_plot_sample),
+                    np.nan,
+                )
+                dmi_selection_sigma_full[fit_positions] = (
                     dmi_selection_sigma_posterior_median
+                )
+
+            if np.any(plot_only):
+                (
+                    plot_only_dmi,
+                    plot_only_dmi_sigma,
+                    plot_only_selection_sigma,
+                ) = _compute_direct_full_sample_completeness_summaries(
+                    flat_samples,
+                    df_agn_fit_selection=df_agn_pass2_fit_selection,
+                    df_agn_plot_sample=df_agn_pass2_plot_sample.loc[plot_only].copy(),
+                    df_pantheon=df_pantheon,
+                    _sna_L=_sna_L,
+                    _sna_Lower=_sna_Lower,
+                    _sna_LogdetCov=_sna_LogdetCov,
+                    cosmo_model=cosmo_model,
+                    completeness_params=_get_direct_completeness_params(),
+                    z_pivot_agn=z_pivot_agn,
+                    agn_pivot_context=agn_pivot_context,
+                    use_full_cov=use_full_cov,
+                    disable_ceph_dist_calibration=disable_ceph_dist_calibration,
+                    use_planck_h0_prior=use_planck_h0_prior,
+                    use_planck_om_prior=use_planck_om_prior,
+                    only_agn=only_agn,
+                    use_alpha_lambda_term=use_alpha_lambda_term,
+                    use_eta_sigma_term=use_eta_sigma_term,
+                    use_redshift_log_f_term=use_redshift_log_f_term,
+                    use_redshift_mu_term=use_redshift_mu_term,
+                    early_de_guard=early_de_guard,
+                    selection_attenuation_mode=selection_attenuation_mode,
+                )
+                dmi_posterior_median_full[plot_only] = plot_only_dmi
+                dmi_posterior_sigma_full[plot_only] = plot_only_dmi_sigma
+                if dmi_selection_sigma_full is not None:
+                    if plot_only_selection_sigma is None:
+                        raise RuntimeError(
+                            "Direct plot-only completeness replay did not "
+                            "return selection widths required by the checkpoint."
+                        )
+                    dmi_selection_sigma_full[plot_only] = plot_only_selection_sigma
+
+            if np.any(~np.isfinite(dmi_posterior_median_full)) or np.any(
+                ~np.isfinite(dmi_posterior_sigma_full)
+            ):
+                raise RuntimeError(
+                    "Resume-replot completeness replay left nonfinite plot-sample debias values."
                 )
             dmi_posterior_draws_full = None
         else:
@@ -4569,6 +4886,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 use_redshift_mu_term=use_redshift_mu_term,
                 early_de_guard=early_de_guard,
+                selection_attenuation_mode=selection_attenuation_mode,
                 dmi_draw_indices=posterior_sample_indices,
             )
 
@@ -4751,6 +5069,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_redshift_log_f_term=use_redshift_log_f_term,
         use_redshift_mu_term=use_redshift_mu_term,
         early_de_guard=early_de_guard,
+        selection_attenuation_mode=selection_attenuation_mode,
         dmi_draw_indices=posterior_sample_indices,
     )
     dmi_posterior_median_full = dmi_posterior_median_full_direct
@@ -5065,6 +5384,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 use_redshift_mu_term=use_redshift_mu_term,
                 early_de_guard=early_de_guard,
+                selection_attenuation_mode=selection_attenuation_mode,
             )
         mu_table, mu_err_table = _compute_debiased_agn_table_mu(
             flat_samples,
@@ -6042,6 +6362,17 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--selection-attenuation-mode",
+        choices=list(SELECTION_ATTENUATION_MODES),
+        default="fixed-offset",
+        help=(
+            "How a dereddened HD magnitude is mapped into an attenuated "
+            "completeness integral. The default preserves the existing "
+            "fixed object-level offset; 'joint-posterior' is an experimental "
+            "v3 paired-draw marginalization."
+        ),
+    )
+    parser.add_argument(
         "--completeness-closure-test",
         action="store_true",
         default=False,
@@ -6177,6 +6508,14 @@ if __name__ == "__main__":
             raise NotImplementedError("--resume_replot_with_cuts currently supports only --run single.")
         if args.use_jax:
             raise NotImplementedError("--resume_replot_with_cuts is not supported with --use_jax.")
+    if (
+        args.selection_attenuation_mode == "joint-posterior"
+        and args.run != "single"
+    ):
+        raise NotImplementedError(
+            "--selection-attenuation-mode joint-posterior currently supports "
+            "only --run single."
+        )
 
     df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_pantheon_data()
     agn_plot_path = f"plots/hubble/{args.prefix}"
@@ -6261,6 +6600,7 @@ if __name__ == "__main__":
             completeness_mode=args.completeness_mode,
             completeness_magnitude=args.completeness_magnitude,
             completeness_stratification=args.completeness_stratification,
+            selection_attenuation_mode=args.selection_attenuation_mode,
             disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
             use_planck_h0_prior=effective_use_planck_h0_prior,
             use_planck_om_prior=args.use_planck_om_prior,
@@ -6290,6 +6630,7 @@ if __name__ == "__main__":
                 color_completeness_artifact=args.color_completeness_artifact,
                 completeness_stratification=args.completeness_stratification,
                 completeness_magnitude=args.completeness_magnitude,
+                selection_attenuation_mode=args.selection_attenuation_mode,
                 only_sna=args.only_sna,
                 only_agn=args.only_agn,
                 N=effective_N,
@@ -6322,6 +6663,7 @@ if __name__ == "__main__":
             completeness_mode=args.completeness_mode,
             completeness_magnitude=args.completeness_magnitude,
             completeness_stratification=args.completeness_stratification,
+            selection_attenuation_mode=args.selection_attenuation_mode,
             disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
             use_planck_h0_prior=effective_use_planck_h0_prior,
             use_planck_om_prior=args.use_planck_om_prior,
@@ -6351,6 +6693,7 @@ if __name__ == "__main__":
                 color_completeness_artifact=args.color_completeness_artifact,
                 completeness_stratification=args.completeness_stratification,
                 completeness_magnitude=args.completeness_magnitude,
+                selection_attenuation_mode=args.selection_attenuation_mode,
                 compare_sigma_only=args.compare_sigma_only,
                 minimal_plots=args.minimal_plots,
                 disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
@@ -6381,6 +6724,7 @@ if __name__ == "__main__":
             completeness_mode=args.completeness_mode,
             completeness_magnitude=args.completeness_magnitude,
             completeness_stratification=args.completeness_stratification,
+            selection_attenuation_mode=args.selection_attenuation_mode,
             disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
             use_planck_h0_prior=effective_use_planck_h0_prior,
             use_planck_om_prior=args.use_planck_om_prior,
