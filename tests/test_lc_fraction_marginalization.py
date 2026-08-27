@@ -45,6 +45,48 @@ def test_scaling_changes_only_variable_relative_flux_amplitudes():
     np.testing.assert_allclose(scaled["survey_delta_mag"], params["survey_delta_mag"])
 
 
+def test_scaling_dilutes_complete_bandwise_linear_trend():
+    params = {
+        "linear_trend": jnp.asarray(0.4),
+        "linear_trend_band_offset": jnp.array([0.1, -0.1]),
+        "mean": jnp.array([0.02, -0.03]),
+    }
+    fractions = jnp.array([0.25, 0.75])
+
+    scaled = scale_variable_relflux_amplitudes(params, fractions)
+
+    np.testing.assert_allclose(scaled["linear_trend_band"], [0.125, 0.225])
+    np.testing.assert_allclose(scaled["linear_trend"], params["linear_trend"])
+    np.testing.assert_allclose(
+        scaled["linear_trend_band_offset"], params["linear_trend_band_offset"]
+    )
+    np.testing.assert_allclose(scaled["mean"], params["mean"])
+
+
+def test_scaling_dilutes_shared_erlang_trend_by_band():
+    scaled = scale_variable_relflux_amplitudes(
+        {"linear_trend": jnp.asarray(0.4)},
+        jnp.array([0.25, 0.75]),
+    )
+
+    np.testing.assert_allclose(scaled["linear_trend_band"], [0.1, 0.3])
+
+
+def test_prediction_scaling_dilutes_batched_linear_trend():
+    samples = {
+        "psf_agn_fraction": np.array([[0.25, 0.75], [0.5, 0.8]]),
+        "linear_trend": np.array([0.4, 0.2]),
+        "linear_trend_band_offset": np.array([[0.1, -0.1], [0.0, 0.1]]),
+    }
+
+    prediction = scale_prediction_samples_by_fraction(samples)
+
+    np.testing.assert_allclose(
+        prediction["linear_trend_band"],
+        [[0.125, 0.225], [0.1, 0.24]],
+    )
+
+
 def test_identical_empirical_draws_equal_fixed_fraction_likelihood():
     fractions = jnp.array([0.4, 0.7])
     params = {"amp_cont_relflux": jnp.array([2.0, 3.0])}

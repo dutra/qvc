@@ -29,13 +29,35 @@ def empirical_logmeanexp(component_log_likelihoods):
 def scale_variable_relflux_amplitudes(
     params: Mapping[str, object], fractions
 ) -> dict[str, object]:
-    """Scale variable flux amplitudes while preserving observed-unit noise terms."""
+    """Dilute intrinsic variable-flux terms into observed total-flux units.
+
+    The linear trend is an intrinsic AGN variation just like the stochastic
+    amplitudes.  Materialize its bandwise value before applying the fractions
+    so a shared scalar trend remains correctly diluted by different fractions
+    in each band.  Constant means, survey offsets, and noise terms remain in
+    observed units and are intentionally unchanged.
+    """
 
     fractions = jnp.asarray(fractions)
     scaled = dict(params)
     for key in VARIABLE_RELFLUX_AMPLITUDE_KEYS:
         if key in scaled:
             scaled[key] = jnp.asarray(scaled[key]) * fractions
+    if "linear_trend_band" in scaled:
+        scaled["linear_trend_band"] = (
+            jnp.asarray(scaled["linear_trend_band"]) * fractions
+        )
+    elif "linear_trend" in scaled:
+        trend = jnp.asarray(scaled["linear_trend"])
+        offsets = scaled.get("linear_trend_band_offset")
+        if offsets is not None:
+            offsets = jnp.asarray(offsets)
+            if trend.ndim == offsets.ndim - 1:
+                trend = trend[..., None]
+            trend = trend + offsets
+        elif trend.ndim == fractions.ndim - 1:
+            trend = trend[..., None]
+        scaled["linear_trend_band"] = trend * fractions
     return scaled
 
 
@@ -153,6 +175,19 @@ def scale_prediction_samples_by_fraction(samples):
     for key in (*VARIABLE_RELFLUX_AMPLITUDE_KEYS, "amp_cont", "amp_bc", "amp_blr", "amp_blr2"):
         if key in out:
             out[key] = np.asarray(out[key]) * fractions
+    if "linear_trend_band" in out:
+        out["linear_trend_band"] = np.asarray(out["linear_trend_band"]) * fractions
+    elif "linear_trend" in out:
+        trend = np.asarray(out["linear_trend"])
+        offsets = out.get("linear_trend_band_offset")
+        if offsets is not None:
+            offsets = np.asarray(offsets)
+            if trend.ndim == offsets.ndim - 1:
+                trend = trend[..., None]
+            trend = trend + offsets
+        elif trend.ndim == fractions.ndim - 1:
+            trend = trend[..., None]
+        out["linear_trend_band"] = trend * fractions
     return out
 
 
