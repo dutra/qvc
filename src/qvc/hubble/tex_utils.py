@@ -82,8 +82,6 @@ def _resolve_table_debias_values(agn_df, *, dm_interp=None, dmi_values=None):
         dm_interp,
         agn_df["z"],
         agn_df[magnitude_col],
-        f_host_2500_psf=agn_df[COMPLETENESS_FHOST_COL] if COMPLETENESS_FHOST_COL in agn_df.columns else None,
-        alpha_lambda=agn_df["alpha_lambda"] if "alpha_lambda" in agn_df.columns else None,
         completeness_stratum=(
             agn_df[COMPLETENESS_STRATUM_COL]
             if COMPLETENESS_STRATUM_COL in agn_df.columns

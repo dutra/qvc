@@ -13,6 +13,7 @@ SDSS_TARGET_SELECTION_CHOICES = (
     "legacy-sdss",
     "boss",
     "eboss",
+    "eboss-color-sensitivity",
     "eboss-var-s82-inclusive",
     "eboss-non-var-s82",
     "eboss-var-s82-only",
@@ -23,6 +24,23 @@ SDSS_EBOSS_QSO_REASON_BITS = tuple(
 )
 SDSS_EBOSS_VAR_S82_BIT = 9
 SDSS_EBOSS_CORE_BIT = 10
+EBOSS_COLOR_BITS = {"target0": (10,), "target1": (10,), "target2": ()}
+EBOSS_ALT_CHANNEL_BITS = {
+    "var_s82": {"target0": (), "target1": (9,), "target2": ()},
+    "ptf": {"target0": (11, 40), "target1": (11,), "target2": ()},
+    "tdss": {"target0": (), "target1": (), "target2": (20, 26)},
+    "radio": {"target0": (14,), "target1": (14,), "target2": ()},
+    "xray_agn": {
+        "target0": (20, 22),
+        "target1": (19, 28, 29),
+        "target2": (0, 2, 4),
+    },
+}
+EBOSS_DISQUALIFY_BITS = {
+    "target0": (12, 13, 15, 16, 17, 18, 21, 23),
+    "target1": (12, 13, 15, 16, 17, 18, 20),
+    "target2": (1, 3, 5),
+}
 SDSS_TARGET_SELECTION_REQUIRED_COLUMNS = (
     "SDSS_EBOSS_TARGET0",
     "SDSS_EBOSS_TARGET1",
@@ -83,6 +101,11 @@ def _matched_sdss_rows(df):
     )
 
 
+def _has_any_bits(values, bits):
+    mask = np.uint64(sum(1 << int(bit) for bit in bits))
+    return (values & mask) != 0
+
+
 def build_sdss_target_selection_mask(df, selection="all"):
     """Build a targeting mask and human-readable criterion for an AGN table."""
 
@@ -108,6 +131,20 @@ def build_sdss_target_selection_mask(df, selection="all"):
         return matched & (normalized_survey == "boss"), "BOSS survey rows"
     if selection == "eboss":
         return matched & (normalized_survey == "eboss"), "eBOSS survey rows"
+    if selection == "eboss-color-sensitivity":
+        if "SDSS_PROGRAMNAME" not in df.columns:
+            raise ValueError(
+                "eBOSS color sensitivity requires SDSS_PROGRAMNAME provenance."
+            )
+        program = np.asarray(
+            [_normalized_survey_value(value) for value in df["SDSS_PROGRAMNAME"]],
+            dtype=object,
+        )
+        criterion = (
+            "all matched main-eBOSS program rows; CORE and alternative-channel "
+            "bits are used only to train the offline color head"
+        )
+        return matched & (normalized_survey == "eboss") & (program == "eboss"), criterion
 
     missing = [
         column for column in SDSS_TARGET_SELECTION_REQUIRED_COLUMNS
@@ -191,6 +228,10 @@ def _cut_env_float(name, default):
 
 LOG_TAU_UV_RF_MIN = _cut_env_float("QVC_CUT_LOG_TAU_UV_RF_MIN", 1.5)
 LOG_TAU_UV_RF_MAX = _cut_env_float("QVC_CUT_LOG_TAU_UV_RF_MAX", 4.0)
+T_RF_OVER_TAU_UV_RF_COLUMN = "t_rf_over_tau_uv_rf"
+T_RF_OVER_TAU_UV_RF_MIN = _cut_env_float(
+    "QVC_CUT_T_RF_OVER_TAU_UV_RF_MIN", 5.0
+)
 FRAC_AGN_5100_MIN = None
 APPARENT_MAG_2500_ERR_MAX = _cut_env_float(
     "QVC_CUT_APPARENT_MAG_2500_ERR_MAX", 1.0
@@ -210,6 +251,7 @@ SPECTRAL_RHAT_MAX = _cut_env_float("QVC_CUT_SPECTRAL_RHAT_MAX", 1.20)
 LIGHT_CURVE_RHAT_MAX = _cut_env_float(
     "QVC_CUT_LIGHT_CURVE_RHAT_MAX", 1.10
 )
+NUM_DIVERGENCES_MAX = _cut_env_float("QVC_CUT_NUM_DIVERGENCES_MAX", None)
 # ESS is not used as a hard Hubble-sample selection criterion. The spectral
 # catalog persists R-hat only.
 
@@ -243,15 +285,19 @@ LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS = ("u",)
 # COMPLETENESS_MAG_2500_MAX=None; ALPHA_LAMBDA=(None, None)
 WRMS_MAX = None
 T_RF_LENGTH_MIN = None
-LIGHT_CURVE_N_POINTS_MIN = None
+LIGHT_CURVE_N_POINTS_MIN = _cut_env_float(
+    "QVC_CUT_LIGHT_CURVE_N_POINTS_MIN", None
+)
 ALPHA_LAMBDA_MIN = None
 ALPHA_LAMBDA_MAX = None
 
-LOG_SIGMA_UV_MIN = None
-LOG_SIGMA_UV_MAX = None
+LOG_SIGMA_UV_MIN = _cut_env_float("QVC_CUT_LOG_SIGMA_UV_MIN", None)
+LOG_SIGMA_UV_MAX = _cut_env_float("QVC_CUT_LOG_SIGMA_UV_MAX", None)
 REDDENING_EBV_MAX = None
 
-VARIABILITY_CHI_SQ_RED_G_MIN = None
+VARIABILITY_CHI_SQ_RED_G_MIN = _cut_env_float(
+    "QVC_CUT_VARIABILITY_CHI_SQ_RED_G_MIN", None
+)
 F_HOST_2500_MAX = None
 LOG_AMP_DELTA_BLR_UPPER = None
 LOG_AMP_DELTA_BLR_UPPER_BY_BAND = {}
@@ -275,6 +321,26 @@ EXCLUDED_SDSS_NAMES = (
 )
 AGN_SCALAR_PARAMETER_CUTS = (
     ("log_tau_uv_rf", LOG_TAU_UV_RF_MIN, LOG_TAU_UV_RF_MAX),
+    *(
+        ((T_RF_OVER_TAU_UV_RF_COLUMN, T_RF_OVER_TAU_UV_RF_MIN, None),)
+        if T_RF_OVER_TAU_UV_RF_MIN is not None
+        else ()
+    ),
+    *(
+        (("log_sigma_uv", LOG_SIGMA_UV_MIN, LOG_SIGMA_UV_MAX),)
+        if LOG_SIGMA_UV_MIN is not None or LOG_SIGMA_UV_MAX is not None
+        else ()
+    ),
+    *(
+        (("variability_chi_sq_red_g", VARIABILITY_CHI_SQ_RED_G_MIN, None),)
+        if VARIABILITY_CHI_SQ_RED_G_MIN is not None
+        else ()
+    ),
+    *(
+        ((LIGHT_CURVE_N_POINTS_COLUMN, LIGHT_CURVE_N_POINTS_MIN, None),)
+        if LIGHT_CURVE_N_POINTS_MIN is not None
+        else ()
+    ),
     ("fracAGN_5100_fit", FRAC_AGN_5100_MIN, None),
     ("apparent_mag_2500_err", None, APPARENT_MAG_2500_ERR_MAX),
     (
@@ -286,6 +352,11 @@ AGN_SCALAR_PARAMETER_CUTS = (
     ("spectroscopy_reduced_chi2", None, SPECTROSCOPY_REDUCED_CHI2_MAX),
     ("joint_reduced_chi2", None, JAXSEDFIT_JOINT_REDUCED_CHI2_MAX),
     ("loo_chi2_eff", None, LOO_CHI2_EFF_MAX),
+    *(
+        (("num_divergences", 0.0, NUM_DIVERGENCES_MAX),)
+        if NUM_DIVERGENCES_MAX is not None
+        else ()
+    ),
     ("m_2500_dereddened_rhat", None, SPECTRAL_RHAT_MAX),
     ("m_2500_attenuated_model_rhat", None, SPECTRAL_RHAT_MAX),
     ("log_tau_uv_rf_rhat", None, LIGHT_CURVE_RHAT_MAX),
@@ -384,3 +455,35 @@ def add_light_curve_point_count_column(
     df = df.copy()
     df[column] = counts
     return df, count_cols
+
+
+def add_t_rf_over_tau_uv_rf_column(
+    df,
+    *,
+    column=T_RF_OVER_TAU_UV_RF_COLUMN,
+):
+    """Add the rest-frame monitoring-baseline to UV-timescale ratio.
+
+    ``t_rf_length`` and ``tau_uv_rf = 10**log_tau_uv_rf`` are both measured
+    in rest-frame days. Invalid or nonpositive inputs remain NaN so an active
+    scalar quality cut rejects them.
+    """
+
+    required = ("t_rf_length", "log_tau_uv_rf")
+    if not set(required).issubset(df.columns):
+        return df, []
+
+    t_rf = pd.to_numeric(df["t_rf_length"], errors="coerce").to_numpy(dtype=float)
+    log_tau = pd.to_numeric(df["log_tau_uv_rf"], errors="coerce").to_numpy(dtype=float)
+    ratio = np.full(len(df), np.nan, dtype=float)
+    valid = np.isfinite(t_rf) & (t_rf > 0.0) & np.isfinite(log_tau)
+    with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
+        tau = np.power(10.0, log_tau[valid])
+        values = t_rf[valid] / tau
+    valid_values = np.isfinite(values) & (values > 0.0)
+    valid_indices = np.flatnonzero(valid)
+    ratio[valid_indices[valid_values]] = values[valid_values]
+
+    df = df.copy()
+    df[column] = ratio
+    return df, list(required)

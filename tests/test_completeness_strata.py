@@ -14,8 +14,6 @@ from qvc.hubble.completeness_strata import (
 from qvc.hubble.hubble_completeness_refactored import (
     COMPLETENESS_MAG_COL,
     Completeness2D,
-    Completeness3D,
-    Completeness4D,
     evaluate_dm_interp,
 )
 from qvc.hubble.hubble_fit import (
@@ -204,7 +202,7 @@ def test_jax_stratified_2d_gathers_each_objects_map():
     )
     actual = float(
         _completeness_loglike_jax(
-            m_model, mu_err, z, prepared, None, None, codes
+            m_model, mu_err, z, prepared, codes
         )
     )
     expected = 0.0
@@ -213,99 +211,53 @@ def test_jax_stratified_2d_gathers_each_objects_map():
         single = _prepare_completeness_for_jax(params)
         expected += float(
             _completeness_loglike_jax(
-                m_model[mask], mu_err[mask], z[mask], single, None, None
+                m_model[mask], mu_err[mask], z[mask], single
             )
         )
     assert actual == pytest.approx(expected, abs=1e-10)
 
 
-@pytest.mark.parametrize("mode", ["3d_fhost", "4d_fhost_alpha"])
-def test_jax_stratified_higher_dimensional_maps_gather_correctly(mode):
+def test_numpy_and_jax_likelihood_extend_center_values_to_support_edges():
     pytest.importorskip("jax")
-    mag = np.linspace(18.5, 24.0, 6)
-    redshift = np.linspace(0.4, 3.2, 5)
-    fhost = np.linspace(0.0, 1.0, 4)
-    alpha_grid = np.linspace(-2.0, 0.5, 4)
-    params = []
-    for probability in (0.7, 0.3):
-        if mode == "3d_fhost":
-            model = Completeness3D(
-                mag,
-                redshift,
-                fhost,
-                np.full((6, 5, 4), probability),
-                (18.5, 24.0),
-            )
-            params.append(
-                (model, mag, redshift, fhost, 1.0, 1.0, 1.0, 0.1, None)
-            )
-        else:
-            model = Completeness4D(
-                mag,
-                redshift,
-                fhost,
-                alpha_grid,
-                np.full((6, 5, 4, 4), probability),
-                (18.5, 24.0),
-            )
-            params.append(
-                (
-                    model,
-                    mag,
-                    redshift,
-                    fhost,
-                    alpha_grid,
-                    1.0,
-                    1.0,
-                    1.0,
-                    1.0,
-                    0.1,
-                    None,
-                    None,
-                )
-            )
-    bundle = StratifiedCompletenessBundle(
-        preset_name="test",
-        definition_json="{}",
-        stratum_names=("a", "b"),
-        params_by_stratum=tuple(params),
+    magnitude = np.array([19.0, 20.0, 21.0])
+    redshift = np.array([0.5, 1.5])
+    values = np.array(
+        [
+            [0.2, 0.3],
+            [0.5, 0.6],
+            [0.8, 0.9],
+        ]
     )
-    codes = np.array([0, 1, 0, 1], dtype=np.int16)
-    m_model = np.array([20.0, 20.1, 20.2, 20.3])
-    mu_err = np.full(4, 0.2)
-    z = np.array([0.7, 1.0, 1.4, 2.0])
-    fhost_values = np.array([0.1, 0.3, 0.6, 0.9])
-    alpha_values = np.array([-1.5, -1.0, -0.5, 0.0])
-    prepared = _prepare_completeness_for_jax(bundle)
-    actual = float(
-        _completeness_loglike_jax(
-            m_model,
-            mu_err,
-            z,
-            prepared,
-            fhost_values,
-            alpha_values if mode == "4d_fhost_alpha" else None,
-            codes,
-        )
+    model = Completeness2D(
+        magnitude,
+        redshift,
+        values,
+        magnitude_support=(18.5, 21.5),
     )
-    expected = 0.0
-    for code, single_params in enumerate(params):
-        mask = codes == code
-        expected += float(
-            _completeness_loglike_jax(
-                m_model[mask],
-                mu_err[mask],
-                z[mask],
-                _prepare_completeness_for_jax(single_params),
-                fhost_values[mask],
-                (
-                    alpha_values[mask]
-                    if mode == "4d_fhost_alpha"
-                    else None
-                ),
-            )
-        )
-    assert actual == pytest.approx(expected, abs=1e-10)
+    m_obs = np.array([18.5, 21.5])
+    m_model = np.array([18.8, 21.2])
+    mu_err = np.array([0.3, 0.4])
+    z = np.array([0.5, 0.5])
+
+    numpy_loglike, _ = completeness_loglike(
+        m_obs=m_obs,
+        m_obs_err=np.full(2, 0.1),
+        m_model=m_model,
+        mu_err=mu_err,
+        z=z,
+        completeness_model=model,
+        m_grid=magnitude,
+        magnitude_support=model.magnitude_support,
+    )
+    prepared = _prepare_completeness_for_jax(
+        (model, magnitude),
+        selection_magnitude=m_obs,
+    )
+    jax_loglike = float(
+        _completeness_loglike_jax(m_model, mu_err, z, prepared)
+    )
+
+    assert jax_loglike == pytest.approx(numpy_loglike, rel=2e-6, abs=2e-6)
 
 
 def test_stratified_interpolation_requires_labels_and_dispatches():

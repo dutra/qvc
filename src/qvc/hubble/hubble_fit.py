@@ -54,7 +54,6 @@ DYNESTY_SEED_ENV = "QVC_HUBBLE_DYNESTY_SEED"
 DEFAULT_COMPLETENESS_MOCK_OVERSAMPLE = 4.0
 DEFAULT_COMPLETENESS_MOCK_MAX_ROWS = 2_000_000
 DEFAULT_DYNESTY_SEED = 12345
-_FITTED_COLOR_SCIENCE_WARNING_EMITTED = False
 
 from qvc.hubble.cuts import (
     SDSS_TARGET_SELECTION_CHOICES,
@@ -133,18 +132,13 @@ from qvc.hubble.hubble_model import (
     M_model_agn,
     M_model_agn_err,
     resolve_model_option_flags,
-    LATENT_ALPHA_RESPONSE_PARAM_PREFIX,
-    LATENT_ALPHA_RESPONSE_PRIOR_SIGMA,
 )
 from qvc.hubble.hubble_completeness_refactored import (
     COMPLETENESS_FHOST_COL,
     COMPLETENESS_MAG_COL,
     COMPLETENESS_MAG_ERR_COL,
     VALID_COMPLETENESS_MAGNITUDES,
-    fit_fhost_2500_l2500_model,
     get_completeness_function_2d,
-    get_completeness_function_3d_fhost,
-    get_completeness_function_4d_fhost_alpha,
     make_dm_function,
     normalize_completeness_magnitude,
     prepare_completeness_magnitude_columns,
@@ -186,35 +180,11 @@ from qvc.hubble.completeness_closure import (
     simulate_hubble_posterior_closure,
     write_completeness_closure_diagnostics,
 )
-from qvc.hubble.latent_alpha_completeness import (
-    BETA_ALPHA_L_PARAMETER,
-    BETA_ALPHA_L_PRIOR,
-    LatentAlphaConfig,
-    latent_alpha_config_hash,
-    latent_alpha_provenance,
-    response_coefficient_names,
-    resolve_lf_luminosity_state,
-)
-from qvc.hubble.fitted_color_completeness import (
-    COLOR_MODEL,
-    COLOR_STRENGTH_PARAMETER,
-    DEFAULT_COLOR_PARENT_SIGMA,
-    FittedColorConfig,
-    deterministic_color_draw_indices,
-    fitted_color_config_hash,
-    fitted_color_provenance,
-    fitted_psf_g_minus_i,
-    fixed_reference_host_fraction_quadrature,
-    color_relative_selection_factor_xp,
-    read_qsogen_color_parent_cache,
-)
-
-LATENT_ALPHA_COMPLETENESS_MODE = "3d_fhost_latent_alpha"
-VALID_COMPLETENESS_MODES = (
-    "2d",
-    "3d_fhost",
-    LATENT_ALPHA_COMPLETENESS_MODE,
-    "4d_fhost_alpha",
+from qvc.hubble.program_color_completeness import (
+    COMPLETENESS_MODES as VALID_COMPLETENESS_MODES,
+    build_hubble_completeness_map,
+    color_support_stencil_mask,
+    read_color_completeness_artifact,
 )
 SPEED_CHOICES = ("fastest", "quick", "standard", "production")
 SIGMA_CLIP_SECOND_PASS_MODES = ("warm", "fresh")
@@ -235,223 +205,12 @@ def validate_completeness_mode(completeness_mode):
         )
 
 
-def build_latent_alpha_config_from_args(args):
-    """Build and validate the authoritative latent-alpha run configuration."""
-
-    if args.completeness_mode != LATENT_ALPHA_COMPLETENESS_MODE:
-        return None
-    if args.disable_completeness:
-        raise ValueError(
-            f"{LATENT_ALPHA_COMPLETENESS_MODE} requires completeness to be enabled."
-        )
-    if args.only_sna:
-        raise ValueError(
-            f"{LATENT_ALPHA_COMPLETENESS_MODE} requires an AGN likelihood."
-        )
-    if args.fit_alpha_lambda_term:
-        raise ValueError(
-            f"{LATENT_ALPHA_COMPLETENESS_MODE} cannot be combined with "
-            "--fit_alpha_lambda_term; the latent standardization integral is "
-            "not implemented."
-        )
-    if args.agn_calibrators is not None:
-        raise ValueError(
-            f"{LATENT_ALPHA_COMPLETENESS_MODE} does not yet support AGN calibrators."
-        )
-
-    luminosity_mode = str(args.completeness_alpha_luminosity_mode).lower()
-    beta_l = args.completeness_alpha_parent_beta_l
-    if luminosity_mode == "fixed" and beta_l is None:
-        raise ValueError(
-            "--completeness-alpha-luminosity-mode fixed requires "
-            "--completeness-alpha-parent-beta-l."
-        )
-    if luminosity_mode != "fixed" and beta_l is not None:
-        raise ValueError(
-            "--completeness-alpha-parent-beta-l is only valid with "
-            "--completeness-alpha-luminosity-mode fixed."
-        )
-
-    shen_mode = normalize_shen_lf_mode(
-        os.environ.get(SHEN_LF_MODE_ENV, SHEN_DEFAULT_LF_MODE)
-    )
-    return LatentAlphaConfig.for_lf(
-        lf_model=args.completeness_lf_model,
-        shen_lf_mode=shen_mode,
-        requested_luminosity_state=args.completeness_magnitude,
-        mode=luminosity_mode,
-        fixed_beta_l=(float(beta_l) if beta_l is not None else None),
-        beta_l_prior=tuple(args.completeness_alpha_parent_beta_l_prior),
-        mu=float(args.completeness_alpha_parent_mean),
-        sigma=float(args.completeness_alpha_parent_sigma),
-        logl_pivot=float(args.completeness_alpha_parent_logl_pivot),
-        include_magnitude_interactions=bool(
-            args.completeness_alpha_magnitude_interaction
-        ),
-        redshift_min=float(args.z_range[0]),
-        redshift_max=float(args.z_range[1]),
-    )
 
 
-def build_fitted_color_config_from_args(args):
-    """Build the pinned qsogen fitted-color configuration, when enabled."""
-
-    if args.completeness_color_model == "none":
-        if args.completeness_color_parent_file is not None:
-            raise ValueError(
-                "--completeness-color-parent-file is only valid with "
-                "--completeness-color-model qsogen_delta_gi."
-            )
-        return None
-    if args.completeness_color_parent_file is None:
-        raise ValueError(
-            "--completeness-color-model qsogen_delta_gi requires "
-            "--completeness-color-parent-file."
-        )
-    shen_mode = normalize_shen_lf_mode(
-        os.environ.get(SHEN_LF_MODE_ENV, SHEN_DEFAULT_LF_MODE)
-    )
-    state_match, expected_state = completeness_lf_magnitude_state_match(
-        args.completeness_lf_model,
-        normalize_completeness_magnitude(args.completeness_magnitude),
-        shen_lf_mode=shen_mode,
-    )
-    if not state_match:
-        raise ValueError(
-            "Fitted-color completeness requires an exact LF/completeness "
-            "luminosity-state match: "
-            f"LF {args.completeness_lf_model!r} requires {expected_state} "
-            f"luminosity, but the run requested "
-            f"{args.completeness_magnitude!r}."
-        )
-    luminosity_state = resolve_lf_luminosity_state(
-        args.completeness_lf_model,
-        shen_lf_mode=shen_mode,
-        requested_state=args.completeness_magnitude,
-    )
-    if luminosity_state != "attenuated":
-        raise ValueError(
-            "The qsogen fitted-color parent is attenuation-retaining and "
-            f"cannot be paired with LF state {luminosity_state!r}."
-        )
-    return FittedColorConfig.from_parent_file(
-        args.completeness_color_parent_file,
-        parent_sigma=float(args.completeness_color_parent_sigma),
-    )
 
 
-def validate_fitted_color_runtime_semantics(
-    config,
-    *,
-    completeness,
-    completeness_mode,
-    completeness_magnitude,
-    only_sna=False,
-    has_agn_calibrators=False,
-    latent_alpha_config=None,
-    use_alpha_lambda_term=False,
-):
-    """Enforce the deliberately narrow fitted-color inference contract."""
-
-    if config is None:
-        return
-    if not isinstance(config, FittedColorConfig):
-        raise TypeError("fitted_color_config must be a FittedColorConfig.")
-    if latent_alpha_config is not None:
-        raise ValueError(
-            "Fitted-color and latent-alpha completeness cannot be combined."
-        )
-    if not completeness or only_sna:
-        raise ValueError(
-            "Fitted-color completeness requires enabled completeness and an "
-            "AGN likelihood."
-        )
-    if completeness_mode not in {"2d", "3d_fhost"}:
-        raise ValueError(
-            "Fitted-color completeness is supported only atop the ordinary "
-            "2d and 3d_fhost maps."
-        )
-    if normalize_completeness_magnitude(completeness_magnitude) != "attenuated":
-        raise ValueError(
-            "The qsogen fitted-color parent and total-PSF g-i draws retain "
-            "source-frame attenuation, so fitted-color completeness requires "
-            "--completeness_magnitude attenuated."
-        )
-    if has_agn_calibrators:
-        raise ValueError(
-            "Fitted-color completeness does not yet support AGN calibrators."
-        )
-    if use_alpha_lambda_term:
-        raise ValueError(
-            "Fitted-color completeness cannot be combined with the legacy "
-            "alpha_lambda standardization term."
-        )
-    global _FITTED_COLOR_SCIENCE_WARNING_EMITTED
-    if not _FITTED_COLOR_SCIENCE_WARNING_EMITTED:
-        warnings.warn(
-            "[SCIENTIFIC SENSITIVITY WARNING] qsogen/Temple mean colors are "
-            "calibrated to the observed selected DR16Q population, not an "
-            "independently selection-free parent; the fixed E(B-V)=0 Normal "
-            "scatter also omits an asymmetric internal-dust red tail. Under "
-            "the fixed-parent, unchanged-denominator, unweighted log-mean-R "
-            "model, the color term factorizes from cosmology and cannot shift "
-            "the cosmology posterior except through Monte Carlo noise. Treat "
-            "this as a targeting sensitivity diagnostic, not a calibrated "
-            "cosmology correction.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        _FITTED_COLOR_SCIENCE_WARNING_EMITTED = True
 
 
-def validate_latent_alpha_runtime_semantics(
-    config,
-    *,
-    completeness,
-    completeness_mode,
-    completeness_magnitude,
-    only_sna=False,
-    use_alpha_lambda_term=False,
-    has_agn_calibrators=False,
-):
-    """Enforce latent-alpha invariants for CLI and programmatic entry points."""
-
-    if config is None:
-        if completeness_mode == LATENT_ALPHA_COMPLETENESS_MODE:
-            raise ValueError(
-                f"{LATENT_ALPHA_COMPLETENESS_MODE} requires latent_alpha_config."
-            )
-        return
-    if not isinstance(config, LatentAlphaConfig):
-        raise TypeError("latent_alpha_config must be a LatentAlphaConfig.")
-    if completeness_mode != LATENT_ALPHA_COMPLETENESS_MODE:
-        raise ValueError(
-            "latent_alpha_config is only valid with "
-            f"{LATENT_ALPHA_COMPLETENESS_MODE}."
-        )
-    if not completeness or only_sna:
-        raise ValueError(
-            "Latent-alpha completeness requires enabled completeness and an "
-            "AGN likelihood."
-        )
-    if use_alpha_lambda_term:
-        raise ValueError(
-            "Latent-alpha completeness cannot be combined with the "
-            "alpha_lambda standardization term."
-        )
-    if has_agn_calibrators:
-        raise ValueError(
-            "Latent-alpha completeness does not yet support AGN calibrators."
-        )
-    magnitude_state = normalize_completeness_magnitude(
-        completeness_magnitude
-    )
-    if magnitude_state != config.luminosity_state:
-        raise ValueError(
-            "Latent-alpha LF/completeness magnitude mismatch: the resolved LF "
-            f"requires {config.luminosity_state!r} M_2500, but the run requested "
-            f"{magnitude_state!r}."
-        )
 
 
 def normalize_speed(speed):
@@ -525,24 +284,8 @@ def _compute_alpha_ox_from_posterior_median(
     return compute_alpha_ox(df_agn, cosmology=cosmology)
 
 
-def standardization_plot_posterior_view(
-    flat_samples,
-    model_labels,
-    *,
-    latent_alpha_config=None,
-    fitted_color_config=None,
-):
-    """Return the base-model posterior consumed by legacy Hubble plots.
-
-    Latent-alpha response parameters are sampled jointly and remain
-    authoritative in checkpoints, diagnostics, and returned posterior arrays.
-    Existing standardization/cosmology plotting helpers, however, rebuild the
-    base model from their explicit option flags and cannot consume unrelated
-    selection-surface columns.  Remove those columns by *name* here, never by
-    posterior width, and validate the complete expected latent parameter set
-    before doing so.
-    """
-
+def standardization_plot_posterior_view(flat_samples, model_labels):
+    """Validate and return the cosmology/standardization posterior unchanged."""
     samples = np.asarray(flat_samples, dtype=float)
     labels = tuple(str(label) for label in model_labels)
     if samples.ndim != 2 or samples.shape[1] != len(labels):
@@ -550,52 +293,7 @@ def standardization_plot_posterior_view(
             "flat_samples and model_labels are misaligned: "
             f"shape={samples.shape}, labels={len(labels)}."
         )
-    if latent_alpha_config is None and fitted_color_config is None:
-        return samples, list(labels)
-    if latent_alpha_config is not None and fitted_color_config is not None:
-        raise ValueError(
-            "Fitted-color and latent-alpha posterior views are mutually exclusive."
-        )
-    if fitted_color_config is not None:
-        if not isinstance(fitted_color_config, FittedColorConfig):
-            raise TypeError("fitted_color_config must be a FittedColorConfig.")
-        present = {label for label in labels if label == COLOR_STRENGTH_PARAMETER}
-        if present != {COLOR_STRENGTH_PARAMETER}:
-            raise ValueError(
-                "Fitted-color posterior must contain exactly one s_color column."
-            )
-        keep = np.asarray(
-            [label != COLOR_STRENGTH_PARAMETER for label in labels], dtype=bool
-        )
-        return samples[:, keep], [
-            label for label, keep_label in zip(labels, keep) if keep_label
-        ]
-    if not isinstance(latent_alpha_config, LatentAlphaConfig):
-        raise TypeError("latent_alpha_config must be a LatentAlphaConfig.")
-
-    expected = set(
-        response_coefficient_names(
-            latent_alpha_config.include_magnitude_interactions
-        )
-    )
-    if latent_alpha_config.mode == "joint":
-        expected.add(BETA_ALPHA_L_PARAMETER)
-    present = {
-        label
-        for label in labels
-        if label == BETA_ALPHA_L_PARAMETER or label.startswith("alpha_sel_")
-    }
-    if present != expected:
-        raise ValueError(
-            "Latent-alpha posterior labels do not match the authoritative "
-            f"configuration; missing={sorted(expected - present)}, "
-            f"extra={sorted(present - expected)}."
-        )
-    keep = np.asarray([label not in expected for label in labels], dtype=bool)
-    return samples[:, keep], [
-        label for label, keep_label in zip(labels, keep) if keep_label
-    ]
-
+    return samples, list(labels)
 
 def _resolve_table_debias_values_for_frame(df_agn, *, dmi_values):
     """Validate direct per-object corrections used in the AGN results table."""
@@ -913,17 +611,11 @@ def subsample_dataframe_at_most(df, n, *, random_state=42, label="rows"):
 
 
 def prior_transform_dynesty(unit_cube, priors, model_labels):
-    transformed = []
-    for x, key in zip(unit_cube, model_labels):
-        low, high = priors[key]
-        if key.startswith(LATENT_ALPHA_RESPONSE_PARAM_PREFIX):
-            sigma = float(LATENT_ALPHA_RESPONSE_PRIOR_SIGMA)
-            a = float(low) / sigma
-            b = float(high) / sigma
-            transformed.append(float(stats.truncnorm.ppf(x, a, b, loc=0.0, scale=sigma)))
-        else:
-            transformed.append(float(low) + (float(high) - float(low)) * x)
-    return transformed
+    return [
+        float(priors[key][0])
+        + (float(priors[key][1]) - float(priors[key][0])) * x
+        for x, key in zip(unit_cube, model_labels)
+    ]
 
 
 def make_dynesty_rstate(seed=None):
@@ -949,15 +641,7 @@ def inverse_prior_transform_dynesty(samples, priors, model_labels, *, eps=1e-9):
         width = float(hi) - float(lo)
         if not np.isfinite(width) or width <= 0.0:
             raise ValueError(f"Prior for {key!r} must have finite positive width, got {(lo, hi)}.")
-        if key.startswith(LATENT_ALPHA_RESPONSE_PARAM_PREFIX):
-            sigma = float(LATENT_ALPHA_RESPONSE_PRIOR_SIGMA)
-            a = float(lo) / sigma
-            b = float(hi) / sigma
-            unit[:, j] = stats.truncnorm.cdf(
-                samples[:, j], a, b, loc=0.0, scale=sigma
-            )
-        else:
-            unit[:, j] = (samples[:, j] - float(lo)) / width
+        unit[:, j] = (samples[:, j] - float(lo)) / width
     return np.clip(unit, eps, 1.0 - eps)
 
 
@@ -1018,31 +702,8 @@ def build_warm_start_live_points(
     return [live_u, live_v, live_logl]
 
 
-def _latent_alpha_run_tag_suffix(latent_alpha_config):
-    """Return the canonical collision-resistant tag for latent-alpha runs."""
-
-    if latent_alpha_config is None:
-        return ""
-    if not isinstance(latent_alpha_config, LatentAlphaConfig):
-        raise TypeError("latent_alpha_config must be a LatentAlphaConfig.")
-    return (
-        f"_alat-{latent_alpha_config.mode}-{latent_alpha_config.luminosity_state}"
-        f"-mi{int(latent_alpha_config.include_magnitude_interactions)}"
-        f"-{latent_alpha_config_hash(latent_alpha_config)[:10]}"
-    )
 
 
-def _fitted_color_run_tag_suffix(fitted_color_config):
-    """Return a collision-resistant tag for the pinned fitted-color model."""
-
-    if fitted_color_config is None:
-        return ""
-    if not isinstance(fitted_color_config, FittedColorConfig):
-        raise TypeError("fitted_color_config must be a FittedColorConfig.")
-    return (
-        f"_fcolor-{fitted_color_config.model}"
-        f"-{fitted_color_config_hash(fitted_color_config)[:10]}"
-    )
 
 
 def make_run_tag(
@@ -1053,7 +714,7 @@ def make_run_tag(
     z_range,
     only_agn=False,
     completeness=True,
-    completeness_mode="2d",
+    completeness_mode="old",
     completeness_magnitude="dereddened",
     disable_ceph_dist_calibration=False,
     use_planck_h0_prior=False,
@@ -1063,8 +724,6 @@ def make_run_tag(
     use_redshift_log_f_term=False,
     use_redshift_mu_term=False,
     completeness_stratification="none",
-    latent_alpha_config=None,
-    fitted_color_config=None,
 ):
     speed = normalize_speed(speed)
     zmin, zmax = z_range
@@ -1097,11 +756,9 @@ def make_run_tag(
     eta_sigma_tag = "_etaSigma" if use_eta_sigma_term else ""
     logf_tag = "_logfz" if use_redshift_log_f_term else ""
     muz_tag = "_muz" if use_redshift_mu_term else ""
-    latent_alpha_tag = _latent_alpha_run_tag_suffix(latent_alpha_config)
-    fitted_color_tag = _fitted_color_run_tag_suffix(fitted_color_config)
     return (
         f"{cosmo_model}_{_fit_mode_label(only_sna, only_agn)}_{speed}_{n_tag}_{z_tag}"
-        f"{completeness_tag}{stratification_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}{muz_tag}{latent_alpha_tag}{fitted_color_tag}"
+        f"{completeness_tag}{stratification_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}{muz_tag}"
     )
 
 
@@ -1114,7 +771,7 @@ def make_multi_cosmology_comparison_tag(
     N=None,
     z_range=(0.44, 3.16),
     completeness=True,
-    completeness_mode="2d",
+    completeness_mode="old",
     completeness_magnitude="dereddened",
     completeness_stratification="none",
     disable_ceph_dist_calibration=False,
@@ -1124,8 +781,6 @@ def make_multi_cosmology_comparison_tag(
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
     use_redshift_mu_term=False,
-    latent_alpha_config=None,
-    fitted_color_config=None,
 ):
     """Build the directory tag shared by multi-cosmology comparisons.
 
@@ -1162,13 +817,11 @@ def make_multi_cosmology_comparison_tag(
     eta_sigma_tag = "_etaSigma" if use_eta_sigma_term else ""
     logf_tag = "_logfz" if use_redshift_log_f_term else ""
     muz_tag = "_muz" if use_redshift_mu_term else ""
-    latent_alpha_tag = _latent_alpha_run_tag_suffix(latent_alpha_config)
-    fitted_color_tag = _fitted_color_run_tag_suffix(fitted_color_config)
     mode_tag = _fit_mode_label(only_sna, only_agn)
     return (
         f"{comparison_prefix}_{mode_tag}_{speed}_{n_tag}_{z_tag}"
         f"{completeness_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}"
-        f"{alpha_tag}{eta_sigma_tag}{logf_tag}{muz_tag}{latent_alpha_tag}{fitted_color_tag}"
+        f"{alpha_tag}{eta_sigma_tag}{logf_tag}{muz_tag}"
     )
 
 
@@ -1216,93 +869,8 @@ def _checkpoint_scalar_string(value, *, field_name, checkpoint_file):
     return items[0]
 
 
-def _validate_latent_alpha_checkpoint_config(
-    results,
-    *,
-    checkpoint_file,
-    expected_latent_alpha_config,
-    checkpoint_kind="Resume",
-):
-    """Require an exact match to the authoritative latent-alpha config JSON."""
-
-    if (
-        expected_latent_alpha_config is not None
-        and not isinstance(expected_latent_alpha_config, LatentAlphaConfig)
-    ):
-        raise TypeError(
-            "expected_latent_alpha_config must be a LatentAlphaConfig or None."
-        )
-    expected_alpha_json = (
-        None
-        if expected_latent_alpha_config is None
-        else expected_latent_alpha_config.to_json()
-    )
-    stored_alpha_json = None
-    if "latent_alpha_config_json" in results:
-        stored_alpha_json = _checkpoint_scalar_string(
-            results["latent_alpha_config_json"],
-            field_name="latent_alpha_config_json",
-            checkpoint_file=checkpoint_file,
-        )
-    if stored_alpha_json != expected_alpha_json:
-        raise RuntimeError(
-            f"{checkpoint_kind} checkpoint '{checkpoint_file}' latent-alpha "
-            "parameterization does not match the current run: an exact "
-            "latent_alpha_config_json match is required."
-        )
 
 
-def _validate_fitted_color_checkpoint_config(
-    results,
-    *,
-    checkpoint_file,
-    expected_fitted_color_config,
-    expected_photometry_provenance_json=None,
-    checkpoint_kind="Resume",
-):
-    """Require exact fitted-color model identity on every checkpoint reuse."""
-
-    if (
-        expected_fitted_color_config is not None
-        and not isinstance(expected_fitted_color_config, FittedColorConfig)
-    ):
-        raise TypeError(
-            "expected_fitted_color_config must be a FittedColorConfig or None."
-        )
-    expected_json = (
-        None
-        if expected_fitted_color_config is None
-        else json.dumps(
-            expected_fitted_color_config.to_dict(),
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    )
-    stored_json = None
-    if "fitted_color_config_json" in results:
-        stored_json = _checkpoint_scalar_string(
-            results["fitted_color_config_json"],
-            field_name="fitted_color_config_json",
-            checkpoint_file=checkpoint_file,
-        )
-    if stored_json != expected_json:
-        raise RuntimeError(
-            f"{checkpoint_kind} checkpoint '{checkpoint_file}' fitted-color "
-            "parameterization does not match the current run: an exact "
-            "fitted_color_config_json match is required."
-        )
-    stored_photometry = None
-    if "fitted_color_photometry_provenance_json" in results:
-        stored_photometry = _checkpoint_scalar_string(
-            results["fitted_color_photometry_provenance_json"],
-            field_name="fitted_color_photometry_provenance_json",
-            checkpoint_file=checkpoint_file,
-        )
-    if stored_photometry != expected_photometry_provenance_json:
-        raise RuntimeError(
-            f"{checkpoint_kind} checkpoint '{checkpoint_file}' fitted-color "
-            "total-PSF prediction provenance does not match the current catalog."
-        )
 
 
 def _completeness_stratification_checkpoint_payload(stratification, df_agn):
@@ -1584,9 +1152,6 @@ def validate_resume_checkpoint(
     expected_use_redshift_mu_term=None,
     expected_completeness_stratification="none",
     expected_completeness_stratum_codes=None,
-    expected_latent_alpha_config=None,
-    expected_fitted_color_config=None,
-    expected_fitted_color_photometry_provenance_json=None,
 ):
     required_keys = {
         "flat_samples",
@@ -1640,22 +1205,6 @@ def validate_resume_checkpoint(
                 f"setting does not match the current run."
             )
 
-    _validate_latent_alpha_checkpoint_config(
-        results,
-        checkpoint_file=checkpoint_file,
-        expected_latent_alpha_config=expected_latent_alpha_config,
-        checkpoint_kind="Resume",
-    )
-    _validate_fitted_color_checkpoint_config(
-        results,
-        checkpoint_file=checkpoint_file,
-        expected_fitted_color_config=expected_fitted_color_config,
-        expected_photometry_provenance_json=(
-            expected_fitted_color_photometry_provenance_json
-        ),
-        checkpoint_kind="Resume",
-    )
-
     _validate_completeness_stratification_checkpoint(
         results,
         checkpoint_file=checkpoint_file,
@@ -1708,9 +1257,6 @@ def _validate_resume_replot_checkpoint_params(
     expected_model_labels=None,
     expected_use_redshift_mu_term=None,
     expected_completeness_stratification="none",
-    expected_latent_alpha_config=None,
-    expected_fitted_color_config=None,
-    expected_fitted_color_photometry_provenance_json=None,
 ):
     if "flat_samples" not in results:
         raise RuntimeError(
@@ -1743,21 +1289,6 @@ def _validate_resume_replot_checkpoint_params(
             raise RuntimeError(
                 f"Resume-replot checkpoint '{checkpoint_file}' mean-redshift-evolution setting does not match."
             )
-    _validate_latent_alpha_checkpoint_config(
-        results,
-        checkpoint_file=checkpoint_file,
-        expected_latent_alpha_config=expected_latent_alpha_config,
-        checkpoint_kind="Resume-replot",
-    )
-    _validate_fitted_color_checkpoint_config(
-        results,
-        checkpoint_file=checkpoint_file,
-        expected_fitted_color_config=expected_fitted_color_config,
-        expected_photometry_provenance_json=(
-            expected_fitted_color_photometry_provenance_json
-        ),
-        checkpoint_kind="Resume-replot",
-    )
     _validate_completeness_stratification_checkpoint(
         results,
         checkpoint_file=checkpoint_file,
@@ -1775,9 +1306,6 @@ def _remap_resume_replot_checkpoint(
     expected_model_labels=None,
     expected_use_redshift_mu_term=None,
     expected_completeness_stratification="none",
-    expected_latent_alpha_config=None,
-    expected_fitted_color_config=None,
-    expected_fitted_color_photometry_provenance_json=None,
 ):
     """Return checkpoint payload remapped to the current cut AGN fit selection."""
 
@@ -1788,11 +1316,6 @@ def _remap_resume_replot_checkpoint(
         expected_model_labels=expected_model_labels,
         expected_use_redshift_mu_term=expected_use_redshift_mu_term,
         expected_completeness_stratification=expected_completeness_stratification,
-        expected_latent_alpha_config=expected_latent_alpha_config,
-        expected_fitted_color_config=expected_fitted_color_config,
-        expected_fitted_color_photometry_provenance_json=(
-            expected_fitted_color_photometry_provenance_json
-        ),
     )
     if "object_id_fit_selection" not in results:
         raise RuntimeError(
@@ -2322,8 +1845,6 @@ def _prepare_shared_agn_pivot_context(
     completeness_magnitude="dereddened",
     completeness_stratification="none",
     resume_replot_with_cuts=False,
-    latent_alpha_config=None,
-    fitted_color_config=None,
 ):
     """Build once, or strictly load once, for cosmologies sharing a fit sample."""
 
@@ -2361,8 +1882,6 @@ def _prepare_shared_agn_pivot_context(
             use_redshift_log_f_term=use_redshift_log_f_term,
             use_redshift_mu_term=use_redshift_mu_term,
             completeness_stratification=completeness_stratification,
-            latent_alpha_config=latent_alpha_config,
-            fitted_color_config=fitted_color_config,
         )
         checkpoint_paths = _build_checkpoint_paths(prefix, run_tag)
         apply_two_pass = (
@@ -2435,75 +1954,22 @@ def _build_completeness_params(
     plot=False,
     completeness_stratification="none",
 ):
+    """Build the unchanged LF/count baseline before resolving HD mode."""
     if not completeness:
         return None
+    missing = {COMPLETENESS_MAG_COL, COMPLETENESS_MAG_ERR_COL} - set(df_agn_completeness.columns)
+    if missing:
+        raise KeyError(f"Completeness requires prepared magnitude columns: {sorted(missing)}.")
     if normalize_completeness_stratification(completeness_stratification) == "none":
-        missing_magnitude_columns = {
-            COMPLETENESS_MAG_COL,
-            COMPLETENESS_MAG_ERR_COL,
-        } - set(df_agn_completeness.columns)
-        if missing_magnitude_columns:
-            raise KeyError(
-                "Completeness requires prepared 2500-A magnitude columns: "
-                f"{sorted(missing_magnitude_columns)}."
-            )
-        if completeness_mode in (
-            "3d_fhost",
-            LATENT_ALPHA_COMPLETENESS_MODE,
-            "4d_fhost_alpha",
-        ):
-            if COMPLETENESS_FHOST_COL not in df_agn_completeness.columns:
-                raise KeyError(
-                    f"completeness_mode={completeness_mode!r} requires "
-                    f"df_agn_completeness[{COMPLETENESS_FHOST_COL!r}]."
-                )
-            bad_fhost = ~np.isfinite(
-                df_agn_completeness[COMPLETENESS_FHOST_COL].to_numpy(dtype=float)
-            )
-            if np.any(bad_fhost):
-                raise ValueError(
-                    f"completeness_mode={completeness_mode!r} requires finite "
-                    f"{COMPLETENESS_FHOST_COL} for all AGN used to estimate "
-                    "the completeness map."
-                )
-        if completeness_mode == "4d_fhost_alpha":
-            if "alpha_lambda" not in df_agn_completeness.columns:
-                raise KeyError(
-                    "completeness_mode='4d_fhost_alpha' requires alpha_lambda."
-                )
-            if not np.all(
-                np.isfinite(
-                    df_agn_completeness["alpha_lambda"].to_numpy(dtype=float)
-                )
-            ):
-                raise ValueError(
-                    "completeness_mode='4d_fhost_alpha' requires finite alpha_lambda."
-                )
-            return get_completeness_function_4d_fhost_alpha(
-                df_agn_completeness,
-                sim_file=completeness_sim_file,
-                plot=plot,
-                plot_path=plot_path,
-                df_agn_fhost_population=df_agn_all,
-            )
-        if completeness_mode in ("3d_fhost", LATENT_ALPHA_COMPLETENESS_MODE):
-            return get_completeness_function_3d_fhost(
-                df_agn_completeness,
-                sim_file=completeness_sim_file,
-                plot=plot,
-                plot_path=plot_path,
-                df_agn_fhost_population=df_agn_all,
-            )
         return get_completeness_function_2d(
-            df_agn_completeness,
-            sim_file=completeness_sim_file,
-            plot=plot,
-            plot_path=plot_path,
+            df_agn_completeness, sim_file=completeness_sim_file, plot=plot, plot_path=plot_path
         )
+    if completeness_mode != "old":
+        raise ValueError("Color-dependent completeness modes cannot use legacy count stratification.")
     return build_completeness_params_for_strata(
         df_agn_completeness,
         df_agn_all,
-        completeness_mode=completeness_mode,
+        completeness_mode="old",
         completeness_sim_file=completeness_sim_file,
         plot=plot,
         plot_path=plot_path,
@@ -2511,352 +1977,9 @@ def _build_completeness_params(
     )
 
 
-def validate_latent_alpha_mock_semantics(mock_path, config):
-    """Require the mock LF and luminosity state to match the alpha parent."""
-
-    if config is None:
-        return
-    with h5py.File(mock_path, "r") as handle:
-        required = {
-            "lf_model",
-            "completeness_magnitude_state",
-            "completeness_mock_schema_version",
-            "lf_semantics_version",
-        }
-        missing = sorted(required.difference(handle.attrs))
-        if missing:
-            raise ValueError(
-                "Latent-alpha completeness requires a current, fully "
-                f"provenanced mock; missing attributes={missing}."
-            )
-        lf_model = str(handle.attrs["lf_model"])
-        state = str(handle.attrs["completeness_magnitude_state"])
-        shen_mode = (
-            str(handle.attrs.get("shen_lf_mode", "all_nh_attenuated"))
-            if lf_model == "shen"
-            else None
-        )
-        if lf_model != config.lf_model or shen_mode != config.shen_lf_mode:
-            raise ValueError(
-                "Latent-alpha mock LF identity does not match the run: "
-                f"mock=({lf_model}, {shen_mode}), "
-                f"run=({config.lf_model}, {config.shen_lf_mode})."
-            )
-        if state != config.luminosity_state:
-            raise ValueError(
-                "Latent-alpha mock magnitude state does not match the LF-resolved "
-                f"parent: mock={state!r}, expected={config.luminosity_state!r}."
-            )
-        if int(handle.attrs["completeness_mock_schema_version"]) != int(
-            COMPLETENESS_MOCK_SCHEMA_VERSION
-        ):
-            raise ValueError("Latent-alpha completeness rejects stale mock schemas.")
-        if str(handle.attrs["lf_semantics_version"]) != str(
-            COMPLETENESS_MOCK_SEMANTICS_VERSION
-        ):
-            raise ValueError("Latent-alpha completeness rejects stale mock semantics.")
 
 
-def write_latent_alpha_run_diagnostics(
-    *,
-    df_agn_fit,
-    completeness_params,
-    flat_samples,
-    model_labels,
-    cosmo_model,
-    z_pivot,
-    latent_alpha_config,
-    plot_path,
-):
-    """Write full-64-draw diagnostics for a completed latent-alpha fit."""
 
-    if latent_alpha_config is None:
-        return ()
-    if completeness_params is None:
-        raise ValueError("Latent-alpha diagnostics require completeness parameters.")
-    samples = np.asarray(flat_samples, dtype=float)
-    if samples.ndim != 2 or samples.shape[1] != len(model_labels):
-        raise ValueError(
-            "Latent-alpha diagnostics require posterior samples aligned with "
-            "model_labels."
-        )
-    representative = {
-        label: float(np.median(samples[:, index]))
-        for index, label in enumerate(model_labels)
-    }
-    cosmology = _cosmo_from_params(cosmo_model, representative, z_pivot)
-    redshift = df_agn_fit["z"].to_numpy(dtype=float)
-    distance_modulus = np.asarray(cosmology.distmod(redshift).value, dtype=float)
-    magnitude = df_agn_fit[COMPLETENESS_MAG_COL].to_numpy(dtype=float)
-
-    from qvc.hubble.latent_alpha_diagnostics import write_latent_alpha_diagnostics
-
-    output_dir = Path(plot_path) / "diagnostics" / "latent_alpha"
-    common = {
-        "config": latent_alpha_config,
-        "output_dir": output_dir,
-        "parameters": representative,
-        "posterior_samples": samples,
-        "model_labels": model_labels,
-        "distance_modulus": distance_modulus,
-        "magnitude": magnitude,
-    }
-    results = []
-    if isinstance(completeness_params, StratifiedCompletenessBundle):
-        codes = df_agn_fit[COMPLETENESS_STRATUM_CODE_COL].to_numpy(dtype=int)
-        for code, params in enumerate(completeness_params.params_by_stratum):
-            mask = codes == code
-            if not np.any(mask):
-                raise ValueError(
-                    "Latent-alpha diagnostics found an empty completeness "
-                    f"stratum at code {code}."
-                )
-            subset_common = dict(common)
-            subset_common["distance_modulus"] = distance_modulus[mask]
-            subset_common["magnitude"] = magnitude[mask]
-            results.append(
-                write_latent_alpha_diagnostics(
-                    df_agn_fit.loc[mask].copy(),
-                    completeness_model=params[0],
-                    filename_prefix=f"latent_alpha_stratum_{code}",
-                    **subset_common,
-                )
-            )
-    else:
-        results.append(
-            write_latent_alpha_diagnostics(
-                df_agn_fit,
-                completeness_model=completeness_params[0],
-                filename_prefix="latent_alpha",
-                **common,
-            )
-        )
-    for result in results:
-        print(f"Latent-alpha diagnostics: {result.json_path}")
-    return tuple(results)
-
-
-def write_fitted_color_run_diagnostics(
-    *,
-    agn_data,
-    completeness_params,
-    flat_samples,
-    model_labels,
-    config,
-    plot_path,
-):
-    """Persist a compact audit of the fitted color response and its data."""
-
-    if config is None:
-        return None
-    if completeness_params is None:
-        raise ValueError(
-            "Fitted-color diagnostics require the base completeness map."
-        )
-    if COLOR_STRENGTH_PARAMETER not in model_labels:
-        raise ValueError("Fitted-color diagnostics require s_color in model labels.")
-    output_dir = Path(plot_path) / "diagnostics" / "fitted_color"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    samples = np.asarray(flat_samples, dtype=float)
-    strength = samples[:, list(model_labels).index(COLOR_STRENGTH_PARAMETER)]
-    color = np.asarray(agn_data["fitted_color_g_minus_i_draws"], dtype=float)
-    percentile = np.asarray(
-        agn_data["fitted_color_parent_percentile_draws"], dtype=float
-    )
-    in_support = np.asarray(
-        agn_data["fitted_color_in_support_draws"], dtype=bool
-    )
-    magnitude = np.asarray(
-        agn_data["fitted_color_magnitude_draws"], dtype=float
-    )
-    f_host = np.asarray(agn_data["fitted_color_fhost_draws"], dtype=float)
-    z = np.asarray(agn_data["z"], dtype=float)
-    if not (
-        color.shape
-        == percentile.shape
-        == in_support.shape
-        == magnitude.shape
-        == f_host.shape
-    ):
-        raise ValueError("Fitted-color diagnostic draws are not aligned.")
-
-    def _base_for_model(model, object_mask):
-        magnitude_draws = magnitude[object_mask]
-        z_draws = z[object_mask, None]
-        support = np.asarray(model.magnitude_support, dtype=float)
-        inside = in_support[object_mask] & (
-            (magnitude_draws >= support[0])
-            & (magnitude_draws <= support[1])
-        )
-        map_magnitude = np.clip(
-            magnitude_draws,
-            float(model.mag_centers[0]),
-            float(model.mag_centers[-1]),
-        )
-        if hasattr(model, "fhost_centers"):
-            map_f_host = np.clip(
-                f_host[object_mask],
-                float(model.fhost_centers[0]),
-                float(model.fhost_centers[-1]),
-            )
-            base = np.asarray(
-                model(map_magnitude, z_draws, map_f_host), dtype=float
-            )
-        else:
-            base = np.asarray(model(map_magnitude, z_draws), dtype=float)
-        invalid = inside & (
-            ~np.isfinite(base) | (base <= np.finfo(float).tiny)
-        )
-        if np.any(invalid):
-            raise ValueError(
-                "Fitted-color diagnostics found an in-support draw with "
-                "zero or invalid base completeness."
-            )
-        return base, inside
-
-    base = np.full_like(magnitude, np.nan, dtype=float)
-    effective_support = np.zeros_like(in_support, dtype=bool)
-    if isinstance(completeness_params, StratifiedCompletenessBundle):
-        if COMPLETENESS_STRATUM_CODE_COL not in agn_data:
-            raise KeyError(
-                "Stratified fitted-color diagnostics require stratum codes."
-            )
-        codes = np.asarray(
-            agn_data[COMPLETENESS_STRATUM_CODE_COL], dtype=int
-        )
-        for code, params in enumerate(completeness_params.params_by_stratum):
-            object_mask = codes == code
-            if not np.any(object_mask):
-                continue
-            values, supported = _base_for_model(params[0], object_mask)
-            base[object_mask] = values
-            effective_support[object_mask] = supported
-    else:
-        object_mask = np.ones(len(z), dtype=bool)
-        base[:, :], effective_support[:, :] = _base_for_model(
-            completeness_params[0], object_mask
-        )
-
-    representative_strength = float(np.median(strength))
-    relative = np.ones_like(base, dtype=float)
-    relative[effective_support] = color_relative_selection_factor_xp(
-        base[effective_support],
-        percentile[effective_support],
-        representative_strength,
-        xp=np,
-    )
-    if np.any(~np.isfinite(relative)) or np.any(relative <= 0.0):
-        raise RuntimeError(
-            "Fitted-color diagnostic relative completeness is invalid."
-        )
-
-    def _finite_median(values):
-        values = np.asarray(values, dtype=float)
-        values = values[np.isfinite(values)]
-        return None if values.size == 0 else float(np.median(values))
-
-    masked_percentile = np.ma.array(percentile, mask=~effective_support)
-    percentile_by_object = np.ma.median(masked_percentile, axis=1).filled(np.nan)
-    color_by_object = np.median(color, axis=1)
-    f_host_by_object = np.median(f_host, axis=1)
-    relative_by_object = np.mean(relative, axis=1)
-    magnitude_by_object = np.median(magnitude, axis=1)
-    log_lnu = np.asarray(
-        rest_frame_ab_magnitude_to_log_lnu(
-            magnitude_by_object,
-            z,
-            cosmology=COMPLETENESS_MOCK_COSMO,
-        ),
-        dtype=float,
-    )
-    log_nu_lnu = log_lnu + np.log10(2.99792458e18 / 2500.0)
-
-    boundary_margin = 0.05
-    boundary_mass_threshold = 0.20
-    lower_boundary_fraction = float(
-        np.mean(strength <= (-1.0 + boundary_margin))
-    )
-    upper_boundary_fraction = float(
-        np.mean(strength >= (1.0 - boundary_margin))
-    )
-    boundary_piled = bool(
-        max(lower_boundary_fraction, upper_boundary_fraction)
-        >= boundary_mass_threshold
-    )
-    summary = {
-        "schema_version": "qvc_fitted_color_diagnostics_v1",
-        "model": fitted_color_provenance(config),
-        "draw_indices": [
-            int(value) for value in deterministic_color_draw_indices()
-        ],
-        "n_objects": int(len(z)),
-        "n_compact_draws": int(color.shape[1]),
-        "n_draws_outside_hard_support": int(
-            np.count_nonzero(~effective_support)
-        ),
-        "n_objects_with_neutral_unsupported_draws": int(
-            np.count_nonzero(np.any(~effective_support, axis=1))
-        ),
-        "unsupported_draw_treatment": "neutral_relative_factor_R_equals_1",
-        "s_color_median": representative_strength,
-        "s_color_p16": float(np.percentile(strength, 16.0)),
-        "s_color_p84": float(np.percentile(strength, 84.0)),
-        "s_color_boundary_margin": boundary_margin,
-        "s_color_lower_boundary_fraction": lower_boundary_fraction,
-        "s_color_upper_boundary_fraction": upper_boundary_fraction,
-        "s_color_boundary_mass_threshold": boundary_mass_threshold,
-        "s_color_boundary_piled": boundary_piled,
-        "median_fitted_g_minus_i": _finite_median(color),
-        "median_parent_percentile": _finite_median(
-            percentile[effective_support]
-        ),
-        "median_host_fraction": _finite_median(f_host),
-        "median_base_completeness": _finite_median(base[effective_support]),
-        "median_relative_completeness": _finite_median(relative_by_object),
-        "relative_completeness_min": _finite_median(
-            [np.min(relative_by_object)]
-        ),
-        "relative_completeness_max": _finite_median(
-            [np.max(relative_by_object)]
-        ),
-        "diagnostic_luminosity": (
-            "log10_nu_Lnu_2500_erg_s_attenuation_retaining_"
-            "fixed_reference_cosmology"
-        ),
-    }
-    summary_path = output_dir / "fitted_color_summary.json"
-    with open(summary_path, "w", encoding="utf-8") as handle:
-        json.dump(summary, handle, indent=2, sort_keys=True)
-
-    fig, axes = plt.subplots(2, 3, figsize=(15.0, 8.0))
-    axes[0, 0].scatter(z, color_by_object, s=7, alpha=0.35)
-    axes[0, 0].set_ylabel(r"fitted total-PSF $g-i$")
-    axes[0, 0].set_xlabel("redshift")
-    axes[0, 1].scatter(z, percentile_by_object, s=7, alpha=0.35)
-    axes[0, 1].axhline(0.5, color="black", lw=1, ls="--")
-    axes[0, 1].set_ylabel("qsogen parent percentile")
-    axes[0, 1].set_xlabel("redshift")
-    axes[0, 2].scatter(z, f_host_by_object, s=7, alpha=0.35)
-    axes[0, 2].set_ylabel(r"$f_{\rm host,2500}^{\rm PSF}$")
-    axes[0, 2].set_xlabel("redshift")
-    axes[1, 0].scatter(z, relative_by_object, s=7, alpha=0.35)
-    axes[1, 0].axhline(1.0, color="black", lw=1, ls="--")
-    axes[1, 0].set_ylabel(r"relative completeness $C_{\rm color}/C_{\rm base}$")
-    axes[1, 0].set_xlabel("redshift")
-    axes[1, 1].scatter(log_nu_lnu, f_host_by_object, s=7, alpha=0.35)
-    axes[1, 1].set_ylabel(r"$f_{\rm host,2500}^{\rm PSF}$")
-    axes[1, 1].set_xlabel(r"$\log_{10}[\nu L_\nu(2500)/{\rm erg\,s^{-1}}]$")
-    axes[1, 2].scatter(log_nu_lnu, relative_by_object, s=7, alpha=0.35)
-    axes[1, 2].axhline(1.0, color="black", lw=1, ls="--")
-    axes[1, 2].set_ylabel(r"relative completeness $C_{\rm color}/C_{\rm base}$")
-    axes[1, 2].set_xlabel(r"$\log_{10}[\nu L_\nu(2500)/{\rm erg\,s^{-1}}]$")
-    for axis in axes.flat:
-        axis.grid(alpha=0.2)
-    fig.tight_layout()
-    plot_file = output_dir / "fitted_color_response_diagnostics.pdf"
-    fig.savefig(plot_file)
-    plt.close(fig)
-    return {"summary_json": summary_path, "response_plot": plot_file}
 
 
 def _map_fit_values_to_plot_sample(
@@ -2939,8 +2062,6 @@ def _compute_direct_full_sample_completeness_summaries(
     use_redshift_mu_term=False,
     early_de_guard=False,
     dmi_draw_indices=None,
-    latent_alpha_config=None,
-    fitted_color_config=None,
 ):
     """Replay completeness for the full plotting sample.
 
@@ -2958,24 +2079,6 @@ def _compute_direct_full_sample_completeness_summaries(
         raise ValueError(
             "flat_samples must be a nonempty two-dimensional array; "
             f"got shape {samples.shape}."
-        )
-    if fitted_color_config is not None:
-        _, color_labels, _ = get_model_params(
-            cosmo_model,
-            only_sna=False,
-            only_agn=only_agn,
-            use_planck_h0_prior=use_planck_h0_prior,
-            use_planck_om_prior=use_planck_om_prior,
-            use_alpha_lambda_term=use_alpha_lambda_term,
-            use_eta_sigma_term=use_eta_sigma_term,
-            use_redshift_log_f_term=use_redshift_log_f_term,
-            use_redshift_mu_term=use_redshift_mu_term,
-            use_fitted_color_completeness=True,
-        )
-        samples, _ = standardization_plot_posterior_view(
-            samples,
-            color_labels,
-            fitted_color_config=fitted_color_config,
         )
     selected_draw_indices = None
     if dmi_draw_indices is not None:
@@ -3079,8 +2182,6 @@ def _compute_direct_full_sample_completeness_summaries(
             only_sna=False,
             only_agn=only_agn,
             use_full_cov=use_full_cov,
-            latent_alpha_config=latent_alpha_config,
-            fitted_color_config=fitted_color_config,
         )
         blob = np.asarray(blob, dtype=float)
         dmi_draws.append(blob[1])
@@ -3288,6 +2389,7 @@ def _run_fit_stage(
     prefix,
     completeness_sim_file,
     completeness_mode,
+    color_completeness_artifact,
     completeness_stratification,
     compare_sigma_only,
     minimal_plots=False,
@@ -3304,8 +2406,6 @@ def _run_fit_stage(
     warm_start_flat_samples=None,
     logZ_is_approximate=False,
     df_agn_completeness=None,
-    latent_alpha_config=None,
-    fitted_color_config=None,
 ):
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
     (
@@ -3340,6 +2440,7 @@ def _run_fit_stage(
         checkpoint_file_override=checkpoint_file_override,
         completeness_sim_file=completeness_sim_file,
         completeness_mode=completeness_mode,
+        color_completeness_artifact=color_completeness_artifact,
         completeness_stratification=completeness_stratification,
         completeness_magnitude=df_agn_fit_selection.attrs.get(
             "completeness_magnitude",
@@ -3359,8 +2460,6 @@ def _run_fit_stage(
         warm_start_flat_samples=warm_start_flat_samples,
         logZ_is_approximate=logZ_is_approximate,
         df_agn_completeness=df_agn_completeness,
-        latent_alpha_config=latent_alpha_config,
-        fitted_color_config=fitted_color_config,
     )
     display_results_summary(
         flat_samples,
@@ -4013,7 +3112,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       prefix="default",
                       checkpoint_file_override=None,
                       completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
-                      completeness_mode="2d",
+                      completeness_mode="old",
+                      color_completeness_artifact=None,
                       completeness_stratification="none",
                       completeness_magnitude="dereddened",
                       N=None,
@@ -4031,27 +3131,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       warm_start_flat_samples=None,
                       logZ_is_approximate=False,
                       df_agn_completeness=None,
-                      latent_alpha_config=None,
-                      fitted_color_config=None,
                       ):
     validate_completeness_mode(completeness_mode)
-    use_latent_alpha = latent_alpha_config is not None
-    use_fitted_color = fitted_color_config is not None
-    if use_latent_alpha:
-        if completeness_mode != LATENT_ALPHA_COMPLETENESS_MODE:
-            raise ValueError(
-                "latent_alpha_config is only valid with "
-                f"{LATENT_ALPHA_COMPLETENESS_MODE}."
-            )
-        if not completeness or only_sna or use_alpha_lambda_term:
-            raise ValueError(
-                "Latent-alpha completeness requires enabled AGN completeness "
-                "and cannot use the alpha_lambda standardization term."
-            )
-    elif completeness_mode == LATENT_ALPHA_COMPLETENESS_MODE:
-        raise ValueError(
-            f"{LATENT_ALPHA_COMPLETENESS_MODE} requires latent_alpha_config."
-        )
     completeness_stratification = normalize_completeness_stratification(
         completeness_stratification
     )
@@ -4062,32 +3143,6 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     completeness_magnitude = normalize_completeness_magnitude(
         df_agn.attrs.get("completeness_magnitude", completeness_magnitude)
     )
-    validate_fitted_color_runtime_semantics(
-        fitted_color_config,
-        completeness=completeness,
-        completeness_mode=completeness_mode,
-        completeness_magnitude=completeness_magnitude,
-        only_sna=only_sna,
-        has_agn_calibrators=df_calibrators is not None,
-        latent_alpha_config=latent_alpha_config,
-        use_alpha_lambda_term=use_alpha_lambda_term,
-    )
-    validate_latent_alpha_runtime_semantics(
-        latent_alpha_config,
-        completeness=completeness,
-        completeness_mode=completeness_mode,
-        completeness_magnitude=completeness_magnitude,
-        only_sna=only_sna,
-        use_alpha_lambda_term=use_alpha_lambda_term,
-        has_agn_calibrators=df_calibrators is not None,
-    )
-    if use_latent_alpha:
-        validate_loaded_spectra_catalog_compatibility(
-            df_agn_all,
-            completeness_enabled=completeness,
-            completeness_mode=completeness_mode,
-            approximate_v1_fhost_2500_psf=False,
-        )
     if completeness and COMPLETENESS_MAG_COL not in df_agn.columns:
         df_agn = prepare_completeness_magnitude_columns(
             df_agn,
@@ -4143,8 +3198,6 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         use_redshift_log_f_term=use_redshift_log_f_term,
         use_redshift_mu_term=use_redshift_mu_term,
         completeness_stratification=completeness_stratification,
-        latent_alpha_config=latent_alpha_config,
-        fitted_color_config=fitted_color_config,
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -4159,21 +3212,6 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         use_redshift_mu_term=use_redshift_mu_term,
-        use_latent_alpha_completeness=use_latent_alpha,
-        latent_alpha_luminosity_mode=(
-            latent_alpha_config.mode if use_latent_alpha else "off"
-        ),
-        latent_alpha_beta_prior=(
-            latent_alpha_config.beta_l_prior
-            if use_latent_alpha
-            else BETA_ALPHA_L_PRIOR
-        ),
-        latent_alpha_magnitude_interaction=(
-            latent_alpha_config.include_magnitude_interactions
-            if use_latent_alpha
-            else False
-        ),
-        use_fitted_color_completeness=use_fitted_color,
     )
     ndim = len(model_labels)
     print(f"Running sampling with {ndim} parameters for cosmological model: {cosmo_model}")
@@ -4251,9 +3289,6 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 completeness_magnitude=completeness_magnitude,
             )
         print(f"Building {completeness_mode} completeness map using mock catalog: {completeness_sim_file}")
-        validate_latent_alpha_mock_semantics(
-            completeness_sim_file, latent_alpha_config
-        )
         completeness_params = _build_completeness_params(
             df_agn_completeness,
             df_agn_all,
@@ -4264,21 +3299,28 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             plot=not (compare_sigma_only or minimal_plots),
             completeness_stratification=completeness_stratification,
         )
+        if completeness_mode != "old":
+            artifact = read_color_completeness_artifact(
+                color_completeness_artifact
+            )
+            old_model = completeness_params[0]
+            resolved_model = build_hubble_completeness_map(
+                completeness_mode,
+                old_completeness=old_model,
+                artifact=artifact,
+                hd_magnitude=df_agn[COMPLETENESS_MAG_COL].to_numpy(dtype=float),
+                hd_redshift=df_agn["z"].to_numpy(dtype=float),
+            )
+            completeness_params = (
+                resolved_model,
+                resolved_model.mag_centers,
+                resolved_model.z_centers,
+                float(np.diff(resolved_model.mag_centers)[0]),
+                float(np.diff(resolved_model.z_centers)[0]),
+                0.0,
+            )
     else:
         completeness_params = None
-
-    fitted_color_photometry_provenance_json = None
-    if use_fitted_color:
-        df_agn = prepare_fitted_color_posterior_draws(
-            df_agn,
-            df_agn_all,
-            config=fitted_color_config,
-            completeness_mode=completeness_mode,
-            z_range=z_range,
-        )
-        fitted_color_photometry_provenance_json = str(
-            df_agn["joint_psf_photometry_provenance_json"].iloc[0]
-        )
 
     agn_model_req_params, agn_model_req_obs, agn_model_req_errs = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
@@ -4296,23 +3338,6 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         agn_fields += ('alpha_lambda',)
     if 'eta_sigma' in df_agn.columns:
         agn_fields += ('eta_sigma',)
-    if use_latent_alpha:
-        agn_fields += (
-            "f_host_2500_psf_draws",
-            "alpha_nu_intrinsic_1450_2500_draws",
-            "alpha_nu_attenuated_1450_2500_draws",
-            "m_2500_dereddened_draws",
-            "m_2500_attenuated_model_draws",
-            "joint_posterior_valid_count",
-        )
-    if use_fitted_color:
-        agn_fields += (
-            "fitted_color_parent_percentile_draws",
-            "fitted_color_magnitude_draws",
-            "fitted_color_fhost_draws",
-            "fitted_color_g_minus_i_draws",
-            "fitted_color_in_support_draws",
-        )
     agn_data = {}
     for col in agn_fields:
         if col not in df_agn.columns:
@@ -4377,11 +3402,6 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     expected_model_labels=model_labels,
                     expected_use_redshift_mu_term=use_redshift_mu_term,
                     expected_completeness_stratification=completeness_stratification,
-                    expected_latent_alpha_config=latent_alpha_config,
-                    expected_fitted_color_config=fitted_color_config,
-                    expected_fitted_color_photometry_provenance_json=(
-                        fitted_color_photometry_provenance_json
-                    ),
                 )
                 print(
                     "Resume-replot with cuts: loaded posterior samples and remapped "
@@ -4400,11 +3420,6 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                         df_agn[COMPLETENESS_STRATUM_CODE_COL].to_numpy(dtype=np.int16)
                         if active_stratification is not None
                         else None
-                    ),
-                    expected_latent_alpha_config=latent_alpha_config,
-                    expected_fitted_color_config=fitted_color_config,
-                    expected_fitted_color_photometry_provenance_json=(
-                        fitted_color_photometry_provenance_json
                     ),
                 )
             if not only_sna:
@@ -4476,10 +3491,6 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 use_redshift_mu_term=use_redshift_mu_term,
                 early_de_guard=early_de_guard,
             )
-            if use_latent_alpha:
-                logl_kwargs["latent_alpha_config"] = latent_alpha_config
-            if use_fitted_color:
-                logl_kwargs["fitted_color_config"] = fitted_color_config
             ptform_kwargs = dict(priors=priors, model_labels=model_labels)
             loglike_func = (
                 log_likelihood_nearbylcs
@@ -4648,43 +3659,18 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             model_labels=np.asarray(model_labels, dtype=str),
             use_redshift_mu_term=bool(use_redshift_mu_term),
             dynesty_seed=int(dynesty_seed),
+            completeness_mode=str(completeness_mode),
         )
-        if use_latent_alpha:
-            alpha_provenance = latent_alpha_provenance(latent_alpha_config)
-            checkpoint_payload.update(
-                latent_alpha_config_json=latent_alpha_config.to_json(),
-                latent_alpha_surface_hash=alpha_provenance[
-                    "config_hash_sha256"
-                ],
-                latent_alpha_provenance_json=json.dumps(
-                    alpha_provenance, sort_keys=True, separators=(",", ":")
-                ),
-                latent_alpha_model_label=LATENT_ALPHA_COMPLETENESS_MODE,
-                latent_alpha_draw_approximation=(
-                    "16_of_64_equal_weight_no_derived_slope_prior_correction"
-                ),
+        if completeness and not isinstance(completeness_params, StratifiedCompletenessBundle):
+            active_map = completeness_params[0]
+            checkpoint_payload["completeness_artifact_hash"] = str(
+                getattr(active_map, "artifact_content_hash", "")
             )
-        if use_fitted_color:
-            color_provenance = fitted_color_provenance(fitted_color_config)
-            checkpoint_payload.update(
-                fitted_color_config_json=json.dumps(
-                    fitted_color_config.to_dict(),
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-                fitted_color_surface_hash=color_provenance[
-                    "config_hash_sha256"
-                ],
-                fitted_color_provenance_json=json.dumps(
-                    color_provenance, sort_keys=True, separators=(",", ":")
-                ),
-                fitted_color_model_label=COLOR_MODEL,
-                fitted_color_draw_approximation=(
-                    "16_of_64_equal_weight_aligned_total_psf_g_i"
-                ),
-                fitted_color_photometry_provenance_json=str(
-                    df_agn["joint_psf_photometry_provenance_json"].iloc[0]
-                ),
+            checkpoint_payload["completeness_old_hash"] = str(
+                getattr(active_map, "old_completeness_hash", "")
+            )
+            checkpoint_payload["completeness_clipped_cells"] = np.argwhere(
+                getattr(active_map, "clipped_cell_mask", np.zeros((0, 0), bool))
             )
         if not only_sna:
             checkpoint_payload.update(
@@ -4700,16 +3686,6 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         # Bin dmi in redshift
         # Interpolate dmi vs redshift for smooth plotting or further analysis (no binning)
         #dmi_interp = interp1d(z, dmi_max_w)
-    if use_fitted_color and not (compare_sigma_only or minimal_plots):
-        write_fitted_color_run_diagnostics(
-            agn_data=agn_data,
-            completeness_params=completeness_params,
-            flat_samples=flat_samples,
-            model_labels=model_labels,
-            config=fitted_color_config,
-            plot_path=plot_path,
-        )
-
     debias_magnitude = (
         df_agn[COMPLETENESS_MAG_COL]
         if completeness
@@ -4722,8 +3698,6 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             debias_magnitude,
             agn_data["z"],
             dmi_posterior_median,
-            f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL),
-            alpha_lambda=agn_data.get("alpha_lambda"),
         )
     dmi_selection_sigma_interp = None
     if dmi_selection_sigma_posterior_median is not None:
@@ -4736,8 +3710,6 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 df_agn[COMPLETENESS_MAG_COL],
                 df_agn["z"],
                 dmi_selection_sigma_posterior_median,
-                f_host_2500_psf=df_agn.get(COMPLETENESS_FHOST_COL),
-                alpha_lambda=df_agn.get("alpha_lambda"),
             )
 
     if compare_sigma_only or minimal_plots:
@@ -4779,7 +3751,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                sigma_clip_second_pass_mode="warm",
                prefix="default", uniform_redshift_distribution=False,
                completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
-               completeness_mode="2d",
+               completeness_mode="old",
+               color_completeness_artifact=None,
                completeness_stratification="none",
                completeness_magnitude="dereddened",
                compare_sigma_only=False,
@@ -4795,48 +3768,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                completeness_closure_test=False,
                resume_replot_with_cuts=False,
                agn_pivot_context=None,
-               latent_alpha_config=None,
-               fitted_color_config=None):
-    validate_latent_alpha_runtime_semantics(
-        latent_alpha_config,
-        completeness=completeness,
-        completeness_mode=completeness_mode,
-        completeness_magnitude=completeness_magnitude,
-        only_sna=only_sna,
-        use_alpha_lambda_term=use_alpha_lambda_term,
-        has_agn_calibrators=df_calibrators is not None,
-    )
-    validate_fitted_color_runtime_semantics(
-        fitted_color_config,
-        completeness=completeness,
-        completeness_mode=completeness_mode,
-        completeness_magnitude=completeness_magnitude,
-        only_sna=only_sna,
-        has_agn_calibrators=df_calibrators is not None,
-        latent_alpha_config=latent_alpha_config,
-        use_alpha_lambda_term=use_alpha_lambda_term,
-    )
-    if fitted_color_config is not None:
-        validate_fitted_color_v3_frame(df_agn_all)
-        if completeness_closure_test:
-            raise ValueError(
-                "The posterior-predictive closure simulator does not yet "
-                "generate fitted g-i draws; disable completeness_closure_test."
-            )
-    if latent_alpha_config is not None:
-        validate_loaded_spectra_catalog_compatibility(
-            df_agn_all,
-            completeness_enabled=completeness,
-            completeness_mode=completeness_mode,
-            approximate_v1_fhost_2500_psf=False,
-        )
-    if (latent_alpha_config is None) != (
-        completeness_mode != LATENT_ALPHA_COMPLETENESS_MODE
-    ):
-        raise ValueError(
-            f"{LATENT_ALPHA_COMPLETENESS_MODE} and latent_alpha_config must be "
-            "enabled together."
-        )
+               df_agn_completeness_parent=None):
     use_redshift_mu_term = bool(use_redshift_mu_term and not only_sna)
     completeness_stratification = normalize_completeness_stratification(
         completeness_stratification
@@ -4863,6 +3795,13 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         df_agn_all,
         completeness_magnitude,
     )
+    if df_agn_completeness_parent is None:
+        df_agn_completeness_parent = df_agn.copy()
+    else:
+        df_agn_completeness_parent = prepare_completeness_magnitude_columns(
+            df_agn_completeness_parent,
+            completeness_magnitude,
+        )
     speed = normalize_speed(speed)
     _fit_mode_label(only_sna, only_agn)
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
@@ -4885,8 +3824,6 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_redshift_log_f_term=use_redshift_log_f_term,
         use_redshift_mu_term=use_redshift_mu_term,
         completeness_stratification=completeness_stratification,
-        latent_alpha_config=latent_alpha_config,
-        fitted_color_config=fitted_color_config,
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -5035,7 +3972,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         nonlocal direct_completeness_params
         if direct_completeness_params is None:
             direct_completeness_params = _build_completeness_params(
-                df_agn_full_sample_preclip,
+                df_agn_completeness_parent,
                 df_agn_all,
                 completeness=completeness,
                 completeness_mode=completeness_mode,
@@ -5044,6 +3981,29 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 plot=False,
                 completeness_stratification=completeness_stratification,
             )
+            if completeness and completeness_mode != "old":
+                artifact = read_color_completeness_artifact(
+                    color_completeness_artifact
+                )
+                model = build_hubble_completeness_map(
+                    completeness_mode,
+                    old_completeness=direct_completeness_params[0],
+                    artifact=artifact,
+                    hd_magnitude=df_agn_full_sample_preclip[
+                        COMPLETENESS_MAG_COL
+                    ].to_numpy(dtype=float),
+                    hd_redshift=df_agn_full_sample_preclip["z"].to_numpy(
+                        dtype=float
+                    ),
+                )
+                direct_completeness_params = (
+                    model,
+                    model.mag_centers,
+                    model.z_centers,
+                    float(np.diff(model.mag_centers)[0]),
+                    float(np.diff(model.z_centers)[0]),
+                    0.0,
+                )
         return direct_completeness_params
 
     skip_pass1_sampling = False
@@ -5126,6 +4086,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 prefix=prefix,
                 completeness_sim_file=completeness_sim_file,
                 completeness_mode=completeness_mode,
+                color_completeness_artifact=color_completeness_artifact,
                 completeness_stratification=completeness_stratification,
                 compare_sigma_only=compare_sigma_only,
                 minimal_plots=minimal_plots,
@@ -5139,9 +4100,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 early_de_guard=early_de_guard,
                 checkpoint_file_override=pass1_checkpoint_file,
                 resume_replot_with_cuts=False,
-                df_agn_completeness=df_agn_full_sample_preclip,
-                latent_alpha_config=latent_alpha_config,
-                fitted_color_config=fitted_color_config,
+                df_agn_completeness=df_agn_completeness_parent,
             )
             posterior_sample_indices_pass1 = (
                 get_hubble_posterior_sample_indices(
@@ -5176,16 +4135,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_redshift_mu_term=use_redshift_mu_term,
                 early_de_guard=early_de_guard,
                 dmi_draw_indices=posterior_sample_indices_pass1,
-                latent_alpha_config=latent_alpha_config,
-                fitted_color_config=fitted_color_config,
             )
             flat_samples_pass1_for_plot = flat_samples_pass1
-            if fitted_color_config is not None:
-                flat_samples_pass1_for_plot, _ = standardization_plot_posterior_view(
-                    flat_samples_pass1,
-                    model_labels_pass1,
-                    fitted_color_config=fitted_color_config,
-                )
             pass1_residuals_full, pass1_clipping_sigma_full, _, _, _ = plot_hubble(
                 flat_samples_pass1_for_plot,
                 df_agn_full_sample_preclip,
@@ -5408,10 +4359,10 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             print("Running fresh second Hubble-fit pass on the clipped AGN sample.")
 
     if uniform_redshift_distribution:
-        if not (compare_sigma_only or minimal_plots):
+        if not compare_sigma_only:
             plot_redshift_histograms(df_pantheon, df_agn_pass2_fit_selection, xscale="linear", plot_path=plot_path, only_agn=only_agn)
     else:
-        if not (compare_sigma_only or minimal_plots):
+        if not compare_sigma_only:
             plot_redshift_histograms(df_pantheon, df_agn_pass2_plot_sample, xscale="log", plot_path=plot_path, only_agn=only_agn)
 
     if not (compare_sigma_only or minimal_plots):
@@ -5477,6 +4428,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         checkpoint_file_override=pass2_checkpoint_file if apply_two_pass_sigma_clip else single_checkpoint_file,
         completeness_sim_file=completeness_sim_file,
         completeness_mode=completeness_mode,
+        color_completeness_artifact=color_completeness_artifact,
         completeness_stratification=completeness_stratification,
         compare_sigma_only=compare_sigma_only,
         minimal_plots=minimal_plots,
@@ -5491,9 +4443,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         resume_replot_with_cuts=resume_replot_with_cuts,
         warm_start_flat_samples=pass2_warm_start_flat_samples if warm_start_pass2 else None,
         logZ_is_approximate=warm_start_pass2,
-        df_agn_completeness=df_agn_full_sample_preclip,
-        latent_alpha_config=latent_alpha_config,
-        fitted_color_config=fitted_color_config,
+        df_agn_completeness=df_agn_completeness_parent,
     )
     if apply_two_pass_sigma_clip:
         _write_stage_checkpoint(
@@ -5516,19 +4466,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         print("Skipping plots, returning results...")
         return flat_samples, model_labels, dm_interp, logZ, logZerr, None, age, age_err
 
-    if latent_alpha_config is not None:
-        write_latent_alpha_run_diagnostics(
-            df_agn_fit=df_agn_pass2_fit_selection,
-            completeness_params=_get_direct_completeness_params(),
-            flat_samples=flat_samples,
-            model_labels=model_labels,
-            cosmo_model=cosmo_model,
-            z_pivot=z_pivot_agn,
-            latent_alpha_config=latent_alpha_config,
-            plot_path=plot_path,
-        )
-
-    if completeness_closure_test and completeness:
+    if completeness_closure_test and completeness and not minimal_plots:
         closure_bin_width = 0.2
         closure_z_lo = closure_bin_width * np.floor(z_range[0] / closure_bin_width)
         closure_z_hi = closure_bin_width * np.ceil(z_range[1] / closure_bin_width)
@@ -5556,7 +4494,6 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             use_eta_sigma_term=use_eta_sigma_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
             use_redshift_mu_term=use_redshift_mu_term,
-            latent_alpha_config=latent_alpha_config,
         )
         closure_paths = write_completeness_closure_diagnostics(
             closure_result,
@@ -5568,17 +4505,11 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             f"{closure_verdict}; summary={closure_paths['summary_csv']}"
         )
 
-    # All inference products above use the authoritative full latent posterior.
-    # Legacy standardization plots below understand only the base Hubble model,
-    # so give them an explicitly label-filtered view rather than asking them to
-    # infer a model parameterization from the enlarged posterior width.
     authoritative_flat_samples = flat_samples
     authoritative_model_labels = model_labels
     flat_samples, model_labels = standardization_plot_posterior_view(
         flat_samples,
         model_labels,
-        latent_alpha_config=latent_alpha_config,
-        fitted_color_config=fitted_color_config,
     )
 
     if minimal_plots:
@@ -5640,6 +4571,71 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 early_de_guard=early_de_guard,
                 dmi_draw_indices=posterior_sample_indices,
             )
+
+        # Keep this mode deliberately small and stable: two luminosity-band
+        # diagnostics, the raw and debiased Hubble diagrams, the authoritative
+        # debiased-residual diagnostic generated by plot_hubble, one redshift
+        # histogram, and one Dynesty posterior corner plot.
+        plot_predicted_L2500_vs_sigmahat(
+            flat_samples,
+            df_agn_pass2_plot_sample,
+            cosmo_model=cosmo_model,
+            z_pivot_agn=z_pivot_agn,
+            debias=False,
+            show_residuals=False,
+            show=False,
+            plot_path=plot_path,
+            df_calibrators=df_calibrators,
+            z_range=z_range,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_log_f_term=use_redshift_log_f_term,
+            use_redshift_mu_term=use_redshift_mu_term,
+            agn_pivot_context=agn_pivot_context,
+        )
+        plot_predicted_L2500_vs_sigmahat(
+            flat_samples,
+            df_agn_pass2_plot_sample,
+            cosmo_model=cosmo_model,
+            z_pivot_agn=z_pivot_agn,
+            debias=True,
+            dm_interp=dm_interp,
+            dmi_values=dmi_posterior_median_full,
+            dmi_selection_sigma=dmi_selection_sigma_full,
+            show_residuals=False,
+            show=False,
+            plot_path=plot_path,
+            df_calibrators=df_calibrators,
+            z_range=z_range,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_log_f_term=use_redshift_log_f_term,
+            use_redshift_mu_term=use_redshift_mu_term,
+            agn_pivot_context=agn_pivot_context,
+        )
+        plot_hubble(
+            flat_samples,
+            df_agn_pass2_plot_sample,
+            df_pantheon,
+            cosmo_model=cosmo_model,
+            z_pivot_agn=z_pivot_agn,
+            show_true=False,
+            show=False,
+            debias=False,
+            plot_path=plot_path,
+            verbose=verbose,
+            residuals_sigma_clip=residuals_sigma_clip,
+            df_calibrators=df_calibrators,
+            residuals_csv_filename=None,
+            sigma_clip_threshold=sigma_clip_threshold if apply_two_pass_sigma_clip else None,
+            z_range=z_range,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_log_f_term=use_redshift_log_f_term,
+            use_redshift_mu_term=use_redshift_mu_term,
+            only_agn=only_agn,
+            agn_pivot_context=agn_pivot_context,
+        )
         (
             debiased_residuals,
             _debiased_clipping_sigma,
@@ -5676,15 +4672,29 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             only_agn=only_agn,
             agn_pivot_context=agn_pivot_context,
         )
-        _plot_hubble_reddening_redshift_pre_and_postcut(
-            df_agn_pass2_plot_sample,
-            debiased_residuals,
+        plot_cosmo_corner(
+            None,
+            flat_samples,
+            cosmo_model,
+            z_pivot_sna,
+            z_pivot_agn,
+            show=False,
             plot_path=plot_path,
-            pass1_diagnostics_df=pass1_diagnostics_df,
+            speed=speed,
+            gauss_sigma=1.5,
+            kde_bw_scale=1.5,
+            include_alpha_beta=True,
+            only_agn=only_agn,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_log_f_term=use_redshift_log_f_term,
+            use_redshift_mu_term=use_redshift_mu_term,
         )
         print(
-            "minimal_plots=True: retained the Hubble diagram, residual CSV, "
-            "and reddening-redshift diagnostics; skipped other figures."
+            "minimal_plots=True: retained the raw and debiased Hubble diagrams, "
+            "debiased-residual diagnostic, Dynesty corner plot, redshift "
+            "histogram, two predicted-L2500 band plots, and "
+            "hubble_plot_residuals.csv; skipped other figures."
         )
         return (
             authoritative_flat_samples,
@@ -6407,33 +5417,12 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                       use_redshift_mu_term=use_redshift_mu_term)
 
     if completeness:
-        df_agn_completeness_plot_sample = df_agn_full_sample_preclip
-        if completeness_mode == "4d_fhost_alpha":
-            print("Plotting host-aware/color-aware 4D completeness diagnostics...")
-            get_completeness_function_4d_fhost_alpha(
-                df_agn_completeness_plot_sample,
-                sim_file=completeness_sim_file,
-                plot=True,
-                plot_path=plot_path,
-                df_agn_fhost_population=df_agn_all,
-            )
-        elif completeness_mode in ("3d_fhost", LATENT_ALPHA_COMPLETENESS_MODE):
-            print("Plotting host-aware 3D completeness diagnostics...")
-            get_completeness_function_3d_fhost(
-                df_agn_completeness_plot_sample,
-                sim_file=completeness_sim_file,
-                plot=True,
-                plot_path=plot_path,
-                df_agn_fhost_population=df_agn_all,
-            )
-        else:
-            print("Plotting completeness vs magnitude at redshifts...")
-            p_detect, mag_centers, z_centers, dm, dz, completeness_scatter = get_completeness_function_2d(
-                df_agn_completeness_plot_sample, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
-            )
-            plot_completeness_vs_mag_at_redshifts(
-                p_detect, mag_centers, z_centers, plot_path=plot_path
-            )
+        print("Plotting active frozen 2D completeness versus magnitude.")
+        active_params = _get_direct_completeness_params()
+        p_detect, mag_centers, z_centers = active_params[:3]
+        plot_completeness_vs_mag_at_redshifts(
+            p_detect, mag_centers, z_centers, plot_path=plot_path
+        )
 
     print(f"\033[94mReduced chi-squared (debiased) M2500: {chisq_red_M2500_debiased:.3f}\033[0m")
     print(
@@ -6495,7 +5484,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             completeness=True,
             prefix="default", result_prefix="", uniform_redshift_distribution=False,
             completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
-            completeness_mode="2d",
+            completeness_mode="old",
             completeness_stratification="none",
             completeness_magnitude="dereddened",
             compare_sigma_only=False,
@@ -6775,447 +5764,8 @@ def validate_plot_mode_args(args):
         raise ValueError("--minimal-plots is not supported with --use_jax.")
 
 
-def validate_spectra_catalog_compatibility_args(args):
-    """Validate explicit temporary v1 catalog compatibility controls."""
-
-    approximate = bool(args.approximate_v1_fhost_2500_psf)
-    if approximate and not args.allow_spectra_catalog_v1:
-        raise ValueError(
-            "--approximate-v1-fhost-2500-psf requires "
-            "--allow-spectra-catalog-v1."
-        )
-    if approximate and args.disable_completeness:
-        raise ValueError(
-            "--approximate-v1-fhost-2500-psf requires completeness to be enabled."
-        )
-    if approximate and args.completeness_mode != "3d_fhost":
-        raise ValueError(
-            "--approximate-v1-fhost-2500-psf is only supported with "
-            "--completeness_mode 3d_fhost."
-        )
-    if approximate and args.correct_sigma_uv_host:
-        raise ValueError(
-            "The approximate v1 host fraction cannot be used with "
-            "--correct-sigma-uv-host."
-        )
 
 
-LATENT_ALPHA_V3_DRAW_COLUMNS = (
-    "f_host_2500_psf_draws",
-    "alpha_nu_intrinsic_1450_2500_draws",
-    "alpha_nu_attenuated_1450_2500_draws",
-    "m_2500_dereddened_draws",
-    "m_2500_attenuated_model_draws",
-    "a_2500_galaxy_draws",
-    "a_2500_internal_draws",
-    "a_2500_total_draws",
-)
-
-FITTED_COLOR_FULL_DRAW_COLUMNS = (
-    "joint_psf_total_g_flux_mjy_draws",
-    "joint_psf_total_i_flux_mjy_draws",
-    "m_2500_attenuated_model_draws",
-    "f_host_2500_psf_draws",
-)
-
-
-def validate_fitted_color_v3_frame(frame):
-    """Require the aligned v3 total-PSF photometry extension."""
-
-    if not isinstance(frame, pd.DataFrame):
-        raise TypeError("The fitted-color spectra catalog must be a pandas DataFrame.")
-    rows = frame
-    if "fit_ok" in rows.columns:
-        successful = rows["fit_ok"].astype(str).str.strip().str.lower().isin(
-            {"true", "1", "yes"}
-        )
-        rows = rows.loc[successful]
-    if rows.empty:
-        raise ValueError(
-            "Fitted-color completeness requires at least one successful v3 row."
-        )
-    formats = set(
-        rows.get(
-            "qvc_spectra_catalog_format",
-            pd.Series([""] * len(rows), index=rows.index),
-        ).astype(str)
-    )
-    if formats != {"qvc_spectra_catalog_v3"}:
-        raise ValueError(
-            "Fitted-color completeness requires only qvc_spectra_catalog_v3 "
-            f"inputs; loaded formats={sorted(formats)}."
-        )
-    required = {
-        *FITTED_COLOR_FULL_DRAW_COLUMNS,
-        "joint_posterior_valid_count",
-        "joint_psf_photometry_valid_count",
-        "joint_psf_photometry_provenance_json",
-        "joint_posterior_index",
-    }
-    missing = sorted(required.difference(rows.columns))
-    if missing:
-        raise ValueError(
-            "The v3 spectra catalog is missing fitted-color aligned fields: "
-            f"{missing}. Reprocess the posterior bundles with total-PSF ugriz "
-            "prediction enabled."
-        )
-    joint_count = pd.to_numeric(
-        rows["joint_posterior_valid_count"], errors="coerce"
-    ).to_numpy(dtype=float)
-    color_count = pd.to_numeric(
-        rows["joint_psf_photometry_valid_count"], errors="coerce"
-    ).to_numpy(dtype=float)
-    if (
-        np.any(~np.isfinite(joint_count))
-        or np.any(~np.isfinite(color_count))
-        or np.any(joint_count != 64)
-        or np.any(color_count != joint_count)
-    ):
-        raise ValueError(
-            "Fitted-color completeness requires exactly 64 valid total-PSF "
-            "draws aligned with the 64 authoritative joint posterior draws."
-        )
-    try:
-        posterior_index = np.asarray(
-            np.stack(rows["joint_posterior_index"].to_numpy()), dtype=float
-        )
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            "Fitted-color posterior indices could not be stacked."
-        ) from exc
-    if (
-        posterior_index.shape != (len(rows), 64)
-        or np.any(~np.isfinite(posterior_index))
-        or np.any(posterior_index < 0.0)
-        or np.any(posterior_index != np.floor(posterior_index))
-        or np.any(np.diff(posterior_index, axis=1) <= 0.0)
-    ):
-        raise ValueError(
-            "Fitted-color authoritative posterior indices must have shape "
-            f"{(len(rows), 64)} and be finite, nonnegative, integer-valued, "
-            "and strictly increasing per object."
-        )
-    provenance_values = set(
-        rows["joint_psf_photometry_provenance_json"].astype(str).tolist()
-    )
-    if len(provenance_values) != 1:
-        raise ValueError(
-            "Fitted-color inputs must share one total-PSF prediction provenance."
-        )
-    try:
-        prediction_provenance = json.loads(next(iter(provenance_values)))
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            "The fitted-color total-PSF prediction provenance is malformed."
-        ) from exc
-    for field in ("prediction_source", "jaxsedfit_git_commit"):
-        if not str(prediction_provenance.get(field, "")).strip():
-            raise ValueError(
-                "The fitted-color total-PSF prediction provenance lacks "
-                f"{field!r}."
-            )
-    for column in FITTED_COLOR_FULL_DRAW_COLUMNS:
-        try:
-            values = np.asarray(np.stack(rows[column].to_numpy()), dtype=float)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"Could not stack fitted-color joint field {column!r}."
-            ) from exc
-        if values.shape != (len(rows), 64) or np.any(~np.isfinite(values)):
-            raise ValueError(
-                f"Fitted-color joint field {column!r} must be finite with "
-                f"shape {(len(rows), 64)}."
-            )
-        if "flux_mjy" in column and np.any(values <= 0.0):
-            raise ValueError(
-                f"Fitted-color total-PSF flux field {column!r} must be positive."
-            )
-        if column == "f_host_2500_psf_draws" and np.any(
-            (values < 0.0) | (values > 1.0)
-        ):
-            raise ValueError("Aligned fitted-color host draws must lie in [0, 1].")
-
-
-def prepare_fitted_color_posterior_draws(
-    frame,
-    parent_frame,
-    *,
-    config,
-    completeness_mode,
-    z_range,
-):
-    """Precompute draw-wise qsogen parent percentiles outside both samplers."""
-
-    if config is None:
-        return frame
-    validate_fitted_color_v3_frame(frame)
-    cache = read_qsogen_color_parent_cache(
-        config.parent_file,
-        expected_content_hash=config.parent_cache_sha256,
-    )
-    support = cache.support
-    magnitude_support = support["apparent_magnitude_2500"]
-    redshift_support = support["redshift"]
-    if magnitude_support[0] > 18.5 or magnitude_support[1] < 24.0:
-        raise ValueError(
-            "The qsogen color-parent cache must cover the full hard magnitude "
-            f"support [18.5, 24.0]; cache support={magnitude_support}."
-        )
-    if redshift_support[0] > float(z_range[0]) or redshift_support[1] < float(
-        z_range[1]
-    ):
-        raise ValueError(
-            "The qsogen color-parent cache must cover the full fitted redshift "
-            f"range {tuple(z_range)}; cache support={redshift_support}."
-        )
-
-    selected = deterministic_color_draw_indices()
-
-    def _compact(column):
-        values = np.asarray(np.stack(frame[column].to_numpy()), dtype=float)
-        return values[:, selected]
-
-    g_flux = _compact("joint_psf_total_g_flux_mjy_draws")
-    i_flux = _compact("joint_psf_total_i_flux_mjy_draws")
-    magnitude = _compact("m_2500_attenuated_model_draws")
-    f_host = _compact("f_host_2500_psf_draws")
-    color = fitted_psf_g_minus_i(
-        np.stack((g_flux, i_flux), axis=-1),
-        bands=("g_sdss", "i_sdss"),
-    )
-    redshift = np.broadcast_to(
-        frame["z"].to_numpy(dtype=float)[:, None], magnitude.shape
-    )
-    within_hard_support = (
-        (magnitude >= 18.5)
-        & (magnitude <= 24.0)
-        & (redshift >= float(z_range[0]))
-        & (redshift <= float(z_range[1]))
-    )
-    percentile = np.full(magnitude.shape, 0.5, dtype=float)
-    mask = within_hard_support
-    if completeness_mode == "3d_fhost":
-        percentile[mask] = cache.percentile_3d(
-            color[mask],
-            magnitude[mask],
-            redshift[mask],
-            f_host[mask],
-            sigma=config.parent_sigma,
-        )
-    elif completeness_mode == "2d":
-        host_model = fit_fhost_2500_l2500_model(
-            parent_frame,
-            f_host_col=COMPLETENESS_FHOST_COL,
-            fit_logL_max=45.5,
-            cosmo=COMPLETENESS_MOCK_COSMO,
-        )
-        host_nodes, weights = fixed_reference_host_fraction_quadrature(
-            magnitude,
-            redshift,
-            host_model,
-            order=12,
-        )
-        host_weights = np.broadcast_to(weights, host_nodes.shape)
-        percentile[mask] = cache.percentile_2d(
-            color[mask],
-            magnitude[mask],
-            redshift[mask],
-            host_nodes[mask],
-            host_weights[mask],
-            sigma=config.parent_sigma,
-        )
-    else:  # guarded by runtime validation, retained for direct callers
-        raise ValueError(
-            "Fitted-color posterior preparation supports only 2d and 3d_fhost."
-        )
-    if np.any(~np.isfinite(percentile)) or np.any(
-        (percentile < 0.0) | (percentile > 1.0)
-    ):
-        raise RuntimeError("Computed fitted-color parent percentiles are invalid.")
-
-    prepared = frame.copy()
-    for name, values in (
-        ("fitted_color_parent_percentile_draws", percentile),
-        ("fitted_color_magnitude_draws", magnitude),
-        ("fitted_color_fhost_draws", f_host),
-        ("fitted_color_g_minus_i_draws", color),
-        ("fitted_color_in_support_draws", within_hard_support),
-    ):
-        prepared[name] = pd.Series(list(values), index=prepared.index, dtype=object)
-    prepared.attrs.update(frame.attrs)
-    prepared.attrs["fitted_color_config"] = config.to_dict()
-    prepared.attrs["fitted_color_draw_indices"] = tuple(int(i) for i in selected)
-    return prepared
-
-
-def validate_latent_alpha_v3_frame(frame):
-    """Fail before sampling unless successful v3 rows have complete 64-draw data."""
-
-    if not isinstance(frame, pd.DataFrame):
-        raise TypeError("The latent-alpha spectra catalog must be a pandas DataFrame.")
-    rows = frame
-    if "fit_ok" in rows.columns:
-        successful = rows["fit_ok"].astype(str).str.strip().str.lower().isin(
-            {"true", "1", "yes"}
-        )
-        rows = rows.loc[successful]
-    if rows.empty:
-        raise ValueError(
-            "Latent-alpha completeness requires at least one successful v3 "
-            "spectral-fit row."
-        )
-
-    required = {
-        *LATENT_ALPHA_V3_DRAW_COLUMNS,
-        "joint_posterior_valid_count",
-        "joint_posterior_index",
-        "joint_posterior_source_draw_count",
-        "mw_deredden_applied",
-    }
-    missing = sorted(required.difference(rows.columns))
-    if missing:
-        raise ValueError(
-            "The v3 spectra catalog is missing latent-alpha joint/provenance "
-            f"fields: {missing}."
-        )
-
-    foreground_corrected = rows["mw_deredden_applied"].map(
-        lambda value: (
-            bool(value)
-            if isinstance(value, (bool, np.bool_))
-            else str(value).strip().lower() in {"true", "1", "yes"}
-        )
-    ).to_numpy(dtype=bool)
-    if not np.all(foreground_corrected):
-        raise ValueError(
-            "Latent intrinsic-slope completeness requires "
-            "mw_deredden_applied=True for every fitted object because the "
-            "stored slopes exclude Milky-Way extinction."
-        )
-
-    counts = pd.to_numeric(
-        rows["joint_posterior_valid_count"], errors="coerce"
-    ).to_numpy(dtype=float)
-    if counts.shape != (len(rows),) or np.any(~np.isfinite(counts)) or np.any(
-        counts != 64
-    ):
-        raise ValueError(
-            "Latent-alpha completeness requires exactly 64 valid aligned "
-            "joint posterior draws for every fitted object."
-        )
-
-    def _stack(column, *, dtype=float):
-        try:
-            values = np.asarray(
-                np.stack(rows[column].to_numpy()), dtype=dtype
-            )
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"Could not stack v3 joint posterior field {column!r}."
-            ) from exc
-        if values.shape != (len(rows), 64):
-            raise ValueError(
-                f"v3 joint posterior field {column!r} has shape "
-                f"{values.shape}; expected {(len(rows), 64)}."
-            )
-        return values
-
-    draw_values = {
-        column: _stack(column) for column in LATENT_ALPHA_V3_DRAW_COLUMNS
-    }
-    nonfinite = [
-        column
-        for column, values in draw_values.items()
-        if np.any(~np.isfinite(values))
-    ]
-    if nonfinite:
-        raise ValueError(
-            "The 64 valid v3 joint posterior draws must be finite; invalid "
-            f"fields: {nonfinite}."
-        )
-    host = draw_values["f_host_2500_psf_draws"]
-    if np.any((host < 0.0) | (host > 1.0)):
-        raise ValueError(
-            "v3 f_host_2500_psf joint draws must lie in [0, 1]."
-        )
-
-    posterior_index = _stack("joint_posterior_index", dtype=float)
-    if np.any(~np.isfinite(posterior_index)) or np.any(
-        posterior_index != np.floor(posterior_index)
-    ):
-        raise ValueError("v3 joint posterior indices must be finite integers.")
-    posterior_index = posterior_index.astype(np.int64)
-    if np.any(posterior_index < 0) or np.any(np.diff(posterior_index, axis=1) <= 0):
-        raise ValueError(
-            "v3 joint posterior indices must be nonnegative and strictly "
-            "increasing within every object."
-        )
-    source_count = pd.to_numeric(
-        rows["joint_posterior_source_draw_count"], errors="coerce"
-    ).to_numpy(dtype=float)
-    if (
-        source_count.shape != (len(rows),)
-        or np.any(~np.isfinite(source_count))
-        or np.any(source_count != np.floor(source_count))
-        or np.any(source_count <= posterior_index[:, -1])
-    ):
-        raise ValueError(
-            "v3 joint posterior source counts must be finite integers larger "
-            "than every selected original posterior index."
-        )
-
-
-def validate_loaded_spectra_catalog_compatibility(
-    frame,
-    *,
-    completeness_enabled,
-    completeness_mode,
-    approximate_v1_fhost_2500_psf,
-):
-    """Reject unsupported completeness uses after catalog formats are known."""
-
-    if "qvc_spectra_catalog_format" in frame.columns:
-        formats = set(frame["qvc_spectra_catalog_format"].astype(str).unique())
-    else:
-        formats = set(frame.attrs.get("spectra_catalog_formats", ()))
-    if completeness_mode == LATENT_ALPHA_COMPLETENESS_MODE:
-        if not completeness_enabled:
-            raise ValueError(
-                f"{LATENT_ALPHA_COMPLETENESS_MODE} requires completeness."
-            )
-        if formats != {"qvc_spectra_catalog_v3"}:
-            raise ValueError(
-                f"{LATENT_ALPHA_COMPLETENESS_MODE} requires only "
-                "qvc_spectra_catalog_v3 inputs with aligned slope/host draws; "
-                f"loaded formats={sorted(formats)}."
-            )
-        validate_latent_alpha_v3_frame(frame)
-        return
-    if "qvc_spectra_catalog_v1" not in formats or not completeness_enabled:
-        return
-    if completeness_mode == "4d_fhost_alpha":
-        raise ValueError(
-            "qvc_spectra_catalog_v1 cannot be used for 4D host/color "
-            "completeness because it has no native f_host_2500_psf posterior."
-        )
-    if completeness_mode == "3d_fhost" and not approximate_v1_fhost_2500_psf:
-        raise ValueError(
-            "qvc_spectra_catalog_v1 requires "
-            "--approximate-v1-fhost-2500-psf for 3D host-aware completeness. "
-            "Use 2D completeness for the non-approximate Shen LF test."
-        )
-    if completeness_mode == "3d_fhost":
-        if "f_host_2500_psf" not in frame.columns:
-            raise ValueError("The requested v1 host-fraction approximation is missing.")
-        fhost = pd.to_numeric(frame["f_host_2500_psf"], errors="coerce").to_numpy(
-            dtype=float
-        )
-        finite = np.isfinite(fhost) & (fhost >= 0.0) & (fhost <= 1.0)
-        if np.count_nonzero(finite) < 8:
-            raise ValueError(
-                "The v1 host-fraction approximation produced fewer than 8 valid "
-                "objects, insufficient for 3D host-population fitting."
-            )
 
 
 if __name__ == "__main__":
@@ -7294,6 +5844,14 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--sdss-target-metadata-h5",
+        default=None,
+        help=(
+            "Local HDF5 catalog providing immutable SDSS survey/program and "
+            "target-bit provenance for shared targeting-sample cuts."
+        ),
+    )
+    parser.add_argument(
         "--magnitude-convention",
         type=str,
         choices=["dereddened", "attenuated"],
@@ -7337,7 +5895,9 @@ if __name__ == "__main__":
         default=False,
         help=(
             "Run the normal fit and evidence comparison while retaining only the "
-            "debiased Hubble diagram and its residual CSV."
+            "raw/debiased Hubble diagrams, debiased-residual diagnostic, Dynesty "
+            "corner plot, redshift histogram, predicted-L2500 band plots, and "
+            "hubble_plot_residuals.csv."
         ),
     )
     parser.add_argument(
@@ -7430,102 +5990,34 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help=(
-            "Explicitly allow qvc_spectra_catalog_v2 for legacy 2D/3D "
-            "workflows. Latent-alpha completeness always requires v3."
+            "Explicitly allow qvc_spectra_catalog_v2 input for the unchanged "
+            "LF/Hubble workflow."
         ),
     )
     parser.add_argument(
-        "--approximate-v1-fhost-2500-psf",
-        action="store_true",
-        default=False,
-        help=(
-            "Diagnostic-only 3D proxy from v1 joint ugriz PSF AGN-fraction "
-            "draws. Requires --allow-spectra-catalog-v1 and 3d_fhost."
-        ),
-    )
-    parser.add_argument(
-        "--completeness_mode",
-        type=str,
+        "--completeness-mode",
+        dest="completeness_mode",
         choices=list(VALID_COMPLETENESS_MODES),
-        default="2d",
+        default="old",
         help=(
-            "Completeness model: 2D, host-aware 3D, latent intrinsic-slope "
-            "host-aware 3D, or legacy 4D host/color."
+            "Frozen 2D Hubble completeness map: empirical LF/count baseline "
+            "or eBOSS photometry-only host-removal sensitivity."
         ),
     )
     parser.add_argument(
-        "--completeness-alpha-parent-mean",
-        type=float,
-        default=-0.5,
-        help="Redshift-independent parent mean alpha_nu (default: -0.5).",
-    )
-    parser.add_argument(
-        "--completeness-alpha-parent-sigma",
-        type=float,
-        default=0.3,
-        help="Positive parent alpha_nu scatter (default: 0.3).",
-    )
-    parser.add_argument(
-        "--completeness-alpha-luminosity-mode",
-        choices=["off", "fixed", "joint"],
-        default="off",
-        help="Alpha-parent luminosity dependence: off, fixed, or sampled jointly.",
-    )
-    parser.add_argument(
-        "--completeness-alpha-parent-beta-l",
-        type=float,
-        default=None,
-        help=(
-            "Fixed beta_alpha_L in alpha_nu per luminosity dex. Positive means "
-            "more luminous quasars are bluer; valid only in fixed mode."
-        ),
-    )
-    parser.add_argument(
-        "--completeness-alpha-parent-beta-l-prior",
-        type=float,
-        nargs=2,
-        metavar=("MIN", "MAX"),
-        default=list(BETA_ALPHA_L_PRIOR),
-        help="Uniform beta_alpha_L prior for joint mode (default: -0.5 0.5).",
-    )
-    parser.add_argument(
-        "--completeness-alpha-parent-logl-pivot",
-        type=float,
-        default=45.5,
-        help="Parent log10(nu L_nu / erg s^-1) pivot (default: 45.5).",
-    )
-    parser.add_argument(
-        "--completeness-alpha-magnitude-interaction",
-        action="store_true",
-        default=False,
-        help=(
-            "Add apparent-magnitude interactions to the latent alpha response "
-            "over the calibrated 18.5--24 support."
-        ),
-    )
-    parser.add_argument(
-        "--completeness-color-model",
-        choices=["none", COLOR_MODEL],
-        default="none",
-        help=(
-            "Optional normalized fitted g-i selection response layered on the "
-            "ordinary 2D or 3D host completeness map."
-        ),
-    )
-    parser.add_argument(
-        "--completeness-color-parent-file",
+        "--color-completeness-artifact",
         type=str,
         default=None,
-        help=(
-            "Pinned qsogen color-parent HDF5 cache; required when the color "
-            "model is qsogen_delta_gi."
-        ),
+        help="Frozen program-specific color artifact required by color-dependent modes.",
     )
     parser.add_argument(
-        "--completeness-color-parent-sigma",
-        type=float,
-        default=DEFAULT_COLOR_PARENT_SIGMA,
-        help="Positive parent g-i scatter in magnitudes (default: 0.20).",
+        "--color-support-cut",
+        action="store_true",
+        help=(
+            "Apply the frozen color artifact's valid four-cell support mask as "
+            "a shared pre-Hubble analysis cut. The uncut selected catalog still "
+            "constructs C_old. Intended for matched color-mode runs only."
+        ),
     )
     parser.add_argument(
         "--completeness-stratification",
@@ -7630,28 +6122,10 @@ if __name__ == "__main__":
     os.environ[COMPLETENESS_LF_MODEL_ENV] = args.completeness_lf_model
     os.environ[DYNESTY_SEED_ENV] = str(args.dynesty_seed)
     args.speed = normalize_speed(args.speed)
-    latent_alpha_config = build_latent_alpha_config_from_args(args)
-    fitted_color_config = build_fitted_color_config_from_args(args)
-    if latent_alpha_config is not None and args.run != "single":
-        raise ValueError(
-            f"{LATENT_ALPHA_COMPLETENESS_MODE} initially supports only "
-            "--run single; full mode includes an unsupported SNe-only fit."
+    if (args.completeness_mode != "old" or args.color_support_cut) and not args.color_completeness_artifact:
+        parser.error(
+            "--color-completeness-artifact is required for color-dependent modes or --color-support-cut."
         )
-    if fitted_color_config is not None and args.run != "single":
-        raise ValueError(
-            "Fitted-color completeness initially supports only --run single; "
-            "full mode includes an unsupported SNe-only fit."
-        )
-    validate_fitted_color_runtime_semantics(
-        fitted_color_config,
-        completeness=not args.disable_completeness,
-        completeness_mode=args.completeness_mode,
-        completeness_magnitude=args.completeness_magnitude,
-        only_sna=args.only_sna,
-        has_agn_calibrators=args.agn_calibrators is not None,
-        latent_alpha_config=latent_alpha_config,
-        use_alpha_lambda_term=args.fit_alpha_lambda_term,
-    )
 
     print("Running Hubble fit with the following settings:")
     for k, v in vars(args).items():
@@ -7681,7 +6155,6 @@ if __name__ == "__main__":
             "normalizations can differ by parameter-independent constants."
         )
     validate_plot_mode_args(args)
-    validate_spectra_catalog_compatibility_args(args)
 
     if args.disable_full_covariance:
         print("Warning: Running without full covariance may lead to underestimated uncertainties.")
@@ -7713,9 +6186,10 @@ if __name__ == "__main__":
                            residuals_sigma_clip=args.residuals_sigma_clip, residuals_csv=args.residuals_csv,
                            exclude_object_ids_csv=args.exclude_object_ids_csv,
                            spectra_fit_h5=args.spectra_fit_h5,
+                           sdss_target_metadata_h5=args.sdss_target_metadata_h5,
                            allow_spectra_catalog_v1=args.allow_spectra_catalog_v1,
                            allow_spectra_catalog_v2=args.allow_spectra_catalog_v2,
-                           approximate_v1_fhost_2500_psf=args.approximate_v1_fhost_2500_psf,
+                           approximate_v1_fhost_2500_psf=False,
                            magnitude_convention=args.magnitude_convention,
                            completeness_magnitude=args.completeness_magnitude,
                            spectra_sdss_run2d=args.spectra_sdss_run2d,
@@ -7725,14 +6199,34 @@ if __name__ == "__main__":
                            z_range=tuple(args.z_range), plot_path=agn_plot_path,
                            cut_report_path=cut_report_path,
                            plot_diagnostics=not args.minimal_plots)
-    validate_loaded_spectra_catalog_compatibility(
-        df_agn_all,
-        completeness_enabled=not args.disable_completeness,
-        completeness_mode=args.completeness_mode,
-        approximate_v1_fhost_2500_psf=args.approximate_v1_fhost_2500_psf,
-    )
-    if fitted_color_config is not None:
-        validate_fitted_color_v3_frame(df_agn_all)
+    df_agn_completeness_parent = df_agn.copy()
+    if args.color_support_cut:
+        artifact = read_color_completeness_artifact(
+            args.color_completeness_artifact
+        )
+        prepared = prepare_completeness_magnitude_columns(
+            df_agn, args.completeness_magnitude
+        )
+        support_mask = color_support_stencil_mask(
+            artifact,
+            prepared[COMPLETENESS_MAG_COL].to_numpy(dtype=float),
+            prepared["z"].to_numpy(dtype=float),
+        )
+        if not np.any(support_mask):
+            raise ValueError("The shared color-support cut rejected every HD object.")
+        audit = pd.DataFrame({
+            "object_id": prepared["object_id"].astype(str).to_numpy(),
+            "color_support_pass": support_mask,
+        })
+        support_path = Path("plots/hubble") / args.prefix / "color_support_cut.csv"
+        support_path.parent.mkdir(parents=True, exist_ok=True)
+        audit.to_csv(support_path, index=False)
+        print(
+            "Shared eBOSS color-support cut: kept "
+            f"{np.count_nonzero(support_mask)}/{len(support_mask)} objects; "
+            f"audit={support_path}."
+        )
+        df_agn = prepared.loc[support_mask].copy()
     effective_N = args.N
     if args.agn_calibrators:
         if args.agn_calibrators.endswith('.h5'):
@@ -7777,8 +6271,6 @@ if __name__ == "__main__":
             disable_sigma_clip_pass=True,
             resume_stage="both",
             prefix=args.prefix,
-            latent_alpha_config=latent_alpha_config,
-            fitted_color_config=fitted_color_config,
         )
         for cosmo_model in args.cosmo_models:
             run_single_jax(
@@ -7795,6 +6287,7 @@ if __name__ == "__main__":
                 prefix=args.prefix,
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
+                color_completeness_artifact=args.color_completeness_artifact,
                 completeness_stratification=args.completeness_stratification,
                 completeness_magnitude=args.completeness_magnitude,
                 only_sna=args.only_sna,
@@ -7811,8 +6304,7 @@ if __name__ == "__main__":
                 early_de_guard=args.early_de_guard,
                 completeness_closure_test=args.completeness_closure_test,
                 agn_pivot_context=agn_pivot_context,
-                latent_alpha_config=latent_alpha_config,
-                fitted_color_config=fitted_color_config,
+                df_agn_completeness_parent=df_agn_completeness_parent,
             )
     elif args.run == "single": # default
         cosmo_models_dict = {k: {} for k in args.cosmo_models}
@@ -7841,8 +6333,6 @@ if __name__ == "__main__":
             resume_stage=args.resume_stage,
             prefix=args.prefix,
             resume_replot_with_cuts=args.resume_replot_with_cuts,
-            latent_alpha_config=latent_alpha_config,
-            fitted_color_config=fitted_color_config,
         )
         for cosmo_model in args.cosmo_models:
             r = run_single(df_agn=df_agn, df_agn_all=df_agn_all, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 
@@ -7858,6 +6348,7 @@ if __name__ == "__main__":
                 prefix=args.prefix,
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
+                color_completeness_artifact=args.color_completeness_artifact,
                 completeness_stratification=args.completeness_stratification,
                 completeness_magnitude=args.completeness_magnitude,
                 compare_sigma_only=args.compare_sigma_only,
@@ -7873,8 +6364,7 @@ if __name__ == "__main__":
                 completeness_closure_test=args.completeness_closure_test,
                 resume_replot_with_cuts=args.resume_replot_with_cuts,
                 agn_pivot_context=agn_pivot_context,
-                latent_alpha_config=latent_alpha_config,
-                fitted_color_config=fitted_color_config)
+                df_agn_completeness_parent=df_agn_completeness_parent)
             samples_joint, model_labels, dm_interp, logZ_joint, logZerr_joint, debiased_residuals, age, age_err = r
             cosmo_models_dict[cosmo_model]['logZ'] = logZ_joint
             cosmo_models_dict[cosmo_model]['logZerr'] = logZerr_joint
@@ -7898,8 +6388,6 @@ if __name__ == "__main__":
             use_eta_sigma_term=args.fit_eta_sigma_term,
             use_redshift_log_f_term=args.fit_redshift_log_f_term,
             use_redshift_mu_term=args.fit_redshift_mu_term,
-            latent_alpha_config=latent_alpha_config,
-            fitted_color_config=fitted_color_config,
         )
         compare_path = f"plots/hubble/{args.prefix}/{compare_run_tag}"
         os.makedirs(compare_path, exist_ok=True)

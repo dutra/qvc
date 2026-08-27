@@ -173,12 +173,12 @@ def test_make_agn_csv_table_writes_expected_output(tmp_path):
     np.testing.assert_allclose(plain["log_sigma_UV_err"], loaded["log_sigma_uv_std_psd"])
 
 
-def test_make_agn_latex_table_supports_2d_dm_interp_with_richer_inputs(tmp_path):
+def test_make_agn_latex_table_supports_2d_dm_interp(tmp_path):
     df = _make_table_df().drop(columns=["alpha_lambda"])
 
     def dm_interp(points):
         arr = np.asarray(points, dtype=float)
-        assert arr.shape == (1, 3)
+        assert arr.shape == (1, 2)
         return np.full(arr.shape[0], 0.5, dtype=float)
 
     latex = make_agn_latex_table(
@@ -195,12 +195,12 @@ def test_make_agn_latex_table_supports_2d_dm_interp_with_richer_inputs(tmp_path)
     assert "$19.65 \\pm 0.07$" in latex
 
 
-def test_make_agn_csv_table_supports_2d_dm_interp_with_richer_inputs(tmp_path):
+def test_make_agn_csv_table_supports_2d_dm_interp(tmp_path):
     df = _make_table_df()
 
     def dm_interp(points):
         arr = np.asarray(points, dtype=float)
-        assert arr.shape == (1, 4)
+        assert arr.shape == (1, 2)
         return np.full(arr.shape[0], 0.5, dtype=float)
 
     csv_df = make_agn_csv_table(
@@ -270,67 +270,6 @@ def test_make_agn_csv_table_prefers_direct_dmi_values_and_falls_back_to_dm_inter
     )
 
     np.testing.assert_allclose(csv_df["apparent_mag_2500_corr"], [19.95, 20.65])
-
-
-def test_make_agn_latex_table_passes_psf_f_host_to_3d_dm_interp(tmp_path):
-    df = _make_table_df().drop(columns=["alpha_lambda"])
-    seen = {}
-
-    def dm_interp(points):
-        seen["points"] = np.asarray(points, dtype=float)
-        return np.full(seen["points"].shape[0], 0.5, dtype=float)
-
-    make_agn_latex_table(
-        df,
-        mu=np.array([44.21]),
-        mu_err=np.array([0.13]),
-        dm_interp=dm_interp,
-        sort_by="z",
-        ascending=True,
-        max_rows=30,
-        write_path=str(tmp_path),
-    )
-
-    np.testing.assert_allclose(
-        seen["points"],
-        np.array([[1.2345, 20.50, 0.18]], dtype=float),
-    )
-
-
-def test_make_agn_latex_table_passes_alpha_lambda_to_4d_dm_interp(tmp_path):
-    df = _make_table_df()
-    df["alpha_lambda"] = [-1.37]
-    seen = {}
-
-    def dm_interp(points):
-        seen["points"] = np.asarray(points, dtype=float)
-        return np.full(seen["points"].shape[0], 0.5, dtype=float)
-
-    make_agn_latex_table(
-        df,
-        mu=np.array([44.21]),
-        mu_err=np.array([0.13]),
-        dm_interp=dm_interp,
-        sort_by="z",
-        ascending=True,
-        max_rows=30,
-        write_path=str(tmp_path),
-    )
-
-    np.testing.assert_allclose(
-        seen["points"],
-        np.array([[1.2345, 20.50, 0.18, -1.37]], dtype=float),
-    )
-
-    make_agn_csv_table(
-        df,
-        mu=np.array([44.21]),
-        mu_err=np.array([0.13]),
-        dm_interp=dm_interp,
-        sort_by="z",
-        ascending=True,
-        write_path=str(tmp_path),
-    )
 
 
 @pytest.mark.parametrize(

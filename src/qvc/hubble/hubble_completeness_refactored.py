@@ -94,22 +94,12 @@ def evaluate_dm_interp(
     z,
     m2500,
     *,
-    f_host_2500_psf=None,
-    f_host_2500=None,
-    alpha_lambda=None,
     completeness_stratum=None,
 ):
-    """Evaluate debias correction using the richest available feature set."""
+    """Evaluate a two-dimensional magnitude/redshift debias correction."""
     z = np.asarray(z, dtype=float)
     m2500 = np.asarray(m2500, dtype=float)
     cols = [z, m2500]
-    # Completeness-derived debiasing should use the PSF host fraction.  Keep the
-    # old keyword only for external compatibility; internal callers pass PSF.
-    fhost = f_host_2500_psf if f_host_2500_psf is not None else f_host_2500
-    if fhost is not None:
-        cols.append(np.asarray(fhost, dtype=float))
-        if alpha_lambda is not None:
-            cols.append(np.asarray(alpha_lambda, dtype=float))
     pts = np.column_stack(cols)
     finite = np.all(np.isfinite(pts), axis=1)
     out = np.full(pts.shape[0], np.nan, dtype=float)
@@ -586,12 +576,14 @@ def _center_grid_edge_support(centers, *, physical_bounds=None):
 class Completeness2D:
     """
     Interpolates p(detect | m, z) on a (mag, z) grid.
-    - Bright magnitudes are clipped to the bright grid edge; faint magnitudes
-      outside the grid return 0.
+    - Magnitudes outside the center grid use the nearest magnitude-edge value.
+      This constant extension applies on both the bright and faint sides,
+      including beyond ``magnitude_support``.
     - Redshifts outside the grid are linearly extrapolated from the nearest
       two redshift planes. Extrapolated probabilities are bounded to [0, 1].
-    - ``magnitude_support`` records the separate hard sample-selection cuts;
-      interpolation edge behavior does not extend that physical support.
+    - ``magnitude_support`` records separate hard sample-selection cuts.  The
+      Hubble likelihood validates those cuts; direct map evaluation does not
+      mask values outside them.
     """
     def __init__(
         self,
@@ -614,8 +606,8 @@ class Completeness2D:
         self.mag_min, self.mag_max = float(self.mag_centers[0]),  float(self.mag_centers[-1])
         self.z_min,   self.z_max   = float(self.z_centers[0]),    float(self.z_centers[-1])
 
-        # ``fill_value=None`` enables multilinear extrapolation. __call__ masks
-        # unsupported faint magnitudes explicitly, so only redshift extrapolates.
+        # ``fill_value=None`` enables redshift extrapolation.  Magnitudes are
+        # clamped to the center grid explicitly in ``__call__``.
         self._interp = RegularGridInterpolator(
             (self.mag_centers, self.z_centers),
             C,
@@ -627,25 +619,30 @@ class Completeness2D:
     def __call__(self, mag, z):
         mag_raw = np.asarray(mag, dtype=float)
         z_raw = np.asarray(z, dtype=float)
+        support_min, support_max = self.magnitude_support
+        finite_inputs = np.isfinite(mag_raw) & np.isfinite(z_raw)
         oob = (
-            (mag_raw < self.mag_min)
-            | (mag_raw > self.mag_max)
-            | (z_raw < self.z_min)
-            | (z_raw > self.z_max)
+            finite_inputs
+            & (
+                (mag_raw < support_min)
+                | (mag_raw > support_max)
+                | (z_raw < self.z_min)
+                | (z_raw > self.z_max)
+            )
         )
         if np.any(oob) and not self._warned_oob:
             print(
                 "[WARNING] Completeness2D received objects outside the "
-                f"grid range m=[{self.mag_min:.2f}, {self.mag_max:.2f}], "
-                f"z=[{self.z_min:.2f}, {self.z_max:.2f}]. "
-                f"count={int(np.count_nonzero(oob))}"
+                f"declared support m=[{support_min:.2f}, {support_max:.2f}] "
+                f"or redshift grid z=[{self.z_min:.2f}, {self.z_max:.2f}]. "
+                "The nearest magnitude-edge value is used; redshift remains "
+                f"linearly extrapolated. count={int(np.count_nonzero(oob))}"
             )
             self._warned_oob = True
-        mag = np.maximum(np.asarray(mag, dtype=float), self.mag_min)
-        z = np.asarray(z, dtype=float)
-        m_b, z_b = np.broadcast_arrays(mag, z)
+        m_raw_b, z_b = np.broadcast_arrays(mag_raw, z_raw)
+        m_b = np.clip(m_raw_b, self.mag_min, self.mag_max)
         pts = np.column_stack([m_b.ravel(), z_b.ravel()])
-        finite = np.all(np.isfinite(pts), axis=1) & (pts[:, 0] <= self.mag_max)
+        finite = np.isfinite(m_raw_b.ravel()) & np.isfinite(z_b.ravel())
         vals = np.zeros(pts.shape[0], dtype=float)
         if np.any(finite):
             vals[finite] = np.clip(self._interp(pts[finite]), 0.0, 1.0)
@@ -660,220 +657,51 @@ class Completeness2D:
         return "2d"
 
 
-class Completeness3D:
-    """
-    Interpolates p(detect | m, z, f_host) on a (mag, z, f_host) grid.
-    - Bright magnitudes are clipped to the bright grid edge; faint magnitudes
-      outside the grid still return 0.
-    - Redshifts outside the grid are linearly extrapolated from the nearest
-      two redshift planes. Extrapolated probabilities are bounded to [0, 1].
-    - ``magnitude_support`` records the separate hard sample-selection cuts.
-    """
-
-    def __init__(
-        self,
-        mag_centers,
-        z_centers,
-        fhost_centers,
-        completeness_cube,
-        magnitude_support=None,
-    ):
-        self.mag_centers = np.asarray(mag_centers)
-        self.z_centers = np.asarray(z_centers)
-        self.fhost_centers = np.asarray(fhost_centers)
-        self.magnitude_support = _normalize_magnitude_support(
-            self.mag_centers,
-            magnitude_support,
-        )
-
-        C = np.nan_to_num(completeness_cube, nan=0.0, posinf=0.0, neginf=0.0)
-        C = np.clip(C, 0.0, 1.0).astype(float)
-
-        self.mag_min, self.mag_max = float(self.mag_centers[0]), float(self.mag_centers[-1])
-        self.z_min, self.z_max = float(self.z_centers[0]), float(self.z_centers[-1])
-        self.fhost_min, self.fhost_max = float(self.fhost_centers[0]), float(self.fhost_centers[-1])
-        self.z_support = _center_grid_edge_support(self.z_centers)
-        self.fhost_support = _center_grid_edge_support(
-            self.fhost_centers,
-            physical_bounds=(0.0, 1.0),
-        )
-
-        self._interp = RegularGridInterpolator(
-            (self.mag_centers, self.z_centers, self.fhost_centers),
-            C,
-            bounds_error=False,
-            fill_value=None,
-        )
-        self._warned_oob = False
-
-    def __call__(self, mag, z, f_host):
-        mag_raw = np.asarray(mag, dtype=float)
-        z_raw = np.asarray(z, dtype=float)
-        f_host_raw = np.asarray(f_host, dtype=float)
-        mag_check, z_check, fhost_check = np.broadcast_arrays(
-            mag_raw,
-            z_raw,
-            f_host_raw,
-        )
-        nonfinite = ~(
-            np.isfinite(mag_check)
-            & np.isfinite(z_check)
-            & np.isfinite(fhost_check)
-        )
-        mag_oob = (
-            (mag_check < self.magnitude_support[0])
-            | (mag_check > self.magnitude_support[1])
-        ) & np.isfinite(mag_check)
-        z_oob = (
-            (z_check < self.z_support[0])
-            | (z_check > self.z_support[1])
-        ) & np.isfinite(z_check)
-        fhost_oob = (
-            (fhost_check < self.fhost_support[0])
-            | (fhost_check > self.fhost_support[1])
-        ) & np.isfinite(fhost_check)
-        oob = nonfinite | mag_oob | z_oob | fhost_oob
-        if np.any(oob) and not self._warned_oob:
-            print(
-                "[WARNING] Completeness3D received queries outside its "
-                "calibrated physical support: "
-                f"m=[{self.magnitude_support[0]:.2f}, "
-                f"{self.magnitude_support[1]:.2f}], "
-                f"z=[{self.z_support[0]:.2f}, {self.z_support[1]:.2f}], "
-                f"f_host=[{self.fhost_support[0]:.3f}, "
-                f"{self.fhost_support[1]:.3f}]. "
-                "counts: "
-                f"m={int(np.count_nonzero(mag_oob))}, "
-                f"z={int(np.count_nonzero(z_oob))}, "
-                f"f_host={int(np.count_nonzero(fhost_oob))}, "
-                f"nonfinite={int(np.count_nonzero(nonfinite))}, "
-                f"any={int(np.count_nonzero(oob))}."
-            )
-            self._warned_oob = True
-        mag = np.maximum(np.asarray(mag, dtype=float), self.mag_min)
-        z = np.asarray(z, dtype=float)
-        f_host = np.asarray(f_host)
-        # The completeness cube is defined on bin centers, but f_host is a
-        # bounded physical variable on [0, 1]. Clip to the nearest supported
-        # center so values very close to 0 or 1 do not spuriously get
-        # fill_value=0 from the interpolator.
-        f_host = np.clip(f_host, self.fhost_min, self.fhost_max)
-        m_b, z_b, f_b = np.broadcast_arrays(mag, z, f_host)
-        pts = np.column_stack([m_b.ravel(), z_b.ravel(), f_b.ravel()])
-        finite = np.all(np.isfinite(pts), axis=1) & (pts[:, 0] <= self.mag_max)
-        vals = np.zeros(pts.shape[0], dtype=float)
-        if np.any(finite):
-            vals[finite] = np.clip(self._interp(pts[finite]), 0.0, 1.0)
-        return vals.reshape(m_b.shape)
-
-    @property
-    def grid(self):
-        return dict(
-            mag_centers=self.mag_centers,
-            z_centers=self.z_centers,
-            fhost_centers=self.fhost_centers,
-        )
-
-    @property
-    def mode(self):
-        return "3d_fhost"
+def generalized_sigmoid_fhost(logL2500, x0, k, nu):
+    arg = np.clip(k * (np.asarray(logL2500, dtype=float) - x0), -60.0, 60.0)
+    return 1.0 / np.power(1.0 + np.exp(arg), nu)
 
 
-class Completeness4D:
-    """
-    Interpolates p(detect | m, z, f_host, alpha_lambda) on a regular grid.
-    - Bright magnitudes are clipped to the bright grid edge; faint magnitudes
-      outside the grid still return 0.
-    - Redshifts outside the grid are linearly extrapolated from the nearest
-      two redshift planes. Extrapolated probabilities are bounded to [0, 1].
-    - ``magnitude_support`` records the separate hard sample-selection cuts.
-    """
+def apparent_mag_to_logL2500(m2500, z, cosmo):
+    m2500 = np.asarray(m2500, dtype=float)
+    z = np.asarray(z, dtype=float)
+    return convert_M2500_to_logL2500(m2500 - cosmo.distmod(z).value)
 
-    def __init__(
-        self,
-        mag_centers,
-        z_centers,
-        fhost_centers,
-        alpha_centers,
-        completeness_hypercube,
-        magnitude_support=None,
-    ):
-        self.mag_centers = np.asarray(mag_centers)
-        self.z_centers = np.asarray(z_centers)
-        self.fhost_centers = np.asarray(fhost_centers)
-        self.alpha_centers = np.asarray(alpha_centers)
-        self.magnitude_support = _normalize_magnitude_support(
-            self.mag_centers,
-            magnitude_support,
-        )
 
-        C = np.nan_to_num(completeness_hypercube, nan=0.0, posinf=0.0, neginf=0.0)
-        C = np.clip(C, 0.0, 1.0).astype(float)
+def fit_fhost_2500_l2500_model(
+    df_agn, *, f_host_col="f_host_2500", fit_logL_max=45.5,
+    clip_eps=1.0e-4, cosmo=COSMO,
+):
+    required = {"z", f_host_col}
+    if not required.issubset(df_agn.columns):
+        raise KeyError(f"Missing required columns for f_host model fit: {sorted(required - set(df_agn.columns))}")
+    z = np.asarray(df_agn["z"], float)
+    m2500 = np.asarray(df_agn[resolve_completeness_magnitude_column(df_agn)], float)
+    f_host = np.asarray(df_agn[f_host_col], float)
+    log_l = apparent_mag_to_logL2500(m2500, z, cosmo)
+    mask = (np.isfinite(log_l) & np.isfinite(f_host) & np.isfinite(z) & (z > 0)
+            & (f_host >= 0) & (f_host <= 1) & (log_l <= fit_logL_max))
+    if np.count_nonzero(mask) < 8:
+        raise ValueError("Need at least 8 finite rows to fit the f_host_2500(log L_2500) model.")
+    x, y = log_l[mask], np.clip(f_host[mask], clip_eps, 1 - clip_eps)
+    popt, _ = curve_fit(generalized_sigmoid_fhost, x, y,
+                        p0=(float(np.median(x)), 2.0, 1.0),
+                        bounds=([float(np.min(x)), 0.01, 0.1],
+                                [float(np.max(x)), 20.0, 10.0]), maxfev=20000)
+    mean = np.clip(generalized_sigmoid_fhost(x, *popt), clip_eps, 1 - clip_eps)
+    sigma = max(float(np.std(logit(y) - logit(mean), ddof=1)), 1e-6)
+    return {"x0": float(popt[0]), "k": float(popt[1]), "nu": float(popt[2]),
+            "sigma_host_logit": sigma, "fit_logL_max": float(fit_logL_max),
+            "clip_eps": float(clip_eps), "n_fit": int(np.count_nonzero(mask))}
 
-        self.mag_min, self.mag_max = float(self.mag_centers[0]), float(self.mag_centers[-1])
-        self.z_min, self.z_max = float(self.z_centers[0]), float(self.z_centers[-1])
-        self.fhost_min, self.fhost_max = float(self.fhost_centers[0]), float(self.fhost_centers[-1])
-        self.alpha_min, self.alpha_max = float(self.alpha_centers[0]), float(self.alpha_centers[-1])
 
-        self._interp = RegularGridInterpolator(
-            (self.mag_centers, self.z_centers, self.fhost_centers, self.alpha_centers),
-            C,
-            bounds_error=False,
-            fill_value=None,
-        )
-        self._warned_oob = False
+def predict_fhost_2500_from_logL2500(logL2500, model):
+    eps = float(model.get("clip_eps", 1e-4))
+    return np.clip(generalized_sigmoid_fhost(logL2500, model["x0"], model["k"], model["nu"]), eps, 1-eps)
 
-    def __call__(self, mag, z, f_host, alpha_lambda):
-        mag_raw = np.asarray(mag, dtype=float)
-        z_raw = np.asarray(z, dtype=float)
-        f_host_raw = np.asarray(f_host, dtype=float)
-        alpha_raw = np.asarray(alpha_lambda, dtype=float)
-        oob = (
-            (mag_raw < self.mag_min)
-            | (mag_raw > self.mag_max)
-            | (z_raw < self.z_min)
-            | (z_raw > self.z_max)
-            | (f_host_raw < self.fhost_min)
-            | (f_host_raw > self.fhost_max)
-            | (alpha_raw < self.alpha_min)
-            | (alpha_raw > self.alpha_max)
-        )
-        if np.any(oob) and not self._warned_oob:
-            print(
-                "[WARNING] Completeness4D received objects outside the "
-                f"grid range m=[{self.mag_min:.2f}, {self.mag_max:.2f}], "
-                f"z=[{self.z_min:.2f}, {self.z_max:.2f}], "
-                f"f_host=[{self.fhost_min:.3f}, {self.fhost_max:.3f}], "
-                f"alpha_lambda=[{self.alpha_min:.2f}, {self.alpha_max:.2f}]. "
-                f"count={int(np.count_nonzero(oob))}"
-            )
-            self._warned_oob = True
-        mag = np.maximum(np.asarray(mag, dtype=float), self.mag_min)
-        z = np.asarray(z, dtype=float)
-        f_host = np.asarray(f_host)
-        alpha_lambda = np.asarray(alpha_lambda)
-        f_host = np.clip(f_host, self.fhost_min, self.fhost_max)
-        alpha_lambda = np.clip(alpha_lambda, self.alpha_min, self.alpha_max)
-        m_b, z_b, f_b, a_b = np.broadcast_arrays(mag, z, f_host, alpha_lambda)
-        pts = np.column_stack([m_b.ravel(), z_b.ravel(), f_b.ravel(), a_b.ravel()])
-        finite = np.all(np.isfinite(pts), axis=1) & (pts[:, 0] <= self.mag_max)
-        vals = np.zeros(pts.shape[0], dtype=float)
-        if np.any(finite):
-            vals[finite] = np.clip(self._interp(pts[finite]), 0.0, 1.0)
-        return vals.reshape(m_b.shape)
 
-    @property
-    def grid(self):
-        return dict(
-            mag_centers=self.mag_centers,
-            z_centers=self.z_centers,
-            fhost_centers=self.fhost_centers,
-            alpha_centers=self.alpha_centers,
-        )
 
-    @property
-    def mode(self):
-        return "4d_fhost_alpha"
+
 
 
 _FHOST_CLIP_EPS = 1e-3
@@ -884,286 +712,32 @@ _ALPHA_MAX = 0.5
 _ALPHA_MIN_SIGMA = 0.05
 
 
-def _finite_float_attr(attrs, *keys):
-    for key in keys:
-        if key not in attrs:
-            continue
-        try:
-            value = float(attrs[key])
-        except (TypeError, ValueError):
-            continue
-        if np.isfinite(value):
-            return value
-    return None
 
 
-def _robust_alpha_sigma(alpha, *, fallback=_ALPHA_TRUE_SIGMA, min_sigma=_ALPHA_MIN_SIGMA):
-    alpha = np.asarray(alpha, dtype=float)
-    alpha = alpha[np.isfinite(alpha)]
-    sigma = np.nan
-    if alpha.size >= 2:
-        p16, p84 = np.nanpercentile(alpha, [16.0, 84.0])
-        sigma = 0.5 * (p84 - p16)
-        if (not np.isfinite(sigma)) or sigma <= 0.0:
-            sigma = np.nanstd(alpha, ddof=1)
-    if (not np.isfinite(sigma)) or sigma <= 0.0:
-        sigma = fallback
-    return float(max(sigma, min_sigma))
 
 
-def _alpha_lambda_model_from_values(
-    alpha_lambda,
-    *,
-    source,
-    count_key="n_fit",
-    fallback_mean=_ALPHA_TRUE_MEAN,
-    fallback_sigma=_ALPHA_TRUE_SIGMA,
-):
-    alpha = np.asarray(alpha_lambda, dtype=float)
-    mask = np.isfinite(alpha) & (alpha >= _ALPHA_MIN) & (alpha <= _ALPHA_MAX)
-    alpha = alpha[mask]
-    if alpha.size == 0:
-        mean = float(fallback_mean)
-        sigma = float(fallback_sigma)
-    else:
-        mean = float(np.nanmedian(alpha))
-        sigma = _robust_alpha_sigma(alpha, fallback=fallback_sigma)
-    return {
-        "alpha_mean": mean,
-        "alpha_sigma": sigma,
-        "alpha_min": float(_ALPHA_MIN),
-        "alpha_max": float(_ALPHA_MAX),
-        "source": source,
-        count_key: int(alpha.size),
-    }
 
 
-def fit_alpha_lambda_population(df_agn):
-    """Fit the fallback alpha_lambda parent from the usable observed sample."""
-    if "alpha_lambda" not in df_agn.columns:
-        return {
-            "alpha_mean": float(_ALPHA_TRUE_MEAN),
-            "alpha_sigma": float(_ALPHA_TRUE_SIGMA),
-            "alpha_min": float(_ALPHA_MIN),
-            "alpha_max": float(_ALPHA_MAX),
-            "source": "default_alpha_lambda",
-            "n_fit": 0,
-        }
-    return _alpha_lambda_model_from_values(
-        df_agn["alpha_lambda"].to_numpy(dtype=float),
-        source="observed_alpha_lambda",
-        count_key="n_fit",
-    )
 
 
-def sample_alpha_lambda_population(size, model, rng):
-    mean = float(model.get("alpha_mean", _ALPHA_TRUE_MEAN))
-    sigma = float(model.get("alpha_sigma", _ALPHA_TRUE_SIGMA))
-    sigma = max(sigma, _ALPHA_MIN_SIGMA)
-    return np.clip(rng.normal(mean, sigma, size=size), _ALPHA_MIN, _ALPHA_MAX)
 
 
-def _read_mock_alpha_lambda(h5file):
-    if "alpha_nu_lf_conversion" in h5file:
-        alpha_nu = np.asarray(
-            h5file["alpha_nu_lf_conversion"][:], dtype=float
-        )
-        return (
-            -alpha_nu - 2.0,
-            "mock_h5_dataset:alpha_nu_lf_conversion_converted_to_alpha_lambda",
-        )
-    # Legacy pre-schema-4 4D mocks used an explicit alpha_lambda dataset.
-    # Retain only that unambiguous compatibility path. Generic PL_slope and
-    # alpha_nu aliases are intentionally not accepted because their physical
-    # meaning cannot be established from the field name.
-    if "alpha_lambda" in h5file:
-        return (
-            np.asarray(h5file["alpha_lambda"][:], dtype=float),
-            "mock_h5_dataset:alpha_lambda",
-        )
-    return None, None
 
 
-def _read_mock_fhost_2500_psf(h5file):
-    for key in (COMPLETENESS_FHOST_COL, "frac_host_psf_2500", "fhost_2500_psf"):
-        if key in h5file:
-            return np.asarray(h5file[key][:], dtype=float), f"mock_h5_dataset:{key}"
-    return None, None
 
 
-def _alpha_lambda_model_from_h5_attrs(attrs):
-    alpha_nu_mean = _finite_float_attr(
-        attrs,
-        "alpha_nu_lf_conversion_parent_mean",
-        "alpha_nu_lf_conversion_mean",
-    )
-    alpha_nu_sigma = _finite_float_attr(
-        attrs,
-        "alpha_nu_lf_conversion_parent_sigma",
-        "alpha_nu_lf_conversion_sigma",
-    )
-    if alpha_nu_mean is not None:
-        alpha_mean = -alpha_nu_mean - 2.0
-        alpha_sigma = (
-            abs(alpha_nu_sigma) if alpha_nu_sigma is not None else None
-        )
-        source = "mock_h5_attrs:alpha_nu_lf_conversion_converted_to_alpha_lambda"
-    else:
-        # Explicit alpha_lambda metadata is retained only for pre-schema-4
-        # mocks. Generic alpha_nu_* attribute aliases are deliberately not
-        # accepted because they do not identify the LF-conversion proxy.
-        alpha_mean = _finite_float_attr(
-            attrs,
-            "alpha_lambda_parent_mean",
-            "alpha_lambda_mean",
-        )
-        alpha_sigma = _finite_float_attr(
-            attrs,
-            "alpha_lambda_parent_sigma",
-            "alpha_lambda_sigma",
-        )
-        source = "mock_h5_attrs:legacy_explicit_alpha_lambda"
-    if alpha_mean is None:
-        return None
-    if alpha_sigma is None or not np.isfinite(alpha_sigma) or alpha_sigma <= 0.0:
-        alpha_sigma = _ALPHA_TRUE_SIGMA
-    return {
-        "alpha_mean": float(np.clip(alpha_mean, _ALPHA_MIN, _ALPHA_MAX)),
-        "alpha_sigma": float(max(alpha_sigma, _ALPHA_MIN_SIGMA)),
-        "alpha_min": float(_ALPHA_MIN),
-        "alpha_max": float(_ALPHA_MAX),
-        "source": source,
-        "n_fit": 0,
-    }
 
 
-def generalized_sigmoid_fhost(logL2500, x0, k, nu):
-    arg = np.clip(k * (np.asarray(logL2500, dtype=float) - x0), -60.0, 60.0)
-    return 1.0 / np.power(1.0 + np.exp(arg), nu)
 
 
-def apparent_mag_to_logL2500(m2500, z, cosmo):
-    m2500 = np.asarray(m2500, dtype=float)
-    z = np.asarray(z, dtype=float)
-    M2500 = m2500 - cosmo.distmod(z).value
-    return convert_M2500_to_logL2500(M2500)
 
 
-def fit_fhost_2500_l2500_model(
-    df_agn,
-    *,
-    f_host_col="f_host_2500",
-    fit_logL_max=45.5,
-    clip_eps=_FHOST_CLIP_EPS,
-    cosmo=COSMO,
-):
-    required = {"z", f_host_col}
-    if not required.issubset(df_agn.columns):
-        missing = ", ".join(sorted(required - set(df_agn.columns)))
-        raise KeyError(f"Missing required columns for f_host model fit: {missing}")
-
-    z = np.asarray(df_agn["z"], dtype=float)
-    magnitude_col = resolve_completeness_magnitude_column(df_agn)
-    m2500 = np.asarray(df_agn[magnitude_col], dtype=float)
-    f_host = np.asarray(df_agn[f_host_col], dtype=float)
-    logL2500 = apparent_mag_to_logL2500(m2500, z, cosmo)
-
-    fit_mask = (
-        np.isfinite(logL2500)
-        & np.isfinite(f_host)
-        & np.isfinite(z)
-        & (z > 0.0)
-        & (f_host >= 0.0)
-        & (f_host <= 1.0)
-        & (logL2500 <= fit_logL_max)
-    )
-    if np.count_nonzero(fit_mask) < 8:
-        raise ValueError("Need at least 8 finite rows to fit the f_host_2500(log L_2500) model.")
-
-    x_fit = logL2500[fit_mask]
-    y_fit = np.clip(f_host[fit_mask], clip_eps, 1.0 - clip_eps)
-    p0 = (float(np.nanmedian(x_fit)), 2.0, 1.0)
-    bounds = (
-        [float(np.nanmin(x_fit)), 0.01, 0.1],
-        [float(np.nanmax(x_fit)), 20.0, 10.0],
-    )
-    popt, _ = curve_fit(
-        generalized_sigmoid_fhost,
-        x_fit,
-        y_fit,
-        p0=p0,
-        bounds=bounds,
-        maxfev=20000,
-    )
-
-    mean_fit = np.clip(generalized_sigmoid_fhost(x_fit, *popt), clip_eps, 1.0 - clip_eps)
-    residual_logit = logit(y_fit) - logit(mean_fit)
-    sigma_host_logit = float(np.nanstd(residual_logit, ddof=1))
-    if not np.isfinite(sigma_host_logit):
-        sigma_host_logit = 0.0
-    sigma_host_logit = max(sigma_host_logit, 1e-6)
-
-    return {
-        "x0": float(popt[0]),
-        "k": float(popt[1]),
-        "nu": float(popt[2]),
-        "sigma_host_logit": sigma_host_logit,
-        "fit_logL_max": float(fit_logL_max),
-        "clip_eps": float(clip_eps),
-        "n_fit": int(np.count_nonzero(fit_mask)),
-    }
 
 
-def predict_fhost_2500_from_logL2500(logL2500, model):
-    clip_eps = float(model.get("clip_eps", _FHOST_CLIP_EPS))
-    mean = generalized_sigmoid_fhost(logL2500, model["x0"], model["k"], model["nu"])
-    return np.clip(mean, clip_eps, 1.0 - clip_eps)
 
 
-def sample_fhost_2500_from_logL2500(logL2500, model, rng):
-    mean = predict_fhost_2500_from_logL2500(logL2500, model)
-    sigma_host_logit = float(model.get("sigma_host_logit", 0.0))
-    if sigma_host_logit <= 0.0:
-        return mean
-    sampled_logit = logit(mean) + rng.normal(0.0, sigma_host_logit, size=np.shape(mean))
-    clip_eps = float(model.get("clip_eps", _FHOST_CLIP_EPS))
-    return np.clip(expit(sampled_logit), clip_eps, 1.0 - clip_eps)
 
 
-def _fit_fhost_population_model(df_agn, df_agn_fhost_population, *, fit_logL_max):
-    """Fit the host-fraction parent on the supplied population frame."""
-
-    fit_df = df_agn if df_agn_fhost_population is None else df_agn_fhost_population
-    host_model = fit_fhost_2500_l2500_model(
-        fit_df,
-        f_host_col=COMPLETENESS_FHOST_COL,
-        fit_logL_max=fit_logL_max,
-        cosmo=COSMO,
-    )
-    observed_fit_source = (
-        "fit_sample_f_host_2500_psf_vs_l2500"
-        if df_agn_fhost_population is None
-        else "precut_f_host_2500_psf_vs_l2500"
-    )
-    approximate = np.zeros(len(fit_df), dtype=bool)
-    if "f_host_2500_psf_is_approximate" in fit_df.columns:
-        approximate = fit_df["f_host_2500_psf_is_approximate"].fillna(False).to_numpy(
-            dtype=bool
-        )
-    if np.any(approximate):
-        observed_fit_source += "_approximate_v1_psf_band_interpolation"
-    host_model["observed_fit_source"] = observed_fit_source
-    host_model["f_host_2500_psf_is_approximate"] = bool(np.any(approximate))
-    host_model["n_approximate_f_host_2500_psf"] = int(np.count_nonzero(approximate))
-    if "f_host_2500_psf_proxy_edge_clamped" in fit_df.columns:
-        edge_clamped = fit_df["f_host_2500_psf_proxy_edge_clamped"].fillna(
-            False
-        ).to_numpy(dtype=bool)
-        host_model["n_edge_clamped_f_host_2500_psf"] = int(
-            np.count_nonzero(edge_clamped)
-        )
-    host_model["n_observed_population"] = int(len(fit_df))
-    return host_model
 
 
 def predicted_new_loglbol(df_agn, loglbol):
@@ -1377,680 +951,18 @@ def get_completeness_function_2d(
     return completeness2d, mag_centers, z_centers, dm, dz, sigma_mag
 
 
-def _plot_completeness_vs_fhost_slices(
-    completeness3d,
-    mag_centers,
-    z_centers,
-    fhost_centers,
-    *,
-    plot_dir,
-    mag_slices=(19.5, 21.0, 22.5),
-    z_slices=(0.5, 1.5, 2.5),
-):
-    import matplotlib.pyplot as plt
-
-    fig, axes = plt.subplots(1, len(mag_slices), figsize=(5.0 * len(mag_slices), 4.5), sharey=True)
-    axes = np.atleast_1d(axes)
-    for ax, mag0 in zip(axes, mag_slices):
-        mag_eval = np.full_like(fhost_centers, np.clip(mag0, mag_centers[0], mag_centers[-1]), dtype=float)
-        for z0 in z_slices:
-            z_eval = np.full_like(fhost_centers, np.clip(z0, z_centers[0], z_centers[-1]), dtype=float)
-            p = completeness3d(mag_eval, z_eval, fhost_centers)
-            ax.plot(fhost_centers, p, lw=2, label=fr"$z={z0:.1f}$")
-        ax.set_title(fr"$m_{{2500}}={mag0:.1f}$")
-        ax.set_xlabel(r"$f_{\rm host,2500}$")
-        ax.grid(True, alpha=0.25)
-    axes[0].set_ylabel(r"$p(\mathrm{detect}\mid m_{2500}, z, f_{\rm host})$")
-    axes[-1].legend(frameon=False, loc="best")
-    fig.tight_layout()
-    fig.savefig(os.path.join(plot_dir, "completeness_vs_fhost_slices.pdf"), dpi=300)
-    plt.close(fig)
 
 
-def _plot_completeness_vs_alpha_slices(
-    completeness4d,
-    mag_centers,
-    z_centers,
-    fhost_centers,
-    alpha_centers,
-    *,
-    plot_dir,
-    mag_slices=(19.5, 21.0, 22.5),
-    z_slices=(0.5, 1.5, 2.5),
-    fhost_slice=0.05,
-):
-    import matplotlib.pyplot as plt
-
-    fig, axes = plt.subplots(1, len(mag_slices), figsize=(5.0 * len(mag_slices), 4.5), sharey=True)
-    axes = np.atleast_1d(axes)
-    fhost_eval = np.full_like(alpha_centers, np.clip(fhost_slice, fhost_centers[0], fhost_centers[-1]), dtype=float)
-    for ax, mag0 in zip(axes, mag_slices):
-        mag_eval = np.full_like(alpha_centers, np.clip(mag0, mag_centers[0], mag_centers[-1]), dtype=float)
-        for z0 in z_slices:
-            z_eval = np.full_like(alpha_centers, np.clip(z0, z_centers[0], z_centers[-1]), dtype=float)
-            p = completeness4d(mag_eval, z_eval, fhost_eval, alpha_centers)
-            ax.plot(alpha_centers, p, lw=2, label=fr"$z={z0:.1f}$")
-        ax.set_title(fr"$m_{{2500}}={mag0:.1f}$, $f_{{\rm host}}={fhost_slice:.2f}$")
-        ax.set_xlabel(r"$\alpha_{\lambda}$")
-        ax.grid(True, alpha=0.25)
-    axes[0].set_ylabel(r"$p(\mathrm{detect}\mid m_{2500}, z, f_{\rm host}, \alpha_{\lambda})$")
-    axes[-1].legend(frameon=False, loc="best")
-    fig.tight_layout()
-    fig.savefig(os.path.join(plot_dir, "completeness_vs_alpha_slices.pdf"), dpi=300)
-    plt.close(fig)
 
 
-def _plot_fixed_slice_completeness_map_4d(
-    completeness4d,
-    mag_edges,
-    z_edges,
-    mag_centers,
-    z_centers,
-    fhost_centers,
-    alpha_centers,
-    *,
-    plot_dir,
-    fhost_slice=0.05,
-    alpha_slice=-1.5,
-):
-    import matplotlib.pyplot as plt
-
-    fhost0 = float(np.clip(fhost_slice, fhost_centers[0], fhost_centers[-1]))
-    alpha0 = float(np.clip(alpha_slice, alpha_centers[0], alpha_centers[-1]))
-    M, Z = np.meshgrid(mag_centers, z_centers, indexing="ij")
-    C_slice = completeness4d(M, Z, np.full_like(M, fhost0), np.full_like(M, alpha0))
-
-    fig, ax = plt.subplots(figsize=(7, 5))
-    im = ax.imshow(
-        np.log10(np.clip(C_slice.T, 1e-12, None)),
-        origin="lower",
-        aspect="auto",
-        extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
-        cmap="viridis",
-        vmin=-4,
-        vmax=0,
-    )
-    ax.set_ylabel(r"$z$")
-    ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
-    cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label(
-        rf"$\log\,p(I{{=}}1\,|\,m,z,f_{{\rm host}}={fhost0:.2f},\alpha_{{\lambda}}={alpha0:.2f})$"
-    )
-    fig.tight_layout()
-    fig.savefig(os.path.join(plot_dir, "completeness_map_fixed_fhost_alpha.pdf"), dpi=600)
-    plt.close(fig)
 
 
-def _plot_weighted_marginal_completeness_map_4d(
-    C,
-    mag_edges,
-    z_edges,
-    fhost_true,
-    alpha_true,
-    fhost_edges,
-    alpha_edges,
-    *,
-    plot_dir,
-):
-    import matplotlib.pyplot as plt
-
-    H_latent, _ = np.histogramdd((fhost_true, alpha_true), bins=[fhost_edges, alpha_edges])
-    W = H_latent.astype(float)
-    if np.sum(W) <= 0:
-        W = np.ones_like(W, dtype=float)
-    W /= np.sum(W)
-
-    c_weighted = np.tensordot(C, W, axes=([2, 3], [0, 1]))
-
-    fig, ax = plt.subplots(figsize=(7, 5))
-    im = ax.imshow(
-        np.log10(np.clip(c_weighted.T, 1e-12, None)),
-        origin="lower",
-        aspect="auto",
-        extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
-        cmap="viridis",
-        vmin=-4,
-        vmax=0,
-    )
-    ax.set_ylabel(r"$z$")
-    ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
-    cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label(r"Population-weighted $\log\,p(I{=}1\,|\,m,z)$")
-    fig.tight_layout()
-    fig.savefig(os.path.join(plot_dir, "completeness_map_weighted_fhost_alpha.pdf"), dpi=600)
-    plt.close(fig)
 
 
-def _plot_mock_latent_summary_maps(
-    m_true,
-    z_true,
-    fhost_true,
-    alpha_true,
-    mag_edges,
-    z_edges,
-    *,
-    plot_dir,
-):
-    import matplotlib.pyplot as plt
-
-    def _binned_mean(x, y, value):
-        counts, _, _ = np.histogram2d(x, y, bins=[mag_edges, z_edges])
-        sums, _, _ = np.histogram2d(x, y, bins=[mag_edges, z_edges], weights=value)
-        mean = np.full_like(sums, np.nan, dtype=float)
-        mean[counts > 0] = sums[counts > 0] / counts[counts > 0]
-        return mean
-
-    def _binned_std(x, y, value):
-        counts, _, _ = np.histogram2d(x, y, bins=[mag_edges, z_edges])
-        sums, _, _ = np.histogram2d(x, y, bins=[mag_edges, z_edges], weights=value)
-        sums2, _, _ = np.histogram2d(x, y, bins=[mag_edges, z_edges], weights=value**2)
-        mean = np.full_like(sums, np.nan, dtype=float)
-        var = np.full_like(sums, np.nan, dtype=float)
-        mask = counts > 0
-        mean[mask] = sums[mask] / counts[mask]
-        var[mask] = np.maximum(sums2[mask] / counts[mask] - mean[mask] ** 2, 0.0)
-        return np.sqrt(var)
-
-    products = [
-        (_binned_mean(m_true, z_true, fhost_true), "mock_fhost_mean_map.pdf", r"Mean $f_{\rm host}$"),
-        (_binned_std(m_true, z_true, fhost_true), "mock_fhost_std_map.pdf", r"$\sigma(f_{\rm host})$"),
-        (_binned_mean(m_true, z_true, alpha_true), "mock_alpha_lambda_mean_map.pdf", r"Mean $\alpha_{\lambda}$"),
-        (_binned_std(m_true, z_true, alpha_true), "mock_alpha_lambda_std_map.pdf", r"$\sigma(\alpha_{\lambda})$"),
-    ]
-
-    for arr, filename, label in products:
-        fig, ax = plt.subplots(figsize=(7, 5))
-        im = ax.imshow(
-            arr.T,
-            origin="lower",
-            aspect="auto",
-            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
-            cmap="viridis",
-        )
-        ax.set_ylabel(r"$z$")
-        ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
-        cbar = plt.colorbar(im, ax=ax)
-        cbar.set_label(label)
-        fig.tight_layout()
-        fig.savefig(os.path.join(plot_dir, filename), dpi=600)
-        plt.close(fig)
 
 
-def get_completeness_function_3d_fhost(
-    df_agn,
-    sim_file="data/nov9_mock_mag_z_moresources.h5",
-    n_mag_bins=30,
-    n_z_bins=40,
-    n_fhost_bins=20,
-    smooth_counts=True,
-    plot=False,
-    plot_path=None,
-    fit_logL_max=45.5,
-    sigma_mag=0.2,
-    sigma_z_abs=0.2,
-    sigma_fhost=0.05,
-    df_agn_fhost_population=None,
-):
-    """
-    Build p(detect | m, z, f_host_2500_psf), preferring mock PSF host
-    fractions when available.
-    """
-    import matplotlib.pyplot as plt
-
-    if COMPLETENESS_FHOST_COL not in df_agn.columns:
-        raise KeyError(
-            f"df_agn must contain {COMPLETENESS_FHOST_COL!r} for 3D host-aware completeness."
-        )
-
-    sim_file = resolve_qvc_data_path(sim_file)
-    with h5py.File(sim_file, "r") as f:
-        if "apparent_mag_2500" in f:
-            m_true = np.asarray(f["apparent_mag_2500"][:], dtype=float)
-        else:
-            m_true = np.asarray(f["apparent_mag_i_rest"][:], dtype=float)
-        z_true = np.asarray(f["z"][:], dtype=float)
-        fhost_true_raw, fhost_source = _read_mock_fhost_2500_psf(f)
-        if fhost_true_raw is not None and fhost_true_raw.shape != m_true.shape:
-            print(
-                "[WARNING] Ignoring mock PSF f_host_2500 dataset because its shape "
-                f"{fhost_true_raw.shape} does not match apparent magnitude shape {m_true.shape}."
-            )
-            fhost_true_raw, fhost_source = None, None
-        mock_count_scale = _read_mock_count_scale(f, sim_file)
-
-    z_obs = df_agn["z"].to_numpy(dtype=float)
-    magnitude_col = resolve_completeness_magnitude_column(df_agn)
-    m_obs = df_agn[magnitude_col].to_numpy(dtype=float)
-    fhost_obs = df_agn[COMPLETENESS_FHOST_COL].to_numpy(dtype=float)
-
-    ok_obs = (
-        np.isfinite(m_obs)
-        & np.isfinite(z_obs)
-        & np.isfinite(fhost_obs)
-        & (fhost_obs >= 0.0)
-        & (fhost_obs <= 1.0)
-    )
-    if fhost_true_raw is None:
-        ok_true = np.isfinite(m_true) & np.isfinite(z_true)
-    else:
-        ok_true = (
-            np.isfinite(m_true)
-            & np.isfinite(z_true)
-            & np.isfinite(fhost_true_raw)
-            & (fhost_true_raw >= 0.0)
-            & (fhost_true_raw <= 1.0)
-        )
-    m_obs, z_obs, fhost_obs = m_obs[ok_obs], z_obs[ok_obs], fhost_obs[ok_obs]
-    m_true, z_true = m_true[ok_true], z_true[ok_true]
-
-    host_model = _fit_fhost_population_model(
-        df_agn.loc[ok_obs],
-        df_agn_fhost_population,
-        fit_logL_max=fit_logL_max,
-    )
-    rng = np.random.default_rng(12345)
-    if fhost_true_raw is None:
-        logL_true = apparent_mag_to_logL2500(m_true, z_true, COSMO)
-        fhost_true = sample_fhost_2500_from_logL2500(logL_true, host_model, rng)
-        host_model["source"] = "observed_fhost_model"
-    else:
-        fhost_true = np.clip(fhost_true_raw[ok_true], 0.0, 1.0)
-        host_model["source"] = fhost_source
-        host_model["n_mock"] = int(np.size(fhost_true))
-        host_model["mock_fhost_mean"] = float(np.nanmean(fhost_true)) if np.size(fhost_true) else np.nan
-        host_model["mock_fhost_sigma"] = float(np.nanstd(fhost_true, ddof=1)) if np.size(fhost_true) > 1 else 0.0
-
-    mag_min, mag_max = 18.5, 24.0
-    z_min, z_max = 0.0, 4.0
-    fhost_min, fhost_max = 0.0, 1.0
-    mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
-    z_edges = np.linspace(z_min, z_max, n_z_bins + 1)
-    fhost_edges = np.linspace(fhost_min, fhost_max, n_fhost_bins + 1)
-    mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
-    z_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
-    fhost_centers = 0.5 * (fhost_edges[:-1] + fhost_edges[1:])
-    dm = float(mag_centers[1] - mag_centers[0]) if len(mag_centers) > 1 else float(mag_edges[-1] - mag_edges[0])
-    dz = float(z_centers[1] - z_centers[0]) if len(z_centers) > 1 else float(z_edges[-1] - z_edges[0])
-    dfh = float(fhost_centers[1] - fhost_centers[0]) if len(fhost_centers) > 1 else float(fhost_edges[-1] - fhost_edges[0])
-
-    H_true, _ = np.histogramdd((m_true, z_true, fhost_true), bins=[mag_edges, z_edges, fhost_edges])
-    H_obs, _ = np.histogramdd((m_obs, z_obs, fhost_obs), bins=[mag_edges, z_edges, fhost_edges])
-
-    if smooth_counts:
-        sig_mag_pix = max(float(sigma_mag / dm), 1e-6)
-        sig_z_pix = max(float(sigma_z_abs / dz), 1e-6)
-        sig_fhost_pix = max(float(sigma_fhost / dfh), 1e-6)
-        H_true_s = gaussian_filter(H_true, sigma=(sig_mag_pix, sig_z_pix, sig_fhost_pix), mode="nearest")
-        H_obs_s = gaussian_filter(H_obs, sigma=(sig_mag_pix, sig_z_pix, sig_fhost_pix), mode="nearest")
-    else:
-        H_true_s, H_obs_s = H_true, H_obs
-
-    eps = 1e-12
-    C = _scaled_completeness_ratio(
-        H_obs_s,
-        H_true_s,
-        mag_centers,
-        label="Completeness3D",
-        count_scale=mock_count_scale,
-        eps=eps,
-    )
-
-    completeness3d = Completeness3D(
-        mag_centers,
-        z_centers,
-        fhost_centers,
-        C,
-        magnitude_support=(
-            COMPLETENESS_MAG_2500_MIN,
-            COMPLETENESS_MAG_2500_MAX,
-        ),
-    )
-
-    if plot:
-        base_plot_path = plot_path or "plots/hubble"
-        plot_dir = os.path.join(base_plot_path, "completeness")
-        os.makedirs(plot_dir, exist_ok=True)
-
-        with open(os.path.join(plot_dir, "fhost_2500_psf_l2500_model.json"), "w") as handle:
-            json.dump(host_model, handle, indent=2)
-
-        _plot_completeness_vs_fhost_slices(
-            completeness3d,
-            mag_centers,
-            z_centers,
-            fhost_centers,
-            plot_dir=plot_dir,
-        )
-
-        fig, ax = plt.subplots(figsize=(7, 5))
-        c_slice = C.mean(axis=2)
-        im = ax.imshow(
-            np.log10(np.clip(c_slice.T, 1e-12, None)),
-            origin="lower",
-            aspect="auto",
-            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
-            cmap="viridis",
-            vmin=-4,
-            vmax=0,
-        )
-        ax.set_ylabel(r"$z$")
-        ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
-        cbar = plt.colorbar(im, ax=ax)
-        cbar.set_label(r"Mean over $f_{\rm host}$: $\log\,p(I{=}1\,|\,m,z,f_{\rm host})$")
-        fig.tight_layout()
-        fig.savefig(os.path.join(plot_dir, "completeness_map_mean_fhost.pdf"), dpi=600)
-        plt.close(fig)
-
-        fig, ax = plt.subplots(figsize=(7, 5))
-        c_slice_mf = C.mean(axis=1)
-        im = ax.imshow(
-            np.log10(np.clip(c_slice_mf.T, 1e-12, None)),
-            origin="lower",
-            aspect="auto",
-            extent=[mag_edges[0], mag_edges[-1], fhost_edges[0], fhost_edges[-1]],
-            cmap="viridis",
-            vmin=-4,
-            vmax=0,
-        )
-        ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
-        ax.set_ylabel(r"$f_{\rm host,2500}$")
-        cbar = plt.colorbar(im, ax=ax)
-        cbar.set_label(r"Mean over $z$: $\log\,p(I{=}1\,|\,m,z,f_{\rm host})$")
-        fig.tight_layout()
-        fig.savefig(os.path.join(plot_dir, "completeness_map_m2500_fhost.pdf"), dpi=600)
-        plt.close(fig)
-
-    return (
-        completeness3d,
-        mag_centers,
-        z_centers,
-        fhost_centers,
-        dm,
-        dz,
-        dfh,
-        sigma_mag,
-        host_model,
-    )
 
 
-def get_completeness_function_4d_fhost_alpha(
-    df_agn,
-    sim_file="data/nov9_mock_mag_z_moresources.h5",
-    n_mag_bins=30,
-    n_z_bins=40,
-    n_fhost_bins=12,
-    n_alpha_bins=12,
-    smooth_counts=True,
-    plot=False,
-    plot_path=None,
-    fit_logL_max=45.5,
-    sigma_mag=0.2,
-    sigma_z_abs=0.2,
-    sigma_fhost=0.1,
-    sigma_alpha=0.35,
-    df_agn_fhost_population=None,
-):
-    """
-    Build p(detect | m, z, f_host_2500_psf, alpha_lambda), preferring mock
-    PSF host fractions and alpha_lambda populations when available.
-    """
-    import matplotlib.pyplot as plt
-
-    required = {
-        COMPLETENESS_FHOST_COL,
-        "alpha_lambda",
-        "z",
-    }
-    if not required.issubset(df_agn.columns):
-        missing = ", ".join(sorted(required - set(df_agn.columns)))
-        raise KeyError(f"df_agn must contain columns for 4D completeness: {missing}")
-
-    sim_file = resolve_qvc_data_path(sim_file)
-    with h5py.File(sim_file, "r") as f:
-        if "apparent_mag_2500" in f:
-            m_true = np.asarray(f["apparent_mag_2500"][:], dtype=float)
-        else:
-            m_true = np.asarray(f["apparent_mag_i_rest"][:], dtype=float)
-        z_true = np.asarray(f["z"][:], dtype=float)
-        fhost_true_raw, fhost_source = _read_mock_fhost_2500_psf(f)
-        if fhost_true_raw is not None and fhost_true_raw.shape != m_true.shape:
-            print(
-                "[WARNING] Ignoring mock PSF f_host_2500 dataset because its shape "
-                f"{fhost_true_raw.shape} does not match apparent magnitude shape {m_true.shape}."
-            )
-            fhost_true_raw, fhost_source = None, None
-        alpha_true_raw, alpha_source = _read_mock_alpha_lambda(f)
-        if alpha_true_raw is not None and alpha_true_raw.shape != m_true.shape:
-            print(
-                "[WARNING] Ignoring mock alpha_lambda dataset because its shape "
-                f"{alpha_true_raw.shape} does not match apparent magnitude shape {m_true.shape}."
-            )
-            alpha_true_raw, alpha_source = None, None
-        alpha_attr_model = _alpha_lambda_model_from_h5_attrs(f.attrs)
-        mock_count_scale = _read_mock_count_scale(f, sim_file)
-
-    z_obs = df_agn["z"].to_numpy(dtype=float)
-    magnitude_col = resolve_completeness_magnitude_column(df_agn)
-    m_obs = df_agn[magnitude_col].to_numpy(dtype=float)
-    fhost_obs = df_agn[COMPLETENESS_FHOST_COL].to_numpy(dtype=float)
-    alpha_obs = df_agn["alpha_lambda"].to_numpy(dtype=float)
-
-    ok_obs = (
-        np.isfinite(m_obs)
-        & np.isfinite(z_obs)
-        & np.isfinite(fhost_obs)
-        & np.isfinite(alpha_obs)
-        & (fhost_obs >= 0.0)
-        & (fhost_obs <= 1.0)
-        & (alpha_obs >= _ALPHA_MIN)
-        & (alpha_obs <= _ALPHA_MAX)
-    )
-    ok_true = np.isfinite(m_true) & np.isfinite(z_true)
-    if fhost_true_raw is not None:
-        ok_true &= (
-            np.isfinite(fhost_true_raw)
-            & (fhost_true_raw >= 0.0)
-            & (fhost_true_raw <= 1.0)
-        )
-    if alpha_true_raw is not None:
-        ok_true &= (
-            np.isfinite(alpha_true_raw)
-            & (alpha_true_raw >= _ALPHA_MIN)
-            & (alpha_true_raw <= _ALPHA_MAX)
-        )
-    m_obs, z_obs, fhost_obs, alpha_obs = m_obs[ok_obs], z_obs[ok_obs], fhost_obs[ok_obs], alpha_obs[ok_obs]
-    m_true, z_true = m_true[ok_true], z_true[ok_true]
-    if alpha_true_raw is not None:
-        alpha_true = np.clip(alpha_true_raw[ok_true], _ALPHA_MIN, _ALPHA_MAX)
-        alpha_model = _alpha_lambda_model_from_values(
-            alpha_true,
-            source=alpha_source,
-            count_key="n_mock",
-        )
-    else:
-        alpha_model = alpha_attr_model or fit_alpha_lambda_population(df_agn.loc[ok_obs])
-
-    host_model = _fit_fhost_population_model(
-        df_agn.loc[ok_obs],
-        df_agn_fhost_population,
-        fit_logL_max=fit_logL_max,
-    )
-    rng = np.random.default_rng(12345)
-    if fhost_true_raw is None:
-        logL_true = apparent_mag_to_logL2500(m_true, z_true, COSMO)
-        fhost_true = sample_fhost_2500_from_logL2500(logL_true, host_model, rng)
-        host_model["source"] = "observed_fhost_model"
-    else:
-        fhost_true = np.clip(fhost_true_raw[ok_true], 0.0, 1.0)
-        host_model["source"] = fhost_source
-        host_model["n_mock"] = int(np.size(fhost_true))
-        host_model["mock_fhost_mean"] = float(np.nanmean(fhost_true)) if np.size(fhost_true) else np.nan
-        host_model["mock_fhost_sigma"] = float(np.nanstd(fhost_true, ddof=1)) if np.size(fhost_true) > 1 else 0.0
-    if alpha_true_raw is None:
-        alpha_true = sample_alpha_lambda_population(np.shape(m_true), alpha_model, rng)
-
-    mag_min, mag_max = 18.5, 24.0
-    z_min, z_max = 0.0, 4.0
-    fhost_min, fhost_max = 0.0, 1.0
-    alpha_min, alpha_max = _ALPHA_MIN, _ALPHA_MAX
-    mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
-    z_edges = np.linspace(z_min, z_max, n_z_bins + 1)
-    fhost_edges = np.linspace(fhost_min, fhost_max, n_fhost_bins + 1)
-    alpha_edges = np.linspace(alpha_min, alpha_max, n_alpha_bins + 1)
-    mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
-    z_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
-    fhost_centers = 0.5 * (fhost_edges[:-1] + fhost_edges[1:])
-    alpha_centers = 0.5 * (alpha_edges[:-1] + alpha_edges[1:])
-    dm = float(mag_centers[1] - mag_centers[0]) if len(mag_centers) > 1 else float(mag_edges[-1] - mag_edges[0])
-    dz = float(z_centers[1] - z_centers[0]) if len(z_centers) > 1 else float(z_edges[-1] - z_edges[0])
-    dfh = float(fhost_centers[1] - fhost_centers[0]) if len(fhost_centers) > 1 else float(fhost_edges[-1] - fhost_edges[0])
-    da = float(alpha_centers[1] - alpha_centers[0]) if len(alpha_centers) > 1 else float(alpha_edges[-1] - alpha_edges[0])
-
-    H_true, _ = np.histogramdd((m_true, z_true, fhost_true, alpha_true), bins=[mag_edges, z_edges, fhost_edges, alpha_edges])
-    H_obs, _ = np.histogramdd((m_obs, z_obs, fhost_obs, alpha_obs), bins=[mag_edges, z_edges, fhost_edges, alpha_edges])
-
-    if smooth_counts:
-        sig_mag_pix = max(float(sigma_mag / dm), 1e-6)
-        sig_z_pix = max(float(sigma_z_abs / dz), 1e-6)
-        sig_fhost_pix = max(float(sigma_fhost / dfh), 1e-6)
-        sig_alpha_pix = max(float(sigma_alpha / da), 1e-6)
-        H_true_s = gaussian_filter(H_true, sigma=(sig_mag_pix, sig_z_pix, sig_fhost_pix, sig_alpha_pix), mode="nearest")
-        H_obs_s = gaussian_filter(H_obs, sigma=(sig_mag_pix, sig_z_pix, sig_fhost_pix, sig_alpha_pix), mode="nearest")
-    else:
-        H_true_s, H_obs_s = H_true, H_obs
-
-    eps = 1e-12
-    C = _scaled_completeness_ratio(
-        H_obs_s,
-        H_true_s,
-        mag_centers,
-        label="Completeness4D",
-        count_scale=mock_count_scale,
-        eps=eps,
-    )
-
-    completeness4d = Completeness4D(
-        mag_centers,
-        z_centers,
-        fhost_centers,
-        alpha_centers,
-        C,
-        magnitude_support=(
-            COMPLETENESS_MAG_2500_MIN,
-            COMPLETENESS_MAG_2500_MAX,
-        ),
-    )
-
-    if plot:
-        base_plot_path = plot_path or "plots/hubble"
-        plot_dir = os.path.join(base_plot_path, "completeness")
-        os.makedirs(plot_dir, exist_ok=True)
-
-        with open(os.path.join(plot_dir, "fhost_2500_psf_l2500_model.json"), "w") as handle:
-            json.dump(host_model, handle, indent=2)
-
-        _plot_completeness_vs_fhost_slices(
-            lambda mag_eval, z_eval, f_eval: completeness4d(mag_eval, z_eval, f_eval, np.full_like(f_eval, _ALPHA_TRUE_MEAN)),
-            mag_centers,
-            z_centers,
-            fhost_centers,
-            plot_dir=plot_dir,
-        )
-        _plot_completeness_vs_alpha_slices(
-            completeness4d,
-            mag_centers,
-            z_centers,
-            fhost_centers,
-            alpha_centers,
-            plot_dir=plot_dir,
-        )
-
-        _plot_fixed_slice_completeness_map_4d(
-            completeness4d,
-            mag_edges,
-            z_edges,
-            mag_centers,
-            z_centers,
-            fhost_centers,
-            alpha_centers,
-            plot_dir=plot_dir,
-            fhost_slice=float(np.nanmedian(fhost_obs)),
-            alpha_slice=float(np.nanmedian(alpha_obs)),
-        )
-
-        _plot_weighted_marginal_completeness_map_4d(
-            C,
-            mag_edges,
-            z_edges,
-            fhost_true,
-            alpha_true,
-            fhost_edges,
-            alpha_edges,
-            plot_dir=plot_dir,
-        )
-
-        _plot_mock_latent_summary_maps(
-            m_true,
-            z_true,
-            fhost_true,
-            alpha_true,
-            mag_edges,
-            z_edges,
-            plot_dir=plot_dir,
-        )
-
-        fig, ax = plt.subplots(figsize=(7, 5))
-        c_slice = C.mean(axis=(2, 3))
-        im = ax.imshow(
-            np.log10(np.clip(c_slice.T, 1e-12, None)),
-            origin="lower",
-            aspect="auto",
-            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
-            cmap="viridis",
-            vmin=-4,
-            vmax=0,
-        )
-        ax.set_ylabel(r"$z$")
-        ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
-        cbar = plt.colorbar(im, ax=ax)
-        cbar.set_label(r"Unweighted mean over $f_{\rm host}, \alpha_{\lambda}$: $\log\,p(I{=}1\,|\,m,z,f_{\rm host},\alpha_{\lambda})$")
-        fig.tight_layout()
-        fig.savefig(os.path.join(plot_dir, "completeness_map_mean_fhost_alpha.pdf"), dpi=600)
-        plt.close(fig)
-
-        fig, ax = plt.subplots(figsize=(7, 5))
-        c_slice_ma = C.mean(axis=(1, 2))
-        im = ax.imshow(
-            np.log10(np.clip(c_slice_ma.T, 1e-12, None)),
-            origin="lower",
-            aspect="auto",
-            extent=[mag_edges[0], mag_edges[-1], alpha_edges[0], alpha_edges[-1]],
-            cmap="viridis",
-            vmin=-4,
-            vmax=0,
-        )
-        ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
-        ax.set_ylabel(r"$\alpha_{\lambda}$")
-        cbar = plt.colorbar(im, ax=ax)
-        cbar.set_label(r"Mean over $z, f_{\rm host}$: $\log\,p(I{=}1\,|\,m,z,f_{\rm host},\alpha_{\lambda})$")
-        fig.tight_layout()
-        fig.savefig(os.path.join(plot_dir, "completeness_map_m2500_alpha_lambda.pdf"), dpi=600)
-        plt.close(fig)
-
-    return (
-        completeness4d,
-        mag_centers,
-        z_centers,
-        fhost_centers,
-        alpha_centers,
-        dm,
-        dz,
-        dfh,
-        da,
-        sigma_mag,
-        host_model,
-        alpha_model,
-    )
 
 
 import numpy as np
@@ -2063,9 +975,6 @@ def make_dm_function(
     dm,
     m_bins=40,
     z_bins=40,
-    f_host_2500_psf=None,
-    f_host_2500=None,
-    alpha_lambda=None,
     *,
     lowess_frac=0.25,
     lowess_it=1,
@@ -2074,83 +983,15 @@ def make_dm_function(
     """
     Build a mean debias interpolator for plotting/debiased magnitudes.
 
-    The returned callable accepts the historical point-array interface used by
-    the plotting code:
-      [z, m_2500]
-      [z, m_2500, f_host_2500_psf]
-      [z, m_2500, f_host_2500_psf, alpha_lambda]
-
-    If host/color columns are provided, they are included in the interpolation.
-    Internal completeness callers use the PSF host fraction; the old
-    f_host_2500 keyword remains only as a compatibility alias.
+    The returned callable accepts points with columns ``[z, m_2500]``.
     """
     m = np.asarray(m, dtype=float)
     z = np.asarray(z, dtype=float)
     dm = np.asarray(dm, dtype=float)
     mask = np.isfinite(m) & np.isfinite(z) & np.isfinite(dm)
-    fhost = f_host_2500_psf if f_host_2500_psf is not None else f_host_2500
-    if fhost is not None:
-        fhost = np.asarray(fhost, dtype=float)
-        mask &= np.isfinite(fhost)
-    if alpha_lambda is not None:
-        alpha_lambda = np.asarray(alpha_lambda, dtype=float)
-        mask &= np.isfinite(alpha_lambda)
-
     m, z, dm = m[mask], z[mask], dm[mask]
-    if fhost is not None:
-        fhost = fhost[mask]
-    if alpha_lambda is not None:
-        alpha_lambda = alpha_lambda[mask]
     if z.size == 0:
         raise ValueError("make_dm_function requires at least one finite (m, z, dm) point.")
-
-    if fhost is not None:
-        feature_cols = [z, m, fhost]
-        if alpha_lambda is not None:
-            feature_cols.append(alpha_lambda)
-        train_pts = np.column_stack(feature_cols)
-        center = np.median(train_pts, axis=0)
-        scale = 0.5 * (
-            np.percentile(train_pts, 84, axis=0)
-            - np.percentile(train_pts, 16, axis=0)
-        )
-        scale = np.where(np.isfinite(scale) & (scale > 0.0), scale, 1.0)
-        train_pts_scaled = (train_pts - center) / scale
-        try:
-            linear_interp = LinearNDInterpolator(train_pts_scaled, dm, fill_value=np.nan)
-        except Exception as exc:
-            print(
-                "Warning: failed to build LinearNDInterpolator for debias correction; "
-                f"falling back to nearest-neighbor interpolation only. Error: {exc}"
-            )
-            linear_interp = None
-        nearest_interp = NearestNDInterpolator(train_pts_scaled, dm)
-
-        def interp_features(pts):
-            pts = np.asarray(pts, dtype=float)
-            arr = np.atleast_2d(pts)
-            expected_dim = train_pts.shape[1]
-            if arr.shape[1] < expected_dim:
-                raise ValueError(
-                    f"dm_interp expected at least {expected_dim} columns, got {arr.shape[1]}."
-                )
-            finite = np.all(np.isfinite(arr[:, :expected_dim]), axis=1)
-            out = np.full(arr.shape[0], np.nan, dtype=float)
-            if not np.any(finite):
-                return out if np.ndim(pts) > 1 else out[0]
-            arr_scaled = (arr[:, :expected_dim] - center) / scale
-            arr_scaled_finite = arr_scaled[finite]
-            if linear_interp is None:
-                finite_out = np.full(arr_scaled_finite.shape[0], np.nan, dtype=float)
-            else:
-                finite_out = np.asarray(linear_interp(arr_scaled_finite), dtype=float)
-            missing = ~np.isfinite(finite_out)
-            if np.any(missing):
-                finite_out[missing] = np.asarray(nearest_interp(arr_scaled_finite[missing]), dtype=float)
-            out[finite] = finite_out
-            return out if np.ndim(pts) > 1 else out[0]
-
-        return interp_features
 
     trend = build_smooth_trend_1d(
         z,

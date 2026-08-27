@@ -38,83 +38,6 @@ def test_dynesty_rstate_is_reproducible_and_seed_sensitive():
         hubble_fit.make_dynesty_rstate(-1)
 
 
-def _spectra_compatibility_args(**overrides):
-    values = {
-        "allow_spectra_catalog_v1": False,
-        "approximate_v1_fhost_2500_psf": False,
-        "disable_completeness": False,
-        "completeness_mode": "2d",
-        "correct_sigma_uv_host": False,
-    }
-    values.update(overrides)
-    return SimpleNamespace(**values)
-
-
-def test_v1_fhost_compatibility_flags_are_explicit_and_3d_only():
-    hubble_fit.validate_spectra_catalog_compatibility_args(
-        _spectra_compatibility_args(allow_spectra_catalog_v1=True)
-    )
-    with pytest.raises(ValueError, match="requires --allow-spectra-catalog-v1"):
-        hubble_fit.validate_spectra_catalog_compatibility_args(
-            _spectra_compatibility_args(
-                approximate_v1_fhost_2500_psf=True,
-                completeness_mode="3d_fhost",
-            )
-        )
-    with pytest.raises(ValueError, match="only supported with"):
-        hubble_fit.validate_spectra_catalog_compatibility_args(
-            _spectra_compatibility_args(
-                allow_spectra_catalog_v1=True,
-                approximate_v1_fhost_2500_psf=True,
-                completeness_mode="4d_fhost_alpha",
-            )
-        )
-    with pytest.raises(ValueError, match="correct-sigma-uv-host"):
-        hubble_fit.validate_spectra_catalog_compatibility_args(
-            _spectra_compatibility_args(
-                allow_spectra_catalog_v1=True,
-                approximate_v1_fhost_2500_psf=True,
-                completeness_mode="3d_fhost",
-                correct_sigma_uv_host=True,
-            )
-        )
-
-
-def test_loaded_v1_catalog_is_safe_for_2d_and_gated_for_host_modes():
-    frame = pd.DataFrame(
-        {
-            "qvc_spectra_catalog_format": ["qvc_spectra_catalog_v1"] * 8,
-            "f_host_2500_psf": np.linspace(0.1, 0.8, 8),
-        }
-    )
-    hubble_fit.validate_loaded_spectra_catalog_compatibility(
-        frame,
-        completeness_enabled=True,
-        completeness_mode="2d",
-        approximate_v1_fhost_2500_psf=False,
-    )
-    with pytest.raises(ValueError, match="requires.*approximate-v1"):
-        hubble_fit.validate_loaded_spectra_catalog_compatibility(
-            frame,
-            completeness_enabled=True,
-            completeness_mode="3d_fhost",
-            approximate_v1_fhost_2500_psf=False,
-        )
-    with pytest.raises(ValueError, match="cannot be used for 4D"):
-        hubble_fit.validate_loaded_spectra_catalog_compatibility(
-            frame,
-            completeness_enabled=True,
-            completeness_mode="4d_fhost_alpha",
-            approximate_v1_fhost_2500_psf=True,
-        )
-    hubble_fit.validate_loaded_spectra_catalog_compatibility(
-        frame,
-        completeness_enabled=True,
-        completeness_mode="3d_fhost",
-        approximate_v1_fhost_2500_psf=True,
-    )
-
-
 @pytest.fixture(autouse=True)
 def _disable_expensive_redshift_wiggle_atlas(monkeypatch):
     monkeypatch.setattr(
@@ -1884,7 +1807,13 @@ def test_plot_hubble_debiased_returns_clipping_sigma_and_writes_distinct_diagnos
     flat_samples = np.tile(theta[None, :], (6, 1))
     sigma_dmi = np.full(len(df_agn), 0.35, dtype=float)
 
-    monkeypatch.setattr(hubble_plotting, "_save_figure", lambda fig, path, **kwargs: path)
+    saved_plot_paths = []
+
+    def fake_save_figure(fig, path, **kwargs):
+        saved_plot_paths.append(str(path))
+        return str(path)
+
+    monkeypatch.setattr(hubble_plotting, "_save_figure", fake_save_figure)
 
     pivot_context = _agn_pivot_context(df_agn, (0.44, 3.16))
     residuals, clipping_sigma, _, _, mu_pred_std_with_scatter = hubble_plotting.plot_hubble(
@@ -1949,6 +1878,10 @@ def test_plot_hubble_debiased_returns_clipping_sigma_and_writes_distinct_diagnos
             ].to_numpy(dtype=float)
         ),
         np.square(sigma_dmi),
+    )
+    assert any(
+        path.endswith("hubble_debiased_residual_diagnostics.pdf")
+        for path in saved_plot_paths
     )
     np.testing.assert_allclose(
         residuals_df["mu_zscore"].to_numpy(dtype=float),
@@ -2469,6 +2402,30 @@ def test_compute_hubble_redshift_trend_recovers_weighted_slope():
     )
     assert 0.0 <= trend["p_value"] <= 1.0
     assert trend["weighted_correlation"] == pytest.approx(-1.0)
+
+
+def test_debiased_residual_diagnostic_writes_authoritative_plot(tmp_path):
+    n_objects = 48
+    redshift = np.linspace(0.3, 3.3, n_objects)
+    residuals = 0.08 - 0.7 * np.log10((1.0 + redshift) / 2.5)
+    residuals[-1] = 8.0
+    data_sigma = np.full(n_objects, 0.22)
+    total_sigma = np.full(n_objects, 0.55)
+    selection_sigma = np.linspace(0.4, 0.8, n_objects)
+    output = hubble_plotting.plot_hubble_debiased_residual_diagnostics(
+        pd.DataFrame({"z": redshift}),
+        residuals,
+        data_sigma,
+        total_sigma,
+        selection_sigma=selection_sigma,
+        dmi_values=np.linspace(-2.0, 0.2, n_objects),
+        z_range=(0.44, 3.16),
+        z_pivot=1.5,
+        plot_path=tmp_path,
+    )
+
+    assert output == str(tmp_path / "hubble_debiased_residual_diagnostics.pdf")
+    assert (tmp_path / "hubble_debiased_residual_diagnostics.pdf").stat().st_size > 0
 
 
 @pytest.mark.parametrize(
@@ -3206,7 +3163,7 @@ def test_run_single_compare_sigma_only_skips_plotting_but_keeps_fit_outputs(monk
     assert delta_m_calls == []
 
 
-def test_run_single_minimal_plots_keeps_only_debiased_hubble_plot(monkeypatch, tmp_path):
+def test_run_single_minimal_plots_keeps_focused_diagnostic_set(monkeypatch, tmp_path):
     df_agn = _make_fake_agn_sample(n_agn=6)
     df_pantheon = _make_fake_pantheon_sample()
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
@@ -3214,23 +3171,40 @@ def test_run_single_minimal_plots_keeps_only_debiased_hubble_plot(monkeypatch, t
     flat_samples = np.tile(theta[None, :], (8, 1))
     pipeline_kwargs = []
     hubble_calls = []
+    predicted_calls = []
+    corner_calls = []
+    redshift_calls = []
     expensive_calls = []
 
     monkeypatch.chdir(tmp_path)
     _patch_run_single_plot_stack(monkeypatch)
     for name in (
         "plot_sigma_uv_mpred_correction",
-        "plot_predicted_L2500_vs_sigmahat",
         "plot_blr_diagnostics_summary",
         "plot_completeness_diagnostics",
-        "plot_cosmo_corner",
         "plot_parameter_residual_diagnostics",
+        "_plot_hubble_reddening_redshift_pre_and_postcut",
     ):
         monkeypatch.setattr(
             hubble_fit,
             name,
             lambda *args, _name=name, **kwargs: expensive_calls.append(_name),
         )
+    monkeypatch.setattr(
+        hubble_fit,
+        "plot_predicted_L2500_vs_sigmahat",
+        lambda *args, **kwargs: predicted_calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        hubble_fit,
+        "plot_cosmo_corner",
+        lambda *args, **kwargs: corner_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        hubble_fit,
+        "plot_redshift_histograms",
+        lambda *args, **kwargs: redshift_calls.append((args, kwargs)),
+    )
 
     def fake_run_mcmc_pipeline(df_agn_arg, *args, **kwargs):
         pipeline_kwargs.append(kwargs)
@@ -3287,37 +3261,49 @@ def test_run_single_minimal_plots_keeps_only_debiased_hubble_plot(monkeypatch, t
 
     assert len(pipeline_kwargs) == 1
     assert pipeline_kwargs[0]["minimal_plots"] is True
-    assert len(hubble_calls) == 1
-    assert hubble_calls[0]["debias"] is True
-    assert hubble_calls[0]["residuals_csv_filename"] == "hubble_plot_residuals.csv"
-    assert "filename" not in hubble_calls[0]
-    assert "agn_likelihood_space_chi2" not in hubble_calls[0]
-    assert "agn_likelihood_space_chi2_zgt1" not in hubble_calls[0]
+    assert len(redshift_calls) == 1
+    assert len(predicted_calls) == 2
+    assert [(call["debias"], call["show_residuals"]) for call in predicted_calls] == [
+        (False, False),
+        (True, False),
+    ]
+    assert len(corner_calls) == 1
+    assert corner_calls[0][0][0] is None
+    assert corner_calls[0][1]["include_alpha_beta"] is True
+    assert len(hubble_calls) == 2
+    raw_call, debiased_call = hubble_calls
+    assert raw_call["debias"] is False
+    assert raw_call["residuals_csv_filename"] is None
+    assert debiased_call["debias"] is True
+    assert debiased_call["residuals_csv_filename"] == "hubble_plot_residuals.csv"
+    assert "filename" not in debiased_call
+    assert "agn_likelihood_space_chi2" not in debiased_call
+    assert "agn_likelihood_space_chi2_zgt1" not in debiased_call
     expected_draw_indices = (
         hubble_plotting.get_hubble_posterior_sample_indices(
             len(flat_samples)
         )
     )
     np.testing.assert_array_equal(
-        hubble_calls[0]["posterior_sample_indices"],
+        debiased_call["posterior_sample_indices"],
         expected_draw_indices,
     )
     assert isinstance(
-        hubble_calls[0]["dmi_posterior_draws"],
+        debiased_call["dmi_posterior_draws"],
         hubble_plotting.HubblePosteriorDrawSelection,
     )
     np.testing.assert_array_equal(
-        hubble_calls[0]["dmi_posterior_draws"].values,
+        debiased_call["dmi_posterior_draws"].values,
         np.zeros(
             (len(expected_draw_indices), len(df_agn)),
             dtype=float,
         ),
     )
     np.testing.assert_array_equal(
-        hubble_calls[0]["dmi_posterior_draws"].sample_indices,
+        debiased_call["dmi_posterior_draws"].sample_indices,
         expected_draw_indices,
     )
-    assert hubble_calls[0]["dmi_posterior_draws"].object_ids == tuple(
+    assert debiased_call["dmi_posterior_draws"].object_ids == tuple(
         df_agn["object_id"].astype(str)
     )
     assert expensive_calls == []
@@ -3707,7 +3693,7 @@ def test_run_mcmc_pipeline_compare_sigma_only_skips_completeness_plots_on_resume
         / "unit"
         / (
             "posteriors_FlatLambdaCDM_joint_fastest_all_z0p44_3p16_"
-            "2d_compmag-dereddened.h5"
+            "old_compmag-dereddened.h5"
         )
     )
     completeness_calls = []
@@ -4113,7 +4099,7 @@ def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_c
     assert plot_hubble_calls[0]["dmi_posterior_draws"].object_ids == tuple(
         df_agn["object_id"].astype(str)
     )
-    assert completeness_plot_calls == [str(generated_completeness), str(generated_completeness)]
+    assert completeness_plot_calls == [str(generated_completeness)]
 
 
 def test_remap_resume_replot_checkpoint_rejects_current_cut_ids_missing_from_checkpoint():
@@ -5290,7 +5276,7 @@ def test_run_hubble_forwards_target_selection_and_defaults_to_metadata_catalog()
 
     assert '"QVC_HUBBLE_SDSS_TARGET_SELECTION", "all"' in runner
     assert "--sdss-target-selection @(sdss_target_selection)" in runner
-    assert "rhat_reprocessed_sdss_metadata.h5" in runner
+    assert '"QVC_HUBBLE_LIGHT_CURVE_H5", h5_file' in runner
 
 
 def test_target_selection_sweep_defines_fixed_range_and_unique_members():

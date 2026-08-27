@@ -12,12 +12,9 @@ import pandas as pd
 
 from qvc.hubble.cuts import build_sdss_target_selection_mask
 from qvc.hubble.hubble_completeness_refactored import (
-    COMPLETENESS_FHOST_COL,
     COMPLETENESS_MAG_COL,
     COMPLETENESS_MAG_ERR_COL,
     get_completeness_function_2d,
-    get_completeness_function_3d_fhost,
-    get_completeness_function_4d_fhost_alpha,
     make_dm_function,
 )
 
@@ -251,32 +248,14 @@ def is_stratified_completeness(value: Any) -> bool:
 
 
 def _validate_map_input_columns(df: pd.DataFrame, completeness_mode: str) -> None:
+    if completeness_mode != "2d":
+        raise ValueError("LF completeness construction supports only the 2D baseline.")
     missing = {COMPLETENESS_MAG_COL, COMPLETENESS_MAG_ERR_COL} - set(df.columns)
     if missing:
         raise KeyError(
             "Completeness requires prepared 2500-A magnitude columns: "
             f"{sorted(missing)}."
         )
-    if completeness_mode in {
-        "3d_fhost",
-        "3d_fhost_latent_alpha",
-        "4d_fhost_alpha",
-    }:
-        if COMPLETENESS_FHOST_COL not in df.columns:
-            raise KeyError(
-                f"completeness_mode={completeness_mode!r} requires "
-                f"{COMPLETENESS_FHOST_COL!r}."
-            )
-        if not np.all(np.isfinite(df[COMPLETENESS_FHOST_COL].to_numpy(float))):
-            raise ValueError(
-                f"completeness_mode={completeness_mode!r} requires finite "
-                f"{COMPLETENESS_FHOST_COL}."
-            )
-    if completeness_mode == "4d_fhost_alpha":
-        if "alpha_lambda" not in df.columns:
-            raise KeyError("4D completeness requires 'alpha_lambda'.")
-        if not np.all(np.isfinite(df["alpha_lambda"].to_numpy(float))):
-            raise ValueError("4D completeness requires finite alpha_lambda.")
 
 
 def build_single_completeness_params(
@@ -291,22 +270,6 @@ def build_single_completeness_params(
     """Build one legacy completeness tuple without stratum-specific logic."""
 
     _validate_map_input_columns(df_observed, completeness_mode)
-    if completeness_mode == "4d_fhost_alpha":
-        return get_completeness_function_4d_fhost_alpha(
-            df_observed,
-            sim_file=completeness_sim_file,
-            plot=plot,
-            plot_path=str(plot_path),
-            df_agn_fhost_population=df_parent,
-        )
-    if completeness_mode in {"3d_fhost", "3d_fhost_latent_alpha"}:
-        return get_completeness_function_3d_fhost(
-            df_observed,
-            sim_file=completeness_sim_file,
-            plot=plot,
-            plot_path=str(plot_path),
-            df_agn_fhost_population=df_parent,
-        )
     return get_completeness_function_2d(
         df_observed,
         sim_file=completeness_sim_file,
@@ -430,22 +393,11 @@ def make_stratified_dm_function(
     values = np.asarray(values, dtype=float)
     if values.shape != (len(df),):
         raise ValueError(f"Debias values have shape {values.shape}, expected {(len(df),)}.")
-    common_kwargs = {
-        "f_host_2500_psf": (
-            df[COMPLETENESS_FHOST_COL].to_numpy()
-            if COMPLETENESS_FHOST_COL in df.columns
-            else None
-        ),
-        "alpha_lambda": (
-            df["alpha_lambda"].to_numpy() if "alpha_lambda" in df.columns else None
-        ),
-    }
     if COMPLETENESS_STRATUM_COL not in df.columns:
         return make_dm_function(
             df[COMPLETENESS_MAG_COL].to_numpy(),
             df["z"].to_numpy(),
             values,
-            **common_kwargs,
         )
 
     interpolators = {}
@@ -456,16 +408,6 @@ def make_stratified_dm_function(
             df.loc[mask, COMPLETENESS_MAG_COL].to_numpy(),
             df.loc[mask, "z"].to_numpy(),
             values[mask],
-            f_host_2500_psf=(
-                df.loc[mask, COMPLETENESS_FHOST_COL].to_numpy()
-                if COMPLETENESS_FHOST_COL in df.columns
-                else None
-            ),
-            alpha_lambda=(
-                df.loc[mask, "alpha_lambda"].to_numpy()
-                if "alpha_lambda" in df.columns
-                else None
-            ),
         )
     return StratifiedDebiasInterpolator(interpolators)
 

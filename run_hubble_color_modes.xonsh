@@ -1,0 +1,234 @@
+#!/usr/bin/env xonsh
+
+"""Run matched old and eBOSS photometry-only host-removal configurations."""
+
+from pathlib import Path
+import hashlib
+import json
+
+repo = Path(__file__).resolve().parent
+$PYTHONPATH = str(repo / "src")
+$MPLCONFIGDIR = "/tmp/qvc-matplotlib-color-modes"
+$RAISE_SUBPROC_ERROR = True
+
+output_root = Path(__xonsh__.env.get(
+    "QVC_HUBBLE_COLOR_MODES_OUTPUT_ROOT", "results/hubble_color_modes"
+))
+base_prefix = __xonsh__.env.get("QVC_HUBBLE_COLOR_MODES_PREFIX", "matched")
+dry_run = __xonsh__.env.get("QVC_HUBBLE_COLOR_MODES_DRY_RUN", "false").lower() in {
+    "1", "true", "yes", "on"
+}
+output_root.mkdir(parents=True, exist_ok=True)
+
+# These inputs are shared by preparation and both Hubble runs.
+light_curve_h5 = Path(__xonsh__.env.get(
+    "QVC_HUBBLE_LIGHT_CURVE_H5",
+    "results/data/aug27_1219pm_erlang_legacy_svithennuts_psflogitnormal_iters3_svi4000w250s250_stonechisq_specaug240152pmv3_n8000_536f607_chisq.h5",
+))
+spectra_fit_h5 = Path(__xonsh__.env.get(
+    "QVC_HUBBLE_SPECTRA_FIT_H5",
+    "results/data/jaxqsofit/aug24_0152pm_spectrafit_e5d2897_chisqgt20_N8000_nested_fhostpsf_resumed_m2500norm12_v3.h5",
+))
+spectra_metadata_h5 = Path(__xonsh__.env.get(
+    "QVC_COLOR_COMPLETENESS_SPECTRA_METADATA",
+    "results/data/aug24_0152pm_spectrafit_e5d2897_chisqgt20_N8000_nested_fhostpsf_resumed_m2500norm12_v3.h5",
+))
+dr16q_fits = Path(__xonsh__.env.get(
+    "QVC_COLOR_COMPLETENESS_DR16Q", "data/dr16q_prop_May01_2024.fits"
+))
+qsogen_path = Path(__xonsh__.env.get(
+    "QVC_QSOGEN_PATH", str(Path.home() / "sdev" / "qsogen")
+))
+magnitude_convention = __xonsh__.env.get("QVC_HUBBLE_MAGNITUDE_CONVENTION", "dereddened")
+completeness_magnitude = __xonsh__.env.get("QVC_HUBBLE_COMPLETENESS_MAGNITUDE", "attenuated")
+sdss_target_selection = __xonsh__.env.get(
+    "QVC_HUBBLE_SDSS_TARGET_SELECTION", "eboss-color-sensitivity"
+)
+if sdss_target_selection != "eboss-color-sensitivity":
+    raise RuntimeError(
+        "Color host sensitivity requires the shared "
+        "eboss-color-sensitivity pre-Hubble selection."
+    )
+lf_oversample = __xonsh__.env.get("QVC_HUBBLE_COMPLETENESS_MOCK_OVERSAMPLE", "4")
+lf_max_rows = __xonsh__.env.get("QVC_HUBBLE_COMPLETENESS_MOCK_MAX_ROWS", "2000000")
+
+# Keep preparation's C_old hash on the exact cut profile used by run_hubble.
+matched_cut_env = {
+    "QVC_CUT_SPECTRAL_RHAT_MAX": "1.1",
+    "QVC_CUT_LIGHT_CURVE_RHAT_MAX": "1.1",
+    "QVC_CUT_LOG_TAU_UV_RF_MAX": "3.5",
+    "QVC_CUT_APPARENT_MAG_2500_ERR_MAX": "0.5",
+    "QVC_CUT_SED_REDUCED_CHI2_MAX": "1.5",
+    "QVC_CUT_SPECTROSCOPY_REDUCED_CHI2_MAX": "1.5",
+    "QVC_CUT_JAXSEDFIT_JOINT_REDUCED_CHI2_MAX": "1.5",
+    "QVC_CUT_LOO_CHI2_EFF_MAX": "1.5",
+    "QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG": "0.10",
+    "QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z": "0.30",
+}
+for key, default in matched_cut_env.items():
+    __xonsh__.env[key] = __xonsh__.env.get(key, default)
+
+artifact_value = __xonsh__.env.get("QVC_COLOR_COMPLETENESS_ARTIFACT", "").strip()
+artifact = Path(artifact_value) if artifact_value else output_root / "program_color_completeness.h5"
+prepared_value = __xonsh__.env.get(
+    "QVC_COLOR_COMPLETENESS_PREPARED_CATALOG", ""
+).strip()
+prepared_catalog = Path(prepared_value) if prepared_value else output_root / "program_color_prepared.h5"
+artifact_plot_dir = output_root / "color-completeness-diagnostics"
+
+# Invalidate products from the removed multi-program/flux-error pipeline so
+# this all-in-one runner cannot silently reuse a different diagnostic.
+expected_artifact_schema = "qvc_eboss_color_completeness_v6"
+expected_prepared_schema = "qvc_eboss_color_prepared_v6"
+expected_cut_configuration = {
+    key: str(__xonsh__.env[key]) for key in matched_cut_env
+}
+if artifact.is_file():
+    import h5py
+    with h5py.File(artifact, "r") as handle:
+        artifact_schema = str(handle.attrs.get("schema", ""))
+        artifact_metadata = json.loads(str(handle.attrs.get("metadata_json", "{}")))
+        artifact_cut_configuration = artifact_metadata.get("hubble_cut_configuration")
+    if artifact_schema != expected_artifact_schema or artifact_cut_configuration != expected_cut_configuration:
+        print(f"Removing stale generated color artifact (schema/cuts changed): {artifact}")
+        if not dry_run:
+            artifact.unlink()
+if not artifact.is_file() and prepared_catalog.is_file():
+    import h5py
+    with h5py.File(prepared_catalog, "r") as handle:
+        prepared_schema = str(handle.attrs.get("schema", ""))
+        prepared_cut_configuration = json.loads(
+            str(handle.attrs.get("hubble_cut_configuration_json", "null"))
+        )
+    if prepared_schema != expected_prepared_schema or prepared_cut_configuration != expected_cut_configuration:
+        print(f"Removing stale generated prepared catalog (schema/cuts changed): {prepared_catalog}")
+        if not dry_run:
+            prepared_catalog.unlink()
+
+if not artifact.is_file():
+    if not prepared_catalog.is_file():
+        required = (light_curve_h5, spectra_fit_h5, spectra_metadata_h5, dr16q_fits)
+        missing = [str(path) for path in required if not path.is_file()]
+        if not qsogen_path.is_dir():
+            missing.append(str(qsogen_path))
+        if missing:
+            raise RuntimeError(f"Cannot prepare color completeness; missing inputs: {missing}")
+        print(f"Preparing paired Wang-LF + qsogen catalog: {prepared_catalog}")
+        if not dry_run:
+            python -m qvc.hubble.prepare_program_color_catalog \
+                @(str(prepared_catalog)) \
+                --dr16q @(str(dr16q_fits)) \
+                --spectra-metadata @(str(spectra_metadata_h5)) \
+                --qsogen-path @(str(qsogen_path)) \
+                --light-curve-h5 @(str(light_curve_h5)) \
+                --spectra-fit-h5 @(str(spectra_fit_h5)) \
+                --lf-model wang2026_type1_lade_a \
+                --lf-oversample @(lf_oversample) \
+                --lf-max-rows @(lf_max_rows) \
+                --seed @(__xonsh__.env.get("QVC_HUBBLE_DYNESTY_SEED", "12345")) \
+                --sed-realizations 16 \
+                --z-range @(__xonsh__.env.get("QVC_HUBBLE_Z_MIN", "0.44")) \
+                          @(__xonsh__.env.get("QVC_HUBBLE_Z_MAX", "3.16")) \
+                --magnitude-convention @(magnitude_convention) \
+                --completeness-magnitude @(completeness_magnitude) \
+                --sdss-target-selection @(sdss_target_selection)
+    print(f"Building frozen color-completeness artifact: {artifact}")
+    if not dry_run:
+        python -m qvc.hubble.program_color_completeness build \
+            @(str(prepared_catalog)) @(str(artifact)) \
+            --plot-dir @(str(artifact_plot_dir))
+else:
+    print(f"Reusing frozen color-completeness artifact: {artifact}")
+
+# Hash/dataset validation happens before any sampler starts. Per-object
+# interpolation-stencil validation is repeated by each color-dependent run.
+if not dry_run:
+    python -m qvc.hubble.program_color_completeness validate @(str(artifact)) \
+        --require-program eboss
+else:
+    print(f"dry-run: would validate artifact {artifact}")
+
+common_env = {
+    "QVC_COLOR_COMPLETENESS_ARTIFACT": str(artifact),
+    "QVC_HUBBLE_DYNESTY_SEED": __xonsh__.env.get("QVC_HUBBLE_DYNESTY_SEED", "12345"),
+    "QVC_HUBBLE_SPEED": __xonsh__.env.get("QVC_HUBBLE_SPEED", "quick"),
+    "QVC_HUBBLE_Z_MIN": __xonsh__.env.get("QVC_HUBBLE_Z_MIN", "0.44"),
+    "QVC_HUBBLE_Z_MAX": __xonsh__.env.get("QVC_HUBBLE_Z_MAX", "3.16"),
+    "QVC_HUBBLE_RESUME": "",
+    "QVC_HUBBLE_SPECTRA_FIT_H5": str(spectra_fit_h5),
+    "QVC_HUBBLE_SDSS_TARGET_METADATA_H5": str(spectra_metadata_h5),
+    "QVC_HUBBLE_LIGHT_CURVE_H5": str(light_curve_h5),
+    "QVC_HUBBLE_COMPLETENESS_LF_MODEL": "wang2026_type1_lade_a",
+    "QVC_HUBBLE_COLOR_SUPPORT_CUT": "true",
+    "QVC_HUBBLE_MAGNITUDE_CONVENTION": magnitude_convention,
+    "QVC_HUBBLE_COMPLETENESS_MAGNITUDE": completeness_magnitude,
+    "QVC_HUBBLE_SDSS_TARGET_SELECTION": sdss_target_selection,
+    "QVC_HUBBLE_COMPLETENESS_MOCK_OVERSAMPLE": lf_oversample,
+    "QVC_HUBBLE_COMPLETENESS_MOCK_MAX_ROWS": lf_max_rows,
+}
+common_env.update({key: str(__xonsh__.env[key]) for key in matched_cut_env})
+if prepared_catalog.is_file():
+    import h5py
+    with h5py.File(prepared_catalog, "r") as prepared_handle:
+        lf_mock_path = str(prepared_handle.attrs.get("lf_mock_path", "")).strip()
+    if not lf_mock_path or not Path(lf_mock_path).is_file():
+        raise RuntimeError("Prepared color catalog has no usable lf_mock_path attribute")
+    common_env["QVC_HUBBLE_COMPLETENESS_SIM_FILE"] = lf_mock_path
+elif artifact.is_file():
+    import h5py
+    with h5py.File(artifact, "r") as artifact_handle:
+        artifact_metadata = json.loads(str(artifact_handle.attrs.get("metadata_json", "{}")))
+    lf_mock_path = str(artifact_metadata.get("lf_mock_path", "")).strip()
+    if lf_mock_path and Path(lf_mock_path).is_file():
+        common_env["QVC_HUBBLE_COMPLETENESS_SIM_FILE"] = lf_mock_path
+for optional in (
+    "QVC_HUBBLE_COMPLETENESS_SIM_FILE",
+    "QVC_HUBBLE_COMPLETENESS_LF_MODEL",
+    "QVC_HUBBLE_SDSS_TARGET_SELECTION",
+    "QVC_HUBBLE_COMPLETENESS_STRATIFICATION",
+):
+    if optional in __xonsh__.env:
+        common_env[optional] = __xonsh__.env[optional]
+
+resolved_common = None
+mode_plot_roots = {}
+configuration_hash = hashlib.sha256(
+    json.dumps(common_env, sort_keys=True, separators=(",", ":")).encode()
+).hexdigest()
+(output_root / "matched_configuration.json").write_text(
+    json.dumps({"sha256": configuration_hash, "configuration": common_env}, indent=2, sort_keys=True) + "\n"
+)
+for mode in ("old", "host-removal"):
+    mode_root = output_root / mode
+    mode_root.mkdir(parents=True, exist_ok=True)
+    run_env = dict(common_env)
+    run_env["QVC_HUBBLE_COMPLETENESS_MODE"] = mode
+    run_env["QVC_HUBBLE_PREFIX"] = str(mode_root / f"{base_prefix}-{mode}")
+    mode_plot_roots[mode] = (
+        repo / "plots" / "hubble" / str(run_env["QVC_HUBBLE_PREFIX"]).lstrip("/")
+    )
+    signature = tuple(sorted((key, value) for key, value in run_env.items()
+                             if key not in {"QVC_HUBBLE_COMPLETENESS_MODE", "QVC_HUBBLE_PREFIX"}))
+    if resolved_common is None:
+        resolved_common = signature
+    elif signature != resolved_common:
+        raise RuntimeError("Matched-run common configuration changed between modes")
+    print(f"mode={mode} output={mode_root} seed={run_env['QVC_HUBBLE_DYNESTY_SEED']} common_hash={configuration_hash}")
+    if not dry_run:
+        with __xonsh__.env.swap(**run_env):
+            xonsh @(str(repo / "run_hubble.xonsh"))
+
+if not dry_run:
+    residual_tables = {}
+    for mode in ("old", "host-removal"):
+        matches = list(mode_plot_roots[mode].rglob("hubble_plot_residuals_no_logf.csv"))
+        if len(matches) != 1:
+            raise RuntimeError(
+                f"Expected exactly one residual table for {mode}, found {len(matches)}: {matches}"
+            )
+        residual_tables[mode] = matches[0]
+    comparison_plot = output_root / "comparison" / "hubble_residual_change.png"
+    python -m qvc.hubble.program_color_completeness plot-residual-change \
+        @(str(residual_tables["old"])) \
+        @(str(residual_tables["host-removal"])) \
+        @(str(comparison_plot))

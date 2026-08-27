@@ -576,8 +576,6 @@ def _resolve_debias_values(
         dm_interp,
         df_agn["z"].values,
         df_agn[COMPLETENESS_MAG_COL].values,
-        f_host_2500_psf=df_agn.get(COMPLETENESS_FHOST_COL),
-        alpha_lambda=df_agn.get("alpha_lambda"),
         completeness_stratum=df_agn.get(COMPLETENESS_STRATUM_COL),
     )
     return dmi_interp
@@ -604,8 +602,6 @@ def _resolve_selection_sigma_values(
             dmi_selection_sigma_interp,
             df_agn["z"].values,
             df_agn[COMPLETENESS_MAG_COL].values,
-            f_host_2500_psf=df_agn.get(COMPLETENESS_FHOST_COL),
-            alpha_lambda=df_agn.get("alpha_lambda"),
             completeness_stratum=df_agn.get(COMPLETENESS_STRATUM_COL),
         )
         sigma_sel = sigma_sel_interp
@@ -5428,6 +5424,467 @@ def compute_hubble_redshift_trend(
     }
 
 
+def plot_hubble_debiased_residual_diagnostics(
+    df_agn,
+    residuals,
+    data_sigma,
+    total_sigma,
+    *,
+    selection_sigma=None,
+    dmi_values=None,
+    clipped_mask=None,
+    z_range=(0.44, 3.16),
+    z_pivot=1.5,
+    redshift_trend=None,
+    plot_path="plots/hubble",
+    show=False,
+    filename="hubble_debiased_residual_diagnostics.pdf",
+):
+    """Plot an audit-focused view of the authoritative debiased residuals.
+
+    This consumes only arrays already calculated by :func:`plot_hubble`. It
+    deliberately does not reconstruct distance moduli, completeness
+    corrections, or posterior summaries, so the diagnostic cannot drift from
+    ``hubble_diagram_debiased.pdf``.
+    """
+
+    if "z" not in df_agn:
+        raise KeyError("Debiased residual diagnostics require a 'z' column.")
+
+    z = np.asarray(df_agn["z"], dtype=float)
+    residuals = np.asarray(residuals, dtype=float)
+    data_sigma = np.asarray(data_sigma, dtype=float)
+    total_sigma = np.asarray(total_sigma, dtype=float)
+    expected_shape = z.shape
+    for name, values in (
+        ("residuals", residuals),
+        ("data_sigma", data_sigma),
+        ("total_sigma", total_sigma),
+    ):
+        if values.shape != expected_shape:
+            raise ValueError(
+                f"{name} has shape {values.shape}; expected {expected_shape}."
+            )
+
+    if len(z_range) != 2:
+        raise ValueError("z_range must contain exactly two endpoints.")
+    z_lo, z_hi = map(float, z_range)
+    if not np.isfinite(z_lo) or not np.isfinite(z_hi) or z_hi <= z_lo:
+        raise ValueError("z_range must be finite and strictly increasing.")
+
+    if selection_sigma is not None:
+        selection_sigma = np.asarray(selection_sigma, dtype=float)
+        if selection_sigma.shape != expected_shape:
+            raise ValueError(
+                "selection_sigma has shape "
+                f"{selection_sigma.shape}; expected {expected_shape}."
+            )
+    if dmi_values is not None:
+        dmi_values = np.asarray(dmi_values, dtype=float)
+        if dmi_values.shape != expected_shape:
+            raise ValueError(
+                f"dmi_values has shape {dmi_values.shape}; expected {expected_shape}."
+            )
+    if clipped_mask is None:
+        clipped_mask = np.zeros(expected_shape, dtype=bool)
+    else:
+        clipped_mask = np.asarray(clipped_mask, dtype=bool)
+        if clipped_mask.shape != expected_shape:
+            raise ValueError(
+                f"clipped_mask has shape {clipped_mask.shape}; expected {expected_shape}."
+            )
+
+    finite = (
+        np.isfinite(z)
+        & np.isfinite(residuals)
+        & np.isfinite(data_sigma)
+        & (data_sigma > 0.0)
+        & np.isfinite(total_sigma)
+        & (total_sigma > 0.0)
+    )
+    in_fit = finite & (z >= z_lo) & (z <= z_hi) & ~clipped_mask
+    if not np.any(in_fit):
+        raise ValueError(
+            "No finite, unclipped residuals lie inside the fitted redshift range."
+        )
+
+    standardized = np.full(expected_shape, np.nan, dtype=float)
+    standardized[finite] = residuals[finite] / total_sigma[finite]
+
+    # Keep central structure legible without silently losing tails. Values
+    # beyond either display limit are drawn as boundary triangles and counted.
+    central_abs = np.abs(residuals[in_fit])
+    residual_limit = max(0.6, 1.18 * float(np.nanquantile(central_abs, 0.985)))
+    residual_limit = min(residual_limit, 2.5)
+    standardized_limit = 5.0
+    residual_plot = np.clip(residuals, -residual_limit, residual_limit)
+    standardized_plot = np.clip(
+        standardized, -standardized_limit, standardized_limit
+    )
+    residual_overflow = in_fit & (np.abs(residuals) > residual_limit)
+    standardized_overflow = in_fit & (
+        np.abs(standardized) > standardized_limit
+    )
+
+    if redshift_trend is None:
+        redshift_trend = compute_hubble_redshift_trend(
+            z[in_fit],
+            residuals[in_fit],
+            total_sigma[in_fit],
+            z_pivot=z_pivot,
+        )
+        trend_label = "Uncertainty-weighted trend"
+    else:
+        trend_label = (
+            "Selection-weighted trend"
+            if selection_sigma is not None
+            else "Uncertainty-weighted trend"
+        )
+
+    bins = np.linspace(z_lo, z_hi, 12)
+    z_bin, residual_bin, residual_bin_sem, bin_count = _weighted_bin_stats(
+        z[in_fit],
+        residuals[in_fit],
+        total_sigma[in_fit],
+        bins,
+        min_count=5,
+        center="weighted",
+    )
+
+    navy = "#15243A"
+    teal = "#008C95"
+    orange = "#E66B2E"
+    red = "#C93C43"
+    pale = "#D9E1E8"
+    fig = plt.figure(figsize=(12.4, 8.2), constrained_layout=True)
+    grid = fig.add_gridspec(
+        2,
+        2,
+        width_ratios=(5.0, 1.35),
+        height_ratios=(2.8, 1.2),
+        wspace=0.04,
+        hspace=0.06,
+    )
+    ax_residual = fig.add_subplot(grid[0, 0])
+    ax_residual_hist = fig.add_subplot(grid[0, 1], sharey=ax_residual)
+    ax_standard = fig.add_subplot(grid[1, 0], sharex=ax_residual)
+    ax_standard_hist = fig.add_subplot(grid[1, 1], sharey=ax_standard)
+
+    outside_fit = finite & ~((z >= z_lo) & (z <= z_hi))
+    if np.any(outside_fit):
+        ax_residual.scatter(
+            z[outside_fit],
+            residual_plot[outside_fit],
+            s=16,
+            marker="D",
+            color="#9AA7B2",
+            alpha=0.45,
+            linewidths=0,
+            label="Outside fitted redshift range",
+            zorder=2,
+        )
+
+    ordinary = in_fit & ~residual_overflow
+    ax_residual.errorbar(
+        z[ordinary],
+        residual_plot[ordinary],
+        yerr=data_sigma[ordinary],
+        fmt="none",
+        ecolor=mpl.colors.to_rgba(navy, 0.10),
+        elinewidth=0.65,
+        capsize=0,
+        zorder=1,
+    )
+
+    color_values = dmi_values if dmi_values is not None else total_sigma
+    color_valid = in_fit & np.isfinite(color_values)
+    color_sample = color_values[color_valid]
+    if color_sample.size:
+        color_lo, color_hi = np.nanquantile(color_sample, (0.02, 0.98))
+        if not np.isfinite(color_lo) or not np.isfinite(color_hi):
+            color_lo, color_hi = 0.0, 1.0
+        if color_hi <= color_lo:
+            color_lo -= 0.5
+            color_hi += 0.5
+        color_norm = mpl.colors.Normalize(vmin=color_lo, vmax=color_hi)
+        color_map = mpl.colormaps["viridis"]
+        ax_residual.scatter(
+            z[color_valid],
+            residual_plot[color_valid],
+            s=22,
+            c=color_values[color_valid],
+            cmap=color_map,
+            norm=color_norm,
+            edgecolors=mpl.colors.to_rgba("white", 0.35),
+            linewidths=0.25,
+            alpha=0.78,
+            zorder=4,
+        )
+        colorbar = fig.colorbar(
+            mpl.cm.ScalarMappable(norm=color_norm, cmap=color_map),
+            ax=ax_residual,
+            pad=0.012,
+            fraction=0.035,
+        )
+        colorbar.set_label(
+            r"Applied selection correction $\Delta m_i$ (mag)"
+            if dmi_values is not None
+            else r"Total residual uncertainty (mag)"
+        )
+
+    if np.any(residual_overflow):
+        above = residual_overflow & (residuals > 0.0)
+        below = residual_overflow & (residuals < 0.0)
+        ax_residual.scatter(
+            z[above],
+            np.full(np.count_nonzero(above), residual_limit),
+            marker="^",
+            s=38,
+            color=red,
+            edgecolors="white",
+            linewidths=0.4,
+            zorder=8,
+        )
+        ax_residual.scatter(
+            z[below],
+            np.full(np.count_nonzero(below), -residual_limit),
+            marker="v",
+            s=38,
+            color=red,
+            edgecolors="white",
+            linewidths=0.4,
+            zorder=8,
+        )
+
+    if z_bin.size:
+        ax_residual.errorbar(
+            z_bin,
+            residual_bin,
+            yerr=residual_bin_sem,
+            fmt="o",
+            markersize=6.8,
+            color=orange,
+            markeredgecolor="white",
+            markeredgewidth=0.8,
+            ecolor=orange,
+            elinewidth=2.0,
+            capsize=3.2,
+            zorder=10,
+            label="Weighted redshift bins",
+        )
+        for x_value, y_value, count in zip(z_bin, residual_bin, bin_count):
+            ax_residual.annotate(
+                f"{int(count)}",
+                (x_value, y_value),
+                xytext=(0, 9),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=7,
+                color="#5F6670",
+            )
+
+    if (
+        redshift_trend is not None
+        and np.isfinite(redshift_trend.get("intercept_mag", np.nan))
+        and np.isfinite(redshift_trend.get("slope_mag_per_dex", np.nan))
+    ):
+        trend_z = np.linspace(z_lo, z_hi, 300)
+        trend_x = np.log10((1.0 + trend_z) / (1.0 + float(z_pivot)))
+        trend_y = (
+            redshift_trend["intercept_mag"]
+            + redshift_trend["slope_mag_per_dex"] * trend_x
+        )
+        ax_residual.plot(
+            trend_z,
+            trend_y,
+            color=teal,
+            linewidth=2.4,
+            zorder=7,
+            label=trend_label,
+        )
+
+    ax_residual.axhline(0.0, color=navy, linewidth=1.1, alpha=0.8)
+    ax_residual.axvline(z_pivot, color=navy, linewidth=0.9, alpha=0.22)
+    ax_residual.set_ylim(-residual_limit, residual_limit)
+    ax_residual.set_ylabel(r"Debiased Hubble residual, $\Delta\mu$ (mag)")
+    ax_residual.tick_params(labelbottom=False)
+    ax_residual.grid(axis="y", color=pale, linewidth=0.7, alpha=0.7)
+
+    ax_residual_hist.hist(
+        residual_plot[in_fit],
+        bins=28,
+        range=(-residual_limit, residual_limit),
+        orientation="horizontal",
+        density=True,
+        color=navy,
+        alpha=0.72,
+        edgecolor="white",
+        linewidth=0.35,
+    )
+    ax_residual_hist.axhline(0.0, color=navy, linewidth=1.0)
+    ax_residual_hist.set_xlabel("Density")
+    ax_residual_hist.tick_params(labelleft=False)
+    ax_residual_hist.grid(False)
+
+    standard_valid = in_fit & np.isfinite(standardized)
+    standard_outlier = standard_valid & (np.abs(standardized) >= 3.0)
+    standard_core = standard_valid & ~standard_outlier
+    ax_standard.scatter(
+        z[standard_core],
+        standardized_plot[standard_core],
+        s=13,
+        color=navy,
+        alpha=0.32,
+        linewidths=0,
+        zorder=3,
+    )
+    ax_standard.scatter(
+        z[standard_outlier],
+        standardized_plot[standard_outlier],
+        s=24,
+        color=red,
+        alpha=0.85,
+        linewidths=0,
+        zorder=5,
+        label=r"$|\Delta\mu|/\sigma_{\rm total}\geq3$",
+    )
+    if np.any(standardized_overflow):
+        above = standardized_overflow & (standardized > 0.0)
+        below = standardized_overflow & (standardized < 0.0)
+        ax_standard.scatter(
+            z[above],
+            np.full(np.count_nonzero(above), standardized_limit),
+            marker="^",
+            s=30,
+            color=red,
+            zorder=7,
+        )
+        ax_standard.scatter(
+            z[below],
+            np.full(np.count_nonzero(below), -standardized_limit),
+            marker="v",
+            s=30,
+            color=red,
+            zorder=7,
+        )
+    for level, alpha in ((0.0, 0.9), (-3.0, 0.35), (3.0, 0.35)):
+        ax_standard.axhline(
+            level,
+            color=navy if level == 0.0 else red,
+            linestyle="-" if level == 0.0 else "--",
+            linewidth=1.0,
+            alpha=alpha,
+        )
+    ax_standard.set_ylim(-standardized_limit, standardized_limit)
+    ax_standard.set_xlim(
+        min(float(np.nanmin(z[finite])), z_lo) - 0.03,
+        max(float(np.nanmax(z[finite])), z_hi) + 0.03,
+    )
+    ax_standard.set_xlabel(r"Redshift $z$")
+    ax_standard.set_ylabel(r"Standardized residual $\Delta\mu/\sigma_{\rm total}$")
+    ax_standard.grid(axis="y", color=pale, linewidth=0.7, alpha=0.7)
+    if np.any(standard_outlier):
+        ax_standard.legend(loc="upper right", frameon=False, fontsize=9)
+
+    standard_values = standardized[standard_valid]
+    ax_standard_hist.hist(
+        np.clip(standard_values, -standardized_limit, standardized_limit),
+        bins=24,
+        range=(-standardized_limit, standardized_limit),
+        orientation="horizontal",
+        density=True,
+        color=teal,
+        alpha=0.72,
+        edgecolor="white",
+        linewidth=0.35,
+    )
+    standard_grid = np.linspace(-standardized_limit, standardized_limit, 300)
+    ax_standard_hist.plot(
+        norm.pdf(standard_grid),
+        standard_grid,
+        color=orange,
+        linewidth=2.0,
+        label=r"$\mathcal{N}(0,1)$",
+    )
+    ax_standard_hist.set_xlabel("Density")
+    ax_standard_hist.tick_params(labelleft=False)
+    ax_standard_hist.legend(loc="upper right", frameon=False, fontsize=8)
+    ax_standard_hist.grid(False)
+
+    median_residual = float(np.nanmedian(residuals[in_fit]))
+    rms_residual = float(np.sqrt(np.nanmean(np.square(residuals[in_fit]))))
+    n_three_sigma = int(np.count_nonzero(standard_outlier))
+    annotation = [
+        rf"$N={np.count_nonzero(in_fit):,}$",
+        rf"median $={median_residual:+.3f}$ mag",
+        rf"RMS $={rms_residual:.3f}$ mag",
+        rf"$|r|/\sigma_{{\rm total}}\geq3$: {n_three_sigma}",
+    ]
+    if np.count_nonzero(residual_overflow):
+        annotation.append(
+            f"residuals beyond view: {np.count_nonzero(residual_overflow)}"
+        )
+    if (
+        redshift_trend is not None
+        and np.isfinite(redshift_trend.get("slope_mag_per_dex", np.nan))
+    ):
+        annotation.append(
+            rf"$\gamma_z={redshift_trend['slope_mag_per_dex']:+.2f}"
+            rf"\pm{redshift_trend['slope_err_mag_per_dex']:.2f}$ mag dex$^{{-1}}$"
+        )
+    ax_residual.text(
+        0.018,
+        0.965,
+        "\n".join(annotation),
+        transform=ax_residual.transAxes,
+        ha="left",
+        va="top",
+        fontsize=9.5,
+        color=navy,
+        bbox=dict(
+            boxstyle="round,pad=0.45",
+            facecolor="white",
+            edgecolor=pale,
+            alpha=0.94,
+        ),
+        zorder=20,
+    )
+    ax_residual.legend(
+        loc="lower left",
+        frameon=False,
+        fontsize=9,
+        ncol=2,
+    )
+
+    for axis in (ax_residual, ax_residual_hist, ax_standard, ax_standard_hist):
+        axis.spines["top"].set_visible(False)
+        axis.spines["right"].set_visible(False)
+        axis.tick_params(direction="out", length=4, width=0.8, colors=navy)
+    fig.suptitle(
+        "Debiased Hubble residual diagnostics",
+        fontsize=17,
+        fontweight="semibold",
+        color=navy,
+    )
+    fig.text(
+        0.5,
+        0.955,
+        rf"Fit support: ${z_lo:.2f}\leq z\leq{z_hi:.2f}$; "
+        r"error bars exclude intrinsic population scatter",
+        ha="center",
+        va="top",
+        fontsize=10,
+        color="#5F6670",
+    )
+    return _save_figure(
+        fig,
+        os.path.join(plot_path, filename),
+        dpi=450,
+        show=show,
+    )
+
+
 def _interval_bin_edges(bins, lower, upper):
     """Return ``bins`` clipped to one non-empty interval."""
     bins = np.asarray(bins, dtype=float)
@@ -5777,15 +6234,20 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     mu_pred_samples = m_obs[None, :] - predicted_M2500_samples
 
     # De-bias (assumes your make_dm_function clips to grid, no extrapolation)
+    applied_dmi = None
     if debias:
         if selected_dmi_posterior_draws is not None:
             mu_pred_samples -= selected_dmi_posterior_draws
+            applied_dmi = np.percentile(
+                selected_dmi_posterior_draws, 50, axis=0
+            )
         else:
-            mu_pred_samples -= _resolve_debias_values(
+            applied_dmi = _resolve_debias_values(
                 df_agn,
                 dm_interp=dm_interp,
                 dmi_values=dmi_values,
             )
+            mu_pred_samples -= applied_dmi
 
     mu_pred_median = np.percentile(mu_pred_samples, 50, axis=0)
     mu_pred_16th   = np.percentile(mu_pred_samples, 16, axis=0)
@@ -6713,8 +7175,25 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     # Save/show
     fig.tight_layout()
     os.makedirs(plot_path, exist_ok=True)
+    is_primary_debiased_plot = debias and filename is None
     filename = filename or ("hubble_diagram_debiased.pdf" if debias else "hubble_diagram.pdf")
     _save_figure(fig, os.path.join(plot_path, filename), dpi=600, show=show)
+
+    if is_primary_debiased_plot:
+        plot_hubble_debiased_residual_diagnostics(
+            df_agn,
+            residuals,
+            mu_pred_std,
+            clipping_sigma,
+            selection_sigma=sigma_sel,
+            dmi_values=applied_dmi,
+            clipped_mask=clipped_mask,
+            z_range=z_range,
+            z_pivot=z_pivot_agn,
+            redshift_trend=redshift_trend,
+            plot_path=plot_path,
+            show=show,
+        )
 
     diagnostics_path = os.path.join(plot_path, "diagnostics")
     os.makedirs(diagnostics_path, exist_ok=True)
@@ -10411,8 +10890,6 @@ def plot_predicted_L2500_vs_sigmahat(
                 dm_interp,
                 ds["z"].values,
                 ds[COMPLETENESS_MAG_COL].values,
-                f_host_2500_psf=ds.get(COMPLETENESS_FHOST_COL),
-                alpha_lambda=ds.get("alpha_lambda"),
                 completeness_stratum=ds.get(COMPLETENESS_STRATUM_COL),
             )
         actual_logL2500_show = convert_M2500_to_logL2500(M2500_show)
@@ -10738,8 +11215,6 @@ def plot_predicted_L2500_vs_sigmahat(
                 dm_interp,
                 ds["z"].values,
                 ds[COMPLETENESS_MAG_COL].values,
-                f_host_2500_psf=ds.get(COMPLETENESS_FHOST_COL),
-                alpha_lambda=ds.get("alpha_lambda"),
                 completeness_stratum=ds.get(COMPLETENESS_STRATUM_COL),
             )
         actual_logL2500_show = convert_M2500_to_logL2500(M2500_show)

@@ -31,11 +31,13 @@ from qvc.hubble.cuts import (
     EXCLUDED_SDSS_NAMES,
     LIGHT_CURVE_N_POINTS_COLUMN,
     LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
+    T_RF_OVER_TAU_UV_RF_COLUMN,
     LOG_AMP_DELTA_BC_UPPER,
     LOG_F_BC_3000_MAX,
     LOG_F_FE_UV_3000_MAX,
     REL_APPARENT_MAG_2500_ERR_MAX,
     add_light_curve_point_count_column,
+    add_t_rf_over_tau_uv_rf_column,
     build_sdss_target_selection_mask,
     normalize_sdss_target_selection,
 )
@@ -962,6 +964,51 @@ def populate_spectra_fit(
     )
     print(f"Matched {len(out)} successful SED fits to {len(df)} AGN light-curve rows.")
     return out
+
+
+def populate_sdss_target_metadata(df, metadata_h5):
+    """Join immutable local SDSS targeting provenance without replacing fits."""
+
+    metadata_h5 = resolve_qvc_data_path(metadata_h5)
+    fields = (
+        "SDSS_SURVEY", "SDSS_PROGRAMNAME", "SDSS_SPECOBJ_MATCHED",
+        "SDSS_EBOSS_TARGET0", "SDSS_EBOSS_TARGET1", "SDSS_EBOSS_TARGET2",
+    )
+    with h5py.File(metadata_h5, "r") as handle:
+        if "catalog" not in handle:
+            raise ValueError(f"SDSS target metadata {metadata_h5} has no catalog group.")
+        group = handle["catalog"]
+        missing = {"object_id", *fields} - set(group)
+        if missing:
+            raise ValueError(
+                f"SDSS target metadata {metadata_h5} is missing {sorted(missing)}."
+            )
+        values = {}
+        for name in ("object_id", *fields):
+            dataset = group[name]
+            if h5py.check_string_dtype(dataset.dtype) is not None or dataset.dtype.kind == "O":
+                values[name] = np.asarray(dataset.asstr()).astype(str)
+            else:
+                values[name] = np.asarray(dataset)
+    metadata = _ensure_object_id(pd.DataFrame(values))
+    if metadata["object_id"].duplicated().any():
+        raise ValueError("SDSS target metadata contains duplicate object_id values.")
+    input_attrs = dict(df.attrs)
+    base = _ensure_object_id(df.copy()).drop(
+        columns=[name for name in fields if name in df.columns]
+    )
+    out = base.merge(metadata, on="object_id", how="left", validate="one_to_one")
+    missing_match = out["SDSS_SURVEY"].isna()
+    if np.any(missing_match):
+        raise ValueError(
+            "Local SDSS target metadata is missing "
+            f"{np.count_nonzero(missing_match)}/{len(out)} Hubble objects."
+        )
+    out.attrs.update(input_attrs)
+    out.attrs["sdss_target_metadata_h5"] = str(metadata_h5)
+    return out
+
+
 def populate_sdss_fields(objs, progress_bar=True):
     """
     Populate SDSS/DR16Q-derived fields.
@@ -1245,6 +1292,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
                   exclude_object_ids_csv=None,
                   residuals_sigma_clip=None, residuals_csv=None,
                   spectra_fit_h5=None, only_load=False,
+                  sdss_target_metadata_h5=None,
                   allow_spectra_catalog_v1=False,
                   allow_spectra_catalog_v2=False,
                   approximate_v1_fhost_2500_psf=False,
@@ -1552,6 +1600,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         residuals_csv = resolve_qvc_data_path(residuals_csv)
     if spectra_fit_h5 is not None:
         spectra_fit_h5 = [resolve_qvc_data_path(path) for path in spectra_fit_h5]
+    if sdss_target_metadata_h5 is not None:
+        sdss_target_metadata_h5 = resolve_qvc_data_path(sdss_target_metadata_h5)
     if exclude_object_ids_csv:
         exclude_object_ids_csv = [resolve_qvc_data_path(path) for path in exclude_object_ids_csv]
 
@@ -1679,6 +1729,9 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         if 'alpha_lambda' not in df.columns:
             raise ValueError("spectra_fit_h5 not provided and spectral fields not found in agn h5 file")
             #raise ValueError("spectra_fit_h5 must be provided if alpha_lambda not in agn h5 file")
+
+    if sdss_target_metadata_h5 is not None:
+        df = populate_sdss_target_metadata(df, sdss_target_metadata_h5)
 
     sdss_target_selection = normalize_sdss_target_selection(sdss_target_selection)
     target_mask, target_criterion = build_sdss_target_selection_mask(
@@ -1861,6 +1914,13 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             f"Computed {LIGHT_CURVE_N_POINTS_COLUMN} from: "
             f"{', '.join(lc_point_count_cols)}"
             f" excluding bands: {excluded}"
+        )
+
+    df, t_rf_tau_cols = add_t_rf_over_tau_uv_rf_column(df)
+    if t_rf_tau_cols:
+        print(
+            f"Computed {T_RF_OVER_TAU_UV_RF_COLUMN} from: "
+            f"{', '.join(t_rf_tau_cols)}"
         )
 
     # Use the PL/total fraction at 2500 A for the sigma_uv dilution correction.

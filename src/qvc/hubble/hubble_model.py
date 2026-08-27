@@ -1,14 +1,7 @@
 import numpy as np
 import pandas as pd
-from scipy.special import expit
 from collections import OrderedDict
 from dataclasses import dataclass
-from qvc.hubble.latent_alpha_completeness import (
-    RESPONSE_COEFFICIENT_PRIOR_SIGMA,
-    response_coefficient_names,
-    response_coefficient_prior_specs,
-)
-from qvc.hubble.fitted_color_completeness import COLOR_STRENGTH_PARAMETER
 
 AGN_ALPHA_LAMBDA_PARAM = "gamma_alpha_lambda"
 AGN_ALPHA_LAMBDA_OBS = "alpha_lambda"
@@ -27,34 +20,6 @@ AGN_LOG_F_PRIOR = (
 PLANCK_H0_PRIOR = (67.37 - 0.54, 67.37 + 0.54)
 PLANCK_OM0_PRIOR = (0.315 - 0.007, 0.315 + 0.007)
 AGN_PIVOT_RULE = "rounded_median_v1"
-LATENT_ALPHA_BETA_PARAM = "beta_alpha_L"
-LATENT_ALPHA_RESPONSE_PARAM_PREFIX = "alpha_sel_"
-LATENT_ALPHA_RESPONSE_PRIOR_SIGMA = RESPONSE_COEFFICIENT_PRIOR_SIGMA
-LATENT_ALPHA_LUMINOSITY_MODES = ("off", "fixed", "joint")
-
-
-def latent_alpha_response_parameter_names(magnitude_interaction=False):
-    """Return the authoritative latent-alpha surface coefficient order.
-
-    The first index is the Legendre redshift order.  ``linear`` and
-    ``quadratic`` multiply the standardized alpha coordinate and its centered
-    square, respectively.  Optional ``*_magnitude`` coefficients multiply the
-    same terms by the standardized apparent-magnitude coordinate.
-    """
-
-    return response_coefficient_names(bool(magnitude_interaction))
-
-
-def normalize_latent_alpha_luminosity_mode(mode):
-    normalized = str(mode).strip().lower()
-    if normalized not in LATENT_ALPHA_LUMINOSITY_MODES:
-        raise ValueError(
-            "Invalid latent-alpha luminosity mode "
-            f"{mode!r}; expected one of {LATENT_ALPHA_LUMINOSITY_MODES}."
-        )
-    return normalized
-
-
 def get_agn_model_spec(use_alpha_lambda_term=False, use_eta_sigma_term=False):
     req_params = (
         "M0_agn",
@@ -925,26 +890,9 @@ def get_model_params(
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
     use_redshift_mu_term=False,
-    use_latent_alpha_completeness=False,
-    latent_alpha_luminosity_mode="off",
-    latent_alpha_beta_prior=(-0.5, 0.5),
-    latent_alpha_magnitude_interaction=False,
-    use_fitted_color_completeness=False,
 ):
     if only_sna and only_agn:
         raise ValueError("only_sna and only_agn cannot both be True.")
-    latent_alpha_luminosity_mode = normalize_latent_alpha_luminosity_mode(
-        latent_alpha_luminosity_mode
-    )
-    if use_latent_alpha_completeness and only_sna:
-        raise ValueError("Latent-alpha completeness requires an AGN likelihood.")
-    if use_fitted_color_completeness and only_sna:
-        raise ValueError("Fitted-color completeness requires an AGN likelihood.")
-    if use_fitted_color_completeness and use_latent_alpha_completeness:
-        raise ValueError(
-            "Fitted-color and latent-alpha completeness cannot be enabled "
-            "simultaneously."
-        )
     
     priors = OrderedDict([
         ("M0_sn",       (-20, -18)),    # SN absolute magnitude, MLE: ~-19.3
@@ -984,49 +932,6 @@ def get_model_params(
     if only_agn:
         priors.pop("M0_sn")
 
-    # Selection-surface parameters belong to the selected-data model, not the
-    # AGN standardization relation.  Insert them immediately after the AGN
-    # scatter/evolution terms and before cosmology for a stable checkpoint
-    # order.  They retain tuple bounds for existing consumers; the samplers
-    # recognize their prefix and apply the truncated-Gaussian density.
-    if use_latent_alpha_completeness:
-        insertion = OrderedDict()
-        response_specs = response_coefficient_prior_specs(
-            latent_alpha_magnitude_interaction
-        )
-        for label in latent_alpha_response_parameter_names(
-            latent_alpha_magnitude_interaction
-        ):
-            spec = response_specs[label]
-            insertion[label] = (float(spec["low"]), float(spec["high"]))
-        if latent_alpha_luminosity_mode == "joint":
-            try:
-                beta_low, beta_high = map(float, latent_alpha_beta_prior)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    "latent_alpha_beta_prior must contain two numeric bounds."
-                ) from exc
-            if not np.isfinite(beta_low) or not np.isfinite(beta_high) or beta_low >= beta_high:
-                raise ValueError(
-                    "latent_alpha_beta_prior must contain finite ordered bounds."
-                )
-            insertion[LATENT_ALPHA_BETA_PARAM] = (beta_low, beta_high)
-
-        rebuilt = OrderedDict()
-        for key, value in priors.items():
-            rebuilt[key] = value
-            if key == "log_f":
-                rebuilt.update(insertion)
-        priors = rebuilt
-
-    if use_fitted_color_completeness:
-        rebuilt = OrderedDict()
-        for key, value in priors.items():
-            rebuilt[key] = value
-            if key == "log_f":
-                rebuilt[COLOR_STRENGTH_PARAMETER] = (-1.0, 1.0)
-        priors = rebuilt
-
     # Select cosmological parameters based on model
     if cosmo_model == 'FlatLambdaCDM':
         pass
@@ -1064,8 +969,6 @@ def get_model_params(
         "log_f": r"$\log f$",
         AGN_LOGF_Z_PARAM: r"$\gamma_{\log f,z}$",
         AGN_MU_Z_PARAM: r"$\gamma_{\mu,z}$",
-        LATENT_ALPHA_BETA_PARAM: r"$\beta_{\alpha L}$",
-        COLOR_STRENGTH_PARAMETER: r"$s_{\rm color}$",
         "sigma_b": r"$\sigma_{\rm b}$",
         "H0": r"$H_0$",
         "Om0": r"$\Omega_{m,0}$",
@@ -1073,19 +976,6 @@ def get_model_params(
         "wp": r"$w_p$",
         "wa": r"$w_a$"
     }
-    for order in range(4):
-        latex_labels[
-            f"{LATENT_ALPHA_RESPONSE_PARAM_PREFIX}z_p{order}_linear"
-        ] = rf"$s^{{(1)}}_{{{order}}}$"
-        latex_labels[
-            f"{LATENT_ALPHA_RESPONSE_PARAM_PREFIX}z_p{order}_quadratic"
-        ] = rf"$s^{{(2)}}_{{{order}}}$"
-        latex_labels[
-            f"{LATENT_ALPHA_RESPONSE_PARAM_PREFIX}mag_z_p{order}_linear"
-        ] = rf"$s^{{(1m)}}_{{{order}}}$"
-        latex_labels[
-            f"{LATENT_ALPHA_RESPONSE_PARAM_PREFIX}mag_z_p{order}_quadratic"
-        ] = rf"$s^{{(2m)}}_{{{order}}}$"
     model_labels_latex = [latex_labels.get(label, label) for label in model_labels]
     
     return priors, model_labels, model_labels_latex

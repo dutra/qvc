@@ -29,11 +29,15 @@ from qvc.hubble.cuts import (  # noqa: E402
     LIGHT_CURVE_RHAT_MAX,
     LOG_TAU_UV_RF_MAX,
     LOG_TAU_UV_RF_MIN,
+    T_RF_OVER_TAU_UV_RF_COLUMN,
+    T_RF_OVER_TAU_UV_RF_MIN,
+    NUM_DIVERGENCES_MAX,
     REL_APPARENT_MAG_2500_ERR_MAX,
     SED_REDUCED_CHI2_MAX,
     SPECTRAL_RHAT_MAX,
     SPECTROSCOPY_REDUCED_CHI2_MAX,
     add_light_curve_point_count_column,
+    add_t_rf_over_tau_uv_rf_column,
     build_sdss_target_selection_mask,
     light_curve_point_count_series,
     normalize_sdss_target_selection,
@@ -228,6 +232,7 @@ def test_build_agn_cuts_contains_only_fiducial_profile():
     assert tuple(cuts) == AGN_SCALAR_PARAMETER_CUTS
     assert cut_map == {
         "log_tau_uv_rf": (1.5, 4.0),
+        T_RF_OVER_TAU_UV_RF_COLUMN: (5.0, None),
         "fracAGN_5100_fit": (FRAC_AGN_5100_MIN, None),
         "apparent_mag_2500_err": (None, APPARENT_MAG_2500_ERR_MAX),
         "m_2500_dereddened": (
@@ -249,6 +254,9 @@ def test_build_agn_cuts_contains_only_fiducial_profile():
     assert LOO_CHI2_EFF_MAX == 1.01
     assert SPECTRAL_RHAT_MAX == 1.20
     assert LIGHT_CURVE_RHAT_MAX == 1.10
+    assert NUM_DIVERGENCES_MAX is None
+    assert T_RF_OVER_TAU_UV_RF_MIN == 5.0
+    assert "num_divergences" not in cut_map
     assert LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS == ("u",)
 
 
@@ -268,6 +276,41 @@ def test_previous_scalar_and_component_defaults_are_disabled():
     assert build_dlog_amp_blr_cuts() == []
     assert len(EXCLUDED_SDSS_NAMES) == 9
     assert REL_APPARENT_MAG_2500_ERR_MAX is None
+
+
+def test_t_rf_over_tau_uv_rf_is_derived_in_rest_frame_days():
+    frame = pd.DataFrame(
+        {
+            "t_rf_length": [500.0, 1000.0, 0.0, -1.0, np.nan, 100.0],
+            "log_tau_uv_rf": [2.0, 2.0, 2.0, 2.0, 2.0, np.inf],
+        }
+    )
+
+    result, source_columns = add_t_rf_over_tau_uv_rf_column(frame)
+
+    assert source_columns == ["t_rf_length", "log_tau_uv_rf"]
+    np.testing.assert_allclose(
+        result[T_RF_OVER_TAU_UV_RF_COLUMN].to_numpy()[:2],
+        [5.0, 10.0],
+    )
+    assert result[T_RF_OVER_TAU_UV_RF_COLUMN].iloc[2:].isna().all()
+
+
+def test_t_rf_over_tau_cut_boundary_is_inclusive_and_invalid_values_fail():
+    values = [
+        T_RF_OVER_TAU_UV_RF_MIN,
+        np.nextafter(T_RF_OVER_TAU_UV_RF_MIN, -np.inf),
+        np.nan,
+        np.inf,
+        -np.inf,
+    ]
+    mask = _scalar_parameter_cut_mask(
+        pd.DataFrame({T_RF_OVER_TAU_UV_RF_COLUMN: values}),
+        T_RF_OVER_TAU_UV_RF_COLUMN,
+        T_RF_OVER_TAU_UV_RF_MIN,
+        None,
+    )
+    np.testing.assert_array_equal(mask, [True, False, False, False, False])
 
 
 def test_fiducial_cut_boundaries_are_inclusive_and_nonfinite_values_fail():
@@ -366,6 +409,47 @@ def test_fit_quality_chi2_cuts_require_finite_values():
             pd.DataFrame({column: values}), column, None, upper
         )
         np.testing.assert_array_equal(mask, [True, False, False, False, False])
+
+
+def test_explicit_zero_num_divergences_cut_requires_exactly_zero():
+    values = [0, 1, -1, np.nan, np.inf, -np.inf]
+    mask = _scalar_parameter_cut_mask(
+        pd.DataFrame({"num_divergences": values}),
+        "num_divergences",
+        0.0,
+        0.0,
+    )
+    np.testing.assert_array_equal(mask, [True, False, False, False, False, False])
+
+
+def _divergence_cut_from_environment(value):
+    env = os.environ.copy()
+    env.pop("QVC_CUT_NUM_DIVERGENCES_MAX", None)
+    if value is not None:
+        env["QVC_CUT_NUM_DIVERGENCES_MAX"] = value
+    script = (
+        "from qvc.hubble.cuts import NUM_DIVERGENCES_MAX, AGN_SCALAR_PARAMETER_CUTS; "
+        "print(repr((NUM_DIVERGENCES_MAX, [cut for cut in "
+        "AGN_SCALAR_PARAMETER_CUTS if cut[0] == 'num_divergences'])))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=SRC,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return literal_eval(completed.stdout.strip())
+
+
+def test_num_divergences_cut_defaults_off_and_can_be_enabled_explicitly():
+    assert _divergence_cut_from_environment(None) == (None, [])
+    assert _divergence_cut_from_environment("none") == (None, [])
+    assert _divergence_cut_from_environment("0") == (
+        0.0,
+        [("num_divergences", 0.0, 0.0)],
+    )
 
 
 def test_rhat_cuts_allow_missing_but_reject_bad_finite_values():
@@ -527,6 +611,37 @@ def test_total_a2500_cut_environment_override_is_inclusive():
         0.25,
     )
     np.testing.assert_array_equal(mask, [True, False])
+
+
+def test_variability_cut_environment_overrides_enable_scalar_cuts():
+    env = os.environ.copy()
+    env.update(
+        {
+            "QVC_CUT_VARIABILITY_CHI_SQ_RED_G_MIN": "30",
+            "QVC_CUT_LOG_SIGMA_UV_MIN": "-1.5",
+            "QVC_CUT_LOG_SIGMA_UV_MAX": "0.2",
+            "QVC_CUT_LIGHT_CURVE_N_POINTS_MIN": "250",
+        }
+    )
+    script = (
+        "from qvc.hubble.hubble_cut_config import build_agn_cuts; "
+        "wanted={'variability_chi_sq_red_g','log_sigma_uv','light_curve_n_points'}; "
+        "print(repr([cut for cut in build_agn_cuts() if cut[0] in wanted]))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=SRC,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert literal_eval(completed.stdout.strip()) == [
+        ("log_sigma_uv", -1.5, 0.2),
+        ("variability_chi_sq_red_g", 30.0, None),
+        ("light_curve_n_points", 250.0, None),
+    ]
 
 
 def test_ess_diagnostics_are_not_hard_cuts():
