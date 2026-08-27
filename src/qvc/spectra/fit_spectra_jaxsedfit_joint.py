@@ -1985,7 +1985,7 @@ def save_spectrum_figure(fitter, rec, fig_dir):
         / f"z{float(rec['z']):.3f}_{rec['sdss_name']}_spectrum.png"
     )
     fig_path.parent.mkdir(parents=True, exist_ok=True)
-    fig = fitter.plot_jaxqsofit_spectrum(show_plot=False, plot_residual=False)
+    fig = fitter.plot_spectrum(show_plot=False, plot_residual=False)
     if fig is None:
         raise RuntimeError("JAXSEDFit did not return a spectrum figure.")
     try:
