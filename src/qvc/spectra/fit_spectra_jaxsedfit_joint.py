@@ -1056,40 +1056,16 @@ def predict_catalog_posterior(fitter, *, kind, **prediction_kwargs):
 
     JAXSEDFit's public prediction products intentionally omit some scalar
     deterministics that were present in the original in-memory fit samples.
-    Extend the return-site selection only for this prediction call so QVC can
-    reproduce legacy CSV columns and the exact bent-disk physical parameters
-    from compact resume bundles, including log-parameterized configurations.
+    Request those sites through the public API so QVC can reproduce legacy CSV
+    columns and exact bent-disk physical parameters from compact resume bundles,
+    including log-parameterized configurations.
     """
-    original_return_sites = getattr(fitter, "_predictive_return_sites", None)
-    if original_return_sites is None:
-        raise RuntimeError(
-            "Installed JAXSEDFit does not expose predictive return-site "
-            "selection required to rebuild the legacy spectra catalog."
-        )
-
-    instance_vars = getattr(fitter, "__dict__", {})
-    had_instance_override = "_predictive_return_sites" in instance_vars
-    previous_instance_override = instance_vars.get("_predictive_return_sites")
-
-    def catalog_return_sites(prediction_kind, *args, **kwargs):
-        return list(
-            dict.fromkeys(
-                (
-                    *original_return_sites(prediction_kind, *args, **kwargs),
-                    *LEGACY_CSV_SCALAR_PREDICTION_SITES,
-                    *M2500_POSTERIOR_SITES,
-                )
-            )
-        )
-
-    fitter._predictive_return_sites = catalog_return_sites
-    try:
-        return fitter.predict(kind=kind, **prediction_kwargs)
-    finally:
-        if had_instance_override:
-            fitter._predictive_return_sites = previous_instance_override
-        else:
-            del fitter._predictive_return_sites
+    return fitter.predict(
+        kind=kind,
+        extra_return_sites=LEGACY_CSV_SCALAR_PREDICTION_SITES,
+        required_return_sites=M2500_POSTERIOR_SITES,
+        **prediction_kwargs,
+    )
 
 
 def add_sdss_psf_host_fraction_prediction(

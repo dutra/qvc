@@ -1099,15 +1099,10 @@ def test_catalog_summary_combines_latent_and_deterministic_scalar_sites():
     assert "pred_fluxes" not in result
 
 
-def test_catalog_prediction_temporarily_requests_legacy_csv_scalar_sites():
+def test_catalog_prediction_requests_legacy_csv_scalar_sites_via_public_api():
     class DummyFitter:
-        @staticmethod
-        def _predictive_return_sites(kind, **kwargs):
-            assert kind == "photometry"
-            return ["pred_fluxes", "fracAGN_5100_fit"]
-
         def predict(self, *, kind, **kwargs):
-            self.requested_sites = self._predictive_return_sites(kind)
+            assert kind == "photometry"
             self.prediction_kwargs = kwargs
             return {"fracAGN_5100_fit": np.array([0.6, 0.8])}
 
@@ -1117,13 +1112,11 @@ def test_catalog_prediction_temporarily_requests_legacy_csv_scalar_sites():
 
     assert "fracAGN_5100_fit" in prediction
     assert set(joint.LEGACY_CSV_SCALAR_PREDICTION_SITES) <= set(
-        fitter.requested_sites
+        fitter.prediction_kwargs["extra_return_sites"]
     )
-    assert set(joint.M2500_POSTERIOR_SITES) <= set(fitter.requested_sites)
-    assert fitter._predictive_return_sites("photometry") == [
-        "pred_fluxes",
-        "fracAGN_5100_fit",
-    ]
+    assert set(joint.M2500_POSTERIOR_SITES) <= set(
+        fitter.prediction_kwargs["required_return_sites"]
+    )
 
 
 def test_sdss_psf_host_fraction_uses_prediction_only_typical_fwhm():
@@ -1629,7 +1622,9 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
         def predict(self, *, kind, **kwargs):
             assert kind == "plot"
             assert self.predictive is None
-            assert kwargs == {}
+            assert set(joint.M2500_POSTERIOR_SITES) <= set(
+                kwargs["required_return_sites"]
+            )
             return prediction
 
         def save(self, output_dir):
@@ -1766,7 +1761,9 @@ def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_
 
         def predict(self, *, kind, **kwargs):
             assert kind == "plot"
-            assert kwargs == {}
+            assert set(joint.M2500_POSTERIOR_SITES) <= set(
+                kwargs["required_return_sites"]
+            )
             return prediction
 
     config = SimpleNamespace(
