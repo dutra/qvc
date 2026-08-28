@@ -640,6 +640,60 @@ def test_carma21_numpyro_model_trace_materializes_likelihood_and_uv_outputs():
         assert np.all(np.isfinite(np.asarray(sites[key]["value"])))
 
 
+@pytest.mark.parametrize(
+    ("shared_latent", "drw_parameterization"),
+    [(False, False), (True, False), (False, True)],
+)
+def test_seeing_dependence_can_be_enabled_for_every_gp_choice(
+    shared_latent, drw_parameterization
+):
+    obj = {
+        "object_id": "seeing-smoke",
+        "z": 1.0,
+        "X": (
+            np.array([0.0, 5.0, 10.0, 15.0]),
+            np.array([0, 0, 0, 0], dtype=np.int32),
+        ),
+        "y": np.array([0.0, 0.02, -0.01, 0.01]),
+        "yerr": np.full(4, 0.03),
+        "survey_idx": np.zeros(4, dtype=np.int32),
+        "seeing_covariate": np.array([-0.3, -0.1, 0.1, 0.3]),
+        "seeing_active_mask": np.array([[True, False, False]]),
+        "mags_means": np.array([20.0]),
+        "bands": ["g"],
+        "survey_names": ("sdss", "ps1", "ztf"),
+    }
+
+    enabled = build_single_object_model_mag_flux_linearized(
+        obj,
+        np.array([2500.0]),
+        log_jitter_mean=np.full((1, 3), np.log(0.03)),
+        shared_latent=shared_latent,
+        drw_parameterization=drw_parameterization,
+        enable_seeing_dependence=True,
+    )
+    enabled_sites = fit_lc.trace(
+        fit_lc.seed(enabled, jax.random.PRNGKey(0))
+    ).get_trace()
+    assert "seeing_mean_slope_active" in enabled_sites
+    assert "seeing_scatter_slope_active" in enabled_sites
+    assert np.asarray(enabled_sites["seeing_mean_slope_active"]["value"]).shape == (1,)
+
+    disabled = build_single_object_model_mag_flux_linearized(
+        obj,
+        np.array([2500.0]),
+        log_jitter_mean=np.full((1, 3), np.log(0.03)),
+        shared_latent=shared_latent,
+        drw_parameterization=drw_parameterization,
+        enable_seeing_dependence=False,
+    )
+    disabled_sites = fit_lc.trace(
+        fit_lc.seed(disabled, jax.random.PRNGKey(0))
+    ).get_trace()
+    assert "seeing_mean_slope_active" not in disabled_sites
+    assert "seeing_scatter_slope_active" not in disabled_sites
+
+
 def test_flux_line_ratio_offsets_include_static_igm_transmission():
     lam_rf = jnp.array([1500.0, 2000.0, 2500.0])
     lambda_center_rf = compute_lambda_center_rf(lam_rf)

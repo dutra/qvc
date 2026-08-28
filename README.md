@@ -136,6 +136,13 @@ value is also written as `log_tau_effective_<band>_RF`. The underlying shared
 driver poles remain available separately as `log_tau_driver_slow_rf` and
 `log_tau_driver_fast_rf`.
 
+Seeing-dependent photometric contamination can be enabled with
+`--enable_seeing_dependence` for any GP choice, including
+`shared_latent_blr` and the CARMA(2,1) parameterization. For each band/survey
+combination with at least three usable epoch-level PSF-FWHM measurements and
+nonzero seeing range, this fits both a centered mean-flux slope and a
+seeing-dependent extra-scatter slope. It is disabled by default.
+
 ### Spectra Fitting
 
 Fits the matching cached SDSS spectrum with `qvc.spectra.fit_spectra`, saving the output CSV, fit figures, and MCMC diagnostic plots.

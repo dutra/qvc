@@ -4273,6 +4273,7 @@ def build_single_object_model_mag_flux_linearized(
     use_fast_solver=False,
     drw_parameterization=False,
     enforce_positive_flux_guard=False,
+    enable_seeing_dependence=False,
 ):
     """Return the relative-flux quasi-separable model for one object."""
 
@@ -4442,7 +4443,7 @@ def build_single_object_model_mag_flux_linearized(
             survey_offset_active_mask=survey_offset_active_mask,
             seeing_active_mask=(
                 obj_dict.get("seeing_active_mask")
-                if use_erlang and not drw_parameterization
+                if enable_seeing_dependence
                 else None
             ),
             line_ratio_offsets=line_ratio_offsets,
@@ -4566,11 +4567,15 @@ def build_single_object_model_mag_flux_linearized(
             baseline_flux_by_band=baseline_flux_by_band,
             zero_mean=zero_mean,
             has_jitter=has_jitter,
+            seeing_covariate=(
+                obj_dict.get("seeing_covariate")
+                if enable_seeing_dependence
+                else None
+            ),
             **(
                 {
                     "disk_order": disk_order,
                     "blr_order": erlang_order,
-                    "seeing_covariate": obj_dict.get("seeing_covariate"),
                 }
                 if shared_latent
                 else {"enforce_positive_flux_guard": enforce_positive_flux_guard}
@@ -4578,7 +4583,6 @@ def build_single_object_model_mag_flux_linearized(
                 else {
                     "erlang_order": erlang_order,
                     "use_fast_solver": use_fast_solver,
-                    "seeing_covariate": obj_dict.get("seeing_covariate"),
                 }
             ),
         )
@@ -4783,6 +4787,7 @@ def run_iterated_mag_flux_linearized_inference(
     refinement_iters=FLUX_LINEARIZED_REFINEMENT_ITERS,
     drw_parameterization=False,
     enforce_positive_flux_guard=False,
+    enable_seeing_dependence=False,
 ):
     """Iteratively refit the relative-flux QS model using local pseudo-data.
 
@@ -4832,6 +4837,7 @@ def run_iterated_mag_flux_linearized_inference(
         use_fast_solver=use_fast_solver,
         drw_parameterization=drw_parameterization,
         enforce_positive_flux_guard=enforce_positive_flux_guard,
+        enable_seeing_dependence=enable_seeing_dependence,
     )
 
     for iter_idx in range(int(refinement_iters)):
@@ -4949,17 +4955,20 @@ def run_iterated_mag_flux_linearized_inference(
             baseline_flux_by_band=reference_flux_from_mean_magnitudes(obj_dict["mags_means"]),
             zero_mean=zero_mean,
             has_jitter=has_jitter,
+            seeing_covariate=(
+                obj_dict.get("seeing_covariate")
+                if enable_seeing_dependence
+                else None
+            ),
             **(
                 {
                     "disk_order": disk_order,
                     "blr_order": erlang_order,
-                    "seeing_covariate": obj_dict.get("seeing_covariate"),
                 }
                 if model_variant == SHARED_LATENT_BLR_VARIANT
-                else {}
+                else {"enforce_positive_flux_guard": enforce_positive_flux_guard}
                 if drw_parameterization
-                else {"seeing_covariate": obj_dict.get("seeing_covariate")}
-                | {"erlang_order": erlang_order}
+                else {"erlang_order": erlang_order}
             ),
         )
         y_target, yerr_target = _flux_linearized_pseudo_data_from_prediction(
@@ -5207,6 +5216,16 @@ def main():
             "Causal-Erlang light-curve model. 'shared_latent_blr' uses one "
             "DHO driver with wavelength-scaled disk convolutions and bandwise "
             "unit-RMS delayed responses."
+        ),
+    )
+    parser.add_argument(
+        "--enable_seeing_dependence",
+        action="store_true",
+        default=False,
+        help=(
+            "Fit centered seeing-dependent mean-flux and extra-scatter terms "
+            "for every band/survey group with usable epoch-level PSF FWHM. "
+            "This is independent of --model_variant and is disabled by default."
         ),
     )
     parser.add_argument(
@@ -5472,6 +5491,7 @@ def main():
                             refinement_iters=args.flux_linearized_refinement_iters,
                             drw_parameterization=args.dho_drw_parameterization,
                             enforce_positive_flux_guard=args.enforce_positive_flux_guard,
+                            enable_seeing_dependence=args.enable_seeing_dependence,
                         )
                 elif args.fit_method in ("nuts", "svi+nuts"):
                     if args.fit_method == "svi+nuts":
@@ -5643,11 +5663,15 @@ def main():
                     baseline_flux_by_band=reference_flux_from_mean_magnitudes(obj["mags_means"]),
                     zero_mean=zero_mean,
                     has_jitter=has_jitter,
+                    seeing_covariate=(
+                        obj.get("seeing_covariate")
+                        if args.enable_seeing_dependence
+                        else None
+                    ),
                     **(
                         {
                             "disk_order": args.disk_order,
                             "blr_order": args.erlang_order,
-                            "seeing_covariate": obj.get("seeing_covariate"),
                         }
                         if args.model_variant == SHARED_LATENT_BLR_VARIANT
                         else
@@ -5655,7 +5679,7 @@ def main():
                             "enforce_positive_flux_guard": args.enforce_positive_flux_guard,
                         }
                         if args.dho_drw_parameterization
-                        else {"seeing_covariate": obj.get("seeing_covariate")}
+                        else {}
                     ),
                 )
             plot_samples = obj_flat_samples
@@ -5821,7 +5845,7 @@ def main():
                     logging.error(f"[{oid}] Plotting error: {e}")
                     logging.error(traceback.format_exc())
 
-            final_result = obj | result | adf_result | drift_result | raw_drift_result | psd_break_result | sf_result | kl_result | loo_residual_result | diagnostics | dict(prefix=prefix, suffix=suffix, model_variant=args.model_variant)
+            final_result = obj | result | adf_result | drift_result | raw_drift_result | psd_break_result | sf_result | kl_result | loo_residual_result | diagnostics | dict(prefix=prefix, suffix=suffix, model_variant=args.model_variant, seeing_dependence_enabled=args.enable_seeing_dependence)
             log_sigma_uv = final_result.get("log_sigma_uv")
             log_sigma_uv_err = final_result.get("log_sigma_uv_err")
             log_tau_uv_rf = final_result.get("log_tau_uv_rf")

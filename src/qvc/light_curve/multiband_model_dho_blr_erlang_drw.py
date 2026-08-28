@@ -235,6 +235,7 @@ def make_multiband_dho_blr_flux_linearized_erlang_drw_model(
     erlang_order=DEFAULT_ERLANG_ORDER,
     enforce_positive_flux_guard=False,
     transition_nonzero_indices=None,
+    seeing_covariate=None,
 ):
     """Construct the all-regime CARMA(2,1) plus causal Erlang response model."""
 
@@ -257,6 +258,7 @@ def make_multiband_dho_blr_flux_linearized_erlang_drw_model(
         has_jitter=has_jitter,
         zero_mean=zero_mean,
         survey_idx=survey_idx,
+        seeing_covariate=seeing_covariate,
         erlang_order=erlang_order,
         use_fast_solver=False,
         enforce_positive_flux_guard=enforce_positive_flux_guard,
