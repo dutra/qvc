@@ -64,13 +64,67 @@ AB_ZEROPOINT_MJY = 3.631e6
 METER_PER_MEGAPARSEC = 3.085677581491367e22
 POSTERIOR_BUNDLE_FORMAT = "jaxsedfit_samples_meta_v2"
 PSF_AGN_FRACTION_BANDS = tuple(legacy.SDSS_BANDS)
+# Legacy marker retained for the standalone old-run repair utility only. It is
+# never passed into the main-based fit configuration.
 QVC_PSF_HOST_CAPTURE_GROUP = "qvc_sdss_psf"
 HOST_FRACTION_REST_WAVELENGTH_ANGSTROM = 2500.0
-HOST_CAPTURE_BUNDLE_ATTR = "qvc_host_capture_group"
+SDSS_TYPICAL_PSF_FWHM_ARCSEC = 1.4
+SDSS_LEGACY_FIBER_DIAMETER_ARCSEC = 3.0
+SDSS_BOSS_FIBER_DIAMETER_ARCSEC = 2.0
+HOST_CAPTURE_BUNDLE_ATTR = "qvc_host_capture_model"
+HOST_CAPTURE_BUNDLE_MARKER = "independent_psf_fractions"
+HOST_CAPTURE_PSF_FWHM_ATTR = "qvc_f_host_2500_psf_fwhm_arcsec"
 
 
 class IncompatibleHostCaptureResumeError(RuntimeError):
-    """Raised when a resume bundle predates shared QVC PSF host capture."""
+    """Raised when a resume bundle uses a different host-capture model."""
+
+
+def _fits_table_scalar(hdul, column_name):
+    """Return the first scalar found for a column in a spectrum FITS file."""
+    for hdu in hdul[1:]:
+        data = getattr(hdu, "data", None)
+        names = getattr(getattr(data, "dtype", None), "names", None) or ()
+        if column_name not in names or len(data) == 0:
+            continue
+        value = data[column_name][0]
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        return value.item() if isinstance(value, np.generic) else value
+    return None
+
+
+def sdss_spectrum_aperture_diameter_arcsec(hdul):
+    """Return the fiber diameter for an SDSS-I--IV spectrum.
+
+    SDSS-I/II Legacy and SEGUE-2 used the original 3-arcsec fibers. BOSS and
+    eBOSS used the upgraded 2-arcsec fibers. The released spectra identify
+    those families through SURVEY/INSTRUMENT and RUN2D metadata.
+    """
+    survey = str(_fits_table_scalar(hdul, "SURVEY") or "").strip().lower()
+    instrument = str(_fits_table_scalar(hdul, "INSTRUMENT") or "").strip().lower()
+    if survey in {"sdss", "segue", "segue1", "segue2"} or instrument == "sdss":
+        return SDSS_LEGACY_FIBER_DIAMETER_ARCSEC
+    if survey in {"boss", "eboss"} or instrument == "boss":
+        return SDSS_BOSS_FIBER_DIAMETER_ARCSEC
+
+    # In the combined SDSS-I--IV releases, 26 is Legacy, 103 is the SDSS
+    # stellar-cluster reduction, and 104 is SEGUE-2. Versioned v5_* runs are
+    # the BOSS/eBOSS reduction family.
+    run2d = _fits_table_scalar(hdul, "RUN2D")
+    if run2d is None and len(hdul):
+        run2d = getattr(hdul[0], "header", {}).get("RUN2D")
+    run2d = str(run2d or "").strip().lower()
+    if run2d in {"26", "103", "104"}:
+        return SDSS_LEGACY_FIBER_DIAMETER_ARCSEC
+    if run2d.startswith("v5_"):
+        return SDSS_BOSS_FIBER_DIAMETER_ARCSEC
+
+    raise ValueError(
+        "Cannot determine whether this spectrum used the 3-arcsec SDSS "
+        "fibers or the 2-arcsec BOSS/eBOSS fibers from its FITS metadata "
+        f"(SURVEY={survey!r}, INSTRUMENT={instrument!r}, RUN2D={run2d!r})."
+    )
 
 
 class M2500ReconstructionError(RuntimeError):
@@ -80,9 +134,9 @@ class M2500ReconstructionError(RuntimeError):
 def _host_capture_resume_message(path, detail):
     return (
         f"Cannot resume spectral posterior bundle {path}: {detail}. "
-        "This run predates the shared qvc_sdss_psf host-capture parameter. "
-        "Run fresh spectral inference with the updated JAXSEDFit/QVC model; "
-        "old per-band fractions cannot be interpolated into f_host_2500_psf."
+        "This baseline requires JAXSEDFit main's five independent QVC ugriz "
+        "host-capture fractions and its fitted host-capture scale. Run fresh "
+        "spectral inference when the saved model contract differs."
     )
 
 
@@ -819,7 +873,6 @@ def add_qvc_psf_photometry(rec, phot):
                 "flux_err_mjy": float(ab_mag_err_to_mjy_err(mag, mag_err)),
                 "psf_fwhm_arcsec": np.nan,
                 "photometry_method": "psf",
-                "host_capture_group": QVC_PSF_HOST_CAPTURE_GROUP,
                 "is_upper_limit": False,
             }
         )
@@ -839,7 +892,17 @@ def add_qvc_psf_photometry(rec, phot):
     return phot
 
 
-def build_joint_config(rec, phot, lam, flux, err, resolving_power, args):
+def build_joint_config(
+    rec,
+    phot,
+    lam,
+    flux,
+    err,
+    resolving_power,
+    args,
+    *,
+    aperture_diameter_arcsec,
+):
     """Construct one validated jaxsedfit joint SED+spectrum configuration."""
     from jaxsedfit import (
         AGNConfig,
@@ -883,13 +946,6 @@ def build_joint_config(rec, phot, lam, flux, err, resolving_power, args):
         "photometry_method", pd.Series("catalog", index=phot.index)
     )
     methods = [None if pd.isna(value) else str(value) for value in method_values]
-    group_values = phot.get(
-        "host_capture_group", pd.Series(None, index=phot.index, dtype=object)
-    )
-    host_capture_groups = [
-        None if pd.isna(value) else str(value) for value in group_values
-    ]
-
     config = FitConfig(
         observation=Observation(
             object_id=joint_saved_name(rec),
@@ -906,7 +962,6 @@ def build_joint_config(rec, phot, lam, flux, err, resolving_power, args):
             is_upper_limit=phot["is_upper_limit"].astype(bool).tolist(),
             psf_fwhm_arcsec=psf_fwhm,
             photometry_method=methods,
-            host_capture_group=host_capture_groups,
         ),
         filters=FilterSet(curves=load_filter_curves(filter_names)),
         spectroscopy=SpectroscopyData(
@@ -915,7 +970,7 @@ def build_joint_config(rec, phot, lam, flux, err, resolving_power, args):
             errors=spec_err_mjy[spec_good].astype(float).tolist(),
             mask=[True] * int(np.sum(spec_good)),
             instrument="SDSS",
-            aperture_diameter_arcsec=3.0,
+            aperture_diameter_arcsec=float(aperture_diameter_arcsec),
             epoch_mjd=float(rec["mjd"]),
             resolving_power=float(resolving_power),
         ),
@@ -948,6 +1003,7 @@ def build_joint_config(rec, phot, lam, flux, err, resolving_power, args):
             method=args.fit_method,
             map_steps=args.optax_steps,
             learning_rate=args.optax_lr,
+            plot_init=bool(getattr(args, "plot_init", False)),
             seed=args.seed,
             num_warmup=args.nuts_warmup,
             num_samples=args.nuts_samples,
@@ -1026,6 +1082,107 @@ def predict_catalog_posterior(fitter, *, kind, **prediction_kwargs):
             fitter._predictive_return_sites = previous_instance_override
         else:
             del fitter._predictive_return_sites
+
+
+def add_sdss_psf_host_fraction_prediction(
+    prediction,
+    *,
+    rest_wavelength=HOST_FRACTION_REST_WAVELENGTH_ANGSTROM,
+    psf_fwhm_arcsec=SDSS_TYPICAL_PSF_FWHM_ARCSEC,
+):
+    """Add posterior PSF host fractions using main's fitted host scale.
+
+    The typical SDSS FWHM is used only for this derived prediction. It is not
+    supplied to the fitted photometry and therefore cannot change the
+    likelihood or sampled latent sites.
+    """
+    required = (
+        "rest_wave",
+        "host_total_rest_sed",
+        "dust_rest_sed",
+        "agn_rest_sed",
+        "log_host_capture_scale_arcsec_fit",
+    )
+    missing = [name for name in required if name not in prediction]
+    if missing:
+        raise ValueError(
+            "JAXSEDFit full prediction lacks sites required for the direct "
+            f"PSF host fraction: {missing}."
+        )
+
+    host_total = np.asarray(prediction["host_total_rest_sed"], dtype=float)
+    dust = np.asarray(prediction["dust_rest_sed"], dtype=float)
+    agn = np.asarray(prediction["agn_rest_sed"], dtype=float)
+    if host_total.ndim != 2 or dust.shape != host_total.shape or agn.shape != host_total.shape:
+        raise ValueError(
+            "Rest-frame component predictions must be matching (draw, wavelength) arrays."
+        )
+    n_draws, n_wave = host_total.shape
+    wave = np.asarray(prediction["rest_wave"], dtype=float)
+    if wave.ndim == 1:
+        if wave.size != n_wave:
+            raise ValueError("rest_wave does not match the component wavelength axis.")
+        wave = np.broadcast_to(wave, host_total.shape)
+    elif wave.shape != host_total.shape:
+        raise ValueError(
+            "rest_wave must be one-dimensional or match the component arrays."
+        )
+    if not np.isfinite(rest_wavelength) or float(rest_wavelength) <= 0.0:
+        raise ValueError("The requested rest wavelength must be positive and finite.")
+    if not np.isfinite(psf_fwhm_arcsec) or float(psf_fwhm_arcsec) <= 0.0:
+        raise ValueError("The adopted PSF FWHM must be positive and finite.")
+
+    host_2500 = np.empty(n_draws, dtype=float)
+    agn_2500 = np.empty(n_draws, dtype=float)
+    for draw_index in range(n_draws):
+        draw_wave = wave[draw_index]
+        if (
+            not np.all(np.isfinite(draw_wave))
+            or np.any(np.diff(draw_wave) <= 0.0)
+            or float(rest_wavelength) < draw_wave[0]
+            or float(rest_wavelength) > draw_wave[-1]
+        ):
+            raise ValueError(
+                "rest_wave must be finite, strictly increasing, and span the "
+                f"requested {float(rest_wavelength):g} Angstrom wavelength."
+            )
+        host_2500[draw_index] = np.interp(
+            rest_wavelength,
+            draw_wave,
+            host_total[draw_index] + dust[draw_index],
+        )
+        agn_2500[draw_index] = np.interp(
+            rest_wavelength,
+            draw_wave,
+            agn[draw_index],
+        )
+
+    log_scale = np.asarray(
+        prediction["log_host_capture_scale_arcsec_fit"], dtype=float
+    )
+    if log_scale.ndim == 0:
+        log_scale = np.full(n_draws, float(log_scale), dtype=float)
+    elif log_scale.shape[0] == n_draws and np.prod(log_scale.shape[1:]) == 1:
+        log_scale = log_scale.reshape(n_draws)
+    else:
+        raise ValueError(
+            "log_host_capture_scale_arcsec_fit must provide one value per draw."
+        )
+    effective_radius = (
+        np.sqrt(2.0) * float(psf_fwhm_arcsec) / 2.354820045
+    )
+    host_scale = np.exp(log_scale)
+    capture = effective_radius**2 / (effective_radius**2 + host_scale**2)
+    captured_host = capture * host_2500
+    denominator = agn_2500 + captured_host
+    fractions = np.where(denominator > 0.0, captured_host / denominator, np.nan)
+    if not np.all(np.isfinite(fractions)) or np.any((fractions < 0.0) | (fractions > 1.0)):
+        raise ValueError("Derived f_host_2500_psf draws are not finite within [0, 1].")
+
+    result = dict(prediction)
+    result["component_host_fraction"] = fractions[:, None]
+    result["component_host_capture_fraction"] = capture[:, None]
+    return result
 
 
 def summarize_catalog_posterior(samples, prediction):
@@ -1778,54 +1935,89 @@ def annotate_posterior_bundle(path, args, rec, *, event_type="fit", source_path=
             record["source_bundle"]["provenance"] = "unavailable"
     write_hdf5_provenance(path, merge_history(record, previous))
     with h5py.File(path, "r+") as handle:
-        if "samples/host_capture_group_fraction" not in handle:
+        missing_path = "samples/missing_psf_host_capture_fraction"
+        scale_path = "samples/log_host_capture_scale_arcsec"
+        if missing_path not in handle:
             raise ValueError(
-                "New posterior bundle lacks the required shared "
-                "host_capture_group_fraction sample."
+                "New posterior bundle lacks independent QVC ugriz "
+                "missing_psf_host_capture_fraction samples."
             )
-        handle.attrs[HOST_CAPTURE_BUNDLE_ATTR] = QVC_PSF_HOST_CAPTURE_GROUP
+        shape = handle[missing_path].shape
+        if len(shape) < 2 or shape[-1] != len(PSF_AGN_FRACTION_BANDS):
+            raise ValueError(
+                "Expected five independent QVC ugriz host-capture fractions; "
+                f"found shape {shape}."
+            )
+        if scale_path not in handle:
+            raise ValueError(
+                "New posterior bundle lacks log_host_capture_scale_arcsec samples."
+            )
+        handle.attrs[HOST_CAPTURE_BUNDLE_ATTR] = HOST_CAPTURE_BUNDLE_MARKER
+        handle.attrs[HOST_CAPTURE_PSF_FWHM_ATTR] = SDSS_TYPICAL_PSF_FWHM_ARCSEC
     return path
 
 
 def validate_resume_host_capture_fitter(fitter, path):
-    """Validate the exact QVC grouping after loading one resume bundle."""
-    photometry = getattr(getattr(fitter, "config", None), "photometry", None)
-    filter_names = list(getattr(photometry, "filter_names", ()) or ())
-    groups = getattr(photometry, "host_capture_group", None)
-    if groups is None or len(groups) != len(filter_names):
-        raise IncompatibleHostCaptureResumeError(
-            _host_capture_resume_message(path, "configuration has no group assignments")
-        )
-    expected_filters = {f"{band}_sdss" for band in PSF_AGN_FRACTION_BANDS}
-    grouped_qvc_filters = [
-        str(name)
-        for name, group in zip(filter_names, groups)
-        if group == QVC_PSF_HOST_CAPTURE_GROUP
-    ]
-    found_filters = set(grouped_qvc_filters)
-    unexpected_groups = [
-        (str(name), group)
-        for name, group in zip(filter_names, groups)
-        if str(name) not in expected_filters and group is not None
-    ]
-    if (
-        found_filters != expected_filters
-        or len(grouped_qvc_filters) != len(expected_filters)
-        or unexpected_groups
-    ):
+    """Validate main's independent QVC host-capture model after loading."""
+    likelihood = getattr(getattr(fitter, "config", None), "likelihood", None)
+    if not bool(getattr(likelihood, "use_host_capture_model", False)):
         raise IncompatibleHostCaptureResumeError(
             _host_capture_resume_message(
                 path,
-                "configuration does not assign exactly the five QVC ugriz "
-                "measurements to qvc_sdss_psf",
+                "saved configuration has host-capture modeling disabled",
+            )
+        )
+    photometry = getattr(getattr(fitter, "config", None), "photometry", None)
+    filter_names = list(getattr(photometry, "filter_names", ()) or ())
+    expected_filters = {f"{band}_sdss" for band in PSF_AGN_FRACTION_BANDS}
+    qvc_indices = [
+        index for index, name in enumerate(filter_names) if str(name) in expected_filters
+    ]
+    if len(qvc_indices) != len(expected_filters) or {
+        str(filter_names[index]) for index in qvc_indices
+    } != expected_filters:
+        raise IncompatibleHostCaptureResumeError(
+            _host_capture_resume_message(
+                path,
+                "configuration does not contain exactly one QVC measurement "
+                "for each of ugriz",
+            )
+        )
+    methods = list(getattr(photometry, "photometry_method", ()) or ())
+    scales = list(getattr(photometry, "psf_fwhm_arcsec", ()) or ())
+    if len(methods) != len(filter_names) or len(scales) != len(filter_names):
+        raise IncompatibleHostCaptureResumeError(
+            _host_capture_resume_message(path, "photometry metadata is incomplete")
+        )
+    invalid_metadata = [
+        str(filter_names[index])
+        for index in qvc_indices
+        if str(methods[index]).strip().lower() != "psf"
+        or np.isfinite(legacy.safe_float(scales[index]))
+    ]
+    if invalid_metadata:
+        raise IncompatibleHostCaptureResumeError(
+            _host_capture_resume_message(
+                path,
+                "QVC measurements are not missing-scale PSF photometry: "
+                f"{invalid_metadata}",
             )
         )
     samples = getattr(fitter, "samples", None) or {}
-    group_draws = np.asarray(samples.get("host_capture_group_fraction", []))
-    if group_draws.ndim < 2 or group_draws.shape[-1] != 1:
+    fractions = np.asarray(samples.get("missing_psf_host_capture_fraction", []))
+    if fractions.ndim < 2 or fractions.shape[-1] != len(expected_filters):
         raise IncompatibleHostCaptureResumeError(
             _host_capture_resume_message(
-                path, "posterior lacks one shared host-capture group parameter"
+                path,
+                "posterior does not contain five independent QVC ugriz "
+                "host-capture fractions",
+            )
+        )
+    scales = np.asarray(samples.get("log_host_capture_scale_arcsec", []))
+    if scales.size == 0 or not np.all(np.isfinite(scales)):
+        raise IncompatibleHostCaptureResumeError(
+            _host_capture_resume_message(
+                path, "posterior lacks a finite fitted host-capture scale"
             )
         )
 
@@ -1844,20 +2036,39 @@ def preflight_resume_host_capture_bundles(records, args):
                 marker = handle.attrs.get(HOST_CAPTURE_BUNDLE_ATTR)
                 if isinstance(marker, bytes):
                     marker = marker.decode("utf-8")
-                if marker != QVC_PSF_HOST_CAPTURE_GROUP:
+                if marker != HOST_CAPTURE_BUNDLE_MARKER:
                     allow_unannotated = bool(
                         getattr(args, "allow_unannotated_resume_bundle", False)
                     )
                     if marker not in (None, "") or not allow_unannotated:
-                        raise ValueError("missing shared-group model marker")
+                        raise ValueError(
+                            f"host-capture model marker is {marker!r}; "
+                            f"expected {HOST_CAPTURE_BUNDLE_MARKER!r}"
+                        )
                     unannotated_accepted = True
-                if "samples/host_capture_group_fraction" not in handle:
-                    raise ValueError("missing host_capture_group_fraction samples")
-                shape = handle["samples/host_capture_group_fraction"].shape
-                if len(shape) < 2 or shape[-1] != 1:
-                    raise ValueError(
-                        f"expected one host-capture group parameter, found shape {shape}"
+                fwhm = handle.attrs.get(HOST_CAPTURE_PSF_FWHM_ATTR)
+                missing_unannotated_fwhm = unannotated_accepted and fwhm is None
+                if not missing_unannotated_fwhm and (
+                    not np.isfinite(legacy.safe_float(fwhm))
+                    or not np.isclose(
+                        float(fwhm), SDSS_TYPICAL_PSF_FWHM_ARCSEC
                     )
+                ):
+                    raise ValueError(
+                        f"prediction PSF FWHM is {fwhm!r}; expected "
+                        f"{SDSS_TYPICAL_PSF_FWHM_ARCSEC} arcsec"
+                    )
+                fraction_path = "samples/missing_psf_host_capture_fraction"
+                if fraction_path not in handle:
+                    raise ValueError("missing independent host-capture samples")
+                shape = handle[fraction_path].shape
+                if len(shape) < 2 or shape[-1] != len(PSF_AGN_FRACTION_BANDS):
+                    raise ValueError(
+                        "expected five independent host-capture fractions, "
+                        f"found shape {shape}"
+                    )
+                if "samples/log_host_capture_scale_arcsec" not in handle:
+                    raise ValueError("missing fitted host-capture scale samples")
                 if unannotated_accepted:
                     warnings.warn(
                         "Explicitly accepting an unannotated resume bundle after "
@@ -1996,6 +2207,46 @@ def save_spectrum_figure(fitter, rec, fig_dir):
     return fig_path
 
 
+def initialization_figure_path(fig_dir, rec, stage):
+    """Return the stable output path for one Optax initialization stage."""
+    return Path(fig_dir) / f"{joint_saved_name(rec)}_init_{stage}.png"
+
+
+def fit_with_saved_initialization_plots(fitter, rec, args):
+    """Run the fit while saving initialization plots without GUI windows."""
+    if not bool(getattr(args, "plot_init", False)):
+        return fitter.fit(progress_bar=args.progress)
+
+    title_stages = {
+        "Stage 1 continuum/host MAP initialization": "stage1",
+        "Stage 2 full MAP initialization": "stage2",
+        "Full MAP initialization": "map",
+    }
+    original_plot_sed = fitter.plot_sed
+
+    def save_instead_of_showing(*call_args, **call_kwargs):
+        stage = title_stages.get(str(call_kwargs.get("title", "")))
+        if stage is None:
+            return original_plot_sed(*call_args, **call_kwargs)
+        output_path = initialization_figure_path(args.fig_dir, rec, stage)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        call_kwargs["output_path"] = output_path
+        call_kwargs["show"] = False
+        figure = original_plot_sed(*call_args, **call_kwargs)
+        if not output_path.is_file():
+            raise FileNotFoundError(
+                f"Initialization figure was not written: {output_path}"
+            )
+        print(f"Saved initialization plot: {output_path}")
+        return figure
+
+    fitter.plot_sed = save_instead_of_showing
+    try:
+        return fitter.fit(progress_bar=args.progress)
+    finally:
+        fitter.plot_sed = original_plot_sed
+
+
 def run_one_fit(
     rec,
     args,
@@ -2022,25 +2273,30 @@ def run_one_fit(
             )
         try:
             lam, flux, err, resolving_power = legacy.get_spectrum_arrays(hdul)
+            aperture_diameter_arcsec = sdss_spectrum_aperture_diameter_arcsec(hdul)
         finally:
             hdul.close()
 
         phot = pd.DataFrame(rec.get("_joint_photometry", []))
         config, used_phot = build_joint_config(
-            rec, phot, lam, flux, err, resolving_power, args
+            rec,
+            phot,
+            lam,
+            flux,
+            err,
+            resolving_power,
+            args,
+            aperture_diameter_arcsec=aperture_diameter_arcsec,
         )
         from jaxsedfit import JAXSEDFit
 
         fitter = JAXSEDFit(config)
-        fit_result = fitter.fit(progress_bar=args.progress)
+        fit_result = fit_with_saved_initialization_plots(fitter, rec, args)
         prediction = predict_catalog_posterior(
             fitter,
-            kind="photometry",
-            component_rest_wavelengths=(
-                HOST_FRACTION_REST_WAVELENGTH_ANGSTROM,
-            ),
-            component_host_capture_group=QVC_PSF_HOST_CAPTURE_GROUP,
+            kind="plot",
         )
+        prediction = add_sdss_psf_host_fraction_prediction(prediction)
         m2500_samples = posterior_samples_for_m2500(
             fit_result.samples,
             prediction,
@@ -2191,9 +2447,8 @@ def _run_resumed_fit(rec, args, source_path):
     prediction = predict_catalog_posterior(
         fitter,
         kind="plot",
-        component_rest_wavelengths=(HOST_FRACTION_REST_WAVELENGTH_ANGSTROM,),
-        component_host_capture_group=QVC_PSF_HOST_CAPTURE_GROUP,
     )
+    prediction = add_sdss_psf_host_fraction_prediction(prediction)
     m2500_samples = posterior_samples_for_m2500(
         fitter.samples,
         prediction,
@@ -2535,8 +2790,8 @@ def parse_args(argv=None):
         "--resume",
         help=(
             "Directory containing compatible per-object *_samples.h5 bundles. "
-            "Bundles without the shared QVC ugriz host-capture parameter are "
-            "rejected before workers start and must be refit from scratch."
+            "Bundles must contain main's five independent QVC ugriz "
+            "host-capture fractions and fitted host-capture scale."
         ),
     )
     parser.add_argument(
@@ -2556,10 +2811,9 @@ def parse_args(argv=None):
         "--allow-unannotated-resume-bundle",
         action="store_true",
         help=(
-            "Explicitly allow a resume bundle that has the required shared "
-            "host-capture draws but is missing only the QVC model-marker "
-            "attribute. The loaded configuration is still validated. Requires "
-            "--resume."
+            "Explicitly allow a structurally compatible main-branch bundle "
+            "that is missing only QVC model-marker attributes. The loaded "
+            "configuration is still validated. Requires --resume."
         ),
     )
     parser.add_argument(
@@ -2596,6 +2850,14 @@ def parse_args(argv=None):
     parser.add_argument("--nproc", type=int, default=1)
     parser.add_argument("--no-deredden", action="store_true")
     parser.add_argument("--progress", action="store_true")
+    parser.add_argument(
+        "--plot-init",
+        action="store_true",
+        help=(
+            "Save each staged Optax initialization SED beside the final plot "
+            "without opening GUI windows."
+        ),
+    )
     parser.set_defaults(catalog_progress=True)
     parser.add_argument(
         "--no-catalog-progress",
