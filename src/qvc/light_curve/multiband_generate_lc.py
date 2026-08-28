@@ -406,8 +406,19 @@ def cut_light_curve_restframe_window(lc_list, n_days=1800, same_length=False):
     return new_lc_list
 
 
-def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N=None):
-    """Vectorized light-curve concatenation."""
+def concat_light_curves(
+    filter_object_ids=None,
+    progress_bar=False,
+    skip=None,
+    N=None,
+    *,
+    load_seeing=True,
+):
+    """Vectorized light-curve concatenation.
+
+    Missing seeing sidecars are optional. Set ``load_seeing=False`` for callers,
+    such as spectral fitting, that do not use epoch-level seeing information.
+    """
     print(
         f"[DEBUG] Loading concat_light_curves with filter_object_ids={filter_object_ids}, skip={skip}, N={N}"
     )
@@ -419,7 +430,10 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
     ztf = pd.read_parquet(resolve_qvc_data_path("data/S82/dr16s82_ZuberLCRaw.parquet"))
 
     def _attach_seeing_sidecar(frame, survey, keys):
-        sidecar_path = Path(resolve_qvc_data_path(SEEING_SIDECARS[survey]))
+        try:
+            sidecar_path = Path(resolve_qvc_data_path(SEEING_SIDECARS[survey]))
+        except FileNotFoundError:
+            return frame
         if not sidecar_path.exists():
             return frame
         sidecar = pd.read_parquet(sidecar_path)
@@ -432,13 +446,14 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
             sidecar, on=keys, how="left", validate="many_to_one"
         )
 
-    sdss = _attach_seeing_sidecar(sdss, "sdss", ["objectId", "mjd", "filterID"])
-    ps1 = _attach_seeing_sidecar(ps1, "ps1", ["detectID"])
-    ztf = _attach_seeing_sidecar(
-        ztf,
-        "ztf",
-        ["ps1objID", "mjd", "fieldid", "rcidin", "filterID"],
-    )
+    if load_seeing:
+        sdss = _attach_seeing_sidecar(sdss, "sdss", ["objectId", "mjd", "filterID"])
+        ps1 = _attach_seeing_sidecar(ps1, "ps1", ["detectID"])
+        ztf = _attach_seeing_sidecar(
+            ztf,
+            "ztf",
+            ["ps1objID", "mjd", "fieldid", "rcidin", "filterID"],
+        )
 
     if filter_object_ids is not None:
         match_object_ids = set(sdss.objectId) & set(filter_object_ids)
