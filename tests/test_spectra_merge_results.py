@@ -61,6 +61,7 @@ def _write_v3_catalog(
     *,
     selection_seed=3,
     joint_psf_values=None,
+    joint_psf_provenance=None,
 ):
     """Write a small physically consistent v3 shard for merge tests."""
 
@@ -120,10 +121,11 @@ def _write_v3_catalog(
     for row_index, value in enumerate(joint_psf_values):
         if value is not None:
             joint_psf_photometry[row_index, 0] = float(value)
-    joint_psf_provenance = {
-        "prediction_source": "synthetic_test",
-        "jaxsedfit_git_commit": "a" * 40,
-    }
+    if joint_psf_provenance is None:
+        joint_psf_provenance = {
+            "prediction_source": "synthetic_test",
+            "jaxsedfit_git_commit": "a" * 40,
+        }
     write_spectra_catalog_hdf5(
         path,
         frame,
@@ -393,6 +395,43 @@ def test_h5_merge_preserves_required_joint_psf_photometry_alignment(tmp_path):
         [1.5, 2.5],
     )
     assert np.all(np.isnan(merged.joint_psf_photometry_draws[:, 1:]))
+
+
+def test_h5_merge_ignores_and_reports_prediction_provenance_mismatch(
+    tmp_path, capsys
+):
+    first = tmp_path / "chunk0000.h5"
+    failed = tmp_path / "chunk0001.h5"
+    reference_provenance = {
+        "prediction_source": "fresh_fit_prediction",
+        "jaxsedfit_git_commit": "a" * 40,
+    }
+    _write_v3_catalog(
+        first,
+        pd.DataFrame({"object_id": ["1"], "fit_ok": [True], "z": [1.0]}),
+        [0.1],
+        joint_psf_provenance=reference_provenance,
+    )
+    _write_v3_catalog(
+        failed,
+        pd.DataFrame({"object_id": ["2"], "fit_ok": [False], "z": [2.0]}),
+        [None],
+        joint_psf_provenance={
+            "prediction_source": "fit_attempt_no_valid_draws",
+            "jaxsedfit_git_commit": "a" * 40,
+        },
+    )
+
+    merged = load_and_merge_h5([str(first), str(failed)])
+
+    assert merged.frame["object_id"].tolist() == ["1", "2"]
+    np.testing.assert_array_equal(merged.joint_posterior_valid_count, [1, 0])
+    assert merged.joint_psf_photometry_provenance == reference_provenance
+    report = capsys.readouterr().out
+    assert "Ignored 1 joint PSF photometry prediction provenance mismatch" in report
+    assert str(failed) in report
+    assert "no valid draws" in report
+    assert "fit_attempt_no_valid_draws" in report
 
 
 def test_h5_merge_rejects_v3_shard_missing_mandatory_joint_psf_photometry(tmp_path):
