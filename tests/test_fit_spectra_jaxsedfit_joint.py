@@ -659,6 +659,69 @@ def test_save_spectrum_figure_uses_separate_spectrum_filename(tmp_path):
     assert path.is_file()
 
 
+def test_release_jaxsedfit_memory_discards_fit_state_and_clears_jax_cache(
+    monkeypatch,
+):
+    figure = plt.figure()
+    figure_number = figure.number
+    state = SimpleNamespace(
+        map_result={"optimizer": np.ones(2)},
+        nuts_result={"mcmc": object()},
+        ns_result={"sampler": object()},
+        samples={"x": np.ones(2)},
+        predictive={"model": np.ones((2, 3))},
+        predictive_cache={"plot": {"model": np.ones((2, 3))}},
+        summary={"x": 1.0},
+        figure=figure,
+        plot_cache={"sed": object()},
+    )
+    fitter = SimpleNamespace(
+        _fit_state=state,
+        context=object(),
+        config=object(),
+    )
+    fitter._reset_fit_state = lambda: setattr(
+        fitter, "_fit_state", SimpleNamespace()
+    )
+    fit_result = SimpleNamespace(
+        fitter=fitter,
+        samples=state.samples,
+        median={"x": 1.0},
+        summary=state.summary,
+        figure=figure,
+        _state=state,
+        _spectrum=object(),
+    )
+    clear_calls = []
+    monkeypatch.setitem(
+        sys.modules,
+        "jax",
+        SimpleNamespace(clear_caches=lambda: clear_calls.append(True)),
+    )
+
+    joint.release_jaxsedfit_memory(fitter, fit_result)
+
+    assert clear_calls == [True]
+    assert not plt.fignum_exists(figure_number)
+    for name in (
+        "map_result",
+        "nuts_result",
+        "ns_result",
+        "samples",
+        "predictive",
+        "predictive_cache",
+        "summary",
+        "figure",
+        "plot_cache",
+    ):
+        assert getattr(state, name) is None
+    assert fitter.context is None
+    assert fitter.config is None
+    assert fit_result.fitter is None
+    assert fit_result.samples is None
+    assert fit_result._state is None
+
+
 def test_plot_init_saves_each_stage_without_showing(tmp_path):
     calls = []
 
