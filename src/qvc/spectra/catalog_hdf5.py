@@ -64,6 +64,8 @@ ALPHA_NU_RED_WAVELENGTH_ANGSTROM = 2500.0
 GRAHSP_ATTENUATION_NORMALIZATION = 1.2
 GRAHSP_ATTENUATION_BREAK_ANGSTROM = 11_000.0
 GRAHSP_ATTENUATION_OPTICAL_INDEX = -1.2
+F_HOST_2500_PSF_CAPTURE_MODEL = "sdss_typical_fwhm_with_fitted_host_scale"
+F_HOST_2500_PSF_FWHM_ARCSEC = 1.4
 
 
 @dataclass(frozen=True)
@@ -690,7 +692,12 @@ def write_spectra_catalog_hdf5(
             handle.attrs["f_host_2500_psf_definition"] = (
                 "captured_attenuated_host_over_captured_host_plus_attenuated_agn"
             )
-            handle.attrs["f_host_2500_psf_capture_group"] = "qvc_sdss_psf"
+            handle.attrs["f_host_2500_psf_capture_model"] = (
+                F_HOST_2500_PSF_CAPTURE_MODEL
+            )
+            handle.attrs["f_host_2500_psf_fwhm_arcsec"] = (
+                F_HOST_2500_PSF_FWHM_ARCSEC
+            )
 
             catalog_group = handle.create_group("catalog", track_order=True)
             for column in frame.columns:
@@ -908,7 +915,8 @@ def _validate_v3_attrs(handle, path):
         "f_host_2500_psf_definition": (
             "captured_attenuated_host_over_captured_host_plus_attenuated_agn"
         ),
-        "f_host_2500_psf_capture_group": "qvc_sdss_psf",
+        "f_host_2500_psf_capture_model": F_HOST_2500_PSF_CAPTURE_MODEL,
+        "f_host_2500_psf_fwhm_arcsec": F_HOST_2500_PSF_FWHM_ARCSEC,
     }
     for name, expected_value in expected.items():
         actual = _decode_attr(handle.attrs.get(name))

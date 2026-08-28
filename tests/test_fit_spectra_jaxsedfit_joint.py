@@ -39,6 +39,38 @@ def _record_with_ugriz():
     return record
 
 
+def _spectrum_hdul_with_metadata(**metadata):
+    dtype = [(name, "U32") for name in metadata]
+    row = tuple(str(value) for value in metadata.values())
+    data = np.array([row], dtype=dtype)
+    return [SimpleNamespace(header={}), SimpleNamespace(data=data)]
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        ({"SURVEY": "sdss"}, 3.0),
+        ({"SURVEY": "segue2"}, 3.0),
+        ({"SURVEY": "boss"}, 2.0),
+        ({"SURVEY": "eboss"}, 2.0),
+        ({"RUN2D": "26"}, 3.0),
+        ({"RUN2D": "104"}, 3.0),
+        ({"RUN2D": "v5_13_2"}, 2.0),
+    ],
+)
+def test_sdss_spectrum_aperture_uses_survey_metadata(metadata, expected):
+    hdul = _spectrum_hdul_with_metadata(**metadata)
+
+    assert joint.sdss_spectrum_aperture_diameter_arcsec(hdul) == expected
+
+
+def test_sdss_spectrum_aperture_rejects_unknown_metadata():
+    hdul = _spectrum_hdul_with_metadata(RUN2D="unknown")
+
+    with pytest.raises(ValueError, match="Cannot determine"):
+        joint.sdss_spectrum_aperture_diameter_arcsec(hdul)
+
+
 def test_saved_sed_loader_normalizes_object_id_and_upper_limits(tmp_path):
     path = tmp_path / "sed.csv"
     pd.DataFrame(
@@ -77,12 +109,9 @@ def test_qvc_psf_photometry_replaces_saved_sdss_and_includes_z():
     qvc_rows = result["filter_name"].isin(
         [f"{band}_sdss" for band in "ugriz"]
     )
-    assert set(result.loc[qvc_rows, "host_capture_group"]) == {
-        joint.QVC_PSF_HOST_CAPTURE_GROUP
-    }
-    assert pd.isna(
-        result.loc[result["filter_name"] == "W2", "host_capture_group"].item()
-    )
+    assert "host_capture_group" not in result
+    assert result.loc[qvc_rows, "photometry_method"].eq("psf").all()
+    assert result.loc[qvc_rows, "psf_fwhm_arcsec"].isna().all()
 
 
 def test_qvc_psf_photometry_requires_z_even_if_variability_fit_dropped_it():
@@ -120,6 +149,7 @@ def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
         fit_method="optax",
         optax_steps=10,
         optax_lr=5.0e-3,
+        plot_init=True,
         seed=3,
         nuts_warmup=10,
         nuts_samples=10,
@@ -140,20 +170,26 @@ def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
         err=np.array([0.1, 0.1, 0.1]),
         resolving_power=2000.0,
         args=args,
+        aperture_diameter_arcsec=2.0,
     )
 
     assert len(used_phot) == 5
     assert config.spectroscopy.resolving_power == pytest.approx(2000.0)
+    assert config.spectroscopy.aperture_diameter_arcsec == pytest.approx(2.0)
     assert config.agn.fit_lines is True
     assert config.agn.tied_lines is True
     assert config.agn.fit_feii is False
     assert config.agn.fit_balmer_continuum is True
     assert config.agn.line_flux_scale_mjy == pytest.approx(0.2)
+    assert config.inference.plot_init is True
     assert config.likelihood.spectrum_systematics_width == pytest.approx(0.06)
     assert config.likelihood.spectrum_student_t_df == pytest.approx(7.0)
     assert config.likelihood.spectrum_weight_mode == "resolution_elements"
     assert config.likelihood.fit_spectrum_scale is True
     assert config.likelihood.spectrum_scale_prior_sigma_dex == pytest.approx(0.12)
+    assert config.likelihood.use_host_capture_model is True
+    assert not hasattr(config.photometry, "host_capture_group")
+    assert config.photometry.psf_fwhm_arcsec == [None] * 5
 
 
 def test_dereddened_m2500_uses_intrinsic_disk_and_both_attenuation_terms():
@@ -616,6 +652,47 @@ def test_save_spectrum_figure_uses_separate_spectrum_filename(tmp_path):
     assert path.is_file()
 
 
+def test_plot_init_saves_each_stage_without_showing(tmp_path):
+    calls = []
+
+    class FakeFitter:
+        def plot_sed(self, *, output_path=None, show=False, title=None):
+            calls.append(
+                {"output_path": output_path, "show": show, "title": title}
+            )
+            figure = plt.figure()
+            if output_path is not None:
+                figure.savefig(output_path)
+            return figure
+
+        def fit(self, *, progress_bar):
+            assert progress_bar is True
+            self.plot_sed(
+                show=True,
+                title="Stage 1 continuum/host MAP initialization",
+            )
+            self.plot_sed(
+                show=True,
+                title="Stage 2 full MAP initialization",
+            )
+            return "fit-result"
+
+    fitter = FakeFitter()
+    rec = {"z": 0.304, "sdss_name": "013453.20-001842.3"}
+    args = SimpleNamespace(plot_init=True, progress=True, fig_dir=tmp_path)
+
+    result = joint.fit_with_saved_initialization_plots(fitter, rec, args)
+
+    assert result == "fit-result"
+    assert [call["show"] for call in calls] == [False, False]
+    assert [Path(call["output_path"]).name for call in calls] == [
+        "z0.304_013453.20-001842.3_joint_init_stage1.png",
+        "z0.304_013453.20-001842.3_joint_init_stage2.png",
+    ]
+    assert all(Path(call["output_path"]).is_file() for call in calls)
+    assert fitter.plot_sed.__func__ is FakeFitter.plot_sed
+
+
 def _run_record():
     return {
         "object_id": "1452887",
@@ -633,12 +710,24 @@ def _run_record():
 
 def _component_prediction(filter_names):
     total = np.tile(np.arange(1.0, len(filter_names) + 1.0), (4, 1))
+    desired_host_fraction = np.array([0.2, 0.3, 0.4, 0.5])
+    effective_radius = (
+        np.sqrt(2.0) * joint.SDSS_TYPICAL_PSF_FWHM_ARCSEC / 2.354820045
+    )
+    capture = effective_radius**2 / (effective_radius**2 + 1.0)
+    agn_2500 = capture * (1.0 - desired_host_fraction) / desired_host_fraction
+    rest_wave = np.broadcast_to(np.array([2000.0, 3000.0]), (4, 2))
     prediction = {
         "pred_fluxes": total,
         "variable_agn_fluxes": 0.7 * total,
         "fracAGN_5100_fit": np.array([0.6, 0.8]),
         "formed_stellar_mass": np.array([1.0e10, 1.2e10]),
-        "component_host_fraction": np.array([[0.2], [0.3], [0.4], [0.5]]),
+        "component_host_fraction": desired_host_fraction[:, None],
+        "rest_wave": rest_wave,
+        "host_total_rest_sed": np.ones((4, 2)),
+        "dust_rest_sed": np.zeros((4, 2)),
+        "agn_rest_sed": np.repeat(agn_2500[:, None], 2, axis=1),
+        "log_host_capture_scale_arcsec_fit": np.zeros(4),
         "pl_bend_loc": np.full(4, 1000.0),
         "pl_bend_width": np.full(4, 10.0),
         "uv_slope": np.zeros(4),
@@ -798,6 +887,10 @@ def test_joint_fit_result_writer_moves_private_draw_payload_out_of_catalog(tmp_p
         assert handle["catalog/formed_stellar_mass"][0] == pytest.approx(1.1e10)
         assert handle["psf_agn_fraction_draws/values"].shape == (1, 64, 5)
         assert handle["psf_agn_fraction_draws/valid_count"][0] == 2
+        assert handle.attrs["f_host_2500_psf_capture_model"] == (
+            "sdss_typical_fwhm_with_fitted_host_scale"
+        )
+        assert handle.attrs["f_host_2500_psf_fwhm_arcsec"] == pytest.approx(1.4)
         np.testing.assert_allclose(
             handle["joint_posterior_draws/f_host_2500_psf"][0, :2],
             [0.25, 0.20],
@@ -1026,32 +1119,31 @@ def test_catalog_prediction_temporarily_requests_legacy_csv_scalar_sites():
     ]
 
 
-def test_catalog_prediction_forwards_monochromatic_component_request():
-    class DummyFitter:
-        @staticmethod
-        def _predictive_return_sites(kind, **kwargs):
-            sites = ["fracAGN_5100_fit"]
-            if kwargs.get("include_component_request"):
-                sites.append("component_host_fraction")
-            return sites
+def test_sdss_psf_host_fraction_uses_prediction_only_typical_fwhm():
+    prediction = {
+        "rest_wave": np.array([2000.0, 3000.0]),
+        "host_total_rest_sed": np.array([[1.0, 3.0], [2.0, 4.0]]),
+        "dust_rest_sed": np.array([[0.2, 0.4], [0.1, 0.3]]),
+        "agn_rest_sed": np.array([[4.0, 6.0], [5.0, 7.0]]),
+        "log_host_capture_scale_arcsec_fit": np.log(np.array([1.0, 2.0])),
+    }
 
-        def predict(self, **kwargs):
-            self.kwargs = kwargs
-            self.requested_sites = self._predictive_return_sites(
-                kwargs["kind"], include_component_request=True
-            )
-            return {"component_host_fraction": np.array([[0.25]])}
+    result = joint.add_sdss_psf_host_fraction_prediction(prediction)
 
-    fitter = DummyFitter()
-    prediction = predict_catalog_posterior(
-        fitter,
-        kind="photometry",
-        component_rest_wavelengths=(2500.0,),
-        component_host_capture_group=joint.QVC_PSF_HOST_CAPTURE_GROUP,
+    effective_radius = (
+        np.sqrt(2.0) * joint.SDSS_TYPICAL_PSF_FWHM_ARCSEC / 2.354820045
     )
-    assert prediction["component_host_fraction"][0, 0] == pytest.approx(0.25)
-    assert fitter.kwargs["component_rest_wavelengths"] == (2500.0,)
-    assert "component_host_fraction" in fitter.requested_sites
+    capture = effective_radius**2 / (
+        effective_radius**2 + np.array([1.0, 2.0]) ** 2
+    )
+    host = np.array([2.3, 3.2])
+    agn = np.array([5.0, 6.0])
+    expected = capture * host / (agn + capture * host)
+    np.testing.assert_allclose(
+        result["component_host_capture_fraction"][:, 0], capture
+    )
+    np.testing.assert_allclose(result["component_host_fraction"][:, 0], expected)
+    assert "component_host_fraction" not in prediction
 
 
 def test_verify_new_posterior_bundle_requires_v2_schema(tmp_path):
@@ -1067,7 +1159,7 @@ def test_verify_new_posterior_bundle_requires_v2_schema(tmp_path):
         verify_new_posterior_bundle(old)
 
 
-def test_resume_preflight_rejects_old_and_accepts_grouped_bundle(tmp_path):
+def test_resume_preflight_rejects_old_and_accepts_main_bundle(tmp_path):
     args = _hybrid_args(tmp_path)
     rec = _run_record()
     path = joint.posterior_bundle_path(args.resume, rec)
@@ -1077,21 +1169,38 @@ def test_resume_preflight_rejects_old_and_accepts_grouped_bundle(tmp_path):
 
     with pytest.raises(
         joint.IncompatibleHostCaptureResumeError,
-        match="predates the shared qvc_sdss_psf",
+        match="five independent QVC ugriz",
     ):
         joint.preflight_resume_host_capture_bundles([rec], args)
 
     with h5py.File(path, "a") as handle:
         handle.attrs[joint.HOST_CAPTURE_BUNDLE_ATTR] = (
-            joint.QVC_PSF_HOST_CAPTURE_GROUP
+            joint.HOST_CAPTURE_BUNDLE_MARKER
+        )
+        handle.attrs[joint.HOST_CAPTURE_PSF_FWHM_ATTR] = (
+            joint.SDSS_TYPICAL_PSF_FWHM_ARCSEC
         )
         handle.create_dataset(
-            "samples/host_capture_group_fraction", data=np.ones((2, 1))
+            "samples/missing_psf_host_capture_fraction", data=np.ones((2, 5))
         )
+        handle.create_dataset("samples/log_host_capture_scale_arcsec", data=np.ones(2))
     joint.preflight_resume_host_capture_bundles([rec], args)
 
 
-def test_resume_preflight_allows_only_explicitly_unannotated_grouped_bundle(
+def test_resume_preflight_rejects_shared_group_bundle(tmp_path):
+    args = _hybrid_args(tmp_path)
+    rec = _run_record()
+    path = joint.posterior_bundle_path(args.resume, rec)
+    path.parent.mkdir(parents=True)
+    with h5py.File(path, "w") as handle:
+        handle.attrs[joint.HOST_CAPTURE_BUNDLE_ATTR] = "qvc_sdss_psf"
+        handle.attrs[joint.HOST_CAPTURE_PSF_FWHM_ATTR] = 1.4
+        handle.create_dataset("samples/host_capture_group_fraction", data=np.ones((2, 1)))
+    with pytest.raises(joint.IncompatibleHostCaptureResumeError):
+        joint.preflight_resume_host_capture_bundles([rec], args)
+
+
+def test_resume_preflight_allows_only_explicitly_unannotated_main_bundle(
     tmp_path,
 ):
     args = _hybrid_args(tmp_path)
@@ -1101,8 +1210,9 @@ def test_resume_preflight_allows_only_explicitly_unannotated_grouped_bundle(
     path.parent.mkdir(parents=True)
     with h5py.File(path, "w") as handle:
         handle.create_dataset(
-            "samples/host_capture_group_fraction", data=np.ones((2, 1))
+            "samples/missing_psf_host_capture_fraction", data=np.ones((2, 5))
         )
+        handle.create_dataset("samples/log_host_capture_scale_arcsec", data=np.ones(2))
 
     with pytest.warns(RuntimeWarning, match="Explicitly accepting"):
         joint.preflight_resume_host_capture_bundles([rec], args)
@@ -1111,7 +1221,7 @@ def test_resume_preflight_allows_only_explicitly_unannotated_grouped_bundle(
         handle.attrs[joint.HOST_CAPTURE_BUNDLE_ATTR] = "some_other_group"
     with pytest.raises(
         joint.IncompatibleHostCaptureResumeError,
-        match="predates the shared qvc_sdss_psf",
+        match="five independent QVC ugriz",
     ):
         joint.preflight_resume_host_capture_bundles([rec], args)
 
@@ -1227,6 +1337,18 @@ def test_parse_args_rejects_no_deredden_for_mandatory_v3_colors(tmp_path):
                 "--no-deredden",
             ]
         )
+
+
+def test_parse_args_rejects_removed_no_host_capture_baseline_flag(tmp_path):
+    common = [
+        "--mode", "fit",
+        str(tmp_path / "out.h5"),
+        "--sed-photometry-path", str(tmp_path / "phot.csv"),
+        "--filter_object_id", "1",
+    ]
+
+    with pytest.raises(SystemExit):
+        joint.parse_args([*common, "--no-host-capture-model"])
 
 
 def test_parse_args_resume_keeps_current_inputs_and_separate_destinations(tmp_path):
@@ -1476,7 +1598,8 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
             "pl_slope": np.full(4, -1.8),
             "pl_bend_loc": np.full(4, 1000.0),
             "pl_bend_width": np.full(4, 10.0),
-            "host_capture_group_fraction": np.array([[0.4], [0.5]]),
+            "missing_psf_host_capture_fraction": np.full((4, 5), 0.5),
+            "log_host_capture_scale_arcsec": np.zeros(4),
         }
         config = SimpleNamespace(
             observation=SimpleNamespace(
@@ -1485,8 +1608,10 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
             ),
             photometry=SimpleNamespace(
                 filter_names=filter_names,
-                host_capture_group=[joint.QVC_PSF_HOST_CAPTURE_GROUP] * 5,
+                photometry_method=["psf"] * 5,
+                psf_fwhm_arcsec=[None] * 5,
             ),
+            likelihood=SimpleNamespace(use_host_capture_model=True),
             galaxy=SimpleNamespace(cosmology_h0=70.0, cosmology_om0=0.3),
         )
 
@@ -1497,7 +1622,7 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
         def predict(self, *, kind, **kwargs):
             assert kind == "plot"
             assert self.predictive is None
-            assert kwargs["component_rest_wavelengths"] == (2500.0,)
+            assert kwargs == {}
             return prediction
 
         def save(self, output_dir):
@@ -1509,8 +1634,12 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
                     "samples/log_agn_amp", data=self.samples["log_agn_amp"]
                 )
                 handle.create_dataset(
-                    "samples/host_capture_group_fraction",
-                    data=self.samples["host_capture_group_fraction"],
+                    "samples/missing_psf_host_capture_fraction",
+                    data=self.samples["missing_psf_host_capture_fraction"],
+                )
+                handle.create_dataset(
+                    "samples/log_host_capture_scale_arcsec",
+                    data=self.samples["log_host_capture_scale_arcsec"],
                 )
             return path
 
@@ -1597,8 +1726,9 @@ def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_
     with h5py.File(saved_path, "w") as handle:
         handle.attrs["posterior_bundle_format"] = joint.POSTERIOR_BUNDLE_FORMAT
         handle.create_dataset(
-            "samples/host_capture_group_fraction", data=np.array([[0.4], [0.5]])
+            "samples/missing_psf_host_capture_fraction", data=np.full((4, 5), 0.5)
         )
+        handle.create_dataset("samples/log_host_capture_scale_arcsec", data=np.zeros(4))
 
     class DummyHDUL:
         def close(self):
@@ -1628,10 +1758,8 @@ def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_
             return DummyFitResult()
 
         def predict(self, *, kind, **kwargs):
-            assert kind == "photometry"
-            assert kwargs["component_host_capture_group"] == (
-                joint.QVC_PSF_HOST_CAPTURE_GROUP
-            )
+            assert kind == "plot"
+            assert kwargs == {}
             return prediction
 
     config = SimpleNamespace(
@@ -1650,6 +1778,9 @@ def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_
             np.array([0.1]),
             2000.0,
         ),
+    )
+    monkeypatch.setattr(
+        joint, "sdss_spectrum_aperture_diameter_arcsec", lambda hdul: 2.0
     )
     monkeypatch.setattr(
         joint, "build_joint_config", lambda *args, **kwargs: (config, used_phot)
