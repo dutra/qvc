@@ -1,6 +1,15 @@
 import pandas as pd
+import pytest
 
 from qvc.light_curve import multiband_generate_lc
+
+
+@pytest.mark.parametrize("half_window_days", [0.0, -1.0, float("nan")])
+def test_concat_light_curves_rejects_invalid_outlier_half_window(half_window_days):
+    with pytest.raises(ValueError, match="outlier_half_window_days must be positive"):
+        multiband_generate_lc.concat_light_curves(
+            outlier_half_window_days=half_window_days
+        )
 
 
 def test_concat_light_curves_tolerates_missing_seeing_sidecars(monkeypatch):

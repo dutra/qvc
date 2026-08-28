@@ -5128,6 +5128,15 @@ def main():
     parser.add_argument("--filter_object_id", nargs="+", help="List of object IDs to filter.")
     parser.add_argument("--N", type=int, help="Number of objects to process.")
     parser.add_argument("--skip", type=int, help="Number of objects to skip.")
+    parser.add_argument(
+        "--outlier_half_window_days",
+        type=float,
+        default=30.0,
+        help=(
+            "Half-width in observer-frame days for rolling photometric outlier "
+            "rejection (default: 30)."
+        ),
+    )
     parser.add_argument("--filter_file", type=str, help="Path to file containing object IDs.")
     parser.add_argument("--plot", action="store_true", help="Enable plotting of results.")
     parser.add_argument("--progress", action="store_true", help="Show progress bar.")
@@ -5339,6 +5348,11 @@ def main():
         help="Subtract spectra-derived constant contaminating flux in PSF light curves before GP fitting.",
     )
     args = parser.parse_args()
+    if (
+        not np.isfinite(args.outlier_half_window_days)
+        or args.outlier_half_window_days <= 0
+    ):
+        parser.error("--outlier_half_window_days must be positive")
     args = apply_resume_sample_save_policy(args)
     print("Args:", args)
 
@@ -5354,6 +5368,7 @@ def main():
             progress_bar=args.progress,
             N=args.N,
             skip=args.skip,
+            outlier_half_window_days=args.outlier_half_window_days,
         )
     print(f"Loaded {len(objs)} objects.")
 

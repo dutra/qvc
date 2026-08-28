@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from qvc.light_curve.multiband_generate_lc import (
     inverse_variance_weighted_mean,
@@ -43,6 +44,35 @@ def test_rolling_outlier_mask_keeps_under_supported_extreme_edges():
 
     assert not rejected[0]
     assert not rejected[-1]
+
+
+def test_rolling_outlier_mask_accepts_custom_half_window():
+    times = np.concatenate(([0.0], np.arange(40.0, 48.0)))
+    mags = np.zeros(times.size)
+    mags[0] = 1.0
+    magerrs = np.full(times.size, 0.02)
+
+    default_rejected = rolling_photometric_outlier_mask(times, mags, magerrs)
+    wider_rejected = rolling_photometric_outlier_mask(
+        times,
+        mags,
+        magerrs,
+        half_window_days=60.0,
+    )
+
+    assert not default_rejected[0]
+    assert wider_rejected[0]
+
+
+@pytest.mark.parametrize("half_window_days", [0.0, -1.0, np.nan])
+def test_rolling_outlier_mask_rejects_invalid_half_window(half_window_days):
+    with pytest.raises(ValueError, match="half_window_days must be positive"):
+        rolling_photometric_outlier_mask(
+            [0.0],
+            [0.0],
+            [0.1],
+            half_window_days=half_window_days,
+        )
 
 
 def test_inverse_variance_weighted_mean_and_formal_error():
