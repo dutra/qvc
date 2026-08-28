@@ -209,6 +209,48 @@ def _scalar_dtype_kinds_compatible(left, right):
     return left in _NUMERIC_DTYPE_KINDS and right in _NUMERIC_DTYPE_KINDS
 
 
+def _prediction_provenance_differences(reference, candidate):
+    """Return human-readable field differences between provenance records."""
+
+    missing = "<missing>"
+    differences = []
+    for key in sorted(set(reference) | set(candidate)):
+        reference_value = reference.get(key, missing)
+        candidate_value = candidate.get(key, missing)
+        if reference_value != candidate_value:
+            differences.append(
+                f"{key}: reference={reference_value!r}, shard={candidate_value!r}"
+            )
+    return differences
+
+
+def _report_ignored_prediction_provenance(provenance_records):
+    """Report ignored shard provenance mismatches and return the chosen record."""
+
+    if not provenance_records:
+        return {}
+    reference_path, reference, _ = next(
+        (record for record in provenance_records if record[2]),
+        provenance_records[0],
+    )
+    mismatches = []
+    for path, candidate, has_valid_draws in provenance_records:
+        differences = _prediction_provenance_differences(reference, candidate)
+        if differences:
+            mismatches.append((path, has_valid_draws, differences))
+    if mismatches:
+        print(
+            "[WARNING] Ignored "
+            f"{len(mismatches)} joint PSF photometry prediction provenance "
+            "mismatch(es)."
+        )
+        print(f"Reference provenance retained from {reference_path}.")
+        for path, has_valid_draws, differences in mismatches:
+            draw_status = "has valid draws" if has_valid_draws else "no valid draws"
+            print(f"  - {path} ({draw_status}): {'; '.join(differences)}")
+    return dict(reference)
+
+
 def deduplicate_h5_catalog(catalog, keys):
     """Deduplicate an in-memory catalog while preserving draw alignment."""
 
@@ -250,7 +292,7 @@ def load_and_merge_h5(file_list, expected_n=None, dedup_keys=None):
     joint_indices = []
     joint_source_counts = []
     joint_psf_photometry = []
-    joint_psf_photometry_provenance = None
+    joint_psf_photometry_provenance_records = []
     selection_seed = None
     column_order = []
     column_dtype_kinds = {}
@@ -309,19 +351,18 @@ def load_and_merge_h5(file_list, expected_n=None, dedup_keys=None):
                 f"Incompatible joint PSF photometry bands in {path}: "
                 f"{catalog.joint_psf_photometry_bands}."
             )
-        if joint_psf_photometry_provenance is None:
-            joint_psf_photometry_provenance = dict(
-                catalog.joint_psf_photometry_provenance
+        joint_psf_photometry_provenance_records.append(
+            (
+                path,
+                dict(catalog.joint_psf_photometry_provenance),
+                bool(np.any(catalog.joint_posterior_valid_count > 0)),
             )
-        elif (
-            dict(catalog.joint_psf_photometry_provenance)
-            != joint_psf_photometry_provenance
-        ):
-            raise ValueError(
-                "Cannot merge joint PSF photometry selected with different "
-                f"prediction provenance; mismatch in {path}."
-            )
+        )
         joint_psf_photometry.append(catalog.joint_psf_photometry_draws)
+
+    joint_psf_photometry_provenance = _report_ignored_prediction_provenance(
+        joint_psf_photometry_provenance_records
+    )
 
     if not frames:
         return SpectraCatalog(
