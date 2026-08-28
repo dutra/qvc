@@ -2691,6 +2691,28 @@ def save_combined_plot(samples, model, X, y, yerr, band_idx, mags_means, survey_
             and np.asarray(band_idx).shape == y_plot.shape
         ):
             y_plot = y_plot - survey_delta_mag[np.asarray(band_idx, dtype=np.int32), survey_idx_plot]
+    if (
+        survey_idx_plot is not None
+        and getattr(model, "seeing_covariate", None) is not None
+        and "seeing_mean_slope" in posterior_median
+    ):
+        seeing_mean_slope = np.asarray(
+            posterior_median["seeing_mean_slope"], dtype=float
+        )
+        seeing_covariate = np.asarray(model.seeing_covariate, dtype=float)
+        band_idx_array = np.asarray(band_idx, dtype=np.int32)
+        if (
+            seeing_mean_slope.ndim == 2
+            and seeing_covariate.shape == y_plot.shape
+            and survey_idx_plot.shape == y_plot.shape
+            and band_idx_array.shape == y_plot.shape
+        ):
+            seeing_relflux = (
+                seeing_mean_slope[band_idx_array, survey_idx_plot]
+                * seeing_covariate
+            )
+            seeing_mag = -2.5 * np.log10(np.maximum(1.0 + seeing_relflux, 1e-6))
+            y_plot = y_plot - seeing_mag
     # A 600-point curve is already much denser than the rendered PDF pixels.
     t_test = np.linspace(t.min() - 400, t.max() + 400, 600)
     active_band_indices = np.unique(band_idx).astype(np.int32)

@@ -174,6 +174,7 @@ class ContiBLR_SHO_Model(MultiVarModel):
     """MultiVarModel with a convenience PSD method for plotting."""
 
     survey_idx: JAXArray | None = None
+    seeing_covariate: JAXArray | None = None
     nBand: int
     n_band: int
     t_in_bands: list[JAXArray]
@@ -192,6 +193,7 @@ class ContiBLR_SHO_Model(MultiVarModel):
         lag_func=None,
         *,
         survey_idx=None,
+        seeing_covariate=None,
         **kwargs,
     ):
         t = jnp.asarray(X[0])
@@ -232,6 +234,10 @@ class ContiBLR_SHO_Model(MultiVarModel):
             self.survey_idx = None
         else:
             self.survey_idx = jnp.asarray(survey_idx, dtype=jnp.int32)[inds]
+        if seeing_covariate is None:
+            self.seeing_covariate = None
+        else:
+            self.seeing_covariate = jnp.asarray(seeing_covariate, dtype=float)[inds]
 
     def lag_transform(
         self, has_lag: bool, params: dict[str, JAXArray], X: JAXArray
@@ -264,8 +270,28 @@ class ContiBLR_SHO_Model(MultiVarModel):
     def _jitter_diag(self, params, band):
         log_jitter = jnp.asarray(params["log_jitter"])
         if self.survey_idx is not None and log_jitter.ndim == 2:
-            return jnp.exp(log_jitter[band, self.survey_idx]) ** 2
+            log_jitter_epoch = log_jitter[band, self.survey_idx]
+            seeing_scatter_slope = params.get("seeing_scatter_slope")
+            if seeing_scatter_slope is not None and self.seeing_covariate is not None:
+                seeing_scatter_slope = jnp.asarray(seeing_scatter_slope, dtype=float)
+                log_jitter_epoch = log_jitter_epoch + (
+                    seeing_scatter_slope[band, self.survey_idx] * self.seeing_covariate
+                )
+            return jnp.exp(log_jitter_epoch) ** 2
         return (jnp.exp(jnp.atleast_1d(log_jitter)) ** 2)[band]
+
+    def _seeing_offset_in_model_units(self, params, band):
+        seeing_mean_slope = params.get("seeing_mean_slope")
+        if (
+            seeing_mean_slope is None
+            or self.survey_idx is None
+            or self.seeing_covariate is None
+        ):
+            return jnp.zeros_like(jnp.asarray(band, dtype=float))
+        seeing_mean_slope = jnp.asarray(seeing_mean_slope, dtype=float)
+        return (
+            seeing_mean_slope[band, self.survey_idx] * self.seeing_covariate
+        )
 
     def _survey_offset_in_model_units(self, params, band):
         survey_delta_mag = params.get("survey_delta_mag")
@@ -279,7 +305,8 @@ class ContiBLR_SHO_Model(MultiVarModel):
     def _observed_y_sorted(self, params, inds):
         band = jnp.asarray(self.X[1], dtype=jnp.int32)
         survey_offset = self._survey_offset_in_model_units(params, band)
-        return (self.y - survey_offset)[inds]
+        seeing_offset = self._seeing_offset_in_model_units(params, band)
+        return (self.y - survey_offset - seeing_offset)[inds]
 
     def _build_gp(
         self, params: dict[str, JAXArray]

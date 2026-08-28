@@ -103,6 +103,59 @@ def _make_kernel(n_band, order, lag_scale=1.0):
     )
 
 
+def test_seeing_terms_shift_mean_and_modulate_jitter_without_changing_gp_kernel():
+    model = make_multiband_dho_blr_flux_linearized_erlang_model(
+        X=(jnp.array([0.0, 1.0, 2.0]), jnp.array([0, 0, 0])),
+        y=jnp.array([0.2, 0.2, 0.2]),
+        yerr=jnp.full(3, 0.01),
+        n_band=1,
+        survey_idx=jnp.array([0, 0, 0]),
+        seeing_covariate=jnp.array([-0.5, 0.0, 0.5]),
+        has_jitter=True,
+    )
+    base_params = {
+        "log_jitter": jnp.full((1, 3), np.log(0.02)),
+        "seeing_mean_slope": jnp.array([[0.1, 0.0, 0.0]]),
+        "seeing_scatter_slope": jnp.array([[0.4, 0.0, 0.0]]),
+    }
+
+    observed = np.asarray(model._observed_y_sorted(base_params, jnp.arange(3)))
+    np.testing.assert_allclose(observed, [0.25, 0.2, 0.15])
+    jitter_var = np.asarray(model._jitter_diag(base_params, model.X[1]))
+    np.testing.assert_allclose(
+        jitter_var,
+        np.square(0.02 * np.exp(0.4 * np.array([-0.5, 0.0, 0.5]))),
+    )
+
+    no_seeing_params = dict(base_params)
+    no_seeing_params.pop("seeing_mean_slope")
+    no_seeing_params.pop("seeing_scatter_slope")
+    kernel_with_seeing = model._build_kernel(
+        {
+            **base_params,
+            "tau_fast_band": jnp.array([20.0]),
+            "tau_slow_band": jnp.array([200.0]),
+            "lag_blr": jnp.array([40.0]),
+            "amp_cont_relflux": jnp.array([0.1]),
+            "amp_blr_relflux": jnp.array([0.02]),
+        }
+    )
+    kernel_without_seeing = model._build_kernel(
+        {
+            **no_seeing_params,
+            "tau_fast_band": jnp.array([20.0]),
+            "tau_slow_band": jnp.array([200.0]),
+            "lag_blr": jnp.array([40.0]),
+            "amp_cont_relflux": jnp.array([0.1]),
+            "amp_blr_relflux": jnp.array([0.02]),
+        }
+    )
+    np.testing.assert_allclose(
+        np.asarray(kernel_with_seeing.stationary_covariance()),
+        np.asarray(kernel_without_seeing.stationary_covariance()),
+    )
+
+
 @pytest.mark.parametrize("n_band", [1, 2, 5])
 @pytest.mark.parametrize("order", [1, 2, 4, 6])
 def test_closed_form_transition_matrix_matches_expm(n_band, order):

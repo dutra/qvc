@@ -3,6 +3,7 @@ import numpy as np
 import pandas as pd
 import h5py
 import warnings
+from pathlib import Path
 from scipy.stats import median_abs_deviation
 from astropy.table import Table, join
 from astropy.io import fits
@@ -26,6 +27,11 @@ filters = {"u": 0, "g": 1, "r": 2, "i": 3, "z": 4, "y": 5} # harcoded filter ord
 bands = ['u', 'g', 'r', 'i', 'z']#, 'y']
 #bands = ['g', 'r', 'i']
 SURVEY_NAMES = ("sdss", "ps1", "ztf")
+SEEING_SIDECARS = {
+    "sdss": "data/S82/dr16s82_sdssSeeing.parquet",
+    "ps1": "data/S82/dr16s82_ps1Seeing.parquet",
+    "ztf": "data/S82/dr16s82_ztfSeeing.parquet",
+}
 STONE_FITS_RELATIVE_PATH = "data/Stone2021/TotalDat.fits"
 STONE_S82_MAX_SEP_ARCSEC = 1.0
 MACLEOD_DIR_RELATIVE_PATH = "data/MacLeod2010"
@@ -412,6 +418,28 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
     ps1 = pd.read_parquet(resolve_qvc_data_path("data/S82/dr16s82_ps1LCRaw.parquet"))
     ztf = pd.read_parquet(resolve_qvc_data_path("data/S82/dr16s82_ZuberLCRaw.parquet"))
 
+    def _attach_seeing_sidecar(frame, survey, keys):
+        sidecar_path = Path(resolve_qvc_data_path(SEEING_SIDECARS[survey]))
+        if not sidecar_path.exists():
+            return frame
+        sidecar = pd.read_parquet(sidecar_path)
+        required = [*keys, "psf_fwhm_arcsec"]
+        missing = [name for name in required if name not in sidecar.columns]
+        if missing:
+            raise ValueError(f"Seeing sidecar {sidecar_path} is missing columns {missing}.")
+        sidecar = sidecar[required].drop_duplicates(keys, keep="last")
+        return frame.drop(columns=["psf_fwhm_arcsec"], errors="ignore").merge(
+            sidecar, on=keys, how="left", validate="many_to_one"
+        )
+
+    sdss = _attach_seeing_sidecar(sdss, "sdss", ["objectId", "mjd", "filterID"])
+    ps1 = _attach_seeing_sidecar(ps1, "ps1", ["detectID"])
+    ztf = _attach_seeing_sidecar(
+        ztf,
+        "ztf",
+        ["ps1objID", "mjd", "fieldid", "rcidin", "filterID"],
+    )
+
     if filter_object_ids is not None:
         match_object_ids = set(sdss.objectId) & set(filter_object_ids)
     else:
@@ -435,6 +463,12 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
 
     valid_filter_ids = [filters[b] for b in bands]
     filter_to_band = {filters[b]: b for b in bands}
+
+    def _seeing_column(df, candidates):
+        for name in candidates:
+            if name in df.columns:
+                return pd.to_numeric(df[name], errors="coerce").to_numpy(dtype=float)
+        return np.full(len(df), np.nan, dtype=float)
 
     def _offset_from_band(df):
         return np.asarray(
@@ -531,6 +565,9 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
             "time": sdss_subset["mjd"].to_numpy(dtype=float),
             "mag": sdss_subset["psMag"].to_numpy(dtype=float),
             "magerr": sdss_subset["psMagErr_p3"].to_numpy(dtype=float),
+            "psf_fwhm_arcsec": _seeing_column(
+                sdss_subset, ("psf_fwhm_arcsec", "psfWidth", "seeing")
+            ),
         }
     )
 
@@ -550,6 +587,10 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
                 "time": ps1_merge["obsTime"].to_numpy(dtype=float),
                 "mag": ps1_merge["psfMag"].to_numpy(dtype=float) + ps1_offset,
                 "magerr": ps1_merge["psfMagErr_p3"].to_numpy(dtype=float),
+                "psf_fwhm_arcsec": _seeing_column(
+                    ps1_merge,
+                    ("psf_fwhm_arcsec", "psfMajorFWHM", "seeing"),
+                ),
             }
         )
 
@@ -568,14 +609,17 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
                 "time": ztf_merge["mjd"].to_numpy(dtype=float),
                 "mag": ztf_merge["mag"].to_numpy(dtype=float) + ztf_offset,
                 "magerr": ztf_merge["magerr_p3"].to_numpy(dtype=float),
+                "psf_fwhm_arcsec": _seeing_column(
+                    ztf_merge, ("psf_fwhm_arcsec", "seeing", "fwhm")
+                ),
             }
         )
     else:
         ps1_obs = pd.DataFrame(
-            columns=["object_id", "band", "band_idx", "survey", "time", "mag", "magerr"]
+            columns=["object_id", "band", "band_idx", "survey", "time", "mag", "magerr", "psf_fwhm_arcsec"]
         )
         ztf_obs = pd.DataFrame(
-            columns=["object_id", "band", "band_idx", "survey", "time", "mag", "magerr"]
+            columns=["object_id", "band", "band_idx", "survey", "time", "mag", "magerr", "psf_fwhm_arcsec"]
         )
 
     obs = pd.concat([sdss_obs, ps1_obs, ztf_obs], ignore_index=True)
@@ -607,6 +651,9 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
     mags_by_obj_band = by_obj_band["mag"].apply(lambda x: x.to_numpy(dtype=float)).to_dict()
     magerrs_by_obj_band = by_obj_band["magerr"].apply(lambda x: x.to_numpy(dtype=float)).to_dict()
     surveys_by_obj_band = by_obj_band["survey"].apply(lambda x: x.astype(str).to_numpy()).to_dict()
+    seeing_by_obj_band = by_obj_band["psf_fwhm_arcsec"].apply(
+        lambda x: x.to_numpy(dtype=float)
+    ).to_dict()
     weighted_photometry_by_obj_band = {
         key: inverse_variance_weighted_mean(
             group["mag"].to_numpy(dtype=float),
@@ -644,12 +691,16 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
         mags = {}
         magerrs = {}
         surveys = {}
+        psf_fwhm_arcsec = {}
         for band in bands:
             key = (object_id, band)
             times[band] = np.asarray(times_by_obj_band.get(key, np.array([])), dtype=float)
             mags[band] = np.asarray(mags_by_obj_band.get(key, np.array([])), dtype=float)
             magerrs[band] = np.asarray(magerrs_by_obj_band.get(key, np.array([])), dtype=float)
             surveys[band] = np.asarray(surveys_by_obj_band.get(key, np.array([])), dtype=str)
+            psf_fwhm_arcsec[band] = np.asarray(
+                seeing_by_obj_band.get(key, np.array([])), dtype=float
+            )
 
         mags_means = []
         mags_mean_errs = []
@@ -673,6 +724,7 @@ def concat_light_curves(filter_object_ids=None, progress_bar=False, skip=None, N
                 "object_id": object_id,
                 "times": times,
                 "surveys": surveys,
+                "psf_fwhm_arcsec": psf_fwhm_arcsec,
                 "survey_times": survey_times,
                 "survey_names": SURVEY_NAMES,
                 "mags": mags,

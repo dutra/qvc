@@ -191,6 +191,8 @@ def flatten_per_chain_samples_per_band(samples_per_chain, bands, survey_names=No
         "log_kernel_param",
         "log_jitter_active",
         "survey_delta_mag_active",
+        "seeing_mean_slope_active",
+        "seeing_scatter_slope_active",
         "linear_trend_band_offset_raw",
     }
     flattened_samples = {}
@@ -282,6 +284,8 @@ def flatten_flat_samples_per_band(samples_flat, bands, survey_names=None):
         "log_kernel_param",
         "log_jitter_active",
         "survey_delta_mag_active",
+        "seeing_mean_slope_active",
+        "seeing_scatter_slope_active",
         "linear_trend_band_offset_raw",
     }
     flattened_samples = {}
