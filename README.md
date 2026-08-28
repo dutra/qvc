@@ -251,8 +251,23 @@ The `hpc_scripts` folder contains Slurm/Yale-HPC-oriented helpers. Treat these a
   ```
 - `hpc_scripts/sfitspectra.xsh` generates and submits spectra-fitting Slurm arrays from a chi-square selected object list, with optional exclusion filtering.
   ```bash
-  xonsh hpc_scripts/sfitspectra.xsh
+  xonsh hpc_scripts/sfitspectra.xsh \
+    --chisq-csv data/jul14_master_input_file_chisqgt20_nested_N8000.csv \
+    --description nested_N8000
   ```
+  To retry only tasks whose latest attempt ended unsuccessfully, pass the full
+  original job name:
+  ```bash
+  xonsh hpc_scripts/sfitspectra.xsh \
+    --retry aug03_1853_f3ea5a6_svi4000_N2000_PRS103to107
+  ```
+  Retry mode requires the original generated
+  `hpc_scripts/submit/jaxqsofit/submit_<job>.sbatch` script and matching
+  `<job>_object_ids.txt` manifest. It searches Slurm accounting records from
+  the last seven days, preserves the original task and chunk numbers, and
+  applies the scheduler resources currently configured in `sfitspectra.xsh`.
+  Every object in an unsuccessful chunk is rerun; completed chunks are left
+  untouched.
 - `hpc_scripts/shubble_grid.xsh` generates and submits Hubble grid sweeps over `N` and `zmax`.
   ```bash
   xonsh hpc_scripts/shubble_grid.xsh

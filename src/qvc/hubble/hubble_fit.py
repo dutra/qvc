@@ -62,6 +62,8 @@ from qvc.hubble.hubble_likelihood import (
     sigma_mu_from_z_err,
 )
 from qvc.hubble.hubble_plotting import (
+    HubblePosteriorDrawSelection,
+    get_hubble_posterior_sample_indices,
     plot_blr_diagnostics_summary,
     plot_blr_line_lags_vs_l2500,
     plot_completeness_diagnostics,
@@ -76,12 +78,14 @@ from qvc.hubble.hubble_plotting import (
     plot_hubble,
     plot_hubble_residual_normality,
     plot_hubble_residual_tail_diagnostics,
+    plot_parameter_residual_diagnostics,
     plot_predicted_L2500_vs_sigmahat,
     plot_L2500_vs_sigma_tau_separate,
     plot_catalog_quantity_vs_sigma_tau_separate,
     plot_predicted_vs_actual_M2500,
     plot_redshift_histograms,
     plot_redshift_bin_residual_summary,
+    plot_redshift_wiggle_diagnostics,
     plot_residuals_vs_alphaOX,
     plot_sigma_uv_mpred_correction,
 )
@@ -103,10 +107,13 @@ from qvc.hubble.hubble_completeness_refactored import (
     COMPLETENESS_FHOST_COL,
     COMPLETENESS_MAG_COL,
     COMPLETENESS_MAG_ERR_COL,
+    VALID_COMPLETENESS_MAGNITUDES,
     get_completeness_function_2d,
     get_completeness_function_3d_fhost,
     get_completeness_function_4d_fhost_alpha,
     make_dm_function,
+    normalize_completeness_magnitude,
+    prepare_completeness_magnitude_columns,
 )
 from qvc.hubble.completeness_mock_catalog import (
     COSMO as COMPLETENESS_MOCK_COSMO,
@@ -581,6 +588,7 @@ def make_run_tag(
     only_agn=False,
     completeness=True,
     completeness_mode="2d",
+    completeness_magnitude="dereddened",
     disable_ceph_dist_calibration=False,
     use_planck_h0_prior=False,
     use_planck_om_prior=False,
@@ -592,7 +600,14 @@ def make_run_tag(
     zmin, zmax = z_range
     n_tag = "all" if N is None else f"N{N}"
     z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
-    completeness_tag = f"_{completeness_mode}" if completeness else "_disable_completeness"
+    completeness_magnitude = normalize_completeness_magnitude(
+        completeness_magnitude
+    )
+    completeness_tag = (
+        f"_{completeness_mode}_compmag-{completeness_magnitude}"
+        if completeness
+        else "_disable_completeness"
+    )
     ceph_tag = "_nocephdist_planckh0" if disable_ceph_dist_calibration else ""
     planck_h0_tag = "_planckh0" if use_planck_h0_prior and not disable_ceph_dist_calibration else ""
     planck_om_tag = "_planckom" if use_planck_om_prior else ""
@@ -1402,6 +1417,7 @@ def _prepare_shared_agn_pivot_context(
     disable_sigma_clip_pass,
     resume_stage,
     prefix,
+    completeness_magnitude="dereddened",
     resume_replot_with_cuts=False,
 ):
     """Build once, or strictly load once, for cosmologies sharing a fit sample."""
@@ -1431,6 +1447,7 @@ def _prepare_shared_agn_pivot_context(
             only_agn=only_agn,
             completeness=completeness,
             completeness_mode=completeness_mode,
+            completeness_magnitude=completeness_magnitude,
             disable_ceph_dist_calibration=disable_ceph_dist_calibration,
             use_planck_h0_prior=use_planck_h0_prior,
             use_planck_om_prior=use_planck_om_prior,
@@ -1517,7 +1534,7 @@ def _build_completeness_params(
     } - set(df_agn_completeness.columns)
     if missing_magnitude_columns:
         raise KeyError(
-            "Completeness requires the attenuated 2500-A magnitude columns: "
+            "Completeness requires prepared 2500-A magnitude columns: "
             f"{sorted(missing_magnitude_columns)}."
         )
 
@@ -1655,10 +1672,76 @@ def _compute_direct_full_sample_completeness_summaries(
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
     early_de_guard=False,
+    dmi_draw_indices=None,
 ):
+    """Replay completeness and optionally retain aligned posterior draws.
+
+    The historical three-value summary return is unchanged when
+    ``dmi_draw_indices`` is omitted.  When indices are supplied, the fourth
+    value is a :class:`HubblePosteriorDrawSelection` carrying the selected
+    draws together with their posterior-row and object-column identities.
+    """
+    samples = np.asarray(flat_samples, dtype=float)
+    if samples.ndim != 2 or samples.shape[0] == 0:
+        raise ValueError(
+            "flat_samples must be a nonempty two-dimensional array; "
+            f"got shape {samples.shape}."
+        )
+    selected_draw_indices = None
+    if dmi_draw_indices is not None:
+        selected_draw_indices = np.asarray(dmi_draw_indices)
+        if (
+            selected_draw_indices.ndim != 1
+            or selected_draw_indices.size == 0
+            or np.issubdtype(selected_draw_indices.dtype, np.bool_)
+            or not np.issubdtype(selected_draw_indices.dtype, np.integer)
+        ):
+            raise ValueError(
+                "dmi_draw_indices must be a nonempty one-dimensional "
+                "integer array."
+            )
+        selected_draw_indices = selected_draw_indices.astype(int, copy=False)
+        if (
+            np.any(selected_draw_indices < 0)
+            or np.any(selected_draw_indices >= samples.shape[0])
+        ):
+            raise ValueError(
+                "dmi_draw_indices contains a row outside "
+                f"[0, {samples.shape[0]})."
+            )
+        if np.unique(selected_draw_indices).size != selected_draw_indices.size:
+            raise ValueError("dmi_draw_indices must not contain duplicates.")
+
     n_plot = len(df_agn_plot_sample)
+    def _selected_draws(values):
+        if "object_id" not in df_agn_plot_sample:
+            raise ValueError(
+                "df_agn_plot_sample must contain object_id when retaining "
+                "posterior dmi draws."
+            )
+        return HubblePosteriorDrawSelection(
+            values=values,
+            sample_indices=selected_draw_indices,
+            object_ids=tuple(
+                str(value)
+                for value in df_agn_plot_sample["object_id"].to_numpy()
+            ),
+        )
+
     if n_plot == 0:
         empty = np.empty(0, dtype=float)
+        if selected_draw_indices is not None:
+            return (
+                empty,
+                empty,
+                None,
+                _selected_draws(
+                    np.empty(
+                        (selected_draw_indices.size, 0),
+                        dtype=float,
+                    )
+                ),
+            )
         return empty, empty, None
 
     if len(df_agn_fit_selection) == 0:
@@ -1666,11 +1749,23 @@ def _compute_direct_full_sample_completeness_summaries(
 
     if completeness_params is None:
         zeros = np.zeros(n_plot, dtype=float)
+        if selected_draw_indices is not None:
+            return (
+                zeros,
+                zeros,
+                None,
+                _selected_draws(
+                    np.zeros(
+                        (selected_draw_indices.size, n_plot),
+                        dtype=float,
+                    )
+                ),
+            )
         return zeros, zeros, None
 
     dmi_draws = []
     sigma_sel_draws = []
-    for theta in np.asarray(flat_samples, dtype=float):
+    for theta in samples:
         _, blob = log_likelihood(
             theta,
             agn_data=df_agn_plot_sample,
@@ -1706,10 +1801,15 @@ def _compute_direct_full_sample_completeness_summaries(
         - np.percentile(dmi_draws, 16, axis=0)
     )
     dmi_selection_sigma_full_direct = np.median(sigma_sel_draws, axis=0)
-    return (
+    summaries = (
         dmi_posterior_median_full_direct,
         dmi_posterior_sigma_full_direct,
         dmi_selection_sigma_full_direct,
+    )
+    if selected_draw_indices is None:
+        return summaries
+    return summaries + (
+        _selected_draws(dmi_draws[selected_draw_indices]),
     )
 
 
@@ -1905,6 +2005,10 @@ def _run_fit_stage(
         checkpoint_file_override=checkpoint_file_override,
         completeness_sim_file=completeness_sim_file,
         completeness_mode=completeness_mode,
+        completeness_magnitude=df_agn_fit_selection.attrs.get(
+            "completeness_magnitude",
+            "dereddened",
+        ),
         compare_sigma_only=compare_sigma_only,
         minimal_plots=minimal_plots,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
@@ -2018,6 +2122,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       checkpoint_file_override=None,
                       completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
                       completeness_mode="2d",
+                      completeness_magnitude="dereddened",
                       N=None,
                       compare_sigma_only=False,
                       minimal_plots=False,
@@ -2034,6 +2139,28 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       df_agn_completeness=None,
                       ):
     validate_completeness_mode(completeness_mode)
+    completeness_magnitude = normalize_completeness_magnitude(
+        df_agn.attrs.get("completeness_magnitude", completeness_magnitude)
+    )
+    if completeness and COMPLETENESS_MAG_COL not in df_agn.columns:
+        df_agn = prepare_completeness_magnitude_columns(
+            df_agn,
+            completeness_magnitude,
+        )
+    if completeness and COMPLETENESS_MAG_COL not in df_agn_all.columns:
+        df_agn_all = prepare_completeness_magnitude_columns(
+            df_agn_all,
+            completeness_magnitude,
+        )
+    if (
+        completeness
+        and df_agn_completeness is not None
+        and COMPLETENESS_MAG_COL not in df_agn_completeness.columns
+    ):
+        df_agn_completeness = prepare_completeness_magnitude_columns(
+            df_agn_completeness,
+            completeness_magnitude,
+        )
     speed = normalize_speed(speed)
     _fit_mode_label(only_sna, only_agn)
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
@@ -2058,6 +2185,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         only_agn=only_agn,
         completeness=completeness,
         completeness_mode=completeness_mode,
+        completeness_magnitude=completeness_magnitude,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
@@ -2147,7 +2275,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         agn_fields += ('eta_sigma',)
     agn_data = {col: df_agn[col].values for col in agn_fields if col in df_agn.columns}
 
-    pantheon_fields = ['zHD', 'm_b_corr', 'IS_CALIBRATOR', 'CEPH_DIST', 'MU_SH0ES_ERR_DIAG']
+    pantheon_fields = ['zHD', 'zHEL', 'm_b_corr', 'IS_CALIBRATOR', 'CEPH_DIST', 'MU_SH0ES_ERR_DIAG']
     pantheon_data = {col: df_pantheon[col].values for col in pantheon_fields if col in df_pantheon.columns}
 
     agn_calibrators_fields = ('MU_CAL', 'MU_CAL_ERR', 'AGN_IS_CALIBRATOR') + agn_fields
@@ -2502,6 +2630,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                prefix="default", uniform_redshift_distribution=False,
                completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
                completeness_mode="2d",
+               completeness_magnitude="dereddened",
                compare_sigma_only=False,
                minimal_plots=False,
                disable_ceph_dist_calibration=False,
@@ -2514,6 +2643,17 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                resume_replot_with_cuts=False,
                agn_pivot_context=None):
     validate_completeness_mode(completeness_mode)
+    completeness_magnitude = normalize_completeness_magnitude(
+        completeness_magnitude
+    )
+    df_agn = prepare_completeness_magnitude_columns(
+        df_agn,
+        completeness_magnitude,
+    )
+    df_agn_all = prepare_completeness_magnitude_columns(
+        df_agn_all,
+        completeness_magnitude,
+    )
     speed = normalize_speed(speed)
     _fit_mode_label(only_sna, only_agn)
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
@@ -2527,6 +2667,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         only_agn=only_agn,
         completeness=completeness,
         completeness_mode=completeness_mode,
+        completeness_magnitude=completeness_magnitude,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
@@ -2538,6 +2679,11 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     os.makedirs(plot_path, exist_ok=True)
     print(f"Saving plots to ", plot_path)
     if completeness:
+        print(
+            "Completeness magnitude: "
+            f"{completeness_magnitude} "
+            f"({df_agn.attrs['completeness_magnitude_source']})."
+        )
         if completeness_sim_file is None:
             if resume_replot_with_cuts:
                 print("Completeness diagnostics enabled with a freshly generated mock catalog.")
@@ -2777,10 +2923,16 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 resume_replot_with_cuts=False,
                 df_agn_completeness=df_agn_full_sample_preclip,
             )
+            posterior_sample_indices_pass1 = (
+                get_hubble_posterior_sample_indices(
+                    len(flat_samples_pass1)
+                )
+            )
             (
                 dmi_posterior_median_pass1_full,
                 dmi_posterior_sigma_pass1_full,
                 dmi_selection_sigma_pass1_full,
+                dmi_posterior_draws_pass1_full,
             ) = _compute_direct_full_sample_completeness_summaries(
                 flat_samples_pass1,
                 df_agn_fit_selection=df_agn_pass1_fit_selection,
@@ -2802,6 +2954,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_eta_sigma_term=use_eta_sigma_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 early_de_guard=early_de_guard,
+                dmi_draw_indices=posterior_sample_indices_pass1,
             )
             pass1_residuals_full, pass1_clipping_sigma_full, _, _, _ = plot_hubble(
                 flat_samples_pass1,
@@ -2821,6 +2974,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 dmi_values=dmi_posterior_median_pass1_full,
                 dmi_sigma=dmi_posterior_sigma_pass1_full,
                 dmi_selection_sigma=dmi_selection_sigma_pass1_full,
+                dmi_posterior_draws=dmi_posterior_draws_pass1_full,
+                posterior_sample_indices=posterior_sample_indices_pass1,
                 filename="hubble_diagram_pass1_full_sample_debiased.pdf",
                 residuals_csv_filename=None if minimal_plots else "hubble_plot_residuals_pass1.csv",
                 compute_only=minimal_plots,
@@ -2895,6 +3050,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     dmi_values=dmi_posterior_median_pass1_full,
                     dmi_sigma=dmi_posterior_sigma_pass1_full,
                     dmi_selection_sigma=dmi_selection_sigma_pass1_full,
+                    dmi_posterior_draws=dmi_posterior_draws_pass1_full,
+                    posterior_sample_indices=posterior_sample_indices_pass1,
                     clipped_mask=clipped_mask_pass1_full,
                     filename="hubble_diagram_pass1_full_sample_clipped_debiased.pdf",
                     residuals_csv_filename="hubble_plot_residuals_pass1_clipped.csv",
@@ -3092,10 +3249,14 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         return flat_samples, model_labels, dm_interp, logZ, logZerr, None, age, age_err
 
     if minimal_plots:
+        posterior_sample_indices = get_hubble_posterior_sample_indices(
+            len(flat_samples)
+        )
         (
             dmi_posterior_median_full,
             dmi_posterior_sigma_full,
             dmi_selection_sigma_full,
+            dmi_posterior_draws_full,
         ) = _compute_direct_full_sample_completeness_summaries(
             flat_samples,
             df_agn_fit_selection=df_agn_pass2_fit_selection,
@@ -3117,38 +3278,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             use_eta_sigma_term=use_eta_sigma_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
             early_de_guard=early_de_guard,
-        )
-        df_agn_agn_likelihood_chi2_selection = df_agn_pass2_fit_selection
-        if resume_replot_with_cuts:
-            df_agn_agn_likelihood_chi2_selection = df_agn_pass2_plot_sample[
-                df_agn_pass2_plot_sample["z"].between(z_range[0], z_range[1])
-            ].copy()
-        chisq_red_agn_likelihood_space, _ = compute_agn_likelihood_space_reduced_chi2(
-            flat_samples,
-            model_labels,
-            df_agn_agn_likelihood_chi2_selection,
-            cosmo_model,
-            z_pivot_agn=z_pivot_agn,
-            agn_pivot_context=agn_pivot_context,
-            use_alpha_lambda_term=use_alpha_lambda_term,
-            use_eta_sigma_term=use_eta_sigma_term,
-            use_redshift_log_f_term=use_redshift_log_f_term,
-        )
-        df_agn_agn_likelihood_chi2_selection_zgt1 = df_agn_agn_likelihood_chi2_selection[
-            df_agn_agn_likelihood_chi2_selection["z"].between(
-                1.0, z_range[1], inclusive="right"
-            )
-        ]
-        chisq_red_agn_likelihood_space_zgt1, _ = compute_agn_likelihood_space_reduced_chi2(
-            flat_samples,
-            model_labels,
-            df_agn_agn_likelihood_chi2_selection_zgt1,
-            cosmo_model,
-            z_pivot_agn=z_pivot_agn,
-            agn_pivot_context=agn_pivot_context,
-            use_alpha_lambda_term=use_alpha_lambda_term,
-            use_eta_sigma_term=use_eta_sigma_term,
-            use_redshift_log_f_term=use_redshift_log_f_term,
+            dmi_draw_indices=posterior_sample_indices,
         )
         (
             debiased_residuals,
@@ -3174,6 +3304,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             dmi_values=dmi_posterior_median_full,
             dmi_sigma=dmi_posterior_sigma_full,
             dmi_selection_sigma=dmi_selection_sigma_full,
+            dmi_posterior_draws=dmi_posterior_draws_full,
+            posterior_sample_indices=posterior_sample_indices,
             residuals_csv_filename="hubble_plot_residuals.csv",
             sigma_clip_threshold=sigma_clip_threshold if apply_two_pass_sigma_clip else None,
             z_range=z_range,
@@ -3181,8 +3313,6 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             use_eta_sigma_term=use_eta_sigma_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
             only_agn=only_agn,
-            agn_likelihood_space_chi2=chisq_red_agn_likelihood_space,
-            agn_likelihood_space_chi2_zgt1=chisq_red_agn_likelihood_space_zgt1,
             agn_pivot_context=agn_pivot_context,
         )
         print(
@@ -3214,10 +3344,14 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         filename="sigma_uv_mpred_correction_postcut.pdf",
     )
 
+    posterior_sample_indices = get_hubble_posterior_sample_indices(
+        len(flat_samples)
+    )
     (
         dmi_posterior_median_full_direct,
         dmi_posterior_sigma_full_direct,
         dmi_selection_sigma_full_direct,
+        dmi_posterior_draws_full_direct,
     ) = _compute_direct_full_sample_completeness_summaries(
         flat_samples,
         df_agn_fit_selection=df_agn_pass2_fit_selection,
@@ -3239,10 +3373,12 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         early_de_guard=early_de_guard,
+        dmi_draw_indices=posterior_sample_indices,
     )
     dmi_posterior_median_full = dmi_posterior_median_full_direct
     dmi_posterior_sigma_full = dmi_posterior_sigma_full_direct
     dmi_selection_sigma_full = dmi_selection_sigma_full_direct
+    dmi_posterior_draws_full = dmi_posterior_draws_full_direct
 
     print("Plotting predicted L2500 vs ...")
     plot_predicted_L2500_vs_sigmahat(
@@ -3408,21 +3544,6 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
-    df_agn_agn_likelihood_chi2_selection_zgt1 = df_agn_agn_likelihood_chi2_selection[
-        df_agn_agn_likelihood_chi2_selection["z"].between(1.0, z_range[1], inclusive="right")
-    ]
-    chisq_red_agn_likelihood_space_zgt1, _ = compute_agn_likelihood_space_reduced_chi2(
-        flat_samples,
-        model_labels,
-        df_agn_agn_likelihood_chi2_selection_zgt1,
-        cosmo_model,
-        z_pivot_agn=z_pivot_agn,
-        agn_pivot_context=agn_pivot_context,
-        use_alpha_lambda_term=use_alpha_lambda_term,
-        use_eta_sigma_term=use_eta_sigma_term,
-        use_redshift_log_f_term=use_redshift_log_f_term,
-    )
-
     print("Plotting Hubble diagram...")
     if dmi_posterior_median_full is not None:
         plot_completeness_diagnostics(
@@ -3442,6 +3563,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     dmi_values=dmi_posterior_median_full,
                     dmi_sigma=dmi_posterior_sigma_full,
                     dmi_selection_sigma=dmi_selection_sigma_full,
+                    dmi_posterior_draws=dmi_posterior_draws_full,
+                    posterior_sample_indices=posterior_sample_indices,
                     residuals_csv_filename="hubble_plot_residuals.csv",
                     sigma_clip_threshold=sigma_clip_threshold if apply_two_pass_sigma_clip else None,
                     z_range=z_range,
@@ -3449,8 +3572,6 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     use_eta_sigma_term=use_eta_sigma_term,
                     use_redshift_log_f_term=use_redshift_log_f_term,
                     only_agn=only_agn,
-                    agn_likelihood_space_chi2=chisq_red_agn_likelihood_space,
-                    agn_likelihood_space_chi2_zgt1=chisq_red_agn_likelihood_space_zgt1,
                     agn_pivot_context=agn_pivot_context)
     debiased_residuals, debiased_clipping_sigma, mu_pred_median_debiased, mu_pred_std_debiased, mu_pred_std_debiased_with_scatter = r
     if apply_two_pass_sigma_clip:
@@ -3598,15 +3719,32 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 agn_pivot_context=agn_pivot_context)
     biased_residuals, biased_residuals_err, _, _, _ = r
 
-    hubble_chi2_mask = df_agn_pass2_plot_sample["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
-    if np.any(hubble_chi2_mask):
-        chisq_red_hubble_debiased, _ = reduced_chi_squared(
+    n_agn_params = sum(label != "M0_sn" for label in model_labels)
+    hubble_chi2_mask = (
+        df_agn_pass2_plot_sample["z"]
+        .between(z_range[0], z_range[1])
+        .to_numpy(dtype=bool)
+        & np.isfinite(debiased_residuals)
+        & np.isfinite(mu_pred_std_debiased)
+        & np.isfinite(mu_pred_std_debiased_with_scatter)
+        & (mu_pred_std_debiased > 0.0)
+        & (mu_pred_std_debiased_with_scatter > 0.0)
+    )
+    if np.count_nonzero(hubble_chi2_mask) > n_agn_params:
+        chisq_red_hubble_debiased_full, _ = reduced_chi_squared(
+            debiased_residuals[hubble_chi2_mask],
+            mu_pred_std_debiased_with_scatter[hubble_chi2_mask],
+            n_params=n_agn_params,
+        )
+        chisq_red_hubble_debiased_data_only, _ = reduced_chi_squared(
             debiased_residuals[hubble_chi2_mask],
             mu_pred_std_debiased[hubble_chi2_mask],
-            n_params=len(model_labels)-1,
+            n_params=n_agn_params,
         )
     else:
-        chisq_red_hubble_debiased = np.nan
+        chisq_red_hubble_debiased_full = np.nan
+        chisq_red_hubble_debiased_data_only = np.nan
+    chisq_red_hubble_debiased = chisq_red_hubble_debiased_full
     chisq_red_hubble_debiased_no_mpred_err = np.nan
     hdbudget_path = Path(plot_path) / "diagnostics" / "hubble_error_budget_per_object_debiased.csv"
     if np.any(hubble_chi2_mask) and hdbudget_path.exists():
@@ -3618,6 +3756,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             "sigma_lens_term",
             "z_err_term",
             "intrinsic_scatter_term",
+            "sigma_dmi_term",
         }
         if required_no_mpred_cols.issubset(hdbudget_df.columns):
             budget_mask = hdbudget_df["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
@@ -3626,12 +3765,18 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 + np.square(hdbudget_df["sigma_lens_term"].to_numpy(dtype=float))
                 + np.square(hdbudget_df["z_err_term"].to_numpy(dtype=float))
                 + np.square(hdbudget_df["intrinsic_scatter_term"].to_numpy(dtype=float))
+                + np.square(
+                    np.nan_to_num(
+                        hdbudget_df["sigma_dmi_term"].to_numpy(dtype=float),
+                        nan=0.0,
+                    )
+                )
             )
-            if np.any(budget_mask):
+            if np.count_nonzero(budget_mask) > n_agn_params:
                 chisq_red_hubble_debiased_no_mpred_err, _ = reduced_chi_squared(
                     hdbudget_df["residuals"].to_numpy(dtype=float)[budget_mask],
                     sigma_no_mpred[budget_mask],
-                    n_params=len(model_labels)-1,
+                    n_params=n_agn_params,
                 )
         else:
             missing_no_mpred_cols = sorted(required_no_mpred_cols.difference(hdbudget_df.columns))
@@ -3664,6 +3809,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         dmi_values=dmi_posterior_median_full,
         dmi_sigma=dmi_posterior_sigma_full,
         dmi_selection_sigma=dmi_selection_sigma_full,
+        dmi_posterior_draws=dmi_posterior_draws_full,
+        posterior_sample_indices=posterior_sample_indices,
         filename="hubble_diagram_debiased_no_logf.pdf",
         residuals_csv_filename="hubble_plot_residuals_no_logf.csv",
         sigma_clip_threshold=sigma_clip_threshold if apply_two_pass_sigma_clip else None,
@@ -3673,8 +3820,6 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_redshift_log_f_term=use_redshift_log_f_term,
         only_agn=only_agn,
         use_intrinsic_scatter_in_residual_sigma=False,
-        agn_likelihood_space_chi2=chisq_red_agn_likelihood_space,
-        agn_likelihood_space_chi2_zgt1=chisq_red_agn_likelihood_space_zgt1,
         diagnostics_suffix="_debiased_no_logf",
         agn_pivot_context=agn_pivot_context,
     )
@@ -3835,6 +3980,24 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         plot_path=plot_path,
         show=False,
     )
+    plot_redshift_wiggle_diagnostics(
+        df_agn_pass2_plot_sample,
+        biased_residuals,
+        biased_residuals_err,
+        debiased_residuals,
+        debiased_clipping_sigma,
+        plot_path=plot_path,
+        z_range=z_range,
+        show=False,
+    )
+    plot_parameter_residual_diagnostics(
+        df_agn_pass2_plot_sample,
+        debiased_residuals,
+        debiased_clipping_sigma,
+        plot_path=plot_path,
+        z_range=z_range,
+        show=False,
+    )
     plot_fast_vs_uv_variability(df_agn_pass2_plot_sample, plot_path=plot_path, show=False)
 
     
@@ -3878,13 +4041,21 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             )
 
     print(f"\033[94mReduced chi-squared (debiased) M2500: {chisq_red_M2500_debiased:.3f}\033[0m")
-    print(f"\033[94mReduced chi-squared (debiased) Hubble: {chisq_red_hubble_debiased:.3f}\033[0m")
+    print(
+        "\033[94mReduced chi-squared (debiased) Hubble, full: "
+        f"{chisq_red_hubble_debiased_full:.3f}\033[0m"
+    )
+    print(
+        "\033[94mReduced chi-squared (debiased) Hubble, data only: "
+        f"{chisq_red_hubble_debiased_data_only:.3f}\033[0m"
+    )
     print(f"\033[94mReduced chi-squared (AGN likelihood-space residuals): {chisq_red_agn_likelihood_space:.3f}\033[0m")
     print(f"\033[94mReduced chi-squared (debiased) Hubble no Mpred err: {chisq_red_hubble_debiased_no_mpred_err:.3f}\033[0m")
     print(f"\033[94mReduced chi-squared (debiased) L2500: {chisq_red_L2500:.3f}\033[0m")
     chisq_dict = {
         'M2500': chisq_red_M2500_debiased,
-        'Hubble': chisq_red_hubble_debiased,
+        'Hubble': chisq_red_hubble_debiased_full,
+        'Hubble_data_only': chisq_red_hubble_debiased_data_only,
         'AGN_likelihood_space': chisq_red_agn_likelihood_space,
         'L2500': chisq_red_L2500
     }
@@ -3921,6 +4092,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             prefix="default", result_prefix="", uniform_redshift_distribution=False,
             completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
             completeness_mode="2d",
+            completeness_magnitude="dereddened",
             compare_sigma_only=False,
             disable_ceph_dist_calibration=False,
             use_planck_h0_prior=False,
@@ -3932,6 +4104,9 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             early_de_guard=False):
 
     validate_completeness_mode(completeness_mode)
+    completeness_magnitude = normalize_completeness_magnitude(
+        completeness_magnitude
+    )
     speed = normalize_speed(speed)
     if only_agn:
         print("Running full model comparison in AGN-only mode; SNe-only comparison branch is disabled.")
@@ -3940,7 +4115,11 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     zmin, zmax = z_range
     n_tag = "all" if N is None else f"N{N}"
     z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
-    completeness_tag = f"_{completeness_mode}" if completeness else "_disable_completeness"
+    completeness_tag = (
+        f"_{completeness_mode}_compmag-{completeness_magnitude}"
+        if completeness
+        else "_disable_completeness"
+    )
     ceph_tag = "_nocephdist_planckh0" if disable_ceph_dist_calibration else ""
     planck_h0_tag = "_planckh0" if use_planck_h0_prior and not disable_ceph_dist_calibration else ""
     planck_om_tag = "_planckom" if use_planck_om_prior else ""
@@ -3973,6 +4152,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         speed=speed,
         completeness=completeness,
         completeness_mode=completeness_mode,
+        completeness_magnitude=completeness_magnitude,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
@@ -4001,6 +4181,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution,
                        completeness_sim_file=completeness_sim_file,
                        completeness_mode=completeness_mode,
+                       completeness_magnitude=completeness_magnitude,
                        compare_sigma_only=compare_sigma_only,
                        minimal_plots=minimal_plots,
                        disable_ceph_dist_calibration=disable_ceph_dist_calibration,
@@ -4036,6 +4217,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                            prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution,
                            completeness_sim_file=completeness_sim_file,
                            completeness_mode=completeness_mode,
+                           completeness_magnitude=completeness_magnitude,
                            compare_sigma_only=compare_sigma_only,
                            minimal_plots=minimal_plots,
                            disable_ceph_dist_calibration=disable_ceph_dist_calibration,
@@ -4326,6 +4508,16 @@ if __name__ == "__main__":
         help="Completeness model to use: 2D p(det|m,z), 3D p(det|m,z,f_host_2500_psf), or 4D p(det|m,z,f_host_2500_psf,alpha_lambda).",
     )
     parser.add_argument(
+        "--completeness_magnitude",
+        type=str,
+        choices=list(VALID_COMPLETENESS_MAGNITUDES),
+        default="dereddened",
+        help=(
+            "m_2500 definition used by the completeness model: "
+            "'dereddened' (default) or 'attenuated'."
+        ),
+    )
+    parser.add_argument(
         "--correct-sigma-uv-host",
         action="store_true",
         default=False,
@@ -4444,6 +4636,7 @@ if __name__ == "__main__":
             speed=args.speed,
             completeness=not args.disable_completeness,
             completeness_mode=args.completeness_mode,
+            completeness_magnitude=args.completeness_magnitude,
             disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
             use_planck_h0_prior=effective_use_planck_h0_prior,
             use_planck_om_prior=args.use_planck_om_prior,
@@ -4469,6 +4662,7 @@ if __name__ == "__main__":
                 prefix=args.prefix,
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
+                completeness_magnitude=args.completeness_magnitude,
                 only_sna=args.only_sna,
                 only_agn=args.only_agn,
                 N=effective_N,
@@ -4496,6 +4690,7 @@ if __name__ == "__main__":
             speed=args.speed,
             completeness=not args.disable_completeness,
             completeness_mode=args.completeness_mode,
+            completeness_magnitude=args.completeness_magnitude,
             disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
             use_planck_h0_prior=effective_use_planck_h0_prior,
             use_planck_om_prior=args.use_planck_om_prior,
@@ -4521,6 +4716,7 @@ if __name__ == "__main__":
                 prefix=args.prefix,
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
+                completeness_magnitude=args.completeness_magnitude,
                 compare_sigma_only=args.compare_sigma_only,
                 minimal_plots=args.minimal_plots,
                 disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
@@ -4540,7 +4736,11 @@ if __name__ == "__main__":
         zmin, zmax = args.z_range
         n_tag = "all" if effective_N is None else f"N{effective_N}"
         z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
-        completeness_tag = f"_{args.completeness_mode}" if not args.disable_completeness else "_disable_completeness"
+        completeness_tag = (
+            f"_{args.completeness_mode}_compmag-{args.completeness_magnitude}"
+            if not args.disable_completeness
+            else "_disable_completeness"
+        )
         ceph_tag = "_nocephdist_planckh0" if args.disable_ceph_dist_calibration else ""
         planck_h0_tag = "_planckh0" if effective_use_planck_h0_prior and not args.disable_ceph_dist_calibration else ""
         planck_om_tag = "_planckom" if args.use_planck_om_prior else ""
@@ -4578,6 +4778,7 @@ if __name__ == "__main__":
                 prefix=args.prefix, result_prefix=args.result_prefix, uniform_redshift_distribution=args.uniform_redshift_distribution,
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
+                completeness_magnitude=args.completeness_magnitude,
                 compare_sigma_only=args.compare_sigma_only,
                 minimal_plots=args.minimal_plots,
                 disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,

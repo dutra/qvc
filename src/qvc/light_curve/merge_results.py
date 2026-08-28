@@ -18,16 +18,19 @@ from tqdm import tqdm
 
 from qvc.hubble.cuts import LOG_SIGMA_UV_MAX, LOG_SIGMA_UV_MIN, LOG_TAU_UV_RF_MAX, LOG_TAU_UV_RF_MIN
 from qvc.hubble.hubble_utils import resolve_qvc_data_path
-from qvc.light_curve.fit_light_curves import make_lc
 from qvc.light_curve.multiband_generate_lc import (
     MACLEOD_BANDS,
     MACLEOD_COLUMNS,
-    concat_light_curves,
-    populate_sdss_fields,
     read_macleod_band,
     resolve_stone_s82_matches,
 )
 from qvc.light_curve.plotting_appendix import plot_sigma_tau_identity_grid
+from qvc.provenance import (
+    build_run_record,
+    provenance_fingerprint,
+    read_hdf5_provenance,
+    write_hdf5_provenance,
+)
 
 MACLEOD_YEAR_DAYS = 365.25
 MACLEOD_IDENTITY_BANDS = ("u", "g", "r", "i")
@@ -204,7 +207,7 @@ def _build_flat_column(values, string_dt):
     return float, out
 
 
-def write_quasars_to_h5_flat(quasars, h5_path):
+def write_quasars_to_h5_flat(quasars, h5_path, provenance=None):
     os.makedirs(os.path.dirname(h5_path) or ".", exist_ok=True)
     string_dt = h5py.string_dtype(encoding="utf-8")
 
@@ -221,8 +224,55 @@ def write_quasars_to_h5_flat(quasars, h5_path):
             values = [q.get(field, None) for q in quasars]
             dtype, col = _build_flat_column(values, string_dt)
             hdf.create_dataset(field, data=col, dtype=dtype)
+        if provenance is not None:
+            write_hdf5_provenance(hdf, provenance)
 
     print(f"Wrote {len(quasars)} rows to flat HDF5 {h5_path}")
+
+
+def summarize_source_provenance(file_list):
+    """Return compact run-level provenance counts without copying every record."""
+    groups = {}
+    missing = 0
+    for path in file_list:
+        try:
+            record = read_hdf5_provenance(path)
+        except (OSError, ValueError):
+            record = None
+        if not record:
+            missing += 1
+            continue
+        run_identity = {
+            "schema": record.get("schema"),
+            "entrypoint": record.get("entrypoint"),
+            "submission": record.get("submission"),
+            "parsed_args": record.get("module", {}).get("parsed_args"),
+            "qvc_git": record.get("qvc_git"),
+        }
+        # Object selectors differ per shard but do not define a distinct run.
+        parsed = run_identity.get("parsed_args")
+        if isinstance(parsed, dict):
+            parsed = dict(parsed)
+            parsed.pop("filter_object_id", None)
+            run_identity["parsed_args"] = parsed
+        fingerprint = provenance_fingerprint(run_identity)
+        group = groups.setdefault(
+            fingerprint,
+            {
+                "fingerprint": fingerprint,
+                "source_count": 0,
+                "entrypoint": record.get("entrypoint", ""),
+                "qvc_git_commit": record.get("qvc_git", {}).get("commit", ""),
+                "submission": record.get("submission"),
+            },
+        )
+        group["source_count"] += 1
+    return {
+        "source_count": len(file_list),
+        "sources_without_provenance": missing,
+        "unique_run_count": len(groups),
+        "runs": sorted(groups.values(), key=lambda item: item["fingerprint"]),
+    }
 
 
 def enforce_expected_count(per_file_count, expected_n, file_path):
@@ -307,6 +357,9 @@ def load_and_merge_h5(file_list, expected_n, load_n, workers=1):
 def attach_variability_metrics(rows):
     """Reload raw light curves and attach authoritative corrected variability metrics."""
 
+    from qvc.light_curve.fit_light_curves import make_lc
+    from qvc.light_curve.multiband_generate_lc import concat_light_curves
+
     object_ids = [str(row["object_id"]) for row in rows if row.get("object_id") not in (None, "")]
     unique_object_ids = list(dict.fromkeys(object_ids))
     reloaded = concat_light_curves(filter_object_ids=unique_object_ids, progress_bar=False)
@@ -362,8 +415,82 @@ def build_stone_identity_plot_path(prefix: str, base_dir: str) -> str:
     return str(base_path.parent / "plots" / prefix / "sigma_tau_identity_grid.pdf")
 
 
+def _format_light_curve_runtime_annotation(rows):
+    values = []
+    for row in rows:
+        try:
+            value = float(row.get("light_curve_fit_total_elapsed_sec", np.nan))
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value) and value >= 0.0:
+            values.append(value)
+
+    if not values:
+        return None
+
+    values = np.asarray(values, dtype=float)
+    mean_seconds = float(np.mean(values))
+    p90_seconds = float(np.percentile(values, 90.0))
+    largest_seconds = max(mean_seconds, p90_seconds)
+    if largest_seconds >= 3600.0:
+        scale, unit = 3600.0, "h"
+    elif largest_seconds >= 60.0:
+        scale, unit = 60.0, "min"
+    else:
+        scale, unit = 1.0, "s"
+    return (
+        f"Runtime: mean {mean_seconds / scale:.1f} {unit}"
+        f" · p90 {p90_seconds / scale:.1f} {unit}"
+    )
+
+
+def _identity_fit_fields(bands, *, include_coordinates=False):
+    fields = ["object_id"]
+    if include_coordinates:
+        fields.extend(("ra", "dec"))
+    for band in bands:
+        fields.extend(
+            (
+                f"log_sigma_band_{band}",
+                f"log_sigma_band_{band}_err",
+                f"log_tau_band_{band}_RF",
+                f"log_tau_band_{band}_RF_err",
+            )
+        )
+    return fields
+
+
+def _build_identity_fit_frame(rows, bands, *, include_coordinates=False):
+    """Build the narrow fit table needed by sigma/tau identity plots."""
+
+    fields = _identity_fit_fields(
+        bands,
+        include_coordinates=include_coordinates,
+    )
+    if not rows:
+        return pd.DataFrame(columns=fields)
+
+    missing = sorted(
+        {
+            field
+            for row in rows
+            for field in fields
+            if field not in row
+        }
+    )
+    if missing:
+        raise KeyError(
+            "Merged light-curve rows are missing fields required for the "
+            f"sigma/tau identity plot: {missing}"
+        )
+    return pd.DataFrame(
+        {field: [row[field] for row in rows] for field in fields},
+        columns=fields,
+    )
+
+
 def build_stone_identity_plot_data(rows, stone_fits_path=None, s82_catalog_path=None, max_sep_arcsec=1.0):
-    df_rows = pd.DataFrame(rows).copy()
+    df_rows = _build_identity_fit_frame(rows, STONE_IDENTITY_BANDS)
     if df_rows.empty:
         return df_rows
 
@@ -429,6 +556,12 @@ def build_stone_identity_plot_data(rows, stone_fits_path=None, s82_catalog_path=
 
 
 def write_stone_sigma_tau_identity_grid(rows, output_path: str, stone_fits_path=None, s82_catalog_path=None):
+    runtime_annotation = _format_light_curve_runtime_annotation(rows)
+    if runtime_annotation is None:
+        print(
+            "WARNING: Stone comparison plot has no finite nonnegative "
+            "light_curve_fit_total_elapsed_sec values; omitting runtime annotation."
+        )
     plot_df = build_stone_identity_plot_data(
         rows,
         stone_fits_path=stone_fits_path,
@@ -467,6 +600,7 @@ def write_stone_sigma_tau_identity_grid(rows, output_path: str, stone_fits_path=
         output_path=output_path,
         sigma_limits=STONE_SIGMA_LIMITS,
         tau_limits=STONE_TAU_LIMITS,
+        figure_annotation=runtime_annotation,
     )
     plt.close(fig)
     print(f"Wrote Stone sigma/tau identity grid to {output_path}")
@@ -621,7 +755,11 @@ def build_macleod_identity_plot_data(rows, macleod_dir=None, max_sep_arcsec=1.0)
     else:
         macleod_dir = str(macleod_dir)
 
-    df_rows = pd.DataFrame(rows).copy()
+    df_rows = _build_identity_fit_frame(
+        rows,
+        MACLEOD_IDENTITY_BANDS,
+        include_coordinates=True,
+    )
     if df_rows.empty:
         return {}
 
@@ -741,7 +879,11 @@ def build_suberlak_identity_plot_data(rows, suberlak_path=None, max_sep_arcsec=1
     else:
         suberlak_path = str(suberlak_path)
 
-    df_rows = pd.DataFrame(rows).copy()
+    df_rows = _build_identity_fit_frame(
+        rows,
+        SUBERLAK_IDENTITY_BANDS,
+        include_coordinates=True,
+    )
     if df_rows.empty:
         return df_rows
 
@@ -1070,6 +1212,8 @@ def main(argv=None):
         load_n=args.N,
         workers=args.workers,
     )
+    source_files = file_list if args.N is None else file_list[: args.N]
+    source_provenance = summarize_source_provenance(source_files)
     print(f"Loaded total of {len(all_quasars)} rows from {len(file_list)} shards.")
 
     dedup_keys = args.dedup_keys
@@ -1080,6 +1224,8 @@ def main(argv=None):
 
     if not args.skip_populate_sdss and all_quasars:
         print("Populating SDSS fields...")
+        from qvc.light_curve.multiband_generate_lc import populate_sdss_fields
+
         all_quasars = populate_sdss_fields(all_quasars)
         if all_quasars and "plate" in all_quasars[0]:
             print(all_quasars[0]["plate"])
@@ -1110,7 +1256,14 @@ def main(argv=None):
                     seen.append(k)
         write_quasars_to_csv(all_quasars, out_path, fields=seen)
     elif out_format == "h5":
-        write_quasars_to_h5_flat(all_quasars, out_path)
+        merge_provenance = build_run_record(
+            "qvc.light_curve.merge_results",
+            args,
+            input_paths={"source_shard_directory": shard_dir},
+            event_type="merge",
+        )
+        merge_provenance["source_runs"] = source_provenance
+        write_quasars_to_h5_flat(all_quasars, out_path, provenance=merge_provenance)
     else:
         print(f"ERROR: Unsupported out-format: {out_format}")
         sys.exit(1)

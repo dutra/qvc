@@ -22,6 +22,7 @@ from qvc.hubble.completeness_mock_catalog import (
     AB_ABSOLUTE_MAG_ZEROPOINT,
     LOG10_MAG_JACOBIAN,
     NU_2500_HZ,
+    SHEN_GLOBAL_FIT,
     _configure_shen_paths,
     build_shen_lf,
     log_nu_lnu_to_ab_absolute_magnitude,
@@ -44,10 +45,10 @@ def test_configure_shen_paths_overrides_checkout_config(tmp_path):
     assert obdata_path == f"{expected_homepath}obdata_copy{os.sep}"
 
 
-def test_build_shen_lf_uses_extinction_convolved_physical_2500_channel(
+def test_build_shen_lf_uses_global_fit_a_extinction_convolved_2500_channel(
     tmp_path, monkeypatch
 ):
-    """Gold test that the Shen mock parent is the observed 2500 A LF."""
+    """Gold test that the mock parent is Shen global fit A at observed 2500 A."""
     calls = []
     log_nu_lnu = np.array([44.0, 45.0])
     log_phi_dex = np.array([-5.0, -6.0])
@@ -63,7 +64,11 @@ def test_build_shen_lf_uses_extinction_convolved_physical_2500_channel(
     phi_log10, m_grid, z_bins = build_shen_lf(tmp_path)
 
     assert len(calls) == len(z_bins) == 40
-    assert all(np.isclose(nu, NU_2500_HZ) and model == "B" for _, nu, model in calls)
+    assert SHEN_GLOBAL_FIT == "A"
+    assert all(
+        np.isclose(nu, NU_2500_HZ) and model == SHEN_GLOBAL_FIT
+        for _, nu, model in calls
+    )
     np.testing.assert_allclose(
         phi_log10,
         np.tile(log_phi_dex + LOG10_MAG_JACOBIAN, (len(z_bins), 1)),
@@ -184,7 +189,9 @@ def _make_fake_fhost_df(n=200, seed=123):
             "object_id": [f"agn_{i:04d}" for i in range(n)],
             "z": z,
             "apparent_mag_2500": m2500,
+            "m_2500_dereddened": m2500,
             "m_2500_attenuated_model": m2500,
+            hcr.COMPLETENESS_MAG_COL: m2500,
             "f_host_2500": f_host,
             "f_host_2500_psf": f_host,
         }
@@ -246,8 +253,12 @@ def _make_fake_agn_sample_with_fhost(n_agn=24, seed=123):
             "z_err": np.full(n_agn, 0.002),
             "apparent_mag_2500": apparent_mag,
             "apparent_mag_2500_err": np.full(n_agn, 0.04),
+            "m_2500_dereddened": apparent_mag,
+            "m_2500_dereddened_err": np.full(n_agn, 0.04),
             "m_2500_attenuated_model": apparent_mag + 0.35,
             "m_2500_attenuated_model_err": np.full(n_agn, 0.06),
+            hcr.COMPLETENESS_MAG_COL: apparent_mag,
+            hcr.COMPLETENESS_MAG_ERR_COL: np.full(n_agn, 0.04),
             "log_sigma_hat0": log_sigma_hat0,
             "log_sigma_uv": log_sigma_uv,
             "log_tau_uv_rf": log_tau_uv,
@@ -473,6 +484,7 @@ def test_log_likelihood_does_not_use_completeness_smoothing_as_extra_scatter(mon
     df_pantheon = pd.DataFrame(
         {
             "zHD": np.linspace(0.02, 0.8, 8),
+            "zHEL": np.linspace(0.02, 0.8, 8),
             "m_b_corr": np.linspace(15.0, 18.0, 8),
             "IS_CALIBRATOR": np.zeros(8, dtype=int),
             "CEPH_DIST": np.full(8, -9.0),
@@ -712,6 +724,7 @@ def test_get_completeness_function_3d_fhost_and_loglikelihood_smoke(tmp_path):
     df_pantheon = pd.DataFrame(
         {
             "zHD": np.linspace(0.02, 0.8, 12),
+            "zHEL": np.linspace(0.02, 0.8, 12),
             "m_b_corr": np.linspace(15.0, 18.0, 12),
             "IS_CALIBRATOR": np.zeros(12, dtype=int),
             "CEPH_DIST": np.full(12, -9.0),

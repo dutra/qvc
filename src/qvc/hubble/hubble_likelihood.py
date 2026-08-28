@@ -37,8 +37,20 @@ def _attenuated_selection_inputs(
     hubble_model_magnitude,
     hubble_total_error,
 ):
-    """Express the selection integral in the attenuated 2500-A magnitude."""
-    selection_magnitude = np.asarray(agn_data[COMPLETENESS_MAG_COL], dtype=float)
+    """Express the selection integral in the configured 2500-A magnitude."""
+    missing = {
+        COMPLETENESS_MAG_COL,
+        COMPLETENESS_MAG_ERR_COL,
+    } - set(agn_data)
+    if missing:
+        raise KeyError(
+            "Completeness likelihood requires explicitly prepared magnitude "
+            f"fields {sorted(missing)}."
+        )
+    selection_magnitude = np.asarray(
+        agn_data[COMPLETENESS_MAG_COL],
+        dtype=float,
+    )
     selection_magnitude_error = np.asarray(
         agn_data[COMPLETENESS_MAG_ERR_COL],
         dtype=float,
@@ -208,6 +220,39 @@ def empty_blob(N_obj):
     # FIX: always return (3, N_obj) float array
     return np.zeros((3, N_obj), dtype=float)
 
+
+def pantheon_distance_modulus(cosmo, z_hd, z_hel):
+    """Return the Pantheon+ distance modulus for separate HD/heliocentric z.
+
+    Pantheon+ uses the Hubble-diagram redshift for the comoving-distance
+    integral and the heliocentric redshift for the photon redshift factor:
+
+        D_L = (1 + z_hel) D_C(z_hd).
+
+    All cosmologies supported by this pipeline are flat, so ``D_C`` is also
+    the transverse comoving distance.
+    """
+    z_hd = np.asarray(z_hd, dtype=float)
+    z_hel = np.asarray(z_hel, dtype=float)
+    if z_hd.shape != z_hel.shape:
+        raise ValueError(
+            "Pantheon zHD and zHEL must have identical shapes; "
+            f"got {z_hd.shape} and {z_hel.shape}."
+        )
+    if not np.all(np.isfinite(z_hd)):
+        raise ValueError("Pantheon zHD must contain only finite values.")
+    if not np.all(np.isfinite(z_hel)):
+        raise ValueError("Pantheon zHEL must contain only finite values.")
+
+    dc_mpc = np.asarray(cosmo.comoving_distance(z_hd).value, dtype=float)
+    dl_mpc = (1.0 + z_hel) * dc_mpc
+    if not np.all(np.isfinite(dl_mpc)) or np.any(dl_mpc <= 0.0):
+        raise ValueError(
+            "Pantheon mixed-redshift luminosity distances must be finite and positive."
+        )
+    return 5.0 * np.log10(dl_mpc) + 25.0
+
+
 def log_likelihood_pantheon_cephdist(params, pantheon_data, _sna_L, _sna_Lower, _sna_LogdetCov,
                                      cosmo, use_full_cov, use_ceph_dist_calibration=True):
     """
@@ -221,11 +266,18 @@ def log_likelihood_pantheon_cephdist(params, pantheon_data, _sna_L, _sna_Lower, 
 
     # --- subset data ---
     zHD = pantheon_data['zHD'][mask]
+    try:
+        zHEL = pantheon_data['zHEL'][mask]
+    except KeyError as exc:
+        raise KeyError(
+            "Pantheon likelihood requires the zHEL field; "
+            "zHD is not a valid fallback for the photon redshift factor."
+        ) from exc
     m_b_corr = pantheon_data['m_b_corr'][mask]
     is_calib_sel = is_calib_bool[mask]
 
     # --- cosmological / Cepheid μ ---
-    sn_mu_model = cosmo.distmod(zHD).value
+    sn_mu_model = pantheon_distance_modulus(cosmo, zHD, zHEL)
     if use_ceph_dist_calibration:
         sn_mu_model[is_calib_sel] = pantheon_data['CEPH_DIST'][mask][is_calib_sel]
 

@@ -2,6 +2,7 @@
 import argparse
 import math
 import os
+import re
 import shlex
 import sys
 import subprocess
@@ -17,6 +18,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from qvc.light_curve.multiband_generate_lc import resolve_macleod_object_ids, resolve_stone_object_ids
+from qvc.provenance import PROVENANCE_ENV, encode_record, submission_record
 
 SCRIPT_DIR = REPO_ROOT / "hpc_scripts" / "jobs" / "multibandfit"
 LOG_ROOT = REPO_ROOT / "hpc_scripts" / "logs" / "multibandfit"
@@ -39,6 +41,15 @@ def parse_args():
         required=True,
         help="Sample to submit.",
     )
+    parser.add_argument(
+        "--stone-linear-mode",
+        choices=("both", "linear", "nolinear"),
+        default="both",
+        help=(
+            "Stone linear-trend variants to submit: both (default), only the "
+            "standard linear-trend fit, or only the no-linear-trend fit."
+        ),
+    )
     parser.add_argument("--chisq-csv", type=str, default=None, help="CSV file with object_id column for --fit chisq.")
     parser.add_argument(
         "--spectra-fit-csv",
@@ -51,7 +62,8 @@ def parse_args():
     parser.add_argument("--N", type=int, default=10, help="Objects per array task.")
     parser.add_argument("--nwarm", type=int, default=250, help="Warmup steps.")
     parser.add_argument("--nsamp", type=int, default=250, help="Posterior samples per chain.")
-    parser.add_argument("--svi-steps", type=int, default=1000, help="SVI warm-start steps.")
+    parser.add_argument("--svi-steps", type=int, default=4000, help="SVI warm-start steps.")
+    parser.add_argument("--svi-lr", type=float, default=1e-3, help="SVI learning rate.")
     parser.add_argument("--ncores", type=int, default=1, help="CPUs per task.")
     parser.add_argument("--max-tree-depth", type=int, default=12, help="NUTS max tree depth.")
     parser.add_argument("--partition", default="day", help="SLURM partition.")
@@ -78,6 +90,10 @@ def parse_args():
         parser.error("--chisq-csv is required when --fit chisq is used.")
     if args.fit == "chisq" and not args.spectra_fit_csv:
         parser.error("--spectra-fit-csv is required when --fit chisq is used.")
+    if args.fit != "stone" and args.stone_linear_mode != "both":
+        parser.error(
+            "--stone-linear-mode linear or nolinear requires --fit stone."
+        )
     try:
         args.description = normalize_run_description(args.description)
     except ValueError as exc:
@@ -102,7 +118,7 @@ def get_git_short_hash() -> str:
 
 def make_run_stamp() -> str:
     now = datetime.now()
-    return f"{now.strftime('%b').lower()}{now.day}_{now.strftime('%I%M%p').lower()}"
+    return now.strftime("%b%d_%I%M%p").lower()
 
 
 def normalize_run_description(description: str | None) -> str | None:
@@ -129,7 +145,20 @@ def load_macleod_ids() -> list[str]:
     return resolve_macleod_object_ids()
 
 
-def build_job_configs(fit: str, chisq_csv: str) -> list[JobConfig]:
+def build_job_configs(
+    fit: str,
+    chisq_csv: str,
+    *,
+    stone_linear_mode: str = "both",
+) -> list[JobConfig]:
+    if stone_linear_mode not in {"both", "linear", "nolinear"}:
+        raise ValueError(
+            "stone_linear_mode must be one of: both, linear, nolinear."
+        )
+    if fit != "stone" and stone_linear_mode != "both":
+        raise ValueError(
+            "stone_linear_mode linear or nolinear requires fit='stone'."
+        )
     if fit == "chisq":
         return [
             JobConfig(
@@ -140,7 +169,7 @@ def build_job_configs(fit: str, chisq_csv: str) -> list[JobConfig]:
         ]
     if fit == "stone":
         stone_object_ids = load_stone_ids()
-        return [
+        jobs = [
             JobConfig(description="stone", object_ids=stone_object_ids),
             JobConfig(
                 description="stone_nolinear",
@@ -148,6 +177,11 @@ def build_job_configs(fit: str, chisq_csv: str) -> list[JobConfig]:
                 extra_flags=("--disable_linear_trend",),
             ),
         ]
+        if stone_linear_mode == "linear":
+            return jobs[:1]
+        if stone_linear_mode == "nolinear":
+            return jobs[1:]
+        return jobs
     if fit == "samelength":
         stone_object_ids = load_stone_ids()
         return [
@@ -246,6 +280,21 @@ def build_run_prefix(
     return f"{run_stamp}_{git_hash}_{job_description}"
 
 
+def build_fit_job_name(prefix: str) -> str:
+    """Build the scheduler name while keeping the result prefix unchanged."""
+
+    match = re.fullmatch(
+        r"(?P<date>[a-z]{3}\d{2})_(?P<time>\d{4}(?:am|pm))_(?P<identity>.+)",
+        prefix,
+    )
+    if match is None:
+        return f"lcfit_{prefix}"
+    return (
+        f"{match.group('date')}_{match.group('time')}_"
+        f"lcfit_{match.group('identity')}"
+    )
+
+
 def build_sbatch_script(
     prefix: str,
     job: JobConfig,
@@ -256,6 +305,7 @@ def build_sbatch_script(
 ) -> str:
     log_dir = LOG_ROOT / prefix
     log_pattern = log_dir / f"{prefix}-%A_%a-%j.txt"
+    job_name = build_fit_job_name(prefix)
     if args.fit != "chisq" and object_ids_path is None:
         raise ValueError(f"object_ids_path is required for fit mode {args.fit!r}.")
     filter_csv = str(REPO_ROOT / chisq_csv) if chisq_csv is not None else ""
@@ -275,6 +325,8 @@ def build_sbatch_script(
         "svi+nuts",
         "--svi_steps",
         str(args.svi_steps),
+        "--svi_lr",
+        str(args.svi_lr),
         "--nwarm",
         str(args.nwarm),
         "--nsamp",
@@ -296,8 +348,36 @@ def build_sbatch_script(
         )
     base_flags.extend(job.extra_flags)
     base_flags.extend(getattr(args, "extra_fit_flags", ()))
+    submission = submission_record(
+        "hpc_scripts/sfitlc.py",
+        sys.argv,
+        {
+            "wrapper_args": vars(args),
+            "job": {
+                "description": job.description,
+                "prefix": prefix,
+                "object_count": len(job.object_ids),
+                "extra_flags": job.extra_flags,
+                "use_psf_constant_flux": job.use_psf_constant_flux,
+            },
+            "inputs": {
+                "chisq_csv": chisq_csv,
+                "spectra_fit_csv": spectra_fit_csv,
+                "object_ids_path": object_id_file,
+            },
+            "resources": {
+                "cpus_per_task": args.ncores,
+                "memory": args.mem,
+                "partition": args.partition,
+                "time": args.time,
+                "environment": args.env,
+            },
+            "fit_flags": base_flags,
+        },
+    )
+    encoded_submission = encode_record(submission)
     return f"""#!/bin/bash
-#SBATCH --job-name=multiband_{prefix}
+#SBATCH --job-name={job_name}
 #SBATCH --output={log_pattern}
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task={args.ncores}
@@ -319,6 +399,7 @@ export FILTER_CSV="{filter_csv}"
 export OBJECT_ID_FILE="{object_id_file}"
 export START=""
 export END=""
+export {PROVENANCE_ENV}="{encoded_submission}"
 
 module load miniconda
 conda activate {args.env}
@@ -402,7 +483,16 @@ def build_merge_sbatch_script(
 ) -> str:
     log_dir = LOG_ROOT / prefix
     log_pattern = log_dir / f"{prefix}-merge-%j.txt"
-    merge_cmd = f'python -m qvc.light_curve.merge_results "{prefix}" --compute-variability'
+    comparison_only = enable_stone_identity_plot or enable_macleod_identity_plot
+    merge_mode_flag = (
+        "--skip-populate-sdss"
+        if comparison_only
+        else "--compute-variability"
+    )
+    merge_memory = "20G" if comparison_only else "40G"
+    merge_cmd = (
+        f'python -m qvc.light_curve.merge_results "{prefix}" {merge_mode_flag}'
+    )
     if enable_stone_identity_plot:
         merge_cmd += (
             " --plot-stone-sigma-tau-identity-grid"
@@ -418,12 +508,29 @@ def build_merge_sbatch_script(
             " --plot-suberlak-sigma-tau-identity-grid"
             f' --suberlak-identity-plot-out "{build_suberlak_identity_plot_path(prefix, job_description)}"'
         )
+    submission = submission_record(
+        "hpc_scripts/sfitlc.py",
+        sys.argv,
+        {
+            "wrapper_args": vars(args),
+            "merge_prefix": prefix,
+            "job_description": job_description,
+            "merge_command": merge_cmd,
+            "resources": {
+                "memory": merge_memory,
+                "partition": args.partition,
+                "time": args.time,
+                "environment": args.env,
+            },
+        },
+    )
+    encoded_submission = encode_record(submission)
     return f"""#!/bin/bash
 #SBATCH --job-name=merge_{prefix}
 #SBATCH --output={log_pattern}
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=40G
+#SBATCH --mem={merge_memory}
 #SBATCH --partition={args.partition}
 #SBATCH --time={args.time}
 {build_mail_lines()}\
@@ -432,6 +539,8 @@ set -euo pipefail
 
 module load miniconda
 conda activate {args.env}
+
+export {PROVENANCE_ENV}="{encoded_submission}"
 
 cd "{REPO_ROOT}"
 
@@ -636,7 +745,11 @@ def main():
     spectra_fit_csv = args.spectra_fit_csv
     samelength_merge_job_ids = []
 
-    for job in build_job_configs(args.fit, chisq_csv):
+    for job in build_job_configs(
+        args.fit,
+        chisq_csv,
+        stone_linear_mode=args.stone_linear_mode,
+    ):
         total_objects = len(job.object_ids)
         _, task_start, task_end = validate_chunking(total_objects, args.N, args.skip, args.num_jobs)
         prefix = build_run_prefix(job.description, run_stamp, git_hash, args.resume, args.description)

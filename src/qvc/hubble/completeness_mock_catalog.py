@@ -22,6 +22,7 @@ L0 = 1e10 * L_SUN_ERG_S
 LOG10_MAG_JACOBIAN = np.log10(0.4)
 NU_2500_HZ = 2.99792458e18 / 2500.0
 AB_ABSOLUTE_MAG_ZEROPOINT = 51.59477721004232
+SHEN_GLOBAL_FIT = "A"
 
 
 def log_nu_lnu_to_ab_absolute_magnitude(log_nu_lnu, frequency_hz):
@@ -115,6 +116,8 @@ def lbol_from_loglx_shen20(loglx_array):
 
 
 def build_shen_lf(pubtools_path):
+    """Build the observed 2500 A luminosity function from Shen global fit A."""
+
     if pubtools_path is None:
         pubtools_path = default_shen_pubtools_path()
     if pubtools_path is None:
@@ -143,7 +146,11 @@ def build_shen_lf(pubtools_path):
 
                 z_bins = np.linspace(0.0, 8.0, 40)
                 qlf_values = [
-                    return_qlf_in_band(redshift=z, nu=NU_2500_HZ, model="B")
+                    return_qlf_in_band(
+                        redshift=z,
+                        nu=NU_2500_HZ,
+                        model=SHEN_GLOBAL_FIT,
+                    )
                     for z in z_bins
                 ]
     finally:

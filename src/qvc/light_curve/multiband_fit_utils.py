@@ -10,6 +10,8 @@ suffix = os.environ.get('SUFFIX', "test")
 
 import logging
 
+from qvc.provenance import merge_history, read_hdf5_provenance, write_hdf5_provenance
+
 logging.basicConfig(
     format='%(asctime)s - %(message)s',
     level=logging.INFO,
@@ -358,75 +360,6 @@ def clean_grouped_samples(samples_grouped, obj_index, batch_data_len):
                 obj_samples_clean[f"{k}_{j}"] = arr[:, j]
 
     return obj_samples_clean
-
-
-
-import numpy as np
-import logging
-
-def compute_rhat_ess_dict(samples_dict):
-    """
-    Compute R-hat and ESS for a dict of MCMC chains without ArviZ.
-    
-    Parameters
-    ----------
-    samples_dict : dict[str, np.ndarray]
-        Keys are parameter names.
-        Values are arrays of shape:
-        - (n_samples, n_chains) for scalar/global params
-        - (n_samples, n_chains) for per-object params (already split)
-
-    Returns
-    -------
-    dict[str, float]
-        Dictionary mapping "<param>_rhat" and "<param>_ess" to values.
-    """
-    logging.info("Computing Rhat and ESS for dictionary of parameters")
-    diagnostics = {}
-
-    for k, chains in samples_dict.items():
-        chains = np.asarray(chains)
-
-        # Ensure shape: (n_samples, n_chains, n_params)
-        if chains.ndim == 1:
-            raise ValueError(f"Parameter {k} is 1D; need multiple chains for R-hat.")
-        elif chains.ndim == 2:  # (n_samples, n_chains)
-            chains = chains[..., None]
-        elif chains.ndim != 3:
-            raise ValueError(f"Parameter {k} has invalid shape {chains.shape}")
-
-        n_samples, n_chains, n_params = chains.shape
-
-        # Compute chain means and variances
-        chain_means = chains.mean(axis=0)             # (n_chains, n_params)
-        chain_variances = chains.var(axis=0, ddof=1)  # (n_chains, n_params)
-
-        # Between-chain variance B
-        B = n_samples * np.var(chain_means, axis=0, ddof=1)
-
-        # Within-chain variance W
-        W = chain_variances.mean(axis=0)
-
-        # Marginal posterior variance estimate
-        var_hat = (n_samples - 1)/n_samples * W + B/n_samples
-
-        # R-hat (Gelman-Rubin)
-        rhat = np.sqrt(var_hat / W)
-
-        # Effective Sample Size (naive approximation)
-        ess = (n_chains * n_samples) / rhat**2
-
-        # Store in flat dict
-        if n_params == 1:
-            diagnostics[f"{k}_rhat"] = float(rhat.squeeze())
-            diagnostics[f"{k}_ess"] = float(ess.squeeze())
-        else:
-            for i in range(n_params):
-                diagnostics[f"{k}_{i}_rhat"] = float(rhat[i])
-                diagnostics[f"{k}_{i}_ess"] = float(ess[i])
-
-    return diagnostics
-
 def modify_h5_file(save_file_path, s82_objs):
     with h5py.File(save_file_path, "a") as hdf:  # Open in append mode to modify
         for object_id in hdf.keys():  # Iterate through every object in the HDF5 file
@@ -608,7 +541,7 @@ def delete_file(file_path):
     else:
         logging.info(f"File does not exist; not deleting: {file_path}")
 
-def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
+def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024, provenance=None):
     """
     Save a list of quasar dictionaries to a *flat columnar* HDF5 file.
 
@@ -749,6 +682,12 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
     os.makedirs(output_dir, exist_ok=True)
     file_path = os.path.join(output_dir, _output_basename(quasars))
     logging.info(f"Saving {total} quasars to {file_path}")
+    previous_provenance = None
+    if provenance is not None and os.path.isfile(file_path):
+        try:
+            previous_provenance = read_hdf5_provenance(file_path)
+        except (OSError, ValueError) as exc:
+            logging.warning("Could not read prior provenance from %s: %s", file_path, exc)
 
     for i, quasar in enumerate(quasars):
         object_id = str(quasar["object_id"])
@@ -779,7 +718,11 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024):
             arr = _build_column(values)
             hdf.create_dataset(col, data=arr)
 
+        if provenance is not None:
+            write_hdf5_provenance(hdf, merge_history(provenance, previous_provenance))
+
     logging.info("All quasars saved successfully.")
+    return file_path
 
 def log_broken_pl(lam, lam_s, d1, d2, ds):
     """
@@ -1034,261 +977,6 @@ def process_samples(flat_samples, data, bands, percentiles=[16, 50, 84]):
 
     return result
 
-
-import numpy as np
-import logging
-
-def _acf_1d_fft(x, max_lag=None):
-    """
-    Fast autocorrelation for a 1D array x.
-    Returns lags 0..L where L = min(max_lag, n-1) (or n-1 if max_lag=None).
-    """
-    x = np.asarray(x, dtype=float)
-    n = x.size
-    if n < 2:
-        return np.array([1.0])
-
-    # Clamp lag
-    L = n - 1 if (max_lag is None) else min(max_lag, n - 1)
-
-    x = x - x.mean()
-    var = np.dot(x, x) / n
-    if var == 0 or not np.isfinite(var):
-        acf = np.zeros(L + 1, dtype=float); acf[0] = 1.0
-        return acf
-
-    # Next power of two >= 2n
-    nfft = 1
-    while nfft < 2 * n:
-        nfft <<= 1
-
-    fx = np.fft.rfft(x, nfft)
-    acov = np.fft.irfft(fx * np.conjugate(fx), nfft)[:n] / n
-    acf_full = acov / var
-    return acf_full[:L + 1]
-
-
-def _avg_acf_over_chains(arr_mc, max_lag=None):
-    """
-    Average ACF over chains for arr_mc with shape (m, n).
-    Returns mean ACF over chains with length L+1, where L is clamped to n-1.
-    """
-    m, n = arr_mc.shape
-    L = n - 1 if (max_lag is None) else min(max_lag, n - 1)
-    acfs = np.empty((m, L + 1), dtype=float)
-    for j in range(m):
-        acfs[j] = _acf_1d_fft(arr_mc[j], max_lag=L)
-    if max_lag is not None and L < max_lag:
-        logging.debug(f"_avg_acf_over_chains: clipped max_lag to {L} (n_draws={n})")
-    return acfs.mean(axis=0)
-
-
-def _ess_from_avg_acf(avg_acf):
-    """Geyer IPS on averaged acf (avg_acf[0]=1)."""
-    rho = np.asarray(avg_acf[1:], dtype=float)
-    s = 0.0
-    for i in range(0, rho.size, 2):
-        pair_sum = rho[i] if i+1 >= rho.size else (rho[i] + rho[i+1])
-        if not np.isfinite(pair_sum) or pair_sum <= 0:
-            break
-        s += pair_sum
-    tau = 1.0 + 2.0 * s
-    return 1.0 if (not np.isfinite(tau) or tau <= 0) else tau
-
-
-def _split_rhat(arr_mc):
-    """Classic split-Rhat using true chains."""
-    m, n = arr_mc.shape
-    if m < 2 or n < 4:
-        return np.nan
-    if n % 2 == 1:
-        arr_mc = arr_mc[:, :-1]; n -= 1
-    half = n // 2
-    if half < 2:
-        return np.nan
-    split = np.concatenate([arr_mc[:, :half], arr_mc[:, half:]], axis=0)
-    means = split.mean(axis=1)
-    W = split.var(axis=1, ddof=1).mean()
-    B = half * np.var(means, ddof=1)
-    if not np.isfinite(W) or W <= 0:
-        return np.nan
-    var_hat = (half - 1) / half * W + B / half
-    return float(np.sqrt(var_hat / W))
-
-
-def _longest_near_constant_run(x, tol=0.0):
-    x = np.asarray(x, dtype=float)
-    n = x.size
-    if n < 2:
-        return n
-    diffs = np.abs(np.diff(x))
-    mask = diffs <= tol
-    longest = 0; cur = 0
-    for v in mask:
-        cur = cur + 1 if v else 0
-        longest = max(longest, cur)
-    return longest + 1 if longest > 0 else 1
-
-def _ess_single_chain(x, max_lag):
-    acf = _acf_1d_fft(x, max_lag)
-    rho = acf[1:]
-    s = 0.0
-    for i in range(0, rho.size, 2):
-        pair_sum = rho[i] if i+1 >= rho.size else (rho[i] + rho[i+1])
-        if not np.isfinite(pair_sum) or pair_sum <= 0:
-            break
-        s += pair_sum
-    tau = 1.0 + 2.0 * s
-    N = float(len(x))
-    if not np.isfinite(tau) or tau <= 0:
-        return N
-    ess = N / tau
-    return float(min(max(ess, 1.0), N))
-
-# --- main ---
-def diagnostics_for_per_chain_samples(
-    flattened_per_chain,
-    max_lag=100,
-    rhat_thresh=1.05,
-    ess_thresh=100,
-    acf_longlag_thresh=0.1,
-    tiny_var_rel_thresh=1e-6,
-    tiny_var_abs_thresh=1e-12,
-    stuck_tol="auto",          # 'auto' -> 1e-12 * scale, else float
-    stuck_run_frac_thresh=0.5, # mark stuck if longest run ≥ this fraction
-    per_chain_ess_thresh=50
-):
-    """
-    Returns, per field k:
-      k_acf : np.ndarray (max_lag+1,)
-      k_rhat : float
-      k_ess : float
-      k_per_chain_variance : np.ndarray (n_chains,)
-      k_stuck_chains : np.ndarray(bool) (n_chains,)
-      k_stuck_any : bool
-    Logs only the single worst offender per category.
-    """
-    out = {}
-
-    # Worst (for compact logging)
-    worst_rhat = (None, -np.inf)
-    worst_ess  = (None,  np.inf)
-    worst_acf  = (None, -np.inf, None)
-    worst_var  = (None,  np.inf, None, None)
-    worst_stuck = (None, -np.inf, None, None)
-    worst_pcess = (None,  np.inf, None)
-
-    ignore_keys = ('bwb_beta', 'f_host', 'log_tau_fake', 'log_sigma_fake',
-                   'gate_log_temp', 'lmc_sep_raw', 'lmc_sep_left_raw', 'lmc_sep_right_raw', 'lmc_span_raw',
-                    'lmc_mu_raw', 'lmc_delta_raw', 'lmc_sep', 'lmc_sep_left', 'lmc_sep_right', 'lmc_span',)
-
-    for k, v in flattened_per_chain.items():
-        if k in ignore_keys:
-            continue
-        v = np.asarray(v)
-        if v.ndim != 2:
-            raise ValueError(f"{k}: expected (n_chains, n_draws), got {v.shape}")
-        m, n = v.shape
-
-        if n < 2:
-            acf = np.array([1.0]); rhat = np.nan; ess = float(m * n)
-        else:
-            acf = _avg_acf_over_chains(v, max_lag=max_lag)  # length is L+1 with L<=n-1
-            tau = _ess_from_avg_acf(acf)
-            Ntot = float(m * n)
-            ess = Ntot / tau
-            ess = 1.0 if (not np.isfinite(ess) or ess < 1) else min(ess, Ntot)
-            rhat = _split_rhat(v)
-
-            
-            L = len(acf) - 1  # actual max lag used
-            # use L instead of max_lag
-            long_lags = acf[L // 2 :]    # last ~half of what we actually computed            
-            if long_lags.size:
-                idx = int(np.argmax(np.abs(long_lags)))
-                max_long = float(np.abs(long_lags[idx]))
-                lag_at = idx + max_lag // 2
-                if max_long > worst_acf[1]:
-                    worst_acf = (k, max_long, lag_at)
-
-        # Per-chain variance
-        per_var = v.var(axis=1, ddof=1) if v.size else np.array([])
-        mean_var = float(np.mean(per_var)) if per_var.size and np.all(np.isfinite(per_var)) else np.nan
-
-        # Stuck detection settings
-        x_range = float(np.nanmax(v) - np.nanmin(v)) if v.size and np.isfinite(v).all() else 0.0
-        tol = (1e-12 * max(1.0, x_range)) if stuck_tol == "auto" else float(stuck_tol)
-
-        # Per-chain stuck + per-chain ESS
-        longest_runs = np.zeros(m, dtype=int)
-        stuck_frac = np.zeros(m, dtype=float)
-        stuck_flags = np.zeros(m, dtype=bool)
-        per_chain_ess = np.zeros(m, dtype=float)
-
-        for j in range(m):
-            # variance flags
-            varj = float(per_var[j]) if per_var.size else np.nan
-            rel = (varj / mean_var) if (np.isfinite(varj) and np.isfinite(mean_var) and mean_var > 0) else np.inf
-            tiny_rel = (rel < tiny_var_rel_thresh)
-            tiny_abs = (varj < tiny_var_abs_thresh) if np.isfinite(varj) else False
-            if (tiny_rel or tiny_abs) and varj < worst_var[1]:
-                worst_var = (k, varj, j, rel)
-
-            # stuck run flags
-            run_len = _longest_near_constant_run(v[j], tol=tol)
-            longest_runs[j] = run_len
-            stuck_frac[j] = run_len / n if n > 0 else 0.0
-            # mark stuck if long run OR near-zero variance
-            stuck_flags[j] = (stuck_frac[j] >= stuck_run_frac_thresh) or tiny_rel or tiny_abs
-            if stuck_frac[j] > worst_stuck[1]:
-                worst_stuck = (k, float(stuck_frac[j]), j, int(run_len))
-
-            # per-chain ESS
-            per_chain_ess[j] = _ess_single_chain(v[j], max_lag=max_lag)
-            if per_chain_ess[j] < worst_pcess[1]:
-                worst_pcess = (k, float(per_chain_ess[j]), j)
-
-        # Save outputs
-        out[f"{k}_acf"] = acf
-        out[f"{k}_rhat"] = float(rhat) if np.isscalar(rhat) else rhat
-        out[f"{k}_ess"] = float(ess)
-        out[f"{k}_per_chain_variance"] = per_var
-        out[f"{k}_stuck_chains"] = stuck_flags
-        out[f"{k}_stuck_any"] = bool(stuck_flags.any())
-
-        # Track worst global Rhat/ESS
-        if np.isfinite(rhat) and rhat > worst_rhat[1]:
-            worst_rhat = (k, float(rhat))
-        if np.isfinite(ess) and ess < worst_ess[1]:
-            worst_ess = (k, float(ess))
-
-    # --- concise logging of only worst offenders (if exceeding thresholds) ---
-    if worst_rhat[0] is not None and worst_rhat[1] > rhat_thresh:
-        logging.warning(f"Worst Rhat: {worst_rhat[0]} = {worst_rhat[1]:.3f} (> {rhat_thresh})")
-    if worst_ess[0] is not None and worst_ess[1] < ess_thresh:
-        logging.warning(f"Worst ESS: {worst_ess[0]} = {worst_ess[1]:.1f} (< {ess_thresh})")
-    if worst_acf[0] is not None and worst_acf[1] > acf_longlag_thresh:
-        logging.warning(f"Worst ACF: {worst_acf[0]} lag={worst_acf[2]}, |acf|={worst_acf[1]:.3f} (> {acf_longlag_thresh})")
-    if worst_var[0] is not None and (worst_var[1] < tiny_var_abs_thresh or (worst_var[3] is not None and worst_var[3] < tiny_var_rel_thresh)):
-        logging.warning(
-            f"Near-zero per-chain variance: {worst_var[0]} chain={worst_var[2]} "
-            f"var={worst_var[1]:.3e}, rel_to_mean={worst_var[3]:.3e} "
-            f"(abs<th={tiny_var_abs_thresh}, rel<th={tiny_var_rel_thresh})"
-        )
-    if worst_stuck[0] is not None and worst_stuck[1] >= stuck_run_frac_thresh:
-        logging.warning(
-            f"Stuck/flat run: {worst_stuck[0]} chain={worst_stuck[2]} "
-            f"longest_run={worst_stuck[3]} draws ({worst_stuck[1]*100:.1f}% of chain) "
-            f"(>= {int(stuck_run_frac_thresh*100)}%)"
-        )
-    if worst_pcess[0] is not None and worst_pcess[1] < per_chain_ess_thresh:
-        logging.warning(
-            f"Per-chain ESS low: {worst_pcess[0]} chain={worst_pcess[2]} "
-            f"ESS={worst_pcess[1]:.1f} (< {per_chain_ess_thresh})"
-        )
-
-    return out
-
 def safe_log_jitter_mean(obj_row):
     # obj_row[:,3] is yerr after padding
     yerr = jnp.array(obj_row[:, 3])
@@ -1385,7 +1073,10 @@ def summarize_fake_true_vs_recovered(
         in_1sigma, in_2sigma, _, _ = _in_bounds(true_val, p16_disp, p84_disp)
         colored_med = _colorize(f"{median:.3f}", in_1sigma, in_2sigma)
 
-        rhat = diagnostics.get(f"{rec_key}_rhat", np.nan)
+        rhat_key = f"{rec_key}_rhat"
+        if rec_key == "log_tau_uv":
+            rhat_key = "log_tau_uv_rf_rhat"
+        rhat = diagnostics.get(rhat_key, np.nan)
         print(
             f"   {label}: true = {true_val:.3f}, "
             f"recovered = {colored_med} ± {half_1sigma_disp:.3f} "

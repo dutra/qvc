@@ -143,7 +143,7 @@ def test_erlang_line_amplitude_is_stationary_response_rms_at_any_lag():
         assert np.isclose(float(variance), target_rms**2, rtol=2e-6)
 
 
-def test_positive_flux_guard_penalizes_pathological_total_rms():
+def test_positive_flux_guard_is_diagnostic_by_default_and_opt_in_penalty():
     times = jnp.array([0.0, 7.0, 18.0, 35.0])
     band = jnp.zeros(times.shape, dtype=jnp.int32)
     model = make_multiband_dho_blr_flux_linearized_erlang_drw_model(
@@ -153,6 +153,15 @@ def test_positive_flux_guard_penalizes_pathological_total_rms():
         n_band=1,
         survey_idx=jnp.zeros(times.shape, dtype=jnp.int32),
         erlang_order=2,
+    )
+    guarded_model = make_multiband_dho_blr_flux_linearized_erlang_drw_model(
+        (times, band),
+        jnp.zeros(times.shape),
+        jnp.full(times.shape, 0.02),
+        n_band=1,
+        survey_idx=jnp.zeros(times.shape, dtype=jnp.int32),
+        erlang_order=2,
+        enforce_positive_flux_guard=True,
     )
     params = {
         "tau_drw_band": jnp.array([100.0]),
@@ -178,7 +187,22 @@ def test_positive_flux_guard_penalizes_pathological_total_rms():
     assert safe_penalty > -1e-8
     assert np.isfinite(pathological_penalty)
     assert pathological_penalty < -100.0
-    assert float(model.log_prob(pathological)) < float(model.log_prob(params))
+    unguarded_log_prob = float(model.log_prob(pathological))
+    guarded_log_prob = float(guarded_model.log_prob(pathological))
+    assert np.isclose(
+        guarded_log_prob,
+        unguarded_log_prob + pathological_penalty,
+        rtol=1e-6,
+    )
+
+    safe_negative_probability = np.asarray(
+        model.negative_total_flux_probability(params)
+    )
+    pathological_negative_probability = np.asarray(
+        model.negative_total_flux_probability(pathological)
+    )
+    assert np.all(safe_negative_probability < 1e-8)
+    assert np.all(pathological_negative_probability > 0.1)
 
 
 def test_quality_factor_prior_is_legacy_centered_with_small_qpo_tail():

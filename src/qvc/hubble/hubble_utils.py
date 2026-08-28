@@ -635,34 +635,6 @@ def _ensure_object_id(df):
     return df
 
 def populate_spectra_fit(df, spectra_fit_csvs):
-    fields = {
-        "object_id": str,
-        "fit_ok": str,
-        "fit_backend": str,
-        "m_2500_dereddened": float,
-        "m_2500_dereddened_err": float,
-        "m_2500_dereddened_err_lower": float,
-        "m_2500_dereddened_err_upper": float,
-        "m_2500_attenuated_model": float,
-        "m_2500_attenuated_model_err": float,
-        "m_2500_attenuated_model_err_lower": float,
-        "m_2500_attenuated_model_err_upper": float,
-        "a_2500_galaxy": float,
-        "a_2500_galaxy_err": float,
-        "a_2500_internal": float,
-        "a_2500_internal_err": float,
-        "pl_slope": float,
-        "pl_slope_err": float,
-        "uv_slope": float,
-        "uv_slope_err": float,
-        "ebv_agn": float,
-        "ebv_agn_err": float,
-        "ebv_gal": float,
-        "ebv_gal_err": float,
-        "fracAGN_5100_fit": float,
-        "fracAGN_5100_fit_err": float,
-    }
-
     required_cols = {
         "fit_ok",
         "fit_backend",
@@ -675,15 +647,12 @@ def populate_spectra_fit(df, spectra_fit_csvs):
         "pl_slope",
         "pl_slope_err",
     }
+    required_numeric_cols = required_cols - {"fit_ok", "fit_backend"}
 
     df = _ensure_object_id(df.copy())
-    existing_to_drop = [col for col in fields if col != "object_id" and col in df.columns]
-    if existing_to_drop:
-        df = df.drop(columns=existing_to_drop)
+    input_attrs = dict(df.attrs)
 
     spectra_frames = []
-    wanted = set(fields) | {"object_id"}
-    converters = _wrap_converters({k: v for k, v in fields.items() if k != "object_id"})
 
     for i, csv_path in enumerate(spectra_fit_csvs):
         csv_path = resolve_qvc_data_path(csv_path)
@@ -691,12 +660,17 @@ def populate_spectra_fit(df, spectra_fit_csvs):
 
         df_spectra = pd.read_csv(
             csv_path,
-            usecols=lambda c: _norm_name(c) in wanted,
-            converters=converters,
             encoding="utf-8-sig",
             skipinitialspace=True,
+            low_memory=False,
         )
         df_spectra.columns = [_norm_name(c) for c in df_spectra.columns]
+        duplicate_columns = df_spectra.columns[df_spectra.columns.duplicated()].tolist()
+        if duplicate_columns:
+            raise ValueError(
+                f"Spectra fit CSV '{csv_path}' contains duplicate normalized "
+                f"column name(s): {sorted(set(duplicate_columns))}"
+            )
         df_spectra = _ensure_object_id(df_spectra)
 
         missing_required = sorted(required_cols.difference(df_spectra.columns))
@@ -705,6 +679,13 @@ def populate_spectra_fit(df, spectra_fit_csvs):
                 f"Spectra fit CSV '{csv_path}' is missing required columns {missing_required}. "
                 "This Hubble workflow only accepts fit_spectra_jaxsedfit_joint.py output."
             )
+        for column in sorted(required_numeric_cols):
+            try:
+                df_spectra[column] = pd.to_numeric(df_spectra[column], errors="raise")
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"Spectra fit CSV '{csv_path}' column {column!r} must be numeric."
+                ) from exc
         invalid_backend = df_spectra["fit_backend"].ne("jaxsedfit_joint")
         if np.any(invalid_backend):
             invalid_values = sorted(
@@ -729,12 +710,38 @@ def populate_spectra_fit(df, spectra_fit_csvs):
             f"{duplicate_values[:10]}"
         )
 
-    out = df.merge(spectra, on="object_id", how="inner", validate="one_to_one")
+    conflicting_columns = sorted(
+        (set(spectra.columns) & set(df.columns)) - {"object_id"}
+    )
+    if conflicting_columns:
+        print(
+            "Keeping HDF5 values and discarding overlapping SED-fit columns: "
+            + ", ".join(conflicting_columns)
+        )
+    spectra_fit_columns = tuple(
+        column
+        for column in spectra.columns
+        if column != "object_id" and column not in conflicting_columns
+    )
+    spectra_to_merge = spectra.loc[:, ["object_id", *spectra_fit_columns]]
+    out = df.merge(
+        spectra_to_merge,
+        on="object_id",
+        how="inner",
+        validate="one_to_one",
+    )
+    out.attrs.update(input_attrs)
+    out.attrs["spectra_fit_columns"] = spectra_fit_columns
+    out.attrs["spectra_fit_discarded_columns"] = tuple(conflicting_columns)
     print(f"Matched {len(out)} successful SED fits to {len(df)} AGN light-curve rows.")
-    out["alpha_lambda"] = out["pl_slope"]
-    out["alpha_lambda_err"] = out["pl_slope_err"]
-    out["alpha_nu"] = -out["alpha_lambda"] - 2
-    out["alpha_nu_err"] = out["alpha_lambda_err"]
+    if "alpha_lambda" not in out.columns:
+        out["alpha_lambda"] = out["pl_slope"]
+    if "alpha_lambda_err" not in out.columns:
+        out["alpha_lambda_err"] = out["pl_slope_err"]
+    if "alpha_nu" not in out.columns:
+        out["alpha_nu"] = -out["alpha_lambda"] - 2
+    if "alpha_nu_err" not in out.columns:
+        out["alpha_nu_err"] = out["alpha_lambda_err"]
 
     return out
 def populate_sdss_fields(objs, progress_bar=True):

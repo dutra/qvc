@@ -434,6 +434,16 @@ def agn_model_pack_obs(
     _require(req_errs, obs_dict, "errors")
     obs = np.array([obs_dict[k] for k in req_obs], dtype=float)
     err = np.array([obs_dict[k] for k in req_errs], dtype=float)
+    validate_agn_observable_uncertainties(
+        err,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+        object_ids=(
+            np.asarray(obs_dict["object_id"], dtype=object)
+            if "object_id" in obs_dict
+            else None
+        ),
+    )
     if not isinstance(pivot_context, AgnPivotContext):
         raise TypeError(
             "pivot_context must be an AgnPivotContext; "
@@ -496,6 +506,276 @@ def M_model_agn(params_arr, obs_arr, pivots_array, use_alpha_lambda_term=False, 
         M_pred = M_pred + gamma_eta_sigma * (eta_sigma - eta_sigma_pivot)
     return M_pred
 
+
+def M_model_agn_posterior_samples(
+    params_samples,
+    obs_arr,
+    pivots_array,
+    use_alpha_lambda_term=False,
+    use_eta_sigma_term=False,
+):
+    """Evaluate the affine AGN magnitude relation for all samples at once.
+
+    Parameters
+    ----------
+    params_samples
+        Posterior parameter matrix in canonical AGN-model order, shaped
+        ``(n_samples, n_parameters)``.
+    obs_arr
+        Canonically ordered observable arrays, shaped
+        ``(n_observables, n_objects)``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Predicted absolute magnitudes shaped ``(n_samples, n_objects)``.
+    """
+    req_params, req_obs, _ = get_agn_model_spec(
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
+    samples = np.asarray(params_samples, dtype=float)
+    observables = np.asarray(obs_arr, dtype=float)
+    pivots = np.asarray(pivots_array, dtype=float)
+    if samples.ndim != 2 or samples.shape[1] != len(req_params):
+        raise ValueError(
+            "params_samples must have shape "
+            f"(n_samples, {len(req_params)}); got {samples.shape}"
+        )
+    if observables.ndim != 2 or observables.shape[0] != len(req_obs):
+        raise ValueError(
+            "obs_arr must have shape "
+            f"({len(req_obs)}, n_objects); got {observables.shape}"
+        )
+    if pivots.shape != (len(req_obs),):
+        raise ValueError(
+            f"pivots_array must have shape ({len(req_obs)},); got {pivots.shape}"
+        )
+
+    pidx = {name: index for index, name in enumerate(req_params)}
+    oidx = {name: index for index, name in enumerate(req_obs)}
+    predicted = np.broadcast_to(
+        samples[:, pidx["M0_agn"], None],
+        (samples.shape[0], observables.shape[1]),
+    ).copy()
+    coefficient_terms = [
+        ("alpha_agn", "log_sigma_uv"),
+        ("beta_agn", "log_tau_uv_rf"),
+    ]
+    if use_alpha_lambda_term:
+        coefficient_terms.append(
+            (AGN_ALPHA_LAMBDA_PARAM, AGN_ALPHA_LAMBDA_OBS)
+        )
+    if use_eta_sigma_term:
+        coefficient_terms.append((AGN_ETA_SIGMA_PARAM, AGN_ETA_SIGMA_OBS))
+    for parameter_name, observable_name in coefficient_terms:
+        predicted += (
+            samples[:, pidx[parameter_name], None]
+            * (
+                observables[oidx[observable_name]][None, :]
+                - pivots[oidx[observable_name]]
+            )
+        )
+    return predicted
+
+
+def _format_invalid_agn_locations(mask, object_ids):
+    indices = np.flatnonzero(np.atleast_1d(mask))
+    if object_ids is None:
+        return f"indices {indices[:5].tolist()}"
+    identifiers = np.atleast_1d(np.asarray(object_ids, dtype=object))
+    if identifiers.size != np.atleast_1d(mask).size:
+        raise ValueError(
+            "object_ids must contain one value per AGN uncertainty column; "
+            f"got {identifiers.size} identifiers for "
+            f"{np.atleast_1d(mask).size} columns."
+        )
+    return f"object_id values {identifiers[indices[:5]].astype(str).tolist()}"
+
+
+def validate_agn_observable_uncertainties(
+    err_arr,
+    use_alpha_lambda_term=False,
+    use_eta_sigma_term=False,
+    *,
+    object_ids=None,
+):
+    """Validate canonical AGN observable errors and their covariance.
+
+    The first two uncertainty rows are standard deviations and the third is
+    their covariance.  A valid 2x2 covariance matrix must satisfy
+    ``abs(covariance) <= sigma_std * tau_std``.  Optional observable-error
+    rows are also required to be finite and nonnegative.
+    """
+    _, _, req_errs = get_agn_model_spec(
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
+    errors = np.asarray(err_arr, dtype=float)
+    if errors.ndim not in (1, 2) or errors.shape[0] != len(req_errs):
+        raise ValueError(
+            "err_arr must have shape "
+            f"({len(req_errs)},) or ({len(req_errs)}, n_objects); "
+            f"got {errors.shape}"
+        )
+
+    eidx = {name: index for index, name in enumerate(req_errs)}
+    error_names = [
+        "log_sigma_uv_std_psd",
+        "log_tau_uv_rf_std_psd",
+    ]
+    if use_alpha_lambda_term:
+        error_names.append(AGN_ALPHA_LAMBDA_ERR)
+    if use_eta_sigma_term:
+        error_names.append(AGN_ETA_SIGMA_ERR)
+
+    for name in error_names:
+        values = errors[eidx[name]]
+        invalid = ~np.isfinite(values) | (values < 0.0)
+        if np.any(invalid):
+            locations = _format_invalid_agn_locations(invalid, object_ids)
+            raise ValueError(
+                f"AGN uncertainty {name!r} must be finite and nonnegative; "
+                f"invalid value(s) at {locations}."
+            )
+
+    covariance_name = "log_sigma_uv_log_tau_uv_rf_cov_psd"
+    covariance = errors[eidx[covariance_name]]
+    invalid_covariance = ~np.isfinite(covariance)
+    if np.any(invalid_covariance):
+        locations = _format_invalid_agn_locations(
+            invalid_covariance, object_ids
+        )
+        raise ValueError(
+            f"AGN covariance {covariance_name!r} must be finite; "
+            f"invalid value(s) at {locations}."
+        )
+
+    sigma_std = errors[eidx["log_sigma_uv_std_psd"]]
+    tau_std = errors[eidx["log_tau_uv_rf_std_psd"]]
+    covariance_bound = sigma_std * tau_std
+    roundoff_tolerance = (
+        64.0
+        * np.finfo(float).eps
+        * np.maximum.reduce(
+            [
+                np.ones_like(covariance_bound),
+                np.abs(covariance),
+                covariance_bound,
+            ]
+        )
+    )
+    invalid_psd = np.abs(covariance) > (
+        covariance_bound + roundoff_tolerance
+    )
+    if np.any(invalid_psd):
+        locations = _format_invalid_agn_locations(invalid_psd, object_ids)
+        raise ValueError(
+            "AGN sigma/tau covariance violates "
+            "|covariance| <= sigma_std * tau_std at "
+            f"{locations}."
+        )
+    return errors
+
+
+def _clip_roundoff_negative_variance(components, *, where):
+    component_array = np.asarray(list(components.values()), dtype=float)
+    variance = np.sum(component_array, axis=0)
+    if np.any(~np.isfinite(variance)):
+        raise ValueError(f"{where} produced nonfinite propagated variance.")
+    absolute_scale = np.sum(np.abs(component_array), axis=0)
+    tolerance = (
+        64.0
+        * np.finfo(float).eps
+        * np.maximum(np.finfo(float).tiny, absolute_scale)
+    )
+    materially_negative = variance < -tolerance
+    if np.any(materially_negative):
+        locations = np.flatnonzero(np.atleast_1d(materially_negative))
+        raise ValueError(
+            f"{where} produced materially negative propagated variance "
+            f"at indices {locations[:5].tolist()}."
+        )
+    roundoff_zero = np.abs(variance) <= tolerance
+    return np.where(roundoff_zero, 0.0, np.maximum(variance, 0.0))
+
+
+def M_model_agn_observable_variance_posterior(
+    params_samples,
+    err_arr,
+    use_alpha_lambda_term=False,
+    use_eta_sigma_term=False,
+):
+    """Average per-object observable variance over posterior coefficients.
+
+    This intentionally excludes the posterior variance of the global
+    relation parameters themselves.  That uncertainty is correlated between
+    objects and belongs in a model/posterior band, not in independent data
+    error bars.
+    """
+    req_params, _, req_errs = get_agn_model_spec(
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
+    samples = np.asarray(params_samples, dtype=float)
+    errors = np.asarray(err_arr, dtype=float)
+    if samples.ndim != 2 or samples.shape[1] != len(req_params):
+        raise ValueError(
+            "params_samples must have shape "
+            f"(n_samples, {len(req_params)}); got {samples.shape}"
+        )
+    if samples.shape[0] == 0:
+        raise ValueError("params_samples must contain at least one sample")
+    if np.any(~np.isfinite(samples)):
+        raise ValueError("params_samples must contain only finite values")
+    if errors.ndim != 2 or errors.shape[0] != len(req_errs):
+        raise ValueError(
+            "err_arr must have shape "
+            f"({len(req_errs)}, n_objects); got {errors.shape}"
+        )
+    validate_agn_observable_uncertainties(
+        errors,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
+
+    pidx = {name: index for index, name in enumerate(req_params)}
+    eidx = {name: index for index, name in enumerate(req_errs)}
+    alpha = samples[:, pidx["alpha_agn"]]
+    beta = samples[:, pidx["beta_agn"]]
+    sigma_std = errors[eidx["log_sigma_uv_std_psd"]]
+    tau_std = errors[eidx["log_tau_uv_rf_std_psd"]]
+    sigma_tau_cov = errors[
+        eidx["log_sigma_uv_log_tau_uv_rf_cov_psd"]
+    ]
+    components = {
+        "sigma": np.mean(np.square(alpha)) * np.square(sigma_std),
+        "tau": np.mean(np.square(beta)) * np.square(tau_std),
+        "covariance": (
+            2.0 * np.mean(alpha * beta) * sigma_tau_cov
+        ),
+    }
+    if use_alpha_lambda_term:
+        gamma_alpha_lambda = samples[:, pidx[AGN_ALPHA_LAMBDA_PARAM]]
+        alpha_lambda_err = errors[eidx[AGN_ALPHA_LAMBDA_ERR]]
+        components["alpha_lambda"] = (
+            np.mean(np.square(gamma_alpha_lambda))
+            * np.square(alpha_lambda_err)
+        )
+    if use_eta_sigma_term:
+        gamma_eta_sigma = samples[:, pidx[AGN_ETA_SIGMA_PARAM]]
+        eta_sigma_err = errors[eidx[AGN_ETA_SIGMA_ERR]]
+        components["eta_sigma"] = (
+            np.mean(np.square(gamma_eta_sigma))
+            * np.square(eta_sigma_err)
+        )
+    variance = _clip_roundoff_negative_variance(
+        components,
+        where="Posterior AGN observable-error propagation",
+    )
+    return variance, components
+
+
 def M_model_agn_err(
     params_arr,
     obs_arr,
@@ -506,6 +786,19 @@ def M_model_agn_err(
     use_eta_sigma_term=False,
 ):
     req_params, _, req_errs = get_agn_model_spec(
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+    )
+    params_arr = np.asarray(params_arr, dtype=float)
+    if params_arr.shape != (len(req_params),):
+        raise ValueError(
+            f"params_arr must have shape ({len(req_params)},); "
+            f"got {params_arr.shape}"
+        )
+    if np.any(~np.isfinite(params_arr)):
+        raise ValueError("params_arr must contain only finite values")
+    err_arr = validate_agn_observable_uncertainties(
+        err_arr,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
     )
@@ -521,27 +814,33 @@ def M_model_agn_err(
 
     # gamma_agn   = params_arr[agn_model_pidx["gamma_agn"]]
     # dm_psf_correction_err = err_arr[agn_model_eidx["dm_psf_correction_err"]]
-    r = (
-          (alpha_agn * log_sigma_uv_std_psd)**2
-        + (beta_agn  * log_tau_uv_rf_std_psd)**2
-        + 2 * alpha_agn * beta_agn * log_sigma_uv_log_tau_uv_rf_cov_psd
-        #+ (gamma_agn * dm_psf_correction_err)**2
-    )
+    components = {
+        "sigma": (alpha_agn * log_sigma_uv_std_psd) ** 2,
+        "tau": (beta_agn * log_tau_uv_rf_std_psd) ** 2,
+        "covariance": (
+            2
+            * alpha_agn
+            * beta_agn
+            * log_sigma_uv_log_tau_uv_rf_cov_psd
+        ),
+    }
     if use_alpha_lambda_term:
         gamma_alpha_lambda = params_arr[pidx[AGN_ALPHA_LAMBDA_PARAM]]
         alpha_lambda_err = err_arr[eidx[AGN_ALPHA_LAMBDA_ERR]]
-        r = r + (gamma_alpha_lambda * alpha_lambda_err) ** 2
+        components["alpha_lambda"] = (
+            gamma_alpha_lambda * alpha_lambda_err
+        ) ** 2
     if use_eta_sigma_term:
         gamma_eta_sigma = params_arr[pidx[AGN_ETA_SIGMA_PARAM]]
         eta_sigma_err = err_arr[eidx[AGN_ETA_SIGMA_ERR]]
-        r = r + (gamma_eta_sigma * eta_sigma_err) ** 2
+        components["eta_sigma"] = (gamma_eta_sigma * eta_sigma_err) ** 2
+    r = _clip_roundoff_negative_variance(
+        components,
+        where="AGN observable-error propagation",
+    )
     if check_negative:
-        if np.any(r < 0):
-            idx = np.where(r < 0)
-            return np.full_like(r, -1), idx
         return np.sqrt(r), None
-    else:
-        return np.sqrt(r)
+    return np.sqrt(r)
 
 
 def get_model_params(
