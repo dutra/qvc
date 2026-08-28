@@ -20,6 +20,7 @@ from qvc.light_curve.fit_light_curves import (
     _weighted_quantile,
     _default_survey_labels_for_band,
     _compute_survey_offset_active_mask,
+    _normalized_seeing_covariate,
     balmer_continuum_weight,
     build_explicit_model_params,
     build_explicit_model_params_relflux,
@@ -96,6 +97,46 @@ def _make_object(z=1.6):
         "cadence_err": {band: 0.5 for band in bands},
         "number_points": {band: 2 for band in bands},
     }
+
+
+def test_normalized_seeing_covariate_is_centered_per_band_and_survey():
+    seeing = np.array([1.0, 2.0, 4.0, 1.5, 1.5, 1.5, np.nan])
+    band_idx = np.array([0, 0, 0, 1, 1, 1, 0], dtype=np.int32)
+    survey_idx = np.array([0, 0, 0, 1, 1, 1, 2], dtype=np.int32)
+
+    covariate, active = _normalized_seeing_covariate(
+        seeing, band_idx, survey_idx, n_bands=2
+    )
+
+    np.testing.assert_allclose(covariate[:3], np.log([0.5, 1.0, 2.0]))
+    np.testing.assert_array_equal(covariate[3:], 0.0)
+    assert active[0, 0]
+    assert not active[1, 1]
+    assert np.count_nonzero(active) == 1
+
+
+def test_make_lc_preserves_and_normalizes_epoch_seeing():
+    obj = _make_object()
+    obj["surveys"] = {
+        band: np.array(["sdss", "sdss"], dtype=str) for band in obj["times"]
+    }
+    obj["psf_fwhm_arcsec"] = {
+        band: np.array([1.0, 2.0], dtype=float) for band in obj["times"]
+    }
+    # Three epochs are required before a survey-band seeing slope is activated.
+    obj["times"]["g"] = np.array([0.0, 25.0, 50.0])
+    obj["mags"]["g"] = np.array([20.0, 20.1, 20.2])
+    obj["magerrs"]["g"] = np.full(3, 0.05)
+    obj["surveys"]["g"] = np.full(3, "sdss", dtype=str)
+    obj["psf_fwhm_arcsec"]["g"] = np.array([1.0, 2.0, 4.0])
+
+    prepared = make_lc(obj, list("ugriz"), verbose=False)
+
+    g = np.asarray(prepared["band_idx"]) == prepared["bands"].index("g")
+    np.testing.assert_allclose(
+        np.asarray(prepared["seeing_covariate"])[g], np.log([0.5, 1.0, 2.0])
+    )
+    assert prepared["seeing_active_mask"][prepared["bands"].index("g"), 0]
 
 
 @pytest.mark.parametrize(

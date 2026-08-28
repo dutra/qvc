@@ -300,6 +300,64 @@ def _sample_survey_delta_mag_grid(active_mask):
     return numpyro.deterministic("survey_delta_mag", survey_delta_mag)
 
 
+def _sample_seeing_effect_grids(active_mask):
+    """Sample centered seeing effects for active band/survey combinations."""
+
+    active_mask = np.asarray(active_mask, dtype=bool)
+    active_indices = np.argwhere(active_mask)
+    seeing_mean_slope = jnp.zeros(active_mask.shape, dtype=float)
+    seeing_scatter_slope = jnp.zeros(active_mask.shape, dtype=float)
+    if active_indices.size:
+        mean_active = numpyro.sample(
+            "seeing_mean_slope_active",
+            dist.Normal(0.0, 0.02 / RELFLUX_TO_MAG_SCALE).expand(
+                (active_indices.shape[0],)
+            ),
+        )
+        scatter_active = numpyro.sample(
+            "seeing_scatter_slope_active",
+            dist.Normal(0.0, 0.25).expand((active_indices.shape[0],)),
+        )
+        for idx_flat, (band_idx, survey_idx) in enumerate(active_indices):
+            seeing_mean_slope = seeing_mean_slope.at[
+                int(band_idx), int(survey_idx)
+            ].set(mean_active[idx_flat])
+            seeing_scatter_slope = seeing_scatter_slope.at[
+                int(band_idx), int(survey_idx)
+            ].set(scatter_active[idx_flat])
+    return (
+        numpyro.deterministic("seeing_mean_slope", seeing_mean_slope),
+        numpyro.deterministic("seeing_scatter_slope", seeing_scatter_slope),
+    )
+
+
+def _normalized_seeing_covariate(seeing, band_idx, survey_idx, n_bands):
+    """Return centered log-FWHM and groups with enough leverage to fit it."""
+
+    seeing = np.asarray(seeing, dtype=float)
+    band_idx = np.asarray(band_idx, dtype=np.int32)
+    survey_idx = np.asarray(survey_idx, dtype=np.int32)
+    covariate = np.zeros(seeing.shape, dtype=float)
+    active_mask = np.zeros((int(n_bands), len(LC_SURVEY_NAMES)), dtype=bool)
+    for band in range(int(n_bands)):
+        for survey in range(len(LC_SURVEY_NAMES)):
+            mask = (
+                (band_idx == band)
+                & (survey_idx == survey)
+                & np.isfinite(seeing)
+                & (seeing > 0.0)
+            )
+            if np.count_nonzero(mask) < 3:
+                continue
+            log_seeing = np.log(seeing[mask])
+            centered = log_seeing - np.median(log_seeing)
+            if np.ptp(centered) <= 1e-6:
+                continue
+            covariate[mask] = centered
+            active_mask[band, survey] = True
+    return covariate, active_mask
+
+
 def compute_lambda_center_rf(lam_rf):
     """Geometric-mean rest wavelength of the kept bands for one object."""
 
@@ -3134,6 +3192,7 @@ def sample_flux_line_latent_params(
     log_jitter_active_mask,
     survey_offset_active_mask,
     line_ratio_offsets,
+    seeing_active_mask=None,
     mean_prior_dist=None,
     disable_lag_blr=False,
     disable_lag_bc=False,
@@ -3178,6 +3237,11 @@ def sample_flux_line_latent_params(
         mean_prior_dist = mean_prior()
     log_jitter = _sample_log_jitter_grid(log_jitter_mean, log_jitter_active_mask)
     survey_delta_mag = _sample_survey_delta_mag_grid(survey_offset_active_mask)
+    if seeing_active_mask is None:
+        seeing_active_mask = np.zeros_like(survey_offset_active_mask, dtype=bool)
+    seeing_mean_slope, seeing_scatter_slope = _sample_seeing_effect_grids(
+        seeing_active_mask
+    )
 
     with numpyro.plate("band", B):
         mean = numpyro.sample("mean", mean_prior_dist)
@@ -3273,6 +3337,8 @@ def sample_flux_line_latent_params(
         log_lag_blr2,
         log_jitter,
         survey_delta_mag,
+        seeing_mean_slope,
+        seeing_scatter_slope,
         dlog_amp_bc,
         log_lag_ratio_bc_to_blr,
     )
@@ -3531,6 +3597,7 @@ def make_lc(
     mags = data["mags"]
     magerrs = data["magerrs"]
     surveys = data.get("surveys", {})
+    seeing_by_band = data.get("psf_fwhm_arcsec", {})
 
     if len(bands) == 0:
         print(f"No usable bands for {data['object_id']}, skipping.", flush=True)
@@ -3548,6 +3615,15 @@ def make_lc(
             for b in bands
         ]
     )
+    all_seeing = np.concatenate(
+        [
+            np.asarray(
+                seeing_by_band.get(b, np.full(len(times[b]), np.nan)),
+                dtype=float,
+            )
+            for b in bands
+        ]
+    )
     band_idx = np.concatenate([np.full(len(times[b]), i) for i, b in enumerate(bands)]).astype(
         np.int64, copy=False
     )
@@ -3559,11 +3635,12 @@ def make_lc(
     tie_eps = 10.0 * np.finfo(all_times.dtype).eps
     key = all_times + band_idx.astype(all_times.dtype) * tie_eps
     order = np.argsort(key, kind="mergesort")
-    all_times, all_mags, all_magerrs, all_surveys, band_idx = (
+    all_times, all_mags, all_magerrs, all_surveys, all_seeing, band_idx = (
         all_times[order],
         all_mags[order],
         all_magerrs[order],
         all_surveys[order],
+        all_seeing[order],
         band_idx[order],
     )
 
@@ -3625,11 +3702,12 @@ def make_lc(
         & (all_magerrs > 0)
         & np.isfinite(all_times)
     )
-    all_times, all_mags, all_magerrs, all_surveys, band_idx = (
+    all_times, all_mags, all_magerrs, all_surveys, all_seeing, band_idx = (
         all_times[mfin],
         all_mags[mfin],
         all_magerrs[mfin],
         all_surveys[mfin],
+        all_seeing[mfin],
         band_idx[mfin],
     )
     if len(all_times) == 0:
@@ -3657,6 +3735,12 @@ def make_lc(
 
     time0 = np.min(all_times)
     survey_idx, survey_labels = _survey_indices_from_labels(all_surveys)
+    seeing_covariate, seeing_active_mask = _normalized_seeing_covariate(
+        all_seeing,
+        band_idx,
+        survey_idx,
+        B,
+    )
     X = (jnp.array(all_times) - jnp.min(all_times), jnp.array(band_idx))
     y = jnp.array(all_mags)
     yerr = jnp.array(all_magerrs)
@@ -3670,6 +3754,9 @@ def make_lc(
         "survey_idx": survey_idx,
         "survey_labels": survey_labels,
         "survey_names": LC_SURVEY_NAMES,
+        "psf_fwhm_arcsec": all_seeing,
+        "seeing_covariate": seeing_covariate,
+        "seeing_active_mask": seeing_active_mask,
         "z": data["z"],
         "mags_means": mags_means,
         "mags_mean_errs": mags_mean_errs,
@@ -4312,6 +4399,8 @@ def build_single_object_model_mag_flux_linearized(
             log_lag_blr2,
             log_jitter,
             survey_delta_mag,
+            seeing_mean_slope,
+            seeing_scatter_slope,
             dlog_amp_bc,
             log_lag_ratio_bc_to_blr,
         ) = sample_flux_line_latent_params(
@@ -4321,6 +4410,11 @@ def build_single_object_model_mag_flux_linearized(
             log_jitter_mean=log_jitter_mean_relflux,
             log_jitter_active_mask=log_jitter_active_mask_relflux,
             survey_offset_active_mask=survey_offset_active_mask,
+            seeing_active_mask=(
+                obj_dict.get("seeing_active_mask")
+                if use_erlang and not drw_parameterization
+                else None
+            ),
             line_ratio_offsets=line_ratio_offsets,
             mean_prior_dist=mean_prior_relflux(),
             disable_lag_blr=disable_lag_blr,
@@ -4345,6 +4439,8 @@ def build_single_object_model_mag_flux_linearized(
             log_lag_blr2=log_lag_blr2,
             log_jitter=log_jitter,
             survey_delta_mag=survey_delta_mag,
+            seeing_mean_slope=seeing_mean_slope,
+            seeing_scatter_slope=seeing_scatter_slope,
             lag0=lag0,
             lag_beta=lag_beta,
             log_igm_transmission_band=log_igm_transmission_band,
@@ -4442,7 +4538,10 @@ def build_single_object_model_mag_flux_linearized(
             **(
                 {"enforce_positive_flux_guard": enforce_positive_flux_guard}
                 if drw_parameterization
-                else {"use_fast_solver": use_fast_solver}
+                else {
+                    "use_fast_solver": use_fast_solver,
+                    "seeing_covariate": obj_dict.get("seeing_covariate"),
+                }
             ),
         )
         if drw_parameterization:
@@ -4810,6 +4909,11 @@ def run_iterated_mag_flux_linearized_inference(
             zero_mean=zero_mean,
             has_jitter=has_jitter,
             erlang_order=erlang_order,
+            **(
+                {}
+                if drw_parameterization
+                else {"seeing_covariate": obj_dict.get("seeing_covariate")}
+            ),
         )
         y_target, yerr_target = _flux_linearized_pseudo_data_from_prediction(
             obj_dict,
@@ -5477,7 +5581,7 @@ def main():
                             "enforce_positive_flux_guard": args.enforce_positive_flux_guard,
                         }
                         if args.dho_drw_parameterization
-                        else {}
+                        else {"seeing_covariate": obj.get("seeing_covariate")}
                     ),
                 )
             plot_samples = obj_flat_samples
