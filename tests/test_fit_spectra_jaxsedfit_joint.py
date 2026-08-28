@@ -9,6 +9,10 @@ import pytest
 from matplotlib import pyplot as plt
 
 from qvc.spectra import fit_spectra_jaxsedfit_joint as joint
+from qvc.spectra.catalog_hdf5 import (
+    SPECTRA_CATALOG_FORMAT,
+    read_spectra_catalog_hdf5,
+)
 from qvc.spectra.fit_spectra_jaxsedfit_joint import (
     ab_mag_to_mjy,
     add_qvc_psf_photometry,
@@ -205,10 +209,110 @@ def test_m2500_attenuation_matches_jaxsedfit_normalized_curve():
     )
 
 
+def test_alpha_nu_1450_2500_is_exact_bent_disk_secant_with_paired_dust():
+    pytest.importorskip("jaxsedfit")
+    from jaxsedfit.model import _powerlaw_jax
+
+    samples = {
+        "log_agn_amp": np.log(np.array([1.0e38, 1.1e38])),
+        "pl_slope": np.array([-1.8, -1.6]),
+        "pl_bend_loc": np.array([1000.0, 1300.0]),
+        "pl_bend_width": np.array([10.0, 7.0]),
+        "uv_slope": np.array([0.0, -0.2]),
+        "pl_cutoff": np.array([100_000.0, 80_000.0]),
+        "ebv_gal": np.array([0.02, 0.03]),
+        "ebv_agn": np.array([0.03, 0.04]),
+    }
+
+    draws = joint.estimate_joint_hubble_posterior_draws(samples, redshift=1.0)
+    disk_args = (
+        np.exp(samples["log_agn_amp"]) / 5100.0,
+        samples["uv_slope"],
+        samples["pl_slope"],
+        5100.0,
+        samples["pl_bend_loc"],
+        samples["pl_bend_width"],
+        samples["pl_cutoff"],
+    )
+    # Evaluate JAXSedFit's authoritative continuum directly so this is an
+    # independent gold test, not a comparison of the QVC helper with itself.
+    l1450_nu = np.asarray(_powerlaw_jax(1450.0, *disk_args)) * 1450.0**2
+    l2500_nu = np.asarray(_powerlaw_jax(2500.0, *disk_args)) * 2500.0**2
+    denominator = np.log10(2500.0 / 1450.0)
+    expected_intrinsic = np.log10(l1450_nu / l2500_nu) / denominator
+    np.testing.assert_allclose(
+        expected_intrinsic,
+        np.array([-1.04214077, -1.06190063]),
+        rtol=2.0e-8,
+        atol=2.0e-8,
+    )
+    attenuation_ratio = (1450.0 / 2500.0) ** -1.2
+    expected_attenuated = (
+        expected_intrinsic
+        - 0.4
+        * draws["a_2500_total_draws"]
+        * (attenuation_ratio - 1.0)
+        / denominator
+    )
+
+    np.testing.assert_allclose(
+        draws["alpha_nu_intrinsic_1450_2500_draws"], expected_intrinsic
+    )
+    np.testing.assert_allclose(
+        draws["alpha_nu_attenuated_1450_2500_draws"], expected_attenuated
+    )
+    assert np.all(expected_attenuated < expected_intrinsic)
+
+
+def test_compact_joint_posterior_uses_one_original_index_axis_for_every_field():
+    source_count = 100
+    base = np.arange(source_count, dtype=float)
+    derived = {
+        "alpha_nu_intrinsic_1450_2500_draws": -0.5 + base / 1000.0,
+        "alpha_nu_attenuated_1450_2500_draws": -1.0 + base / 1000.0,
+        "m_2500_dereddened_draws": 20.0 + base / 1000.0,
+        "m_2500_attenuated_model_draws": 20.5 + base / 1000.0,
+        "a_2500_galaxy_draws": np.full(source_count, 0.2),
+        "a_2500_internal_draws": np.full(source_count, 0.3),
+        "a_2500_total_draws": np.full(source_count, 0.5),
+    }
+    prediction = {"component_host_fraction": (base / 200.0)[:, None]}
+
+    compact, count, indices, original_count = (
+        joint.extract_compact_joint_posterior_draws(
+            prediction,
+            derived,
+            object_id="1452887",
+            seed=3,
+        )
+    )
+
+    assert count == 64
+    assert original_count == source_count
+    assert np.all(np.diff(indices[:count]) > 0)
+    assert np.all(indices[count:] == -1)
+    np.testing.assert_allclose(
+        compact["f_host_2500_psf"][:count],
+        prediction["component_host_fraction"][indices[:count], 0],
+    )
+    np.testing.assert_allclose(
+        compact["m_2500_dereddened"][:count],
+        derived["m_2500_dereddened_draws"][indices[:count]],
+    )
+    np.testing.assert_allclose(
+        compact["alpha_nu_intrinsic_1450_2500"][:count],
+        derived["alpha_nu_intrinsic_1450_2500_draws"][indices[:count]],
+    )
+
+
 def test_m2500_resume_regenerates_dust_and_overrides_stale_values():
     latent = {
         "log_agn_amp": np.log(np.array([1.0e38, 1.1e38])),
         "pl_slope": np.array([-1.8, -1.8]),
+        "pl_bend_loc": np.full(2, 1000.0),
+        "pl_bend_width": np.full(2, 10.0),
+        "uv_slope": np.zeros(2),
+        "pl_cutoff": np.full(2, 100_000.0),
     }
     regenerated = {
         "ebv_gal": np.array([0.02, 0.03]),
@@ -236,6 +340,10 @@ def test_m2500_resume_rejects_missing_regenerated_dust_site():
     latent = {
         "log_agn_amp": np.log(np.array([1.0e38, 1.1e38])),
         "pl_slope": np.array([-1.8, -1.8]),
+        "pl_bend_loc": np.full(2, 1000.0),
+        "pl_bend_width": np.full(2, 10.0),
+        "uv_slope": np.zeros(2),
+        "pl_cutoff": np.full(2, 100_000.0),
     }
 
     with pytest.raises(joint.M2500ReconstructionError, match="ebv_agn"):
@@ -374,12 +482,24 @@ def test_spectral_convergence_saves_all_scalar_sites_and_skips_arrays(monkeypatc
         "singleton_site",
         *joint.HUBBLE_MAGNITUDE_SITES,
         "a_2500_total",
+        *joint.ALPHA_NU_CATALOG_SITES,
     }
     assert set(captured) == expected_scalar_sites
     assert "vector_site" not in captured
     for name in expected_scalar_sites:
         assert np.isfinite(result[f"{name}_rhat"])
         assert f"{name}_ess" not in result
+
+    monkeypatch.setattr(
+        joint,
+        "print_numpyro_summary_dict",
+        lambda *args, **kwargs: pytest.fail("summary output should be suppressed"),
+    )
+    joint.summarize_spectral_convergence(
+        grouped,
+        redshift=1.0,
+        print_summary=False,
+    )
 
 
 def test_flat_samples_reconstruct_chain_major_order():
@@ -440,6 +560,15 @@ def test_base_result_has_stable_nan_hubble_convergence_schema(tmp_path):
     assert all(np.isnan(result[name]) for name in expected)
     assert np.isnan(result["f_host_2500_psf"])
     assert np.isnan(result["f_host_2500_psf_err"])
+    for name in joint.DERIVED_HUBBLE_CATALOG_SITES:
+        assert np.isnan(result[name])
+        assert np.isnan(result[f"{name}_err_lower"])
+        assert np.isnan(result[f"{name}_err_upper"])
+    assert set(result["_joint_posterior_draws"]) == set(
+        joint.JOINT_POSTERIOR_DRAW_FIELDS
+    )
+    assert result["_joint_posterior_valid_count"] == 0
+    assert np.all(result["_joint_posterior_index"] == -1)
 
 
 @pytest.mark.parametrize(
@@ -510,6 +639,10 @@ def _component_prediction(filter_names):
         "fracAGN_5100_fit": np.array([0.6, 0.8]),
         "formed_stellar_mass": np.array([1.0e10, 1.2e10]),
         "component_host_fraction": np.array([[0.2], [0.3], [0.4], [0.5]]),
+        "pl_bend_loc": np.full(4, 1000.0),
+        "pl_bend_width": np.full(4, 10.0),
+        "uv_slope": np.zeros(4),
+        "pl_cutoff": np.full(4, 100_000.0),
     }
     prediction.update(
         {
@@ -543,6 +676,44 @@ def test_compact_psf_fraction_draws_preserve_joint_rows_and_pad_to_64():
     assert np.all(np.isnan(compact[4:]))
 
 
+def test_total_psf_photometry_uses_authoritative_joint_indices_and_band_order():
+    filter_names = ["W2", "i_sdss", "g_sdss", "z_sdss", "u_sdss", "r_sdss"]
+    total = np.arange(1.0, 37.0, dtype=float).reshape(6, 6)
+    posterior_index = np.full(64, -1, dtype=np.int32)
+    posterior_index[:2] = [1, 4]
+
+    compact = joint.extract_aligned_joint_psf_photometry_draws(
+        {"pred_fluxes": total},
+        filter_names,
+        posterior_index,
+        2,
+    )
+
+    expected_filter_indices = [4, 2, 5, 1, 3]
+    np.testing.assert_allclose(
+        compact[:2],
+        total[np.ix_([1, 4], expected_filter_indices)],
+    )
+    assert compact.shape == (64, 5)
+    assert compact.dtype == np.float32
+    assert np.all(np.isnan(compact[2:]))
+
+
+def test_total_psf_photometry_rejects_nonpositive_selected_flux():
+    total = np.ones((2, 5), dtype=float)
+    total[1, 1] = 0.0
+    posterior_index = np.full(64, -1, dtype=np.int32)
+    posterior_index[:2] = [0, 1]
+
+    with pytest.raises(ValueError, match="finite and positive"):
+        joint.extract_aligned_joint_psf_photometry_draws(
+            {"pred_fluxes": total},
+            [f"{band}_sdss" for band in "ugriz"],
+            posterior_index,
+            2,
+        )
+
+
 def test_compact_host_2500_psf_draws_preserve_values_and_pad_to_64():
     fractions = np.array([[0.15], [0.25], [0.35], [0.45]], dtype=float)
 
@@ -563,8 +734,29 @@ def test_joint_fit_result_writer_moves_private_draw_payload_out_of_catalog(tmp_p
     path = tmp_path / "chunk.h5"
     draws = np.full((64, 5), np.nan, dtype=np.float32)
     draws[:2] = 0.75
-    host_draws = np.full(64, np.nan, dtype=np.float32)
-    host_draws[:2] = [0.25, 0.20]
+    derived = joint.estimate_joint_hubble_posterior_draws(
+        {
+            "log_agn_amp": np.log(np.array([1.0e38, 1.1e38])),
+            "pl_slope": np.array([-1.8, -1.7]),
+            "ebv_gal": np.array([0.02, 0.03]),
+            "ebv_agn": np.array([0.03, 0.04]),
+        },
+        redshift=1.0,
+    )
+    joint_draws, joint_count, posterior_index, source_count = (
+        joint.extract_compact_joint_posterior_draws(
+            {"component_host_fraction": np.array([[0.25], [0.20]])},
+            derived,
+            object_id="1452887",
+            seed=3,
+        )
+    )
+    scalar_summary = joint.summarize_joint_hubble_posterior_draws(derived)
+    scalar_summary.update(
+        joint.summarize_host_2500_psf(
+            {"component_host_fraction": np.array([[0.25], [0.20]])}
+        )
+    )
     rows = [
         {
             "object_id": "1452887",
@@ -574,10 +766,26 @@ def test_joint_fit_result_writer_moves_private_draw_payload_out_of_catalog(tmp_p
             "fracAGN_5100_fit_err": 0.04,
             "formed_stellar_mass": 1.1e10,
             "f_AGN_psf_g": 0.75,
+            "mw_deredden_applied": True,
+            "joint_posterior_draw_source": "synthetic_test",
+            **scalar_summary,
             "_psf_agn_fraction_draws": draws,
             "_psf_agn_fraction_valid_count": 2,
-            "_f_host_2500_psf_draws": host_draws,
-            "_f_host_2500_psf_valid_count": 2,
+            "_joint_posterior_draws": joint_draws,
+            "_joint_posterior_valid_count": joint_count,
+            "_joint_posterior_index": posterior_index,
+            "_joint_posterior_source_draw_count": source_count,
+            "_joint_posterior_selection_seed": 3,
+            "_joint_psf_photometry_draws": np.vstack(
+                [
+                    np.asarray([[1.0, 2.0, 3.0, 4.0, 5.0]] * 2),
+                    np.full((62, 5), np.nan),
+                ]
+            ).astype(np.float32),
+            "_joint_psf_photometry_provenance": {
+                "prediction_source": "synthetic_test",
+                "jaxsedfit_git_commit": "a" * 40,
+            },
         }
     ]
 
@@ -591,9 +799,39 @@ def test_joint_fit_result_writer_moves_private_draw_payload_out_of_catalog(tmp_p
         assert handle["psf_agn_fraction_draws/values"].shape == (1, 64, 5)
         assert handle["psf_agn_fraction_draws/valid_count"][0] == 2
         np.testing.assert_allclose(
-            handle["f_host_2500_psf_draws/values"][0, :2], [0.25, 0.20]
+            handle["joint_posterior_draws/f_host_2500_psf"][0, :2],
+            [0.25, 0.20],
         )
-        assert handle["f_host_2500_psf_draws/valid_count"][0] == 2
+        assert handle["joint_posterior_draws/valid_count"][0] == 2
+        np.testing.assert_array_equal(
+            handle["joint_posterior_draws/posterior_index"][0, :2], [0, 1]
+        )
+        assert "_joint_psf_photometry_draws" not in handle["catalog"]
+        np.testing.assert_allclose(
+            handle["joint_psf_photometry_draws/values_mjy"][0, :2, 1],
+            [2.0, 2.0],
+        )
+
+    catalog = read_spectra_catalog_hdf5(path)
+    assert catalog.joint_psf_photometry_bands == tuple(
+        f"{band}_sdss" for band in "ugriz"
+    )
+
+
+def test_joint_fit_result_writer_preserves_v3_schema_for_empty_shard(tmp_path):
+    path = tmp_path / "empty.h5"
+
+    write_joint_fit_results_hdf5(path, [])
+    catalog = read_spectra_catalog_hdf5(path)
+
+    assert catalog.catalog_format == SPECTRA_CATALOG_FORMAT
+    assert catalog.frame.empty
+    assert set(joint.JOINT_POSTERIOR_SCALAR_SUMMARY_FIELDS) <= set(
+        catalog.frame.columns
+    )
+    assert catalog.joint_posterior_draws[
+        "alpha_nu_intrinsic_1450_2500"
+    ].shape == (0, 64)
 
 
 def test_m2500_catalog_validation_rejects_zeroed_resumed_attenuation():
@@ -608,6 +846,8 @@ def test_m2500_catalog_validation_rejects_zeroed_resumed_attenuation():
         "a_2500_galaxy": 0.0,
         "a_2500_internal": 0.0,
         "a_2500_total": 0.0,
+        "alpha_nu_intrinsic_1450_2500": -0.5,
+        "alpha_nu_attenuated_1450_2500": -1.0,
     }
 
     with pytest.raises(
@@ -636,6 +876,8 @@ def test_m2500_catalog_validation_rejects_partially_zeroed_resume_fields(
         "a_2500_galaxy": 0.10,
         "a_2500_internal": 0.15,
         "a_2500_total": a_2500_total,
+        "alpha_nu_intrinsic_1450_2500": -0.5,
+        "alpha_nu_attenuated_1450_2500": -1.0,
     }
 
     with pytest.raises(joint.M2500ReconstructionError, match="object_ids"):
@@ -656,6 +898,8 @@ def test_m2500_catalog_validation_uses_latent_log_ebv_as_dust_evidence():
         "a_2500_galaxy": 0.0,
         "a_2500_internal": 0.0,
         "a_2500_total": 0.0,
+        "alpha_nu_intrinsic_1450_2500": -0.5,
+        "alpha_nu_attenuated_1450_2500": -1.0,
     }
 
     with pytest.raises(joint.M2500ReconstructionError, match="object_ids"):
@@ -674,6 +918,8 @@ def test_m2500_catalog_validation_accepts_physical_rows_and_ignores_failures():
         "a_2500_galaxy": 0.10,
         "a_2500_internal": 0.15,
         "a_2500_total": 0.25,
+        "alpha_nu_intrinsic_1450_2500": -0.5,
+        "alpha_nu_attenuated_1450_2500": -1.0,
     }
     failed = {
         "object_id": "failed",
@@ -773,6 +1019,7 @@ def test_catalog_prediction_temporarily_requests_legacy_csv_scalar_sites():
     assert set(joint.LEGACY_CSV_SCALAR_PREDICTION_SITES) <= set(
         fitter.requested_sites
     )
+    assert set(joint.M2500_POSTERIOR_SITES) <= set(fitter.requested_sites)
     assert fitter._predictive_return_sites("photometry") == [
         "pred_fluxes",
         "fracAGN_5100_fit",
@@ -844,6 +1091,144 @@ def test_resume_preflight_rejects_old_and_accepts_grouped_bundle(tmp_path):
     joint.preflight_resume_host_capture_bundles([rec], args)
 
 
+def test_resume_preflight_allows_only_explicitly_unannotated_grouped_bundle(
+    tmp_path,
+):
+    args = _hybrid_args(tmp_path)
+    args.allow_unannotated_resume_bundle = True
+    rec = _run_record()
+    path = joint.posterior_bundle_path(args.resume, rec)
+    path.parent.mkdir(parents=True)
+    with h5py.File(path, "w") as handle:
+        handle.create_dataset(
+            "samples/host_capture_group_fraction", data=np.ones((2, 1))
+        )
+
+    with pytest.warns(RuntimeWarning, match="Explicitly accepting"):
+        joint.preflight_resume_host_capture_bundles([rec], args)
+
+    with h5py.File(path, "a") as handle:
+        handle.attrs[joint.HOST_CAPTURE_BUNDLE_ATTR] = "some_other_group"
+    with pytest.raises(
+        joint.IncompatibleHostCaptureResumeError,
+        match="predates the shared qvc_sdss_psf",
+    ):
+        joint.preflight_resume_host_capture_bundles([rec], args)
+
+
+def test_prepared_resume_records_filter_in_requested_order(tmp_path):
+    path = tmp_path / "prepared.csv"
+    pd.DataFrame(
+        {
+            "object_id": ["2", "1"],
+            "sdss_name": ["second", "first"],
+            "plate": [2, 1],
+            "fiber": [20, 10],
+            "mjd": [52_002, 52_001],
+            "z": [2.0, 1.0],
+            "ra": [20.0, 10.0],
+            "dec": [0.2, 0.1],
+        }
+    ).to_csv(path, index=False)
+
+    records = joint.load_prepared_resume_records(path, ["1", "2"])
+
+    assert [record["object_id"] for record in records] == ["1", "2"]
+    assert [record["sdss_name"] for record in records] == ["first", "second"]
+
+
+def test_prepared_resume_records_reject_missing_requested_id(tmp_path):
+    path = tmp_path / "prepared.csv"
+    pd.DataFrame(
+        {
+            "object_id": ["1"],
+            "sdss_name": ["first"],
+            "plate": [1],
+            "fiber": [10],
+            "mjd": [52_001],
+            "z": [1.0],
+            "ra": [10.0],
+            "dec": [0.1],
+        }
+    ).to_csv(path, index=False)
+
+    with pytest.raises(ValueError, match="lack 1 requested"):
+        joint.load_prepared_resume_records(path, ["2"])
+
+
+def test_resume_build_records_uses_prepared_manifest_without_sed_reload(tmp_path):
+    path = tmp_path / "prepared.csv"
+    pd.DataFrame(
+        {
+            "object_id": ["1"],
+            "sdss_name": ["first"],
+            "plate": [1],
+            "fiber": [10],
+            "mjd": [52_001],
+            "z": [1.0],
+            "ra": [10.0],
+            "dec": [0.1],
+        }
+    ).to_csv(path, index=False)
+    args = SimpleNamespace(
+        resume="old_run",
+        resume_only=True,
+        resume_records_path=str(path),
+        filter_object_id=["1"],
+        sed_photometry_path=str(tmp_path / "deliberately_missing.csv"),
+    )
+
+    records = joint.build_records(args)
+
+    assert [record["object_id"] for record in records] == ["1"]
+    assert "_joint_photometry" not in records[0]
+
+
+def test_hybrid_resume_build_records_retains_fresh_fallback_photometry(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        joint.legacy,
+        "build_records",
+        lambda args: [{"object_id": "1"}],
+    )
+    monkeypatch.setattr(
+        joint,
+        "load_saved_sed_photometry",
+        lambda path: pd.DataFrame(
+            {
+                "source_id": ["1"],
+                "filter_name": ["W1"],
+                "flux_mjy": [1.0],
+                "flux_err_mjy": [0.1],
+            }
+        ),
+    )
+    args = SimpleNamespace(
+        resume="old_run",
+        resume_only=False,
+        resume_records_path=None,
+        sed_photometry_path=str(tmp_path / "photometry.csv"),
+    )
+
+    records = joint.build_records(args)
+
+    assert records[0]["_joint_photometry"][0]["filter_name"] == "W1"
+
+
+def test_parse_args_rejects_no_deredden_for_mandatory_v3_colors(tmp_path):
+    with pytest.raises(SystemExit):
+        joint.parse_args(
+            [
+                "--mode", "fit",
+                str(tmp_path / "out.h5"),
+                "--sed-photometry-path", str(tmp_path / "phot.csv"),
+                "--filter_object_id", "1",
+                "--no-deredden",
+            ]
+        )
+
+
 def test_parse_args_resume_keeps_current_inputs_and_separate_destinations(tmp_path):
     resume_dir = tmp_path / "old_run" / "all"
     resume_dir.mkdir(parents=True)
@@ -895,6 +1280,68 @@ def test_parse_args_rejects_resume_output_directory_alias(tmp_path):
         )
 
 
+@pytest.mark.parametrize(
+    "flag",
+    ["--resume-only", "--allow-unannotated-resume-bundle"],
+)
+def test_parse_args_requires_resume_for_resume_safety_flags(tmp_path, flag):
+    with pytest.raises(SystemExit):
+        joint.parse_args(
+            [
+                "--mode",
+                "fit",
+                str(tmp_path / "chunk.h5"),
+                "--sed-photometry-path",
+                str(tmp_path / "photometry.csv"),
+                "--filter_object_id",
+                "1452887",
+                flag,
+            ]
+        )
+
+
+def test_parse_args_requires_resume_for_prepared_records(tmp_path):
+    records = tmp_path / "records.csv"
+    records.write_text("object_id\n1452887\n")
+    with pytest.raises(SystemExit):
+        joint.parse_args(
+            [
+                "--mode",
+                "fit",
+                str(tmp_path / "chunk.h5"),
+                "--sed-photometry-path",
+                str(tmp_path / "photometry.csv"),
+                "--filter_object_id",
+                "1452887",
+                "--resume-records-path",
+                str(records),
+            ]
+        )
+
+
+def test_parse_args_requires_resume_only_for_prepared_records(tmp_path):
+    resume_dir = tmp_path / "old" / "all"
+    resume_dir.mkdir(parents=True)
+    records = tmp_path / "records.csv"
+    records.write_text("object_id\n1452887\n")
+    with pytest.raises(SystemExit):
+        joint.parse_args(
+            [
+                "--mode",
+                "fit",
+                str(tmp_path / "chunk.h5"),
+                "--sed-photometry-path",
+                str(tmp_path / "photometry.csv"),
+                "--filter_object_id",
+                "1452887",
+                "--resume",
+                str(resume_dir),
+                "--resume-records-path",
+                str(records),
+            ]
+        )
+
+
 def test_hybrid_missing_bundle_requires_fresh_spectral_run(monkeypatch, tmp_path):
     args = _hybrid_args(tmp_path)
     with pytest.raises(
@@ -936,6 +1383,36 @@ def test_hybrid_bad_bundle_cleans_new_artifacts_and_falls_back(monkeypatch, tmp_
     assert not joint.sed_figure_path(args.fig_dir, _run_record()).exists()
     assert source.read_bytes() == b"old posterior"
     assert len(fresh_calls) == 1
+
+
+def test_hybrid_resume_only_cleans_artifacts_without_fresh_fit(
+    monkeypatch, tmp_path
+):
+    args = _hybrid_args(tmp_path)
+    args.resume_only = True
+    rec = _run_record()
+    source = joint.posterior_bundle_path(args.resume, rec)
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"posterior")
+
+    def failing_resume(rec, received_args, source_path):
+        new_bundle = joint.posterior_bundle_path(received_args.output_dir, rec)
+        new_bundle.parent.mkdir(parents=True)
+        new_bundle.write_bytes(b"partial")
+        raise ValueError("prediction failed")
+
+    monkeypatch.setattr(joint, "_run_resumed_fit", failing_resume)
+    monkeypatch.setattr(
+        joint,
+        "run_one_fit",
+        lambda *args, **kwargs: pytest.fail("must not launch a fresh refit"),
+    )
+
+    with pytest.raises(RuntimeError, match="fresh Optax/NUTS fit was not started"):
+        joint.run_hybrid_fit(rec, args)
+
+    assert not joint.posterior_bundle_path(args.output_dir, rec).exists()
+    assert source.read_bytes() == b"posterior"
 
 
 def test_hybrid_m2500_reconstruction_error_does_not_refit(monkeypatch, tmp_path):
@@ -987,18 +1464,18 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
     prediction = _component_prediction(filter_names)
     prediction.update(
         {
-            "ebv_gal": np.array([0.02, 0.02]),
-            "ebv_agn": np.array([0.03, 0.03]),
+            "ebv_gal": np.full(4, 0.02),
+            "ebv_agn": np.full(4, 0.03),
         }
     )
 
     class DummyFitter:
         predictive = {"stale": np.array([1.0])}
         samples = {
-            "log_agn_amp": np.log(np.array([1.0e38, 1.1e38])),
-            "pl_slope": np.array([-1.8, -1.8]),
-            "pl_bend_loc": np.array([1000.0, 1000.0]),
-            "pl_bend_width": np.array([10.0, 10.0]),
+            "log_agn_amp": np.log(np.array([1.0e38, 1.1e38, 1.2e38, 1.3e38])),
+            "pl_slope": np.full(4, -1.8),
+            "pl_bend_loc": np.full(4, 1000.0),
+            "pl_bend_width": np.full(4, 10.0),
             "host_capture_group_fraction": np.array([[0.4], [0.5]]),
         }
         config = SimpleNamespace(
@@ -1075,8 +1552,30 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
         result["m_2500_attenuated_model"]
         > result["m_2500_dereddened"]
     )
+    assert np.isfinite(result["alpha_nu_intrinsic_1450_2500"])
+    assert (
+        result["alpha_nu_attenuated_1450_2500"]
+        < result["alpha_nu_intrinsic_1450_2500"]
+    )
+    assert result["mw_deredden_applied"] is True
+    assert result["joint_posterior_draw_source"] == "resume_bundle_reprocess"
+    assert result["_joint_posterior_valid_count"] == 4
+    np.testing.assert_array_equal(result["_joint_posterior_index"][:4], [0, 1, 2, 3])
+    np.testing.assert_allclose(
+        result["_joint_psf_photometry_draws"][:4],
+        prediction["pred_fluxes"],
+    )
+    assert result["_joint_psf_photometry_provenance"][
+        "prediction_source"
+    ] == "saved_posterior_bundle_prediction"
     assert verify_new_posterior_bundle(result["fit_result_path"]).is_file()
     assert source.read_bytes() == b"immutable old posterior"
+
+    args.save_jaxsedfit_samples = False
+    args.save_fig = False
+    catalog_only = joint.run_hybrid_fit(rec, args)
+    assert catalog_only["fit_result_path"] == str(source)
+    assert catalog_only["resumed_from_path"] == str(source)
 
 
 def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_path):
@@ -1089,8 +1588,8 @@ def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_
     prediction = _component_prediction(filter_names)
     prediction.update(
         {
-            "ebv_gal": np.array([0.02, 0.02]),
-            "ebv_agn": np.array([0.03, 0.03]),
+            "ebv_gal": np.full(4, 0.02),
+            "ebv_agn": np.full(4, 0.03),
         }
     )
     saved_path = joint.posterior_bundle_path(args.output_dir, rec)
@@ -1107,8 +1606,8 @@ def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_
 
     class DummyFitResult:
         samples = {
-            "log_agn_amp": np.log(np.array([1.0e38, 1.1e38])),
-            "pl_slope": np.array([-1.8, -1.8]),
+            "log_agn_amp": np.log(np.array([1.0e38, 1.1e38, 1.2e38, 1.3e38])),
+            "pl_slope": np.full(4, -1.8),
         }
         path = saved_path
 
@@ -1181,4 +1680,20 @@ def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_
         result["m_2500_attenuated_model"]
         > result["m_2500_dereddened"]
     )
+    assert np.isfinite(result["alpha_nu_intrinsic_1450_2500"])
+    assert (
+        result["alpha_nu_attenuated_1450_2500"]
+        < result["alpha_nu_intrinsic_1450_2500"]
+    )
+    assert result["mw_deredden_applied"] is True
+    assert result["joint_posterior_draw_source"] == "fresh_fit"
+    assert result["_joint_posterior_valid_count"] == 4
+    np.testing.assert_array_equal(result["_joint_posterior_index"][:4], [0, 1, 2, 3])
+    np.testing.assert_allclose(
+        result["_joint_psf_photometry_draws"][:4],
+        prediction["pred_fluxes"],
+    )
+    assert result["_joint_psf_photometry_provenance"][
+        "prediction_source"
+    ] == "fresh_fit_prediction"
     assert result["fit_result_path"] == str(saved_path)
