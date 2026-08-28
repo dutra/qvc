@@ -15,6 +15,7 @@ The original ``fit_spectra.py`` remains the spectrum-first production path.
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import multiprocessing as mp
 import traceback
@@ -2231,6 +2232,80 @@ def fit_with_saved_initialization_plots(fitter, rec, args):
         fitter.plot_sed = original_plot_sed
 
 
+def release_jaxsedfit_memory(fitter=None, fit_result=None):
+    """Discard one fit's large state and clear process-wide JAX caches."""
+    states = []
+    for owner in (fitter, fit_result):
+        state = getattr(owner, "_fit_state", None)
+        if state is None:
+            state = getattr(owner, "_state", None)
+        if state is not None and all(state is not item for item in states):
+            states.append(state)
+
+    for state in states:
+        figure = getattr(state, "figure", None)
+        if figure is not None:
+            try:
+                from matplotlib import pyplot as plt
+
+                plt.close(figure)
+            except Exception:
+                pass
+        for name in (
+            "map_result",
+            "nuts_result",
+            "ns_result",
+            "samples",
+            "predictive",
+            "predictive_cache",
+            "summary",
+            "figure",
+            "plot_cache",
+        ):
+            try:
+                setattr(state, name, None)
+            except Exception:
+                pass
+
+    if fit_result is not None:
+        for name in (
+            "fitter",
+            "samples",
+            "median",
+            "summary",
+            "figure",
+            "_state",
+            "_spectrum",
+        ):
+            try:
+                setattr(fit_result, name, None)
+            except Exception:
+                pass
+
+    if fitter is not None:
+        reset = getattr(fitter, "_reset_fit_state", None)
+        if callable(reset):
+            try:
+                reset()
+            except Exception:
+                pass
+        for name in ("context", "config"):
+            try:
+                setattr(fitter, name, None)
+            except Exception:
+                pass
+
+    gc.collect()
+    try:
+        import jax
+
+        jax.clear_caches()
+    except Exception:
+        # Cleanup must not replace a completed fit or mask its original error.
+        pass
+    gc.collect()
+
+
 def run_one_fit(
     rec,
     args,
@@ -2247,6 +2322,8 @@ def run_one_fit(
         resumed_from_path=resumed_from_path,
     )
     result["resume_error_message"] = str(resume_error_message or "")
+    fitter = None
+    fit_result = None
     try:
         hdul = legacy.load_spec_from_cache(
             rec["plate"], rec["fiber"], rec["mjd"], cache_dir=args.cache_dir
@@ -2402,13 +2479,26 @@ def run_one_fit(
         result["error_message"] = str(exc)
         if args.verbose:
             traceback.print_exc()
+    finally:
+        release_jaxsedfit_memory(fitter, fit_result)
     return result
 
 
 def _run_resumed_fit(rec, args, source_path):
     """Regenerate one object from saved draws and write current-schema outputs."""
-    from matplotlib import pyplot as plt
     from jaxsedfit import JAXSEDFit
+
+    fitter = None
+    try:
+        fitter = JAXSEDFit.load(source_path)
+        return _complete_resumed_fit(rec, args, source_path, fitter)
+    finally:
+        release_jaxsedfit_memory(fitter)
+
+
+def _complete_resumed_fit(rec, args, source_path, fitter):
+    """Build current catalog products from one already-loaded posterior."""
+    from matplotlib import pyplot as plt
 
     result = _base_result(
         rec,
@@ -2416,7 +2506,6 @@ def _run_resumed_fit(rec, args, source_path):
         execution_mode="resumed",
         resumed_from_path=source_path,
     )
-    fitter = JAXSEDFit.load(source_path)
     fitter.predictive = None
     validate_resume_host_capture_fitter(fitter, source_path)
     config = fitter.config
