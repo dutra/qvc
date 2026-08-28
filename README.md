@@ -106,6 +106,36 @@ PREFIX=demo SUFFIX=demo python -m qvc.light_curve.fit_light_curves \
   --corner_plot_mode "full"
 ```
 
+The experimental shared-latent response model is available through a
+dedicated entry point:
+
+```bash
+PREFIX=latent_demo SUFFIX=latent_demo \
+python -m qvc.light_curve.fit_light_curves_shared_latent_blr \
+  --filter_object_id 1452887 \
+  --nwarm 500 \
+  --nsamp 250 \
+  --nchains 2 \
+  --plot
+```
+
+It uses one unit-RMS DHO driver for every band. Each observed continuum is a
+narrow Erlang-convolved disk response whose centroid follows a shared
+`lambda^(4/3)` law, while each band's generic delayed component has its own
+lag and unit-RMS Erlang response. The same model can be selected from the main
+entry point with `--model_variant shared_latent_blr`. `--disk_order` controls
+the disk-response width (default 3); `--erlang_order` controls the delayed
+response width (default 3). No emission-line, Fe, or diffuse-continuum
+wavelength template is imposed.
+
+For output compatibility with the other light-curve models,
+`log_tau_band_<band>_RF` is the rest-frame effective timescale of that band's
+complete disk-plus-delayed light curve. It is the exact integral of the
+normalized autocorrelation function, not a fitted response centroid. The same
+value is also written as `log_tau_effective_<band>_RF`. The underlying shared
+driver poles remain available separately as `log_tau_driver_slow_rf` and
+`log_tau_driver_fast_rf`.
+
 ### Spectra Fitting
 
 Fits the matching cached SDSS spectrum with `qvc.spectra.fit_spectra`, saving the output CSV, fit figures, and MCMC diagnostic plots.

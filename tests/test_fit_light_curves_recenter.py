@@ -1109,6 +1109,49 @@ def test_process_samples_supports_drw_q_without_fast_pole_outputs():
     )
 
 
+def test_process_samples_stores_shared_latent_effective_band_timescales():
+    bands = ["g", "r"]
+    z = 1.0
+    tau_fast = np.asarray([12.0, 15.0, 18.0])
+    tau_slow = np.asarray([140.0, 180.0, 220.0])
+    samples = {
+        "log_sigma_uv": np.log(np.asarray([0.18, 0.20, 0.22])),
+        "log_tau_uv": np.log(tau_slow),
+        "log_tau_fast_uv": np.log(tau_fast),
+        "eta_sigma": np.zeros(3),
+        "eta_tau": np.zeros(3),
+    }
+    for index, band in enumerate(bands):
+        samples[f"tau_fast_{band}"] = tau_fast
+        samples[f"tau_slow_{band}"] = tau_slow
+        samples[f"lag_disk_{band}"] = np.asarray([2.0, 3.0, 4.0]) * (index + 1)
+        samples[f"lag_blr_{band}"] = np.asarray([25.0, 35.0, 45.0]) * (index + 1)
+        samples[f"amp_cont_relflux_{band}"] = np.full(3, 0.10)
+        samples[f"amp_blr_relflux_{band}"] = np.full(3, 0.03 + 0.02 * index)
+
+    result = process_samples(
+        samples,
+        {"object_id": "shared", "z": z},
+        bands=bands,
+        model_variant="shared_latent_blr",
+        disk_order=3,
+        erlang_order=3,
+    )
+
+    assert result["log_tau_driver_slow_rf"] == result["log_tau_uv_rf"]
+    assert result["log_tau_driver_fast_rf"] == result["log_tau_fast_uv_rf"]
+    for band in bands:
+        assert np.isfinite(result[f"log_tau_band_{band}_RF"])
+        assert result[f"log_tau_band_{band}_RF"] == result[f"log_tau_effective_{band}_RF"]
+        assert result[f"log_tau_band_{band}_RF_err"] == result[f"log_tau_effective_{band}_RF_err"]
+
+    # Different response mixtures must produce genuinely band-dependent tau,
+    # even though both bands share the same latent driver poles.
+    assert not np.isclose(
+        result["log_tau_band_g_RF"], result["log_tau_band_r_RF"]
+    )
+
+
 def test_process_samples_keeps_bc_lag_for_band_near_balmer_edge():
     z = lambda_pivot["r"] / 3900.0 - 1.0
     flat_samples = {

@@ -1,6 +1,7 @@
 import h5py
 import os
 import numpy as np
+import jax
 import jax.numpy as jnp
 import secrets
 import subprocess
@@ -803,7 +804,16 @@ def psd_cov_from_samples(X, Y, eps=1e-12, shrink_rho=0.0):
     C = np.array([[sx*sx, rho*sx*sy],[rho*sx*sy, sy*sy]])
     return C
 
-def process_samples(flat_samples, data, bands, percentiles=[16, 50, 84]):
+def process_samples(
+    flat_samples,
+    data,
+    bands,
+    percentiles=[16, 50, 84],
+    *,
+    model_variant=None,
+    disk_order=3,
+    erlang_order=3,
+):
     """
     Generalized processing of MCMC samples for arbitrary parameters and bands.
 
@@ -887,6 +897,12 @@ def process_samples(flat_samples, data, bands, percentiles=[16, 50, 84]):
     if has_fast_pole:
         samples_log_tau_fast_uv_rf = log_tau_fast_uv / np.log(10) - np.log10(1 + data['z']) + log_single_pl(lambda_ref, lam_ref_arr, eta_tau)
         result["log_tau_fast_uv_rf"], result["log_tau_fast_uv_rf_err"] = sym_percentile(samples_log_tau_fast_uv_rf)
+    if model_variant == "shared_latent_blr":
+        result["log_tau_driver_slow_rf"] = result["log_tau_uv_rf"]
+        result["log_tau_driver_slow_rf_err"] = result["log_tau_uv_rf_err"]
+        if has_fast_pole:
+            result["log_tau_driver_fast_rf"] = result["log_tau_fast_uv_rf"]
+            result["log_tau_driver_fast_rf_err"] = result["log_tau_fast_uv_rf_err"]
 
     log_sigma_band = []
     for band in bands:
@@ -901,6 +917,65 @@ def process_samples(flat_samples, data, bands, percentiles=[16, 50, 84]):
         val = log_tau_uv / np.log(10) - np.log10(1 + data['z']) + log_single_pl(lam_eff, lam_ref_arr, eta_tau)
         log_tau_band.append(val)
     log_tau_band = np.array(log_tau_band).T
+
+    if model_variant == "shared_latent_blr":
+        from qvc.light_curve.multiband_model_shared_latent_blr import (
+            SharedLatentDiskBLRQS,
+        )
+
+        required = [
+            *(f"tau_fast_{band}" for band in bands),
+            *(f"tau_slow_{band}" for band in bands),
+            *(f"lag_disk_{band}" for band in bands),
+            *(f"lag_blr_{band}" for band in bands),
+            *(f"amp_cont_relflux_{band}" for band in bands),
+            *(f"amp_blr_relflux_{band}" for band in bands),
+        ]
+        missing = [key for key in required if key not in flat_samples]
+        if missing:
+            raise KeyError(
+                "Missing shared-latent samples required for effective tau: "
+                + ", ".join(missing)
+            )
+
+        tau_fast_draws = np.asarray(flat_samples[f"tau_fast_{bands[0]}"])
+        tau_slow_draws = np.asarray(flat_samples[f"tau_slow_{bands[0]}"])
+        lag_disk_draws = np.column_stack(
+            [np.asarray(flat_samples[f"lag_disk_{band}"]) for band in bands]
+        )
+        lag_blr_draws = np.column_stack(
+            [np.asarray(flat_samples[f"lag_blr_{band}"]) for band in bands]
+        )
+        amp_cont_draws = np.column_stack(
+            [np.asarray(flat_samples[f"amp_cont_relflux_{band}"]) for band in bands]
+        )
+        amp_blr_draws = np.column_stack(
+            [np.asarray(flat_samples[f"amp_blr_relflux_{band}"]) for band in bands]
+        )
+
+        def effective_one(tau_fast, tau_slow, lag_disk, lag_blr, amp_cont, amp_blr):
+            return SharedLatentDiskBLRQS(
+                tau_fast=jnp.atleast_1d(tau_fast),
+                tau_slow=jnp.atleast_1d(tau_slow),
+                lag_disk=lag_disk,
+                lag_blr=lag_blr,
+                amp_cont=amp_cont,
+                amp_blr=amp_blr,
+                disk_order=int(disk_order),
+                blr_order=int(erlang_order),
+            ).effective_timescales()
+
+        effective_tau_obs = np.asarray(
+            jax.jit(jax.vmap(effective_one))(
+                jnp.asarray(tau_fast_draws),
+                jnp.asarray(tau_slow_draws),
+                jnp.asarray(lag_disk_draws),
+                jnp.asarray(lag_blr_draws),
+                jnp.asarray(amp_cont_draws),
+                jnp.asarray(amp_blr_draws),
+            )
+        )
+        log_tau_band = np.log10(effective_tau_obs) - np.log10(1.0 + data["z"])
 
     log_tau_fast_band = None
     if has_fast_pole:
@@ -924,10 +999,24 @@ def process_samples(flat_samples, data, bands, percentiles=[16, 50, 84]):
         median, err = sym_percentile(log_tau_band[:, i])
         result[f"log_tau_band_{band}_RF"] = median
         result[f"log_tau_band_{band}_RF_err"] = err
+        if model_variant == "shared_latent_blr":
+            result[f"log_tau_effective_{band}_RF"] = median
+            result[f"log_tau_effective_{band}_RF_err"] = err
         if has_fast_pole:
             median, err = sym_percentile(log_tau_fast_band[:, i])
             result[f"log_tau_fast_band_{band}_RF"] = median
             result[f"log_tau_fast_band_{band}_RF_err"] = err
+        lag_disk_key = f"lag_disk_{band}"
+        if lag_disk_key in flat_samples:
+            lag_disk = np.asarray(flat_samples[lag_disk_key], dtype=float)
+            valid_disk = np.isfinite(lag_disk) & (lag_disk > 0.0)
+            if np.any(valid_disk):
+                log_lag_disk_rf = (
+                    np.log10(lag_disk[valid_disk]) - np.log10(1.0 + data["z"])
+                )
+                median, err = sym_percentile(log_lag_disk_rf)
+                result[f"log_lag_disk_{band}_RF"] = median
+                result[f"log_lag_disk_{band}_RF_err"] = err
         for lag_suffix in ("", "2"):
             log_lag_blr_key = f"log_lag_blr{lag_suffix}_{band}"
             if log_lag_blr_key in flat_samples:
