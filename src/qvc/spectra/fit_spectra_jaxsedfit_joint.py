@@ -24,6 +24,7 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+import numpyro.distributions as dist
 import pandas as pd
 
 from qvc.mcmc_diagnostics import (
@@ -1019,6 +1020,13 @@ def build_joint_config(
             save_result=args.save_jaxsedfit_samples,
             show_plot=False,
         ),
+    )
+    config.galaxy.host_sfh_model = "delayed_burst"
+    config.prior_config.host.log_sfh_burst_age_gyr = dist.Uniform(
+        np.log(0.01), np.log(0.5)
+    )
+    config.prior_config.host.log_sfh_burst_tau_gyr = dist.Uniform(
+        np.log(0.01), np.log(0.2)
     )
     config.validate()
     return config, phot

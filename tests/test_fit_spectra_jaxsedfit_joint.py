@@ -188,6 +188,13 @@ def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
     assert config.likelihood.fit_spectrum_scale is True
     assert config.likelihood.spectrum_scale_prior_sigma_dex == pytest.approx(0.12)
     assert config.likelihood.use_host_capture_model is True
+    assert config.galaxy.host_sfh_model == "delayed_burst"
+    burst_age_prior = config.prior_config.host.log_sfh_burst_age_gyr
+    burst_tau_prior = config.prior_config.host.log_sfh_burst_tau_gyr
+    assert float(burst_age_prior.low) == pytest.approx(np.log(0.01))
+    assert float(burst_age_prior.high) == pytest.approx(np.log(0.5))
+    assert float(burst_tau_prior.low) == pytest.approx(np.log(0.01))
+    assert float(burst_tau_prior.high) == pytest.approx(np.log(0.2))
     assert not hasattr(config.photometry, "host_capture_group")
     assert config.photometry.psf_fwhm_arcsec == [None] * 5
 
