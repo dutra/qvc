@@ -640,6 +640,60 @@ def test_carma21_numpyro_model_trace_materializes_likelihood_and_uv_outputs():
         assert np.all(np.isfinite(np.asarray(sites[key]["value"])))
 
 
+@pytest.mark.parametrize(
+    ("shared_latent", "drw_parameterization"),
+    [(False, False), (True, False), (False, True)],
+)
+def test_seeing_dependence_can_be_enabled_for_every_gp_choice(
+    shared_latent, drw_parameterization
+):
+    obj = {
+        "object_id": "seeing-smoke",
+        "z": 1.0,
+        "X": (
+            np.array([0.0, 5.0, 10.0, 15.0]),
+            np.array([0, 0, 0, 0], dtype=np.int32),
+        ),
+        "y": np.array([0.0, 0.02, -0.01, 0.01]),
+        "yerr": np.full(4, 0.03),
+        "survey_idx": np.zeros(4, dtype=np.int32),
+        "seeing_covariate": np.array([-0.3, -0.1, 0.1, 0.3]),
+        "seeing_active_mask": np.array([[True, False, False]]),
+        "mags_means": np.array([20.0]),
+        "bands": ["g"],
+        "survey_names": ("sdss", "ps1", "ztf"),
+    }
+
+    enabled = build_single_object_model_mag_flux_linearized(
+        obj,
+        np.array([2500.0]),
+        log_jitter_mean=np.full((1, 3), np.log(0.03)),
+        shared_latent=shared_latent,
+        drw_parameterization=drw_parameterization,
+        enable_seeing_dependence=True,
+    )
+    enabled_sites = fit_lc.trace(
+        fit_lc.seed(enabled, jax.random.PRNGKey(0))
+    ).get_trace()
+    assert "seeing_mean_slope_active" in enabled_sites
+    assert "seeing_scatter_slope_active" in enabled_sites
+    assert np.asarray(enabled_sites["seeing_mean_slope_active"]["value"]).shape == (1,)
+
+    disabled = build_single_object_model_mag_flux_linearized(
+        obj,
+        np.array([2500.0]),
+        log_jitter_mean=np.full((1, 3), np.log(0.03)),
+        shared_latent=shared_latent,
+        drw_parameterization=drw_parameterization,
+        enable_seeing_dependence=False,
+    )
+    disabled_sites = fit_lc.trace(
+        fit_lc.seed(disabled, jax.random.PRNGKey(0))
+    ).get_trace()
+    assert "seeing_mean_slope_active" not in disabled_sites
+    assert "seeing_scatter_slope_active" not in disabled_sites
+
+
 def test_flux_line_ratio_offsets_include_static_igm_transmission():
     lam_rf = jnp.array([1500.0, 2000.0, 2500.0])
     lambda_center_rf = compute_lambda_center_rf(lam_rf)
@@ -1106,6 +1160,49 @@ def test_process_samples_supports_drw_q_without_fast_pole_outputs():
     assert np.isclose(
         result["log_sigma_rms_band_g"],
         result["log_sigma_band_g"],
+    )
+
+
+def test_process_samples_stores_shared_latent_effective_band_timescales():
+    bands = ["g", "r"]
+    z = 1.0
+    tau_fast = np.asarray([12.0, 15.0, 18.0])
+    tau_slow = np.asarray([140.0, 180.0, 220.0])
+    samples = {
+        "log_sigma_uv": np.log(np.asarray([0.18, 0.20, 0.22])),
+        "log_tau_uv": np.log(tau_slow),
+        "log_tau_fast_uv": np.log(tau_fast),
+        "eta_sigma": np.zeros(3),
+        "eta_tau": np.zeros(3),
+    }
+    for index, band in enumerate(bands):
+        samples[f"tau_fast_{band}"] = tau_fast
+        samples[f"tau_slow_{band}"] = tau_slow
+        samples[f"lag_disk_{band}"] = np.asarray([2.0, 3.0, 4.0]) * (index + 1)
+        samples[f"lag_blr_{band}"] = np.asarray([25.0, 35.0, 45.0]) * (index + 1)
+        samples[f"amp_cont_relflux_{band}"] = np.full(3, 0.10)
+        samples[f"amp_blr_relflux_{band}"] = np.full(3, 0.03 + 0.02 * index)
+
+    result = process_samples(
+        samples,
+        {"object_id": "shared", "z": z},
+        bands=bands,
+        model_variant="shared_latent_blr",
+        disk_order=3,
+        erlang_order=3,
+    )
+
+    assert result["log_tau_driver_slow_rf"] == result["log_tau_uv_rf"]
+    assert result["log_tau_driver_fast_rf"] == result["log_tau_fast_uv_rf"]
+    for band in bands:
+        assert np.isfinite(result[f"log_tau_band_{band}_RF"])
+        assert result[f"log_tau_band_{band}_RF"] == result[f"log_tau_effective_{band}_RF"]
+        assert result[f"log_tau_band_{band}_RF_err"] == result[f"log_tau_effective_{band}_RF_err"]
+
+    # Different response mixtures must produce genuinely band-dependent tau,
+    # even though both bands share the same latent driver poles.
+    assert not np.isclose(
+        result["log_tau_band_g_RF"], result["log_tau_band_r_RF"]
     )
 
 

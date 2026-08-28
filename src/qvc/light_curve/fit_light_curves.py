@@ -92,6 +92,10 @@ from qvc.light_curve.multiband_model_dho_blr_erlang import (
     DEFAULT_ERLANG_ORDER,
     make_multiband_dho_blr_flux_linearized_erlang_model,
 )
+from qvc.light_curve.multiband_model_shared_latent_blr import (
+    DEFAULT_DISK_ORDER,
+    make_multiband_shared_latent_blr_model,
+)
 from qvc.light_curve.dho_drw_parameterization import (
     DEFAULT_PERTURBATION_TO_DRW_RATIO,
     carma21_response_parameters,
@@ -111,6 +115,11 @@ from qvc.light_curve.variability_metrics import compute_variability_metrics_for_
 
 zero_mean = False
 has_jitter = True
+SHARED_LATENT_BLR_VARIANT = "shared_latent_blr"
+FLUX_LINEARIZED_MODEL_VARIANTS = (
+    "mag_flux_linearized_erlang",
+    SHARED_LATENT_BLR_VARIANT,
+)
 BALMER_EDGE_REST_WAVELENGTH = 3646.0
 BALMER_EDGE_ATTENUATION_WIDTH = 250.0
 ETA_SIGMA_LOW = -5.0
@@ -3369,32 +3378,33 @@ def compute_parameter_kls(
     eta_tau = np.asarray(flat_samples["eta_tau"])
     sigma_center0_key = (
         "log_sigma_center0_relflux"
-        if model_variant == "mag_flux_linearized_erlang" and "log_sigma_center0_relflux" in flat_samples
+        if model_variant in FLUX_LINEARIZED_MODEL_VARIANTS and "log_sigma_center0_relflux" in flat_samples
         else "log_sigma_center0"
     )
     sigma_prior_fn = (
-        log_sigma_center0_relflux_prior if model_variant == "mag_flux_linearized_erlang" else log_sigma_center0_prior
+        log_sigma_center0_relflux_prior if model_variant in FLUX_LINEARIZED_MODEL_VARIANTS else log_sigma_center0_prior
     )
     linear_trend_prior_fn = (
         linear_trend_prior_relflux(t_ref=t_ref, z=z)
-        if model_variant == "mag_flux_linearized_erlang"
+        if model_variant in FLUX_LINEARIZED_MODEL_VARIANTS
         else linear_trend_prior(t_ref=t_ref, z=z)
     )
     linear_trend_band_offset_prior_fn = linear_trend_band_offset_prior(
         len(bands),
-        relflux=(model_variant == "mag_flux_linearized_erlang"),
+        relflux=(model_variant in FLUX_LINEARIZED_MODEL_VARIANTS),
     )
-    mean_prior_fn = mean_prior_relflux if model_variant == "mag_flux_linearized_erlang" else mean_prior
+    mean_prior_fn = mean_prior_relflux if model_variant in FLUX_LINEARIZED_MODEL_VARIANTS else mean_prior
     log_jitter_mean_arr = np.asarray(log_jitter_mean, dtype=float)
 
     kls["eta_sigma_kl"] = kl_from_samples(
         eta_sigma,
         lambda x: _dist_log_prob_array(eta_sigma_prior(), x),
     )
-    kls["eta_tau_kl"] = kl_from_samples(
-        eta_tau,
-        lambda x: _dist_log_prob_array(eta_tau_prior(), x),
-    )
+    if model_variant != SHARED_LATENT_BLR_VARIANT:
+        kls["eta_tau_kl"] = kl_from_samples(
+            eta_tau,
+            lambda x: _dist_log_prob_array(eta_tau_prior(), x),
+        )
 
     if sigma_center0_key in flat_samples:
         kls["log_sigma_center0_kl"] = conditional_kl_from_samples(
@@ -3469,7 +3479,7 @@ def compute_parameter_kls(
             flat_samples["lag0"],
             lambda x: _dist_log_prob_array(lag0_prior(z=z), x),
         )
-    if model_variant != "mag_flux_linearized_erlang" and "lag_beta" in flat_samples:
+    if model_variant not in FLUX_LINEARIZED_MODEL_VARIANTS and "lag_beta" in flat_samples:
         kls["lag_beta_kl"] = kl_from_samples(
             flat_samples["lag_beta"],
             lambda x: _dist_log_prob_array(lag_beta_prior(), x),
@@ -3546,9 +3556,19 @@ def compute_parameter_kls(
             amp_keys.append(f"dlog_amp_blr2_{band}")
         for amp_key in amp_keys:
             if amp_key in flat_samples:
+                amp_prior = (
+                    dist.TruncatedNormal(
+                        -1.0,
+                        0.75,
+                        low=jnp.log(5e-3),
+                        high=0.0,
+                    )
+                    if model_variant == SHARED_LATENT_BLR_VARIANT
+                    else dlog_amp_blr_prior()
+                )
                 kls[f"{amp_key}_kl"] = kl_from_samples(
                     flat_samples[amp_key],
-                    lambda x: _dist_log_prob_array(dlog_amp_blr_prior(), x),
+                    lambda x: _dist_log_prob_array(amp_prior, x),
                 )
 
         lag_keys = [f"log_lag_blr_{band}"]
@@ -4247,10 +4267,13 @@ def build_single_object_model_mag_flux_linearized(
     tau_fast_truncated=False,
     n_blr_terms=1,
     use_erlang=True,
+    shared_latent=False,
     erlang_order=DEFAULT_ERLANG_ORDER,
+    disk_order=DEFAULT_DISK_ORDER,
     use_fast_solver=False,
     drw_parameterization=False,
     enforce_positive_flux_guard=False,
+    enable_seeing_dependence=False,
 ):
     """Return the relative-flux quasi-separable model for one object."""
 
@@ -4260,7 +4283,7 @@ def build_single_object_model_mag_flux_linearized(
         )
     if not use_erlang:
         raise ValueError("The non-Erlang flux-linearized model has been removed.")
-    if drw_parameterization and not use_erlang:
+    if drw_parameterization and (not use_erlang or shared_latent):
         raise ValueError("drw_parameterization currently requires use_erlang=True.")
 
     (t, bidx) = obj_dict["X"]
@@ -4297,7 +4320,11 @@ def build_single_object_model_mag_flux_linearized(
 
     def model():
         eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
-        eta_tau = numpyro.sample("eta_tau", eta_tau_prior())
+        eta_tau = (
+            numpyro.deterministic("eta_tau", jnp.asarray(0.0))
+            if shared_latent
+            else numpyro.sample("eta_tau", eta_tau_prior())
+        )
 
         tau_center_prior_fn = (
             log_tau_drw_center0_prior
@@ -4374,7 +4401,11 @@ def build_single_object_model_mag_flux_linearized(
             shared_linear_trend=use_erlang,
         )
 
-        if use_erlang:
+        if shared_latent:
+            lag0 = numpyro.sample("lag0", lag0_prior(z=z))
+            log_lag0 = numpyro.deterministic("log_lag0", jnp.log(lag0))
+            lag_beta = numpyro.deterministic("lag_beta", jnp.asarray(4.0 / 3.0))
+        elif use_erlang:
             # This first implementation gives the prompt continuum zero delay
             # and assigns all inferred response delay to the causal BLR chain.
             lag0 = numpyro.deterministic("lag0", jnp.asarray(0.0))
@@ -4412,7 +4443,7 @@ def build_single_object_model_mag_flux_linearized(
             survey_offset_active_mask=survey_offset_active_mask,
             seeing_active_mask=(
                 obj_dict.get("seeing_active_mask")
-                if use_erlang and not drw_parameterization
+                if enable_seeing_dependence
                 else None
             ),
             line_ratio_offsets=line_ratio_offsets,
@@ -4521,7 +4552,9 @@ def build_single_object_model_mag_flux_linearized(
         numpyro.deterministic("lag_blr2", params["lag_blr2"])
         numpyro.deterministic("F0_cont_band", baseline_flux_by_band)
 
-        if drw_parameterization:
+        if shared_latent:
+            model_factory = make_multiband_shared_latent_blr_model
+        elif drw_parameterization:
             model_factory = make_multiband_dho_blr_flux_linearized_erlang_drw_model
         else:
             model_factory = make_multiband_dho_blr_flux_linearized_erlang_model
@@ -4534,13 +4567,22 @@ def build_single_object_model_mag_flux_linearized(
             baseline_flux_by_band=baseline_flux_by_band,
             zero_mean=zero_mean,
             has_jitter=has_jitter,
-            erlang_order=erlang_order,
+            seeing_covariate=(
+                obj_dict.get("seeing_covariate")
+                if enable_seeing_dependence
+                else None
+            ),
             **(
-                {"enforce_positive_flux_guard": enforce_positive_flux_guard}
+                {
+                    "disk_order": disk_order,
+                    "blr_order": erlang_order,
+                }
+                if shared_latent
+                else {"enforce_positive_flux_guard": enforce_positive_flux_guard}
                 if drw_parameterization
                 else {
+                    "erlang_order": erlang_order,
                     "use_fast_solver": use_fast_solver,
-                    "seeing_covariate": obj_dict.get("seeing_covariate"),
                 }
             ),
         )
@@ -4739,11 +4781,13 @@ def run_iterated_mag_flux_linearized_inference(
     n_blr_terms=1,
     model_variant="mag_flux_linearized_erlang",
     erlang_order=DEFAULT_ERLANG_ORDER,
+    disk_order=DEFAULT_DISK_ORDER,
     use_fast_solver=False,
     refinement_strategy="nuts_each",
     refinement_iters=FLUX_LINEARIZED_REFINEMENT_ITERS,
     drw_parameterization=False,
     enforce_positive_flux_guard=False,
+    enable_seeing_dependence=False,
 ):
     """Iteratively refit the relative-flux QS model using local pseudo-data.
 
@@ -4786,11 +4830,14 @@ def run_iterated_mag_flux_linearized_inference(
         drop_band_lyman_alpha=drop_band_lyman_alpha,
         tau_fast_truncated=tau_fast_truncated,
         n_blr_terms=n_blr_terms,
-        use_erlang=(model_variant == "mag_flux_linearized_erlang"),
+        use_erlang=True,
+        shared_latent=(model_variant == SHARED_LATENT_BLR_VARIANT),
         erlang_order=erlang_order,
+        disk_order=disk_order,
         use_fast_solver=use_fast_solver,
         drw_parameterization=drw_parameterization,
         enforce_positive_flux_guard=enforce_positive_flux_guard,
+        enable_seeing_dependence=enable_seeing_dependence,
     )
 
     for iter_idx in range(int(refinement_iters)):
@@ -4876,7 +4923,7 @@ def run_iterated_mag_flux_linearized_inference(
                 add_model_prediction_params(
                     samples_flat,
                     lam_rf,
-                    model_variant="mag_flux_linearized_erlang",
+                    model_variant=model_variant,
                     lam_lya_rf=lam_lya_rf,
                 )
             )
@@ -4887,15 +4934,15 @@ def run_iterated_mag_flux_linearized_inference(
             prediction_params = add_model_prediction_params(
                 _model_params_at_values(iter_model, inference_key, init_values),
                 lam_rf,
-                model_variant="mag_flux_linearized_erlang",
+                model_variant=model_variant,
                 lam_lya_rf=lam_lya_rf,
             )
 
         params_median = prediction_params
-        use_erlang_response = (
-            model_variant == "mag_flux_linearized_erlang" and not disable_lag_blr
-        )
-        if drw_parameterization:
+        use_erlang_response = not disable_lag_blr
+        if model_variant == SHARED_LATENT_BLR_VARIANT:
+            display_factory = make_multiband_shared_latent_blr_model
+        elif drw_parameterization:
             display_factory = make_multiband_dho_blr_flux_linearized_erlang_drw_model
         else:
             display_factory = make_multiband_dho_blr_flux_linearized_erlang_model
@@ -4908,11 +4955,20 @@ def run_iterated_mag_flux_linearized_inference(
             baseline_flux_by_band=reference_flux_from_mean_magnitudes(obj_dict["mags_means"]),
             zero_mean=zero_mean,
             has_jitter=has_jitter,
-            erlang_order=erlang_order,
+            seeing_covariate=(
+                obj_dict.get("seeing_covariate")
+                if enable_seeing_dependence
+                else None
+            ),
             **(
-                {}
+                {
+                    "disk_order": disk_order,
+                    "blr_order": erlang_order,
+                }
+                if model_variant == SHARED_LATENT_BLR_VARIANT
+                else {"enforce_positive_flux_guard": enforce_positive_flux_guard}
                 if drw_parameterization
-                else {"seeing_covariate": obj_dict.get("seeing_covariate")}
+                else {"erlang_order": erlang_order}
             ),
         )
         y_target, yerr_target = _flux_linearized_pseudo_data_from_prediction(
@@ -5104,6 +5160,16 @@ def main():
         help=f"Positive Erlang BLR response order for --model_variant mag_flux_linearized_erlang (default: {DEFAULT_ERLANG_ORDER}).",
     )
     parser.add_argument(
+        "--disk_order",
+        type=int,
+        default=DEFAULT_DISK_ORDER,
+        help=(
+            "Order of each narrow disk-response Erlang chain for "
+            f"--model_variant {SHARED_LATENT_BLR_VARIANT} "
+            f"(default: {DEFAULT_DISK_ORDER})."
+        ),
+    )
+    parser.add_argument(
         "--fast_solver",
         action="store_true",
         default=False,
@@ -5144,9 +5210,23 @@ def main():
     )
     parser.add_argument(
         "--model_variant",
-        choices=("mag_flux_linearized_erlang",),
+        choices=FLUX_LINEARIZED_MODEL_VARIANTS,
         default="mag_flux_linearized_erlang",
-        help="Retained causal-Erlang light-curve model.",
+        help=(
+            "Causal-Erlang light-curve model. 'shared_latent_blr' uses one "
+            "DHO driver with wavelength-scaled disk convolutions and bandwise "
+            "unit-RMS delayed responses."
+        ),
+    )
+    parser.add_argument(
+        "--enable_seeing_dependence",
+        action="store_true",
+        default=False,
+        help=(
+            "Fit centered seeing-dependent mean-flux and extra-scatter terms "
+            "for every band/survey group with usable epoch-level PSF FWHM. "
+            "This is independent of --model_variant and is disabled by default."
+        ),
     )
     parser.add_argument(
         "--spectra_fit_csv",
@@ -5215,7 +5295,7 @@ def main():
     chain_method = "parallel" if args.nchains and args.nchains > 1 else "sequential"
     if (
         args.flux_linearized_refinement_strategy != "nuts_each"
-        and args.model_variant != "mag_flux_linearized_erlang"
+        and args.model_variant not in FLUX_LINEARIZED_MODEL_VARIANTS
     ):
         raise ValueError(
             "--flux_linearized_refinement_strategy is only used by "
@@ -5231,12 +5311,14 @@ def main():
         )
     if args.erlang_order < 1:
         raise ValueError("--erlang_order must be at least 1.")
+    if args.disk_order < 1:
+        raise ValueError("--disk_order must be at least 1.")
     if args.flux_linearized_refinement_iters < 1:
         raise ValueError("--flux_linearized_refinement_iters must be at least 1.")
     if not 0.0 < args.target_accept < 1.0:
         raise ValueError("--target_accept must be strictly between 0 and 1.")
-    if args.erlang_order != DEFAULT_ERLANG_ORDER and args.model_variant != "mag_flux_linearized_erlang":
-        raise ValueError("--erlang_order is only used by --model_variant mag_flux_linearized_erlang.")
+    if args.disk_order != DEFAULT_DISK_ORDER and args.model_variant != SHARED_LATENT_BLR_VARIANT:
+        raise ValueError("--disk_order is only used by --model_variant shared_latent_blr.")
     if args.fast_solver and args.model_variant != "mag_flux_linearized_erlang":
         raise ValueError("--fast_solver is only used by --model_variant mag_flux_linearized_erlang.")
     if args.dho_drw_parameterization and args.model_variant != "mag_flux_linearized_erlang":
@@ -5334,7 +5416,7 @@ def main():
             obj["log_jitter_active_mask"] = log_jitter_active_mask
             obj["survey_offset_active_mask"] = survey_offset_active_mask
             log_jitter_mean_fit = log_jitter_mean
-            if args.model_variant == "mag_flux_linearized_erlang":
+            if args.model_variant in FLUX_LINEARIZED_MODEL_VARIANTS:
                 y_relflux = np.asarray(mag_residual_to_relative_flux(obj["y"]), dtype=float)
                 yerr_relflux = np.asarray(
                     magerr_residual_to_relative_fluxerr(obj["y"], obj["yerr"]),
@@ -5371,7 +5453,7 @@ def main():
             else:
                 key = random.PRNGKey(0)
                 key = random.fold_in(key, idx)
-                if args.model_variant == "mag_flux_linearized_erlang":
+                if args.model_variant in FLUX_LINEARIZED_MODEL_VARIANTS:
                     (
                         obj_flat_samples,
                         samples_per_chain,
@@ -5403,11 +5485,13 @@ def main():
                             n_blr_terms=args.n_blr_terms,
                             model_variant=args.model_variant,
                             erlang_order=args.erlang_order,
+                            disk_order=args.disk_order,
                             use_fast_solver=args.fast_solver,
                             refinement_strategy=args.flux_linearized_refinement_strategy,
                             refinement_iters=args.flux_linearized_refinement_iters,
                             drw_parameterization=args.dho_drw_parameterization,
                             enforce_positive_flux_guard=args.enforce_positive_flux_guard,
+                            enable_seeing_dependence=args.enable_seeing_dependence,
                         )
                 elif args.fit_method in ("nuts", "svi+nuts"):
                     if args.fit_method == "svi+nuts":
@@ -5549,7 +5633,7 @@ def main():
             )
             diagnostics |= stage_diagnostics
 
-            if args.model_variant == "mag_flux_linearized_erlang":
+            if args.model_variant in FLUX_LINEARIZED_MODEL_VARIANTS:
                 fit_obj_for_display = flux_linearized_fit_obj if flux_linearized_fit_obj is not None else obj
                 y_relflux_display, yerr_relflux_display = (
                     (
@@ -5562,11 +5646,14 @@ def main():
                         magerr_residual_to_relative_fluxerr(obj["y"], obj["yerr"]),
                     )
                 )
-                display_factory = (
-                    make_multiband_dho_blr_flux_linearized_erlang_drw_model
-                    if args.dho_drw_parameterization
-                    else make_multiband_dho_blr_flux_linearized_erlang_model
-                )
+                if args.model_variant == SHARED_LATENT_BLR_VARIANT:
+                    display_factory = make_multiband_shared_latent_blr_model
+                else:
+                    display_factory = (
+                        make_multiband_dho_blr_flux_linearized_erlang_drw_model
+                        if args.dho_drw_parameterization
+                        else make_multiband_dho_blr_flux_linearized_erlang_model
+                    )
                 m = display_factory(
                     obj["X"],
                     y_relflux_display,
@@ -5576,12 +5663,23 @@ def main():
                     baseline_flux_by_band=reference_flux_from_mean_magnitudes(obj["mags_means"]),
                     zero_mean=zero_mean,
                     has_jitter=has_jitter,
+                    seeing_covariate=(
+                        obj.get("seeing_covariate")
+                        if args.enable_seeing_dependence
+                        else None
+                    ),
                     **(
+                        {
+                            "disk_order": args.disk_order,
+                            "blr_order": args.erlang_order,
+                        }
+                        if args.model_variant == SHARED_LATENT_BLR_VARIANT
+                        else
                         {
                             "enforce_positive_flux_guard": args.enforce_positive_flux_guard,
                         }
                         if args.dho_drw_parameterization
-                        else {"seeing_covariate": obj.get("seeing_covariate")}
+                        else {}
                     ),
                 )
             plot_samples = obj_flat_samples
@@ -5596,6 +5694,9 @@ def main():
                 obj_flat_samples_flatten_per_band,
                 obj,
                 bands=bands,
+                model_variant=args.model_variant,
+                disk_order=args.disk_order,
+                erlang_order=args.erlang_order,
             )
             adf_result = compute_object_adf_diagnostics(
                 obj_flat_samples_flatten_per_band,
@@ -5744,7 +5845,7 @@ def main():
                     logging.error(f"[{oid}] Plotting error: {e}")
                     logging.error(traceback.format_exc())
 
-            final_result = obj | result | adf_result | drift_result | raw_drift_result | psd_break_result | sf_result | kl_result | loo_residual_result | diagnostics | dict(prefix=prefix, suffix=suffix, model_variant=args.model_variant)
+            final_result = obj | result | adf_result | drift_result | raw_drift_result | psd_break_result | sf_result | kl_result | loo_residual_result | diagnostics | dict(prefix=prefix, suffix=suffix, model_variant=args.model_variant, seeing_dependence_enabled=args.enable_seeing_dependence)
             log_sigma_uv = final_result.get("log_sigma_uv")
             log_sigma_uv_err = final_result.get("log_sigma_uv_err")
             log_tau_uv_rf = final_result.get("log_tau_uv_rf")
