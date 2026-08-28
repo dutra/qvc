@@ -101,6 +101,76 @@ def write_quasars_to_csv(quasars, csv_path, fields=None):
     print(f"Wrote {len(quasars)} rows to {csv_path}")
 
 
+def partition_fit_status_object_ids(quasars):
+    """Return unique successful and failed object IDs in first-seen order."""
+
+    status_by_object_id = {}
+    for row_index, quasar in enumerate(quasars):
+        if "object_id" not in quasar:
+            raise ValueError(
+                f"Merged spectra row {row_index} is missing required field 'object_id'."
+            )
+        object_id = quasar["object_id"]
+        if is_missing_value(object_id) or str(object_id).strip() == "":
+            raise ValueError(
+                f"Merged spectra row {row_index} has a missing or blank object_id."
+            )
+        object_id = str(object_id).strip()
+
+        if "fit_ok" not in quasar:
+            raise ValueError(
+                f"Merged spectra row {row_index} is missing required field 'fit_ok'."
+            )
+        fit_ok = quasar["fit_ok"]
+        if isinstance(fit_ok, (bool, np.bool_)):
+            succeeded = bool(fit_ok)
+        elif isinstance(fit_ok, str) and fit_ok.strip().lower() in {"true", "false"}:
+            succeeded = fit_ok.strip().lower() == "true"
+        else:
+            raise ValueError(
+                f"Merged spectra row {row_index} has unrecognized fit_ok value "
+                f"{fit_ok!r}; expected true or false."
+            )
+
+        if object_id not in status_by_object_id:
+            status_by_object_id[object_id] = succeeded
+        else:
+            status_by_object_id[object_id] = (
+                status_by_object_id[object_id] or succeeded
+            )
+
+    successful = [
+        object_id
+        for object_id, succeeded in status_by_object_id.items()
+        if succeeded
+    ]
+    failed = [
+        object_id
+        for object_id, succeeded in status_by_object_id.items()
+        if not succeeded
+    ]
+    return successful, failed
+
+
+def write_fit_status_object_id_csvs(out_path, successful, failed):
+    """Write successful and failed object-ID CSVs beside a merged catalog."""
+
+    output_stem, _extension = os.path.splitext(os.fspath(out_path))
+    successful_path = f"{output_stem}_successful_object_ids.csv"
+    failed_path = f"{output_stem}_failed_object_ids.csv"
+    write_quasars_to_csv(
+        [{"object_id": object_id} for object_id in successful],
+        successful_path,
+        fields=["object_id"],
+    )
+    write_quasars_to_csv(
+        [{"object_id": object_id} for object_id in failed],
+        failed_path,
+        fields=["object_id"],
+    )
+    return successful_path, failed_path
+
+
 def enforce_expected_count(per_file_count, expected_n, file_path):
     if expected_n is None:
         return True
@@ -812,6 +882,10 @@ def main():
             else:
                 all_quasars = populate_sdss_run2d_from_fits(all_quasars, fits_path)
 
+    successful_object_ids, failed_object_ids = partition_fit_status_object_ids(
+        all_quasars
+    )
+
     if use_h5:
         frame = pd.DataFrame.from_records(all_quasars)
         provenance = build_run_record(
@@ -854,6 +928,12 @@ def main():
                     seen_set.add(k)
                     seen.append(k)
         write_quasars_to_csv(all_quasars, out_path, fields=seen)
+
+    write_fit_status_object_id_csvs(
+        out_path,
+        successful_object_ids,
+        failed_object_ids,
+    )
 
     print("Done.")
 

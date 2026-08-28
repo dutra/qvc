@@ -21,6 +21,8 @@ from qvc.spectra.merge_results import (
     deduplicate_h5_catalog,
     enrich_h5_catalog_rows,
     load_and_merge_h5,
+    partition_fit_status_object_ids,
+    write_fit_status_object_id_csvs,
 )
 
 
@@ -258,6 +260,137 @@ def test_h5_main_loads_shards_once_then_deduplicates_in_memory(
                 for value in (0.1, 0.8, 0.3)
             ],
         )
+
+    successful = pd.read_csv(tmp_path / "merged_successful_object_ids.csv")
+    failed = pd.read_csv(tmp_path / "merged_failed_object_ids.csv")
+    assert successful["object_id"].astype(str).tolist() == ["1", "2", "3"]
+    assert failed.columns.tolist() == ["object_id"]
+    assert failed.empty
+
+
+def test_h5_main_writes_successful_and_failed_object_id_csvs(
+    monkeypatch, tmp_path
+):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _write_v3_catalog(
+        run_dir / "chunk0000.h5",
+        pd.DataFrame(
+            {
+                "object_id": ["10", "20", "10"],
+                "fit_ok": [False, False, True],
+                "run_label": ["first", "first", "retry"],
+                "z": [1.0, 2.0, 1.0],
+            }
+        ),
+        [None, None, 0.1],
+    )
+    output = tmp_path / "custom-merged.h5"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "merge_results",
+            "--base-dir",
+            str(tmp_path),
+            "--skip-populate-sdss",
+            "--out",
+            str(output),
+            "run",
+        ],
+    )
+
+    merge_results.main()
+
+    assert output.is_file()
+    successful = pd.read_csv(
+        tmp_path / "custom-merged_successful_object_ids.csv",
+        dtype={"object_id": str},
+    )
+    failed = pd.read_csv(
+        tmp_path / "custom-merged_failed_object_ids.csv",
+        dtype={"object_id": str},
+    )
+    assert successful["object_id"].tolist() == ["10"]
+    assert failed["object_id"].tolist() == ["20"]
+
+
+def test_legacy_main_rejects_unrecognized_fit_status(monkeypatch, tmp_path):
+    run_dir = tmp_path / "legacy"
+    run_dir.mkdir()
+    pd.DataFrame(
+        {"object_id": ["10"], "fit_ok": ["unknown"]}
+    ).to_csv(run_dir / "chunk0000.csv", index=False)
+    output = tmp_path / "legacy-merged.csv"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "merge_results",
+            "--base-dir",
+            str(tmp_path),
+            "--skip-populate-sdss",
+            "--out",
+            str(output),
+            "legacy",
+        ],
+    )
+
+    with pytest.raises(ValueError, match="unrecognized fit_ok value"):
+        merge_results.main()
+
+    assert not output.exists()
+
+
+def test_partition_fit_status_object_ids_is_unique_and_success_wins():
+    successful, failed = partition_fit_status_object_ids(
+        [
+            {"object_id": "first", "fit_ok": False},
+            {"object_id": "second", "fit_ok": "false"},
+            {"object_id": "first", "fit_ok": True},
+            {"object_id": "third", "fit_ok": "TRUE"},
+            {"object_id": "second", "fit_ok": False},
+        ]
+    )
+
+    assert successful == ["first", "third"]
+    assert failed == ["second"]
+
+
+@pytest.mark.parametrize(
+    ("rows", "message"),
+    [
+        ([{"fit_ok": True}], "missing required field 'object_id'"),
+        ([{"object_id": " ", "fit_ok": True}], "missing or blank object_id"),
+        ([{"object_id": "1"}], "missing required field 'fit_ok'"),
+        (
+            [{"object_id": "1", "fit_ok": "unknown"}],
+            "unrecognized fit_ok value",
+        ),
+    ],
+)
+def test_partition_fit_status_object_ids_rejects_invalid_rows(rows, message):
+    with pytest.raises(ValueError, match=message):
+        partition_fit_status_object_ids(rows)
+
+
+def test_write_fit_status_object_id_csvs_uses_output_stem_and_empty_header(tmp_path):
+    output = tmp_path / "custom.catalog.h5"
+
+    successful_path, failed_path = write_fit_status_object_id_csvs(
+        output,
+        ["10", "20"],
+        [],
+    )
+
+    assert successful_path == str(
+        tmp_path / "custom.catalog_successful_object_ids.csv"
+    )
+    assert failed_path == str(tmp_path / "custom.catalog_failed_object_ids.csv")
+    assert pd.read_csv(successful_path)["object_id"].tolist() == [10, 20]
+    failed = pd.read_csv(failed_path)
+    assert failed.columns.tolist() == ["object_id"]
+    assert failed.empty
 
 
 def test_h5_merge_unions_optional_columns_and_accepts_numeric_dtype_promotion(tmp_path):
