@@ -5327,10 +5327,10 @@ def main():
         ),
     )
     parser.add_argument(
-        "--spectra_fit_csv",
+        "--spectra_fit_h5",
         nargs="+",
         default=None,
-        help="Spectra-fit CSV file(s) used to derive per-band PSF PL/total fractions.",
+        help="Spectra-fit HDF5 catalog file(s) used to derive per-band PSF AGN/total fractions.",
     )
     parser.add_argument(
         "--subtract_psf_constant_flux",
@@ -5370,11 +5370,11 @@ def main():
         print(f"After restframe cut, {len(objs)} objects remain.")
 
     if args.subtract_psf_constant_flux:
-        if not args.spectra_fit_csv:
-            raise ValueError("--subtract_psf_constant_flux requires --spectra_fit_csv.")
+        if not args.spectra_fit_h5:
+            raise ValueError("--subtract_psf_constant_flux requires --spectra_fit_h5.")
         objs, correction_summary = apply_constant_flux_correction_to_objects(
             objs,
-            spectra_fit_csvs=args.spectra_fit_csv,
+            spectra_fit_h5s=args.spectra_fit_h5,
             progress_bar=args.progress,
         )
         print_constant_flux_correction_summary(correction_summary)
@@ -5975,8 +5975,8 @@ def main():
         "filter_file": args.filter_file,
         "nearby_light_curve_csv": args.load_nearby_lc_csv,
     }
-    for index, path in enumerate(args.spectra_fit_csv or []):
-        provenance_inputs[f"spectra_fit_csv_{index}"] = path
+    for index, path in enumerate(args.spectra_fit_h5 or []):
+        provenance_inputs[f"spectra_fit_h5_{index}"] = path
     provenance_object_id = (
         str(results[0]["object_id"])
         if len(results) == 1 and "object_id" in results[0]
