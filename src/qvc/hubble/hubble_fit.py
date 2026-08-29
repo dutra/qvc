@@ -4416,7 +4416,8 @@ if __name__ == "__main__":
     parser.add_argument("--N", type=int, default=None, help="Number of AGNs to run (default: all)")
     parser.add_argument("--only_sna", action="store_true", default=False, help="Run SNIa-only fit (default: False)")
     parser.add_argument("--only_agn", action="store_true", default=False, help="Run AGN-only fit with the Supernova likelihood and M0_sn disabled (default: False)")
-    parser.add_argument(
+    spectra_group = parser.add_mutually_exclusive_group(required=True)
+    spectra_group.add_argument(
         "--spectra_fit_csv",
         type=str,
         nargs="+",
@@ -4425,6 +4426,12 @@ if __name__ == "__main__":
             "Path(s) to CSV output from fit_spectra_jaxsedfit_joint.py. "
             "Legacy spectral-fit formats are not supported."
         ),
+    )
+    spectra_group.add_argument(
+        "--spectra_fit_h5",
+        type=str,
+        nargs="+",
+        help="Path(s) to versioned JAXSEDFit joint spectral HDF5 catalogs.",
     )
     parser.add_argument(
         "--magnitude-convention",
@@ -4602,6 +4609,7 @@ if __name__ == "__main__":
                            residuals_sigma_clip=args.residuals_sigma_clip, residuals_csv=args.residuals_csv,
                            exclude_object_ids_csv=args.exclude_object_ids_csv,
                            spectra_fit_csv=args.spectra_fit_csv,
+                           spectra_fit_h5=args.spectra_fit_h5,
                            magnitude_convention=args.magnitude_convention,
                            completeness_magnitude=args.completeness_magnitude,
                            spectra_sdss_run2d=args.spectra_sdss_run2d,

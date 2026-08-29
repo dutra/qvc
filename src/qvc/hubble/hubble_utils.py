@@ -51,6 +51,7 @@ from qvc.hubble.hubble_model import (
 )
 from qvc.hubble.sigma_tau_lambda_fit import fit_sigma_tau_lambda_broken_pl
 from qvc.light_curve.plotting_appendix import plot_sigma_tau_identity_grid
+from qvc.spectra.catalog_hdf5 import read_spectra_catalog_hdf5
 
 PURPLE_ANSI = "\033[95m"
 RESET_ANSI = "\033[0m"
@@ -638,7 +639,8 @@ def _ensure_object_id(df):
     df["object_id"] = df["object_id"].astype(str)
     return df
 
-def populate_spectra_fit(df, spectra_fit_csvs):
+def populate_spectra_fit(df, spectra_fit_paths):
+    """Merge joint SED-fit products from legacy CSV or versioned spectra HDF5."""
     required_cols = {
         "fit_ok",
         "fit_backend",
@@ -658,21 +660,41 @@ def populate_spectra_fit(df, spectra_fit_csvs):
 
     spectra_frames = []
 
-    for i, csv_path in enumerate(spectra_fit_csvs):
-        csv_path = resolve_qvc_data_path(csv_path)
-        print(f"\033[96mLoading spectra fit CSV ({i+1}/{len(spectra_fit_csvs)}): {csv_path}\033[0m")
-
-        df_spectra = pd.read_csv(
-            csv_path,
-            encoding="utf-8-sig",
-            skipinitialspace=True,
-            low_memory=False,
+    for i, input_path in enumerate(spectra_fit_paths):
+        input_path = resolve_qvc_data_path(input_path)
+        is_hdf5 = Path(input_path).suffix.lower() in {".h5", ".hdf5"}
+        input_kind = "HDF5" if is_hdf5 else "CSV"
+        print(
+            f"\033[96mLoading spectra fit {input_kind} "
+            f"({i+1}/{len(spectra_fit_paths)}): {input_path}\033[0m"
         )
+        if is_hdf5:
+            catalog = read_spectra_catalog_hdf5(
+                input_path,
+                include_fraction_draws=True,
+            )
+            df_spectra = catalog.frame.copy()
+            if catalog.catalog_format == "qvc_spectra_catalog_v3":
+                for field, draws in catalog.joint_posterior_draws.items():
+                    df_spectra[f"{field}_draws"] = [
+                        np.asarray(row, dtype=float) for row in draws
+                    ]
+                df_spectra["joint_posterior_valid_count"] = np.asarray(
+                    catalog.joint_posterior_valid_count,
+                    dtype=np.int16,
+                )
+        else:
+            df_spectra = pd.read_csv(
+                input_path,
+                encoding="utf-8-sig",
+                skipinitialspace=True,
+                low_memory=False,
+            )
         df_spectra.columns = [_norm_name(c) for c in df_spectra.columns]
         duplicate_columns = df_spectra.columns[df_spectra.columns.duplicated()].tolist()
         if duplicate_columns:
             raise ValueError(
-                f"Spectra fit CSV '{csv_path}' contains duplicate normalized "
+                f"Spectra fit {input_kind} '{input_path}' contains duplicate normalized "
                 f"column name(s): {sorted(set(duplicate_columns))}"
             )
         df_spectra = _ensure_object_id(df_spectra)
@@ -680,7 +702,7 @@ def populate_spectra_fit(df, spectra_fit_csvs):
         missing_required = sorted(required_cols.difference(df_spectra.columns))
         if missing_required:
             raise ValueError(
-                f"Spectra fit CSV '{csv_path}' is missing required columns {missing_required}. "
+                f"Spectra fit {input_kind} '{input_path}' is missing required columns {missing_required}. "
                 "This Hubble workflow only accepts fit_spectra_jaxsedfit_joint.py output."
             )
         for column in sorted(required_numeric_cols):
@@ -688,7 +710,7 @@ def populate_spectra_fit(df, spectra_fit_csvs):
                 df_spectra[column] = pd.to_numeric(df_spectra[column], errors="raise")
             except (TypeError, ValueError) as exc:
                 raise ValueError(
-                    f"Spectra fit CSV '{csv_path}' column {column!r} must be numeric."
+                    f"Spectra fit {input_kind} '{input_path}' column {column!r} must be numeric."
                 ) from exc
         invalid_backend = df_spectra["fit_backend"].ne("jaxsedfit_joint")
         if np.any(invalid_backend):
@@ -696,13 +718,13 @@ def populate_spectra_fit(df, spectra_fit_csvs):
                 df_spectra.loc[invalid_backend, "fit_backend"].astype(str).unique()
             )
             raise ValueError(
-                f"Spectra fit CSV '{csv_path}' contains unsupported fit_backend "
+                f"Spectra fit {input_kind} '{input_path}' contains unsupported fit_backend "
                 f"value(s) {invalid_values}; expected only 'jaxsedfit_joint'."
             )
         fit_ok = df_spectra["fit_ok"].astype(str).str.lower().eq("true")
         failed_count = int(np.count_nonzero(~fit_ok))
         if failed_count:
-            print(f"Skipping {failed_count} unsuccessful SED fit(s) from {csv_path}.")
+            print(f"Skipping {failed_count} unsuccessful SED fit(s) from {input_path}.")
         spectra_frames.append(df_spectra.loc[fit_ok].copy())
 
     spectra = pd.concat(spectra_frames, ignore_index=True)
@@ -710,7 +732,7 @@ def populate_spectra_fit(df, spectra_fit_csvs):
     if np.any(duplicate_ids):
         duplicate_values = sorted(spectra.loc[duplicate_ids, "object_id"].unique())
         raise ValueError(
-            "SED-fit CSV inputs contain duplicate object_id values: "
+            "SED-fit inputs contain duplicate object_id values: "
             f"{duplicate_values[:10]}"
         )
 
@@ -1033,7 +1055,7 @@ def read_quasars_from_hdf5_flat(file_path, N=None):
 def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
                   exclude_object_ids_csv=None,
                   residuals_sigma_clip=None, residuals_csv=None,
-                  spectra_fit_csv=None, only_load=False,
+                  spectra_fit_csv=None, spectra_fit_h5=None, only_load=False,
                   spectra_sdss_run2d="all",
                   correct_sigma_uv_host=False,
                   lc_info_csv=None,
@@ -1334,8 +1356,12 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         lc_info_csv = resolve_qvc_data_path(lc_info_csv)
     if residuals_csv is not None:
         residuals_csv = resolve_qvc_data_path(residuals_csv)
+    if spectra_fit_csv is not None and spectra_fit_h5 is not None:
+        raise ValueError("Provide only one of spectra_fit_csv or spectra_fit_h5.")
     if spectra_fit_csv is not None:
         spectra_fit_csv = [resolve_qvc_data_path(path) for path in spectra_fit_csv]
+    if spectra_fit_h5 is not None:
+        spectra_fit_h5 = [resolve_qvc_data_path(path) for path in spectra_fit_h5]
     if exclude_object_ids_csv:
         exclude_object_ids_csv = [resolve_qvc_data_path(path) for path in exclude_object_ids_csv]
 
@@ -1444,14 +1470,14 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
 
     # df['log_sigma_uv'] = df['log_sigma_uv'] + 1/2 * np.log10(1 + df['z'])
 
-    if spectra_fit_csv is not None:
-        print("Populating spectra fit data from:", spectra_fit_csv)
-        df = populate_spectra_fit(df, spectra_fit_csv)
+    spectra_fit_paths = spectra_fit_h5 or spectra_fit_csv
+    if spectra_fit_paths is not None:
+        print("Populating spectra fit data from:", spectra_fit_paths)
+        df = populate_spectra_fit(df, spectra_fit_paths)
     else:
-        print("[WARNING] spectra_fit_csv not provided, assuming spectral fit fields are in agn h5 file")
+        print("[WARNING] spectra fit catalog not provided, assuming spectral fields are in agn h5 file")
         if 'alpha_lambda' not in df.columns:
-            raise ValueError("spectra_fit_csv not provided and spectral fields not found in agn h5 file")
-            #raise ValueError("spectra_fit_csv must be provided if alpha_lambda not in agn h5 file")
+            raise ValueError("spectra fit catalog not provided and spectral fields not found in agn h5 file")
 
     magnitude_columns = {
         "dereddened": (
@@ -2123,7 +2149,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             if "SDSS_RUN2D" not in df.columns:
                 raise ValueError(
                     "spectra_sdss_run2d filtering was requested but SDSS_RUN2D is not available. "
-                    "Provide --spectra_fit_csv with SDSS_RUN2D or disable this filter."
+                    "Provide --spectra_fit_h5 with SDSS_RUN2D or disable this filter."
                 )
             normalized_run2d = df["SDSS_RUN2D"].map(_normalize_run2d_value)
             run2d_mask = normalized_run2d == requested_run2d
