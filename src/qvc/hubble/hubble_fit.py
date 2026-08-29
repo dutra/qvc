@@ -4850,7 +4850,6 @@ if __name__ == "__main__":
         "--spectra_fit_csv",
         type=str,
         nargs="+",
-        required=True,
         help=(
             "Path(s) to CSV output from fit_spectra_jaxsedfit_joint.py. "
             "Legacy spectral-fit formats are not supported."
