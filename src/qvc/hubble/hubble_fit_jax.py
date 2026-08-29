@@ -1066,6 +1066,9 @@ def run_single_jax(
         logZ=logZ if logZ is not None else np.nan,
         logZerr=logZerr if logZerr is not None else np.nan,
         integrals_max_w=integrals_max_w,
+        cut_tier=str(df_agn.attrs.get("cut_tier", "")),
+        cut_configuration_json=str(df_agn.attrs.get("cut_configuration_json", "")),
+        z_range_semantics=Z_RANGE_SEMANTICS,
     )
     if not only_sna:
         checkpoint_payload.update(

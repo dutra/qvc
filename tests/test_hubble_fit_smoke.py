@@ -5331,3 +5331,45 @@ def test_hubble_fit_cli_declares_and_forwards_minimal_plots():
     assert "minimal_plots" in run_single_kwargs
     assert "minimal_plots" in run_all_kwargs
     assert "plot_diagnostics" in load_kwargs
+
+
+def test_resume_checkpoint_validates_cut_and_redshift_metadata():
+    n_agn = 2
+    payload = {
+        "flat_samples": np.zeros((4, 3)),
+        "dmi_max_w": np.zeros(n_agn),
+        "dmi_posterior_sigma": np.ones(n_agn),
+        "integrals_max_w": np.zeros(n_agn),
+        "logZ": 0.0,
+        "logZerr": 0.0,
+        "cut_tier": "2",
+        "cut_configuration_json": '{"cut_tier":"2"}',
+        "z_range_semantics": hubble_fit.Z_RANGE_SEMANTICS,
+    }
+    hubble_fit.validate_resume_checkpoint(
+        payload,
+        "valid.h5",
+        3,
+        n_agn,
+        expected_cut_tier="2",
+        expected_cut_configuration_json='{"cut_tier":"2"}',
+        expected_z_range_semantics=hubble_fit.Z_RANGE_SEMANTICS,
+    )
+    with pytest.raises(RuntimeError, match="different Hubble cut"):
+        hubble_fit.validate_resume_checkpoint(
+            payload,
+            "wrong-cut.h5",
+            3,
+            n_agn,
+            expected_cut_tier="1",
+            expected_cut_configuration_json='{"cut_tier":"1"}',
+        )
+    legacy = {key: value for key, value in payload.items() if key != "z_range_semantics"}
+    with pytest.raises(RuntimeError, match="predates fit-only"):
+        hubble_fit.validate_resume_checkpoint(
+            legacy,
+            "legacy.h5",
+            3,
+            n_agn,
+            expected_z_range_semantics=hubble_fit.Z_RANGE_SEMANTICS,
+        )

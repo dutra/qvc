@@ -661,6 +661,17 @@ def _checkpoint_string_tuple(value, *, field_name, checkpoint_file):
     )
 
 
+def _checkpoint_scalar_string(value, *, field_name, checkpoint_file):
+    values = _checkpoint_string_tuple(
+        value, field_name=field_name, checkpoint_file=checkpoint_file
+    )
+    if len(values) != 1:
+        raise RuntimeError(
+            f"Checkpoint '{checkpoint_file}' field {field_name!r} must be scalar."
+        )
+    return values[0]
+
+
 def _checkpoint_reference_object_id_tuple(
     value,
     *,
@@ -824,7 +835,16 @@ def _validate_agn_pivot_context_for_reference(
     return agn_pivot_context
 
 
-def validate_resume_checkpoint(results, checkpoint_file, ndim, n_agn):
+def validate_resume_checkpoint(
+    results,
+    checkpoint_file,
+    ndim,
+    n_agn,
+    *,
+    expected_cut_tier=None,
+    expected_cut_configuration_json=None,
+    expected_z_range_semantics=None,
+):
     required_keys = {
         "flat_samples",
         "dmi_max_w",
@@ -854,6 +874,41 @@ def validate_resume_checkpoint(results, checkpoint_file, ndim, n_agn):
             "This usually happens when resuming with a different cosmology model or code version. "
             "Delete the checkpoint or use a fresh resume path."
         )
+    if expected_cut_tier is not None:
+        if "cut_tier" not in results or "cut_configuration_json" not in results:
+            raise RuntimeError(
+                f"Resume checkpoint '{checkpoint_file}' predates tiered cut metadata. "
+                "Start a fresh run."
+            )
+        stored_cut_tier = _checkpoint_scalar_string(
+            results["cut_tier"], field_name="cut_tier", checkpoint_file=checkpoint_file
+        )
+        stored_cut_configuration = _checkpoint_scalar_string(
+            results["cut_configuration_json"],
+            field_name="cut_configuration_json",
+            checkpoint_file=checkpoint_file,
+        )
+        if stored_cut_tier != str(expected_cut_tier) or stored_cut_configuration != str(expected_cut_configuration_json):
+            raise RuntimeError(
+                f"Resume checkpoint '{checkpoint_file}' uses a different Hubble cut tier or threshold configuration."
+            )
+    if expected_z_range_semantics is not None:
+        if "z_range_semantics" not in results:
+            raise RuntimeError(
+                f"Resume checkpoint '{checkpoint_file}' predates fit-only "
+                "--z_range semantics. Start a fresh run."
+            )
+        stored_semantics = _checkpoint_scalar_string(
+            results["z_range_semantics"],
+            field_name="z_range_semantics",
+            checkpoint_file=checkpoint_file,
+        )
+        if stored_semantics != str(expected_z_range_semantics):
+            raise RuntimeError(
+                f"Resume checkpoint '{checkpoint_file}' uses incompatible "
+                f"--z_range semantics {stored_semantics!r}; expected "
+                f"{expected_z_range_semantics!r}."
+            )
 
     for key in ("dmi_max_w", "integrals_max_w"):
         value = np.asarray(results[key])
@@ -892,7 +947,15 @@ def validate_resume_checkpoint(results, checkpoint_file, ndim, n_agn):
         )
 
 
-def _validate_resume_replot_checkpoint_params(results, checkpoint_file, ndim):
+def _validate_resume_replot_checkpoint_params(
+    results,
+    checkpoint_file,
+    ndim,
+    *,
+    expected_cut_tier=None,
+    expected_cut_configuration_json=None,
+    expected_z_range_semantics=None,
+):
     if "flat_samples" not in results:
         raise RuntimeError(
             f"Resume-replot checkpoint '{checkpoint_file}' is missing required dataset 'flat_samples'."
@@ -908,12 +971,61 @@ def _validate_resume_replot_checkpoint_params(results, checkpoint_file, ndim):
             f"Resume-replot checkpoint '{checkpoint_file}' was created for a different parameterization: "
             f"flat_samples has {flat_samples.shape[1]} columns, but the current model expects {ndim}."
         )
+    if expected_cut_tier is not None:
+        if "cut_tier" not in results or "cut_configuration_json" not in results:
+            raise RuntimeError(
+                f"Resume-replot checkpoint '{checkpoint_file}' predates tiered cut metadata."
+            )
+        stored_cut_tier = _checkpoint_scalar_string(
+            results["cut_tier"], field_name="cut_tier", checkpoint_file=checkpoint_file
+        )
+        stored_config = _checkpoint_scalar_string(
+            results["cut_configuration_json"],
+            field_name="cut_configuration_json",
+            checkpoint_file=checkpoint_file,
+        )
+        if stored_cut_tier != str(expected_cut_tier) or stored_config != str(expected_cut_configuration_json):
+            raise RuntimeError(
+                f"Resume-replot checkpoint '{checkpoint_file}' uses a different Hubble cut configuration."
+            )
+    if expected_z_range_semantics is not None:
+        if "z_range_semantics" not in results:
+            raise RuntimeError(
+                f"Resume-replot checkpoint '{checkpoint_file}' predates "
+                "fit-only --z_range semantics and cannot be reused."
+            )
+        stored_semantics = _checkpoint_scalar_string(
+            results["z_range_semantics"],
+            field_name="z_range_semantics",
+            checkpoint_file=checkpoint_file,
+        )
+        if stored_semantics != str(expected_z_range_semantics):
+            raise RuntimeError(
+                f"Resume-replot checkpoint '{checkpoint_file}' uses "
+                f"incompatible --z_range semantics {stored_semantics!r}."
+            )
 
 
-def _remap_resume_replot_checkpoint(results, checkpoint_file, df_agn_fit_selection, ndim):
+def _remap_resume_replot_checkpoint(
+    results,
+    checkpoint_file,
+    df_agn_fit_selection,
+    ndim,
+    *,
+    expected_cut_tier=None,
+    expected_cut_configuration_json=None,
+    expected_z_range_semantics=None,
+):
     """Return checkpoint payload remapped to the current cut AGN fit selection."""
 
-    _validate_resume_replot_checkpoint_params(results, checkpoint_file, ndim)
+    _validate_resume_replot_checkpoint_params(
+        results,
+        checkpoint_file,
+        ndim,
+        expected_cut_tier=expected_cut_tier,
+        expected_cut_configuration_json=expected_cut_configuration_json,
+        expected_z_range_semantics=expected_z_range_semantics,
+    )
     if "object_id_fit_selection" not in results:
         raise RuntimeError(
             f"Resume-replot checkpoint '{checkpoint_file}' is missing required dataset "
@@ -2467,6 +2579,13 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     checkpoint_file,
                     df_agn,
                     ndim,
+                    expected_cut_tier=df_agn.attrs.get("cut_tier"),
+                    expected_cut_configuration_json=df_agn.attrs.get("cut_configuration_json"),
+                    expected_z_range_semantics=(
+                        Z_RANGE_SEMANTICS
+                        if df_agn.attrs.get("cut_configuration_json")
+                        else None
+                    ),
                 )
                 print(
                     "Resume-replot with cuts: loaded posterior samples and remapped "
@@ -2478,6 +2597,15 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     checkpoint_file=checkpoint_file,
                     ndim=ndim,
                     n_agn=len(agn_data["z"]),
+                    expected_cut_tier=df_agn.attrs.get("cut_tier"),
+                    expected_cut_configuration_json=df_agn.attrs.get(
+                        "cut_configuration_json"
+                    ),
+                    expected_z_range_semantics=(
+                        Z_RANGE_SEMANTICS
+                        if df_agn.attrs.get("cut_configuration_json")
+                        else None
+                    ),
                 )
             if not only_sna:
                 if stored_pivot_context != agn_pivot_context:
@@ -2490,14 +2618,15 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 raise RuntimeError(
                     f"Failed to resume/replot from checkpoint '{checkpoint_file}' with the current AGN cuts. "
                     "The checkpoint must match the current parameterization and include object_id_fit_selection "
-                    "metadata covering every current AGN."
+                    f"metadata covering every current AGN. Cause: {exc}"
                 ) from exc
             else:
                 raise RuntimeError(
                     f"Failed to resume from checkpoint '{checkpoint_file}'. "
                     "The checkpoint appears incompatible with the current run configuration "
                     "(for example: different cosmology model, different selected AGN sample, "
-                    "or an older file format). Start a fresh run or remove the stale checkpoint."
+                    "or an older file format). Start a fresh run or remove the stale checkpoint. "
+                    f"Cause: {exc}"
                 ) from exc
         flat_samples = r["flat_samples"]
         dmi_max_w = r["dmi_max_w"]
@@ -2704,6 +2833,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             logZerr=logZerr,
             logZ_is_approximate=bool(logZ_is_approximate),
             integrals_max_w=integrals_max_w,
+            cut_tier=str(df_agn.attrs.get("cut_tier", "")),
+            cut_configuration_json=str(df_agn.attrs.get("cut_configuration_json", "")),
+            z_range_semantics=Z_RANGE_SEMANTICS,
         )
         if not only_sna:
             checkpoint_payload.update(
@@ -3284,6 +3416,15 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                         use_redshift_log_f_term=use_redshift_log_f_term,
                     )[1]),
                     n_agn=len(expected_pass1_fit_selection),
+                    expected_cut_tier=expected_pass1_fit_selection.attrs.get("cut_tier"),
+                    expected_cut_configuration_json=expected_pass1_fit_selection.attrs.get("cut_configuration_json"),
+                    expected_z_range_semantics=(
+                        Z_RANGE_SEMANTICS
+                        if expected_pass1_fit_selection.attrs.get(
+                            "cut_configuration_json"
+                        )
+                        else None
+                    ),
                 )
                 pass2_warm_start_flat_samples = selected_resume_results["flat_samples"]
             _write_sigma_clip_diagnostics(
