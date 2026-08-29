@@ -34,6 +34,12 @@ z_pivot_agn = 1.5
 DEFAULT_COMPLETENESS_SIM_FILE = None
 DEFAULT_COMPLETENESS_FOOTPRINT_AREA_DEG2 = 5.0
 
+from qvc.hubble.cuts import (
+    CUT_TIER_CHOICES,
+    SDSS_TARGET_SELECTION_CHOICES,
+    normalize_cut_tier,
+    normalize_sdss_target_selection,
+)
 from qvc.hubble.hubble_utils import (
     compare_models_by_log_evidence_all,
     compute_alpha_ox,
@@ -4494,12 +4500,24 @@ if __name__ == "__main__":
         help="Optional SDSS_RUN2D filter for spectra-matched AGN rows. Applies only when cuts are enabled.",
     )
     parser.add_argument(
-        "--no-cuts",
-        "--no_cuts",
-        dest="no_cuts",
-        action="store_true",
-        default=False,
-        help="Disable all AGN data cuts (default: False).",
+        "--sdss-target-selection",
+        "--sdss_target_selection",
+        dest="sdss_target_selection",
+        type=normalize_sdss_target_selection,
+        choices=SDSS_TARGET_SELECTION_CHOICES,
+        default="all",
+        help=(
+            "Tier-0 SDSS targeting population to fit. It is bypassed only by "
+            "--cut-tier none."
+        ),
+    )
+    parser.add_argument(
+        "--cut-tier",
+        dest="cut_tier",
+        type=normalize_cut_tier,
+        choices=CUT_TIER_CHOICES,
+        default="2",
+        help="Maximum AGN cut tier: none, 0 (eligibility), 1 (fit quality), or 2 (science parameters).",
     )
     parser.add_argument("--skip_plots", action="store_true", default=False, help="Skip plotting steps (default: False)")
     parser.add_argument(
@@ -4648,11 +4666,12 @@ if __name__ == "__main__":
     agn_plot_path = f"plots/hubble/{args.prefix}"
     cut_report_path = Path(agn_plot_path) / "cut_summary.txt"
     df_agn, df_agn_all = load_agn_data(args.agn_data_filepath, populate_sdss=args.force_populate_fields, 
-                           apply_cut=not args.no_cuts,
+                           cut_tier=args.cut_tier,
                            residuals_sigma_clip=args.residuals_sigma_clip, residuals_csv=args.residuals_csv,
                            exclude_object_ids_csv=args.exclude_object_ids_csv,
                            spectra_fit_csv=args.spectra_fit_csv,
                            spectra_fit_h5=args.spectra_fit_h5,
+                           sdss_target_selection=args.sdss_target_selection,
                            magnitude_convention=args.magnitude_convention,
                            completeness_magnitude=args.completeness_magnitude,
                            spectra_sdss_run2d=args.spectra_sdss_run2d,
@@ -4660,6 +4679,7 @@ if __name__ == "__main__":
                            z_range=tuple(args.z_range), plot_path=agn_plot_path,
                            cut_report_path=cut_report_path,
                            plot_diagnostics=not args.minimal_plots)
+    df_agn_completeness_parent = df_agn.copy()
     effective_N = args.N
     if args.agn_calibrators:
         if args.agn_calibrators.endswith('.h5'):

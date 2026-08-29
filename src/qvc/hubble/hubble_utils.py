@@ -1,5 +1,6 @@
 """Shared utility functions for the QVC/Hubble fitting workflow."""
 
+import json
 import math
 import os
 import warnings
@@ -30,15 +31,25 @@ from qvc.hubble.cuts import (
     EXCLUDED_SDSS_NAMES,
     LIGHT_CURVE_N_POINTS_COLUMN,
     LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
+    T_RF_OVER_TAU_UV_RF_COLUMN,
     LOG_AMP_DELTA_BC_UPPER,
     LOG_F_BC_3000_MAX,
     LOG_F_FE_UV_3000_MAX,
+    LOW_L2500_FHOST_LOG_L_MAX,
+    LOW_L2500_FHOST_PSF_MAX,
     REL_APPARENT_MAG_2500_ERR_MAX,
     add_light_curve_point_count_column,
+    add_t_rf_over_tau_uv_rf_column,
+    build_sdss_target_selection_mask,
+    cut_tier_level,
+    normalize_cut_tier,
+    normalize_sdss_target_selection,
 )
 from qvc.hubble.hubble_cut_config import (
-    build_agn_cuts,
     build_dlog_amp_blr_cuts,
+    build_tier0_cuts,
+    build_tier1_cuts,
+    build_tier2_cuts,
 )
 from qvc.hubble.hubble_model import (
     AgnPivotContext,
@@ -126,10 +137,12 @@ def _append_cut_report_row(
     kept,
     status,
     removed_frame=None,
+    tier="assembly",
 ):
     before_i = int(before)
     kept_i = int(kept)
     row = {
+        "tier": str(tier),
         "step": str(step),
         "criterion": str(criterion),
         "before": before_i,
@@ -143,6 +156,7 @@ def _append_cut_report_row(
 
 def _render_cut_summary_table(rows):
     columns = (
+        ("tier", "tier"),
         ("step", "step"),
         ("criterion", "criterion"),
         ("before", "before"),
@@ -1052,10 +1066,11 @@ def read_quasars_from_hdf5_flat(file_path, N=None):
             df[meta_key] = meta_value
     return df
 
-def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
+def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                   exclude_object_ids_csv=None,
                   residuals_sigma_clip=None, residuals_csv=None,
                   spectra_fit_csv=None, spectra_fit_h5=None, only_load=False,
+                  sdss_target_selection="all",
                   spectra_sdss_run2d="all",
                   correct_sigma_uv_host=False,
                   lc_info_csv=None,
@@ -1080,6 +1095,11 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             "completeness_magnitude must be exactly 'dereddened' or "
             f"'attenuated', got {completeness_magnitude!r}."
         )
+    cut_tier = normalize_cut_tier(cut_tier)
+    maximum_cut_tier = cut_tier_level(cut_tier)
+    apply_tier0 = maximum_cut_tier >= 0
+    apply_tier1 = maximum_cut_tier >= 1
+    apply_tier2 = maximum_cut_tier >= 2
 
     def _format_cut_bounds(lower, upper, *, upper_inclusive=True, allow_missing=False):
         left = "[" if lower is not None else "("
@@ -1208,7 +1228,16 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         exclude_object_ids_csv = []
     cut_rows = []
 
-    def _record_cut(step, criterion, frame_before, mask, *, status="applied", reset_index=True):
+    def _record_cut(
+        step,
+        criterion,
+        frame_before,
+        mask,
+        *,
+        tier,
+        status="applied",
+        reset_index=True,
+    ):
         before = len(frame_before)
         kept = int(np.count_nonzero(mask))
         removed_frame = frame_before.loc[~np.asarray(mask, dtype=bool)].copy()
@@ -1220,6 +1249,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             kept=kept,
             status=status,
             removed_frame=removed_frame,
+            tier=tier,
         )
         filtered = frame_before[mask]
         if reset_index:
@@ -1479,6 +1509,40 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
         if 'alpha_lambda' not in df.columns:
             raise ValueError("spectra fit catalog not provided and spectral fields not found in agn h5 file")
 
+    # Targeting provenance is read from the spectra v3 catalog frame.
+
+    sdss_target_selection = normalize_sdss_target_selection(sdss_target_selection)
+    target_before = len(df)
+    if apply_tier0:
+        target_mask, target_criterion = build_sdss_target_selection_mask(
+            df, sdss_target_selection
+        )
+        df = _record_cut(
+            "sample:sdss_target_selection",
+            f"{sdss_target_selection}: {target_criterion}",
+            df,
+            target_mask,
+            tier="0",
+        )
+    else:
+        target_criterion = "bypassed by --cut-tier none"
+        _append_cut_report_row(
+            cut_rows,
+            step="sample:sdss_target_selection",
+            criterion=target_criterion,
+            before=len(df),
+            kept=len(df),
+            status="skipped",
+            tier="0",
+        )
+    df.attrs["sdss_target_selection"] = sdss_target_selection
+    print(
+        "SDSS target selection "
+        f"{sdss_target_selection!r}: kept {len(df)}/{target_before} objects "
+        f"({target_criterion})."
+    )
+
+
     magnitude_columns = {
         "dereddened": (
             "m_2500_dereddened",
@@ -1596,6 +1660,13 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             f"Computed {LIGHT_CURVE_N_POINTS_COLUMN} from: "
             f"{', '.join(lc_point_count_cols)}"
             f" excluding bands: {excluded}"
+        )
+
+    df, t_rf_tau_cols = add_t_rf_over_tau_uv_rf_column(df)
+    if t_rf_tau_cols:
+        print(
+            f"Computed {T_RF_OVER_TAU_UV_RF_COLUMN} from: "
+            f"{', '.join(t_rf_tau_cols)}"
         )
 
     # Use the PL/total fraction at 2500 A for the sigma_uv dilution correction.
@@ -1984,9 +2055,8 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
     print("Number of quasars with z > 3:", num_quasars_z_gt_3_before)
     print("Highest redshift quasar:", df['z'].max())
 
-    df_all = df.copy()
-
     if only_load:
+        df_all = df.copy()
         _finalize_cut_report()
         return df, df_all
 
@@ -2004,8 +2074,38 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
 
     df = df.reset_index(drop=True)
     
-    # Apply a small hand-maintained exclusion list.
-    if apply_cut:
+    def _apply_scalar_cut_group(frame, cuts, *, tier):
+        for col, lower, upper in cuts:
+            upper_inclusive = _scalar_cut_has_inclusive_upper(col)
+            bounds = _format_cut_bounds(
+                lower,
+                upper,
+                upper_inclusive=upper_inclusive,
+                allow_missing=False,
+            )
+            cut_desc = f"{col} in {bounds}"
+            if col not in frame.columns:
+                raise ValueError(
+                    f"Tier {tier} cut requires missing column {col!r}. "
+                    "Use a compatible input catalog or select a lower cut tier."
+                )
+            col_mask = _scalar_parameter_cut_mask(frame, col, lower, upper)
+            plot_cut_diagnostics(
+                frame.copy(), frame[col_mask], bins=30, cut_info=cut_desc
+            )
+            frame = _record_cut(
+                f"tier{tier}:agn_scalar:{col}",
+                cut_desc,
+                frame,
+                col_mask,
+                tier=str(tier),
+            )
+        return frame
+
+    tier0_start = target_before
+
+    # Tier 0: sample eligibility and analysis support.
+    if apply_tier0:
         exclusion_object_ids = []
         mask_exclude = ~df['object_id'].astype(str).isin(exclusion_object_ids)
         mask_exclude &= (~df["sdss_name"].astype(str).isin(EXCLUDED_SDSS_NAMES))
@@ -2014,82 +2114,173 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             "sdss_name/object_id exclusion list",
             df,
             mask_exclude,
+            tier="0",
         )
 
-
-    # Remove outliers listed in external CSV files.
-    for exclude_csv in exclude_object_ids_csv if apply_cut else ():
-        if os.path.exists(exclude_csv):
-            exclude_df = pd.read_csv(exclude_csv)
-            exclude_ids = set(exclude_df['object_id'].astype(str))
-            mask_exclude = ~df['object_id'].astype(str).isin(exclude_ids)
-            plot_cut_diagnostics(df.copy(), df[mask_exclude], bins=30, cut_info="exclude csv")
-            df = _record_cut(
-                f"exclude_csv:{Path(exclude_csv).name}",
-                f"object_id not in {Path(exclude_csv).name}",
-                df,
-                mask_exclude,
-            )
-        else:
-            _append_cut_report_row(
-                cut_rows,
-                step=f"exclude_csv:{Path(exclude_csv).name}",
-                criterion=f"missing file: {exclude_csv}",
-                before=len(df),
-                kept=len(df),
-                status="warning",
-            )
-            print(f"[WARNING] Exclusion CSV not found: {exclude_csv}")
-
-    blr_amp_cuts = build_dlog_amp_blr_cuts()
-    for col, lower, upper in blr_amp_cuts if apply_cut else ():
-        cut_desc = f"{col} in {_format_cut_bounds(lower, upper, upper_inclusive=False, allow_missing=True)}"
-        if col not in df.columns:
-            _append_cut_report_row(
-                cut_rows,
-                step=f"blr_amp:{col}",
-                criterion=cut_desc,
-                before=len(df),
-                kept=len(df),
-                status="skipped",
-            )
-            continue
-        mask = np.ones(len(df), dtype=bool)
-        if lower is not None:
-            mask &= df[col] >= lower
-        if upper is not None:
-            mask &= df[col] < upper
-        mask |= df[col].isna()
-        plot_cut_diagnostics(df.copy(), df[mask], bins=30, cut_info=cut_desc)
-        df = _record_cut(f"blr_amp:{col}", cut_desc, df, mask)
-
-    cuts = build_agn_cuts(completeness_magnitude=completeness_magnitude)
-
-    if apply_cut:
-        mask = np.ones(len(df), dtype=bool)
-        for col, lower, upper in cuts:
-            upper_inclusive = _scalar_cut_has_inclusive_upper(col)
-            allow_missing = col in ALLOW_MISSING_SCALAR_CUT_COLUMNS
-            bounds = _format_cut_bounds(
-                lower,
-                upper,
-                upper_inclusive=upper_inclusive,
-                allow_missing=allow_missing,
-            )
-            cut_desc = f"{col} in {bounds}"
-            if col not in df.columns:
+        for exclude_csv in exclude_object_ids_csv:
+            if os.path.exists(exclude_csv):
+                exclude_df = pd.read_csv(exclude_csv)
+                exclude_ids = set(exclude_df['object_id'].astype(str))
+                mask_exclude = ~df['object_id'].astype(str).isin(exclude_ids)
+                plot_cut_diagnostics(df.copy(), df[mask_exclude], bins=30, cut_info="exclude csv")
+                df = _record_cut(
+                    f"exclude_csv:{Path(exclude_csv).name}",
+                    f"object_id not in {Path(exclude_csv).name}",
+                    df,
+                    mask_exclude,
+                    tier="0",
+                )
+            else:
                 _append_cut_report_row(
                     cut_rows,
-                    step=f"agn_scalar:{col}",
-                    criterion=cut_desc,
+                    step=f"exclude_csv:{Path(exclude_csv).name}",
+                    criterion=f"missing file: {exclude_csv}",
                     before=len(df),
                     kept=len(df),
-                    status="skipped",
+                    status="warning",
+                    tier="0",
                 )
-                continue
-            col_mask = _scalar_parameter_cut_mask(df, col, lower, upper)
-            plot_cut_diagnostics(df.copy(), df[col_mask], bins=30, cut_info=cut_desc)
-            df = _record_cut(f"agn_scalar:{col}", cut_desc, df, col_mask)
+                print(f"[WARNING] Exclusion CSV not found: {exclude_csv}")
+
+        requested_run2d = _normalize_run2d_value(spectra_sdss_run2d)
+        if requested_run2d not in {None, "all"}:
+            if "SDSS_RUN2D" not in df.columns:
+                raise ValueError(
+                    "Tier 0 SDSS_RUN2D eligibility was requested but SDSS_RUN2D "
+                    "is not available. Provide compatible spectra metadata."
+                )
+            normalized_run2d = df["SDSS_RUN2D"].map(_normalize_run2d_value)
+            run2d_mask = normalized_run2d == requested_run2d
+            cut_desc = f"SDSS_RUN2D == {requested_run2d}"
+            df = _record_cut(
+                "tier0:SDSS_RUN2D", cut_desc, df, run2d_mask, tier="0"
+            )
+
+        df = _apply_scalar_cut_group(
+            df,
+            build_tier0_cuts(completeness_magnitude=completeness_magnitude),
+            tier="0",
+        )
+        _append_cut_report_row(
+            cut_rows,
+            step="tier0:summary",
+            criterion="sample eligibility",
+            before=tier0_start,
+            kept=len(df),
+            status="applied",
+            tier="0",
+        )
+    else:
+        _append_cut_report_row(
+            cut_rows,
+            step="tier0:summary",
+            criterion="sample eligibility bypassed by --cut-tier none",
+            before=len(df),
+            kept=len(df),
+            status="skipped",
+            tier="0",
+        )
+
+    # The completeness parent is the Tier-0 population.  Higher tiers define
+    # the selected observed sample used to estimate the empirical map.
+    df_all = df.copy()
+
+    # Tier 1: mandatory fit quality whenever the selected level is >= 1.
+    if apply_tier1:
+        tier1_start = len(df)
+        df = _apply_scalar_cut_group(df, build_tier1_cuts(), tier="1")
+        _append_cut_report_row(
+            cut_rows,
+            step="tier1:summary",
+            criterion="fit chi-square and convergence diagnostics",
+            before=tier1_start,
+            kept=len(df),
+            status="applied",
+            tier="1",
+        )
+    else:
+        _append_cut_report_row(
+            cut_rows,
+            step="tier1:summary",
+            criterion=f"not requested by --cut-tier {cut_tier}",
+            before=len(df),
+            kept=len(df),
+            status="skipped",
+            tier="1",
+        )
+
+    # Tier 2: scientific and fitted-parameter quality cuts.
+    if apply_tier2:
+        tier2_start = len(df)
+        df = _apply_scalar_cut_group(
+            df,
+            build_tier2_cuts(completeness_magnitude=completeness_magnitude),
+            tier="2",
+        )
+
+        if (
+            LOW_L2500_FHOST_LOG_L_MAX is not None
+            and LOW_L2500_FHOST_PSF_MAX is not None
+        ):
+            required = {"apparent_mag_2500", "z", "f_host_2500_psf"}
+            missing = sorted(required - set(df.columns))
+            if missing:
+                raise ValueError(
+                    "Tier 2 low-luminosity/low-host cut requires missing "
+                    f"column(s): {missing}."
+                )
+            magnitude = pd.to_numeric(
+                df["apparent_mag_2500"], errors="coerce"
+            ).to_numpy(dtype=float)
+            redshift = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
+            f_host_psf = pd.to_numeric(
+                df["f_host_2500_psf"], errors="coerce"
+            ).to_numpy(dtype=float)
+            finite = (
+                np.isfinite(magnitude)
+                & np.isfinite(redshift)
+                & (redshift > 0.0)
+                & np.isfinite(f_host_psf)
+            )
+            log_l2500 = np.full(len(df), np.nan, dtype=float)
+            if np.any(finite):
+                absolute_magnitude = magnitude[finite] - FlatLambdaCDM(
+                    H0=70.0, Om0=0.3
+                ).distmod(redshift[finite]).value
+                log_l2500[finite] = convert_M2500_to_logL2500(absolute_magnitude)
+            anomalous_low_host = (
+                finite
+                & (log_l2500 < LOW_L2500_FHOST_LOG_L_MAX)
+                & (f_host_psf < LOW_L2500_FHOST_PSF_MAX)
+            )
+            joint_mask = finite & ~anomalous_low_host
+            criterion = (
+                "exclude objects with log10(L_2500/[erg s^-1]) < "
+                f"{LOW_L2500_FHOST_LOG_L_MAX} and f_host_2500_psf < "
+                f"{LOW_L2500_FHOST_PSF_MAX}"
+            )
+            df = _record_cut(
+                "tier2:low_l2500_low_fhost_psf",
+                criterion,
+                df,
+                joint_mask,
+                tier="2",
+            )
+
+        blr_amp_cuts = build_dlog_amp_blr_cuts()
+        for col, lower, upper in blr_amp_cuts:
+            cut_desc = f"{col} in {_format_cut_bounds(lower, upper, upper_inclusive=False, allow_missing=True)}"
+            if col not in df.columns:
+                raise ValueError(f"Tier 2 cut requires missing column {col!r}.")
+            mask = np.ones(len(df), dtype=bool)
+            if lower is not None:
+                mask &= df[col] >= lower
+            if upper is not None:
+                mask &= df[col] < upper
+            mask |= df[col].isna()
+            df = _record_cut(
+                f"tier2:blr_amp:{col}", cut_desc, df, mask, tier="2"
+            )
 
         if LOG_AMP_DELTA_BC_UPPER is not None and "dlog_amp_bc" in df.columns:
             bc_amp_upper = LOG_AMP_DELTA_BC_UPPER
@@ -2099,28 +2290,28 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             ) | df["dlog_amp_bc"].isna().to_numpy(dtype=bool)
             cut_desc = f"dlog_amp_bc in (-inf, {bc_amp_upper}] or NaN"
             plot_cut_diagnostics(df.copy(), df[bc_amp_mask], bins=30, cut_info=cut_desc)
-            df = _record_cut("agn_scalar:dlog_amp_bc", cut_desc, df, bc_amp_mask)
+            df = _record_cut(
+                "tier2:agn_scalar:dlog_amp_bc", cut_desc, df, bc_amp_mask, tier="2"
+            )
+        elif LOG_AMP_DELTA_BC_UPPER is not None:
+            raise ValueError("Tier 2 cut requires missing column 'dlog_amp_bc'.")
 
         for frac_col, log_col, log_upper in (
             ("f_bc_3000", "log_f_bc_3000", LOG_F_BC_3000_MAX),
             ("f_fe_uv_3000", "log_f_fe_uv_3000", LOG_F_FE_UV_3000_MAX),
         ):
-            if log_upper is None or frac_col not in df.columns:
-                _append_cut_report_row(
-                    cut_rows,
-                    step=f"agn_scalar:{log_col}",
-                    criterion=f"{log_col} <= {log_upper} or NaN/non-positive",
-                    before=len(df),
-                    kept=len(df),
-                    status="skipped",
-                )
+            if log_upper is None:
                 continue
+            if frac_col not in df.columns:
+                raise ValueError(f"Tier 2 cut requires missing column {frac_col!r}.")
             frac_vals = pd.to_numeric(df[frac_col], errors="coerce").to_numpy(dtype=float)
             frac_upper = 10.0**log_upper
             frac_mask = (~np.isfinite(frac_vals)) | (frac_vals <= 0.0) | (frac_vals <= frac_upper)
             cut_desc = f"{log_col} <= {log_upper} or NaN/non-positive"
             plot_cut_diagnostics(df.copy(), df[frac_mask], bins=30, cut_info=cut_desc)
-            df = _record_cut(f"agn_scalar:{log_col}", cut_desc, df, frac_mask)
+            df = _record_cut(
+                f"tier2:agn_scalar:{log_col}", cut_desc, df, frac_mask, tier="2"
+            )
 
         if (
             REL_APPARENT_MAG_2500_ERR_MAX is not None
@@ -2143,19 +2334,27 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
                 cut_desc,
                 df,
                 rel_mag_err_mask,
+                tier="2",
             )
-        requested_run2d = _normalize_run2d_value(spectra_sdss_run2d)
-        if requested_run2d not in {None, "all"}:
-            if "SDSS_RUN2D" not in df.columns:
-                raise ValueError(
-                    "spectra_sdss_run2d filtering was requested but SDSS_RUN2D is not available. "
-                    "Provide --spectra_fit_h5 with SDSS_RUN2D or disable this filter."
-                )
-            normalized_run2d = df["SDSS_RUN2D"].map(_normalize_run2d_value)
-            run2d_mask = normalized_run2d == requested_run2d
-            cut_desc = f"SDSS_RUN2D == {requested_run2d}"
-            plot_cut_diagnostics(df.copy(), df[run2d_mask], bins=30, cut_info=cut_desc)
-            df = _record_cut("agn_scalar:SDSS_RUN2D", cut_desc, df, run2d_mask)
+        _append_cut_report_row(
+            cut_rows,
+            step="tier2:summary",
+            criterion="science and parameter quality",
+            before=tier2_start,
+            kept=len(df),
+            status="applied",
+            tier="2",
+        )
+    else:
+        _append_cut_report_row(
+            cut_rows,
+            step="tier2:summary",
+            criterion=f"not requested by --cut-tier {cut_tier}",
+            before=len(df),
+            kept=len(df),
+            status="skipped",
+            tier="2",
+        )
     df = df.reset_index(drop=True)
 
     if residuals_sigma_clip is not None and residuals_csv is not None:
@@ -2172,6 +2371,7 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
                 f"|mu_zscore| < {residuals_sigma_clip}",
                 df,
                 mask_residual,
+                tier="post",
             )
             df = df.drop(columns=['mu_zscore'])
         else:
@@ -2185,6 +2385,40 @@ def load_agn_data(file_path, populate_sdss=False, apply_cut=True,
             )
             print(f"[WARNING] Residual CSV not found: {residuals_csv}")
             raise ValueError(f"Residual CSV not found: {residuals_csv}")
+
+    resolved_cut_configuration = {
+        "cut_tier": cut_tier,
+        "tier0": (
+            build_tier0_cuts(completeness_magnitude=completeness_magnitude)
+            if apply_tier0 else []
+        ),
+        "tier1": build_tier1_cuts() if apply_tier1 else [],
+        "tier2": (
+            build_tier2_cuts(completeness_magnitude=completeness_magnitude)
+            if apply_tier2 else []
+        ),
+        "tier2_low_l2500_low_fhost_psf": (
+            {
+                "log_l2500_max": LOW_L2500_FHOST_LOG_L_MAX,
+                "f_host_2500_psf_max": LOW_L2500_FHOST_PSF_MAX,
+            }
+            if apply_tier2
+            and LOW_L2500_FHOST_LOG_L_MAX is not None
+            and LOW_L2500_FHOST_PSF_MAX is not None
+            else None
+        ),
+        "sdss_target_selection": sdss_target_selection,
+        "spectra_sdss_run2d": str(spectra_sdss_run2d),
+        "excluded_sdss_names": list(EXCLUDED_SDSS_NAMES),
+        "exclude_object_ids_csv": [str(value) for value in exclude_object_ids_csv],
+        "residuals_sigma_clip": residuals_sigma_clip,
+    }
+    cut_configuration_json = json.dumps(
+        resolved_cut_configuration, sort_keys=True, separators=(",", ":")
+    )
+    for frame in (df, df_all):
+        frame.attrs["cut_tier"] = cut_tier
+        frame.attrs["cut_configuration_json"] = cut_configuration_json
 
     num_quasars_z_0_1 = len(df[(df['z'] > 0) & (df['z'] <= 1.0)])
     num_quasars_z_gt_3 = len(df[df['z'] > 3])

@@ -5036,7 +5036,7 @@ def test_load_agn_data_residuals_csv_cut_remains_available(monkeypatch, tmp_path
     filtered_df, all_df = hubble_utils.load_agn_data(
         "dummy.h5",
         magnitude_convention="dereddened",
-        apply_cut=False,
+        cut_tier="none",
         residuals_sigma_clip=3.0,
         residuals_csv=str(residuals_path),
         lc_info_csv=None,
@@ -5089,7 +5089,32 @@ def test_hubble_fit_cli_declares_and_forwards_spectra_sdss_run2d():
     assert "spectra_sdss_run2d" in load_kwargs
 
 
-def test_hubble_fit_clis_declare_and_forward_no_cuts():
+def test_hubble_fit_clis_declare_and_forward_sdss_target_selection():
+    for source_path in (
+        Path(hubble_fit.__file__),
+        SRC / "qvc" / "hubble" / "hubble_fit_jax.py",
+    ):
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+
+        option_strings = set()
+        load_kwargs = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument":
+                option_strings.update(
+                    arg.value
+                    for arg in node.args
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                )
+            if isinstance(node.func, ast.Name) and node.func.id == "load_agn_data":
+                load_kwargs.update(kw.arg for kw in node.keywords if kw.arg is not None)
+
+        assert "--sdss-target-selection" in option_strings
+        assert "--sdss_target_selection" in option_strings
+        assert "sdss_target_selection" in load_kwargs
+
+def test_hubble_fit_clis_declare_and_forward_cut_tier():
     for source_path in (
         Path(hubble_fit.__file__),
         SRC / "qvc" / "hubble" / "hubble_fit_jax.py",
@@ -5097,6 +5122,7 @@ def test_hubble_fit_clis_declare_and_forward_no_cuts():
         tree = ast.parse(source_path.read_text(encoding="utf-8"))
         option_strings = set()
         forwarded_value = None
+        parser_choices = None
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -5106,18 +5132,20 @@ def test_hubble_fit_clis_declare_and_forward_no_cuts():
                     for arg in node.args
                     if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
                 ]
-                if "--no-cuts" in constants or "--no_cuts" in constants:
+                if "--cut-tier" in constants:
                     option_strings.update(constants)
+                    for keyword in node.keywords:
+                        if keyword.arg == "choices":
+                            parser_choices = keyword.value
             if isinstance(node.func, ast.Name) and node.func.id == "load_agn_data":
                 for keyword in node.keywords:
-                    if keyword.arg == "apply_cut":
+                    if keyword.arg == "cut_tier":
                         forwarded_value = keyword.value
 
-        assert {"--no-cuts", "--no_cuts"}.issubset(option_strings)
-        assert isinstance(forwarded_value, ast.UnaryOp)
-        assert isinstance(forwarded_value.op, ast.Not)
-        assert isinstance(forwarded_value.operand, ast.Attribute)
-        assert forwarded_value.operand.attr == "no_cuts"
+        assert "--cut-tier" in option_strings
+        assert parser_choices is not None
+        assert isinstance(forwarded_value, ast.Attribute)
+        assert forwarded_value.attr == "cut_tier"
 
 
 def test_hubble_fit_cli_declares_and_forwards_magnitude_convention():

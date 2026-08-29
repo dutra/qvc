@@ -105,6 +105,12 @@ from qvc.hubble.hubble_plotting import (
     plot_redshift_histograms,
     plot_sigma_uv_mpred_correction,
 )
+from qvc.hubble.cuts import (
+    CUT_TIER_CHOICES,
+    SDSS_TARGET_SELECTION_CHOICES,
+    normalize_cut_tier,
+    normalize_sdss_target_selection,
+)
 from qvc.hubble.hubble_utils import (
     compute_age_universe_with_error,
     display_results_summary,
@@ -1319,6 +1325,18 @@ def main():
     spectra_group.add_argument("--spectra_fit_csv", type=str, nargs="+")
     spectra_group.add_argument("--spectra_fit_h5", type=str, nargs="+")
     parser.add_argument(
+        "--sdss-target-selection",
+        "--sdss_target_selection",
+        dest="sdss_target_selection",
+        type=normalize_sdss_target_selection,
+        choices=SDSS_TARGET_SELECTION_CHOICES,
+        default="all",
+        help=(
+            "Tier-0 SDSS targeting population to fit. It is bypassed only by "
+            "--cut-tier none."
+        ),
+    )
+    parser.add_argument(
         "--magnitude-convention",
         type=str,
         choices=["dereddened", "attenuated"],
@@ -1359,12 +1377,12 @@ def main():
     )
     parser.add_argument("--correct-sigma-uv-host", action="store_true", default=False)
     parser.add_argument(
-        "--no-cuts",
-        "--no_cuts",
-        dest="no_cuts",
-        action="store_true",
-        default=False,
-        help="Disable all AGN data cuts (default: False).",
+        "--cut-tier",
+        dest="cut_tier",
+        type=normalize_cut_tier,
+        choices=CUT_TIER_CHOICES,
+        default="2",
+        help="Maximum AGN cut tier: none, 0 (eligibility), 1 (fit quality), or 2 (science parameters).",
     )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -1378,9 +1396,10 @@ def main():
     agn_plot_path = f"plots/hubble/{args.prefix}"
     df_agn, df_agn_all = load_agn_data(
         args.agn_data_filepath,
-        apply_cut=not args.no_cuts,
+        cut_tier=args.cut_tier,
         spectra_fit_csv=args.spectra_fit_csv,
         spectra_fit_h5=args.spectra_fit_h5,
+        sdss_target_selection=args.sdss_target_selection,
         magnitude_convention=args.magnitude_convention,
         completeness_magnitude=args.completeness_magnitude,
         correct_sigma_uv_host=args.correct_sigma_uv_host,

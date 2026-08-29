@@ -97,7 +97,7 @@ def test_load_agn_data_raises_when_selected_magnitude_columns_are_missing(
             magnitude_convention="dereddened",
             lc_info_csv=None,
             only_load=True,
-            apply_cut=False,
+            cut_tier="none",
             plot_diagnostics=False,
         )
 
@@ -145,7 +145,7 @@ def test_load_agn_data_does_not_require_legacy_spectral_fraction_columns(
         magnitude_convention="dereddened",
         lc_info_csv=None,
         only_load=False,
-        apply_cut=False,
+        cut_tier="none",
         plot_diagnostics=False,
     )
 
@@ -177,7 +177,7 @@ def _obsolete_load_agn_data_attenuated_aliases_legacy_generic_columns(
         magnitude_convention="attenuated",
         lc_info_csv=None,
         only_load=True,
-        apply_cut=False,
+        cut_tier="none",
         plot_diagnostics=False,
     )
 
@@ -227,7 +227,7 @@ def _obsolete_load_agn_data_attenuated_raises_when_canonical_and_legacy_disagree
             magnitude_convention="attenuated",
             lc_info_csv=None,
             only_load=True,
-            apply_cut=False,
+            cut_tier="none",
             plot_diagnostics=False,
         )
 
@@ -261,7 +261,7 @@ def _obsolete_load_agn_data_attenuated_raises_for_incomplete_alias_pairs(
             magnitude_convention="attenuated",
             lc_info_csv=None,
             only_load=True,
-            apply_cut=False,
+            cut_tier="none",
             plot_diagnostics=False,
         )
 
@@ -284,7 +284,7 @@ def _obsolete_load_agn_data_attenuated_colocated_nans_are_not_alias_conflicts(
             magnitude_convention="attenuated",
             lc_info_csv=None,
             only_load=True,
-            apply_cut=False,
+            cut_tier="none",
             plot_diagnostics=False,
         )
 
@@ -324,7 +324,7 @@ def test_load_agn_data_raises_for_invalid_selected_magnitude_values(
             magnitude_convention="dereddened",
             lc_info_csv=None,
             only_load=True,
-            apply_cut=False,
+            cut_tier="none",
             plot_diagnostics=False,
         )
 
@@ -349,7 +349,7 @@ def test_load_agn_data_propagates_host_error_into_sigma_uv(monkeypatch, tmp_path
         spectra_fit_csv=None,
         lc_info_csv=None,
         only_load=True,
-        apply_cut=False,
+        cut_tier="none",
         correct_sigma_uv_host=True,
         plot_path=str(tmp_path / "figures"),
     )
@@ -440,7 +440,7 @@ def test_load_agn_data_aliases_dereddened_spectral_magnitude(monkeypatch, tmp_pa
         magnitude_convention="dereddened",
         lc_info_csv=None,
         only_load=True,
-        apply_cut=False,
+        cut_tier="none",
         plot_diagnostics=False,
     )
 
@@ -492,7 +492,7 @@ def test_load_agn_data_can_use_attenuated_spectral_magnitude(monkeypatch, tmp_pa
         magnitude_convention="attenuated",
         lc_info_csv=None,
         only_load=True,
-        apply_cut=False,
+        cut_tier="none",
         plot_diagnostics=False,
     )
 
@@ -542,7 +542,7 @@ def test_load_agn_data_applies_attenuated_convention_to_hdf5_spectral_fields(
         magnitude_convention="attenuated",
         lc_info_csv=None,
         only_load=True,
-        apply_cut=False,
+        cut_tier="none",
         plot_diagnostics=False,
     )
 
@@ -583,7 +583,7 @@ def test_load_agn_data_uses_survey_band_log_jitter_grid(monkeypatch, tmp_path):
         spectra_fit_csv=None,
         lc_info_csv=None,
         only_load=True,
-        apply_cut=False,
+        cut_tier="none",
         plot_path=str(tmp_path / "figures"),
     )
     assert df_all.equals(df)
