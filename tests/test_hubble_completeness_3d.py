@@ -6,6 +6,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 import pandas as pd
+import pytest
 from astropy.cosmology import FlatLambdaCDM
 from scipy.special import ndtr
 
@@ -99,8 +100,9 @@ def _build_pivot_context(df_agn):
     )
 
 
-def test_completeness_loglike_includes_bright_gaussian_tail():
-    mag_centers = np.linspace(18.5, 24.0, 60)
+def test_completeness_loglike_respects_finite_hard_magnitude_support():
+    lower, upper = 18.5, 24.0
+    mag_centers = np.linspace(lower, upper, 5501)
     z_centers = np.linspace(0.0, 4.0, 20)
     completeness = hcr.Completeness2D(
         mag_centers,
@@ -109,18 +111,191 @@ def test_completeness_loglike_includes_bright_gaussian_tail():
     )
 
     _, blob = completeness_loglike(
-        m_obs=np.array([17.5]),
+        m_obs=np.array([lower]),
         m_obs_err=np.array([0.05]),
         m_model=np.array([17.5]),
         mu_err=np.array([0.3]),
         z=np.array([1.0]),
         completeness_model=completeness,
         m_grid=mag_centers,
+        magnitude_support=(lower, upper),
     )
 
-    np.testing.assert_allclose(blob[0], 1.0, atol=1e-4)
-    np.testing.assert_allclose(blob[1], 0.0, atol=1e-4)
-    np.testing.assert_allclose(blob[2], 0.3, atol=1e-4)
+    sigma = 0.3
+    alpha = (lower - 17.5) / sigma
+    beta = (upper - 17.5) / sigma
+    expected_z = ndtr(beta) - ndtr(alpha)
+    phi_alpha = np.exp(-0.5 * alpha**2) / np.sqrt(2.0 * np.pi)
+    phi_beta = np.exp(-0.5 * beta**2) / np.sqrt(2.0 * np.pi)
+    expected_bias = sigma * (phi_alpha - phi_beta) / expected_z
+    expected_variance = sigma**2 * (
+        1.0
+        + (alpha * phi_alpha - beta * phi_beta) / expected_z
+        - ((phi_alpha - phi_beta) / expected_z) ** 2
+    )
+    np.testing.assert_allclose(blob[0, 0], expected_z, rtol=2e-5)
+    np.testing.assert_allclose(blob[1, 0], expected_bias, rtol=2e-5)
+    np.testing.assert_allclose(blob[2, 0], np.sqrt(expected_variance), rtol=2e-5)
+
+
+def test_hard_support_extends_smoothed_edge_bin_values_and_rejects_outside_data():
+    lower, upper = 18.5, 24.0
+    n_bins = 30
+    width = (upper - lower) / n_bins
+    centers = lower + (np.arange(n_bins) + 0.5) * width
+    z_centers = np.array([0.5, 1.5])
+    completeness_by_mag = np.linspace(0.85, 0.15, n_bins)
+    model = hcr.Completeness2D(
+        centers,
+        z_centers,
+        np.repeat(completeness_by_mag[:, None], 2, axis=1),
+        magnitude_support=(lower, upper),
+        redshift_support=(0.0, 2.0),
+    )
+
+    integration_grid = np.concatenate(([lower], centers, [upper]))
+    expected_pdet = np.interp(
+        integration_grid, centers, completeness_by_mag
+    )
+    np.testing.assert_allclose(
+        model(integration_grid, np.ones_like(integration_grid)), expected_pdet
+    )
+
+    log_z, _ = completeness_loglike(
+        m_obs=np.array([lower, upper]),
+        m_obs_err=np.full(2, 0.05),
+        m_model=np.array([lower, upper]),
+        mu_err=np.full(2, 0.2),
+        z=np.ones(2),
+        completeness_model=model,
+        m_grid=centers,
+        magnitude_support=(lower, upper),
+    )
+    assert np.isfinite(log_z)
+
+    with pytest.raises(ValueError, match="observed selection magnitudes"):
+        completeness_loglike(
+            m_obs=np.array([lower - 1e-6]),
+            m_obs_err=np.array([0.05]),
+            m_model=np.array([lower]),
+            mu_err=np.array([0.2]),
+            z=np.array([1.0]),
+            completeness_model=model,
+            m_grid=centers,
+            magnitude_support=(lower, upper),
+        )
+
+
+def test_cpu_and_jax_constant_edge_normalizations_match():
+    jax = pytest.importorskip("jax")
+    jnp = pytest.importorskip("jax.numpy")
+    from qvc.hubble.hubble_fit_jax import (
+        _completeness_loglike_jax,
+        _prepare_completeness_for_jax,
+    )
+
+    jax.config.update("jax_enable_x64", True)
+    support = (18.5, 24.0)
+    n_bins = 1200
+    width = (support[1] - support[0]) / n_bins
+    mag_centers = support[0] + (np.arange(n_bins) + 0.5) * width
+    z_centers = np.linspace(0.0, 4.0, 9)
+    mm, zz = np.meshgrid(mag_centers, z_centers, indexing="ij")
+    completeness_map = np.clip(
+        0.95 - 0.04 * (mm - support[0]) - 0.03 * zz, 0.1, 1.0
+    )
+    model = hcr.Completeness2D(
+        mag_centers,
+        z_centers,
+        completeness_map,
+        magnitude_support=support,
+        redshift_support=(-0.25, 4.25),
+    )
+    params = (
+        model,
+        mag_centers,
+        z_centers,
+        width,
+        z_centers[1] - z_centers[0],
+        0.0,
+    )
+    m_obs = np.array([support[0], 21.2, support[1]])
+    m_model = np.array([17.5, 21.2, 25.5])
+    mu_err = np.array([0.3, 0.5, 0.3])
+    redshift = np.array([-0.2, 1.5, 4.2])
+
+    cpu_log_z, _ = completeness_loglike(
+        m_obs=m_obs,
+        m_obs_err=np.full(3, 0.05),
+        m_model=m_model,
+        mu_err=mu_err,
+        z=redshift,
+        completeness_model=model,
+        m_grid=mag_centers,
+        magnitude_support=support,
+    )
+    prepared = _prepare_completeness_for_jax(
+        params, selection_magnitude=m_obs
+    )
+    jax_log_z = _completeness_loglike_jax(
+        jnp.asarray(m_model),
+        jnp.asarray(mu_err),
+        jnp.asarray(redshift),
+        prepared,
+        None,
+        None,
+    )
+
+    np.testing.assert_allclose(float(jax_log_z), cpu_log_z, rtol=1e-11)
+
+
+def test_joint_posterior_selection_uses_the_same_hard_support():
+    support = (18.5, 24.0)
+    width = (support[1] - support[0]) / 30
+    mag_centers = support[0] + (np.arange(30) + 0.5) * width
+    z_centers = np.array([0.5, 1.5])
+    model = hcr.Completeness2D(
+        mag_centers,
+        z_centers,
+        np.ones((30, 2)),
+        magnitude_support=support,
+        redshift_support=(0.0, 2.0),
+    )
+    params = (model, mag_centers, z_centers, width, 1.0, 0.0)
+    agn_data = {
+        hcr.COMPLETENESS_MAG_COL: np.array([20.3]),
+        "m_2500_dereddened_draws": np.array([[20.0, 20.0]]),
+        "m_2500_attenuated_model_draws": np.array([[20.2, 20.4]]),
+        "joint_posterior_valid_count": np.array([2]),
+    }
+
+    log_z, blob = hubble_likelihood.joint_posterior_completeness_loglike_for_data(
+        completeness_params=params,
+        agn_data=agn_data,
+        hubble_magnitude=np.array([20.0]),
+        hubble_magnitude_error=np.array([0.05]),
+        hubble_model_magnitude=np.array([20.0]),
+        hubble_total_error=np.array([0.2]),
+        z=np.array([2.5]),
+    )
+
+    assert np.isfinite(log_z)
+    assert blob.shape == (3, 1)
+    cached_grid = next(iter(model._likelihood_magnitude_grid_cache.values()))
+    assert cached_grid[0] == support[0]
+    assert cached_grid[-1] == support[1]
+
+    agn_data[hcr.COMPLETENESS_MAG_COL] = np.array([24.01])
+    with pytest.raises(ValueError, match="observed selection magnitudes"):
+        hubble_likelihood.joint_posterior_completeness_loglike_for_data(
+            completeness_params=params,
+            agn_data=agn_data,
+            hubble_magnitude=np.array([20.0]),
+            hubble_magnitude_error=np.array([0.05]),
+            hubble_model_magnitude=np.array([20.0]),
+            hubble_total_error=np.array([0.2]),
+            z=np.array([1.0]),
+        )
 
 
 def test_selection_correction_matches_truncated_normal_and_recovers_parent_mean():
@@ -153,6 +328,7 @@ def test_selection_correction_matches_truncated_normal_and_recovers_parent_mean(
         z=np.array([1.2]),
         completeness_model=HardMagnitudeLimit(m_limit),
         m_grid=mag_grid,
+        magnitude_support=(mag_grid[0], mag_grid[-1]),
     )
 
     alpha = (m_limit - m_model) / sigma
@@ -401,6 +577,7 @@ def test_completeness3d_shape_and_likelihood_matches_2d_when_host_independent():
         z=z,
         completeness_model=comp2,
         m_grid=mag_centers,
+        magnitude_support=(mag_centers[0], mag_centers[-1]),
     )
     ll3, blob3 = hubble_likelihood.completeness_loglike(
         m_obs=m_obs,
@@ -410,6 +587,7 @@ def test_completeness3d_shape_and_likelihood_matches_2d_when_host_independent():
         z=z,
         completeness_model=comp3,
         m_grid=mag_centers,
+        magnitude_support=(mag_centers[0], mag_centers[-1]),
         f_host_2500_psf=f_host,
     )
     ll4, blob4 = hubble_likelihood.completeness_loglike(
@@ -420,6 +598,7 @@ def test_completeness3d_shape_and_likelihood_matches_2d_when_host_independent():
         z=z,
         completeness_model=comp4,
         m_grid=mag_centers,
+        magnitude_support=(mag_centers[0], mag_centers[-1]),
         f_host_2500_psf=f_host,
         alpha_lambda=alpha_lambda,
     )
@@ -462,6 +641,7 @@ def test_completeness_loglike_caches_detection_grid_across_parameter_calls():
         z=z,
         completeness_model=comp,
         m_grid=mag_centers,
+        magnitude_support=(mag_centers[0], mag_centers[-1]),
     )
     ll2, blob2 = hubble_likelihood.completeness_loglike(
         m_obs=m_obs,
@@ -471,6 +651,7 @@ def test_completeness_loglike_caches_detection_grid_across_parameter_calls():
         z=z,
         completeness_model=comp,
         m_grid=mag_centers,
+        magnitude_support=(mag_centers[0], mag_centers[-1]),
     )
 
     assert comp.calls == 1
@@ -561,7 +742,7 @@ def test_completeness_callables_return_zero_for_nonfinite_queries():
     )
 
 
-def test_completeness_callables_linearly_extrapolate_redshift_without_edge_clipping():
+def test_completeness_callables_clamp_magnitude_and_redshift_to_edge_values():
     mag_centers = np.array([20.0, 21.0])
     z_centers = np.array([1.0, 2.0])
     fhost_centers = np.array([0.1, 0.9])
@@ -575,10 +756,10 @@ def test_completeness_callables_linearly_extrapolate_redshift_without_edge_clipp
     comp4 = hcr.Completeness4D(mag_centers, z_centers, fhost_centers, alpha_centers, c4)
     z_query = np.array([0.5, 2.5])
 
-    np.testing.assert_allclose(comp2(20.5, z_query), [0.3, 0.7])
-    np.testing.assert_allclose(comp3(20.5, z_query, 0.5), [0.3, 0.7])
-    np.testing.assert_allclose(comp4(20.5, z_query, 0.5, -1.5), [0.3, 0.7])
-    np.testing.assert_allclose(comp2(22.0, z_query), [0.0, 0.0])
+    np.testing.assert_allclose(comp2(20.5, z_query), [0.4, 0.6])
+    np.testing.assert_allclose(comp3(20.5, z_query, 0.5), [0.4, 0.6])
+    np.testing.assert_allclose(comp4(20.5, z_query, 0.5, -1.5), [0.4, 0.6])
+    np.testing.assert_allclose(comp2(22.0, z_query), [0.4, 0.6])
 
 
 def test_get_completeness_function_4d_fhost_alpha_uses_mock_alpha_dataset(tmp_path):

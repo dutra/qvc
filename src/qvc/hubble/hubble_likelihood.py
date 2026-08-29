@@ -1,6 +1,5 @@
 
 from scipy.linalg import cho_solve
-from scipy.special import ndtr
 from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
 import numpy as np
 
@@ -100,6 +99,78 @@ def _array_cache_token(arr):
     return (id(arr), arr.shape, arr.dtype.str)
 
 
+def _validate_magnitude_support(magnitude_support):
+    """Return a finite, ordered hard-selection interval."""
+
+    values = np.asarray(magnitude_support, dtype=float)
+    if values.shape != (2,) or not np.all(np.isfinite(values)):
+        raise ValueError(
+            "magnitude_support must contain exactly two finite numeric bounds."
+        )
+    lower, upper = (float(value) for value in values)
+    if lower >= upper:
+        raise ValueError(
+            "magnitude_support must satisfy lower < upper; "
+            f"got ({lower}, {upper})."
+        )
+    return lower, upper
+
+
+def _validate_observed_magnitude_support(m_obs, magnitude_support):
+    """Require selected observed magnitudes to lie within the hard support."""
+
+    values = np.asarray(m_obs, dtype=float)
+    lower, upper = _validate_magnitude_support(magnitude_support)
+    outside = ~np.isfinite(values) | (values < lower) | (values > upper)
+    if np.any(outside):
+        raise ValueError(
+            "All observed selection magnitudes must lie within the hard "
+            f"support ({lower}, {upper}); found "
+            f"{int(np.count_nonzero(outside))} outside."
+        )
+    return values
+
+
+def _magnitude_integration_grid(m_grid, magnitude_support):
+    """Insert exact physical cut edges around the calibrated center grid."""
+
+    centers = np.asarray(m_grid, dtype=float)
+    if (
+        centers.ndim != 1
+        or centers.size < 2
+        or not np.all(np.isfinite(centers))
+        or np.any(np.diff(centers) <= 0.0)
+    ):
+        raise ValueError(
+            "m_grid must be finite, strictly increasing, and contain at least two points."
+        )
+    lower, upper = _validate_magnitude_support(magnitude_support)
+    calibrated_lower = centers[0] - 0.5 * (centers[1] - centers[0])
+    calibrated_upper = centers[-1] + 0.5 * (centers[-1] - centers[-2])
+    tolerance = 32.0 * np.finfo(float).eps * max(
+        1.0, abs(lower), abs(upper), abs(calibrated_lower), abs(calibrated_upper)
+    )
+    if lower < calibrated_lower - tolerance or upper > calibrated_upper + tolerance:
+        raise ValueError(
+            "magnitude_support must lie within the calibrated magnitude-bin edges; "
+            f"got ({lower}, {upper}) versus ({calibrated_lower}, {calibrated_upper})."
+        )
+    interior = centers[(centers > lower) & (centers < upper)]
+    return np.concatenate(([lower], interior, [upper]))
+
+
+def _cached_magnitude_integration_grid(completeness_model, m_grid, magnitude_support):
+    support = _validate_magnitude_support(magnitude_support)
+    key = (_array_cache_token(m_grid), support)
+    cache = getattr(completeness_model, "_likelihood_magnitude_grid_cache", None)
+    if cache is None:
+        cache = {}
+        setattr(completeness_model, "_likelihood_magnitude_grid_cache", cache)
+    if key not in cache:
+        cache[key] = _magnitude_integration_grid(m_grid, support)
+    return cache[key]
+
+
 def _cached_completeness_pdet(
     completeness_model,
     m_grid,
@@ -108,7 +179,7 @@ def _cached_completeness_pdet(
     f_host_2500_psf=None,
     alpha_lambda=None,
 ):
-    """Evaluate p(detect) on the fixed likelihood grid, caching across sampler calls."""
+    """Evaluate edge-clamped p(detect), caching across sampler calls."""
 
     mode = getattr(completeness_model, "mode", "2d")
     key = (
@@ -125,11 +196,16 @@ def _cached_completeness_pdet(
     if key in cache:
         return cache[key]
 
+    map_mag_centers = np.asarray(
+        getattr(completeness_model, "mag_centers", m_grid), dtype=float
+    )
+    map_m_grid = np.clip(m_grid, map_mag_centers[0], map_mag_centers[-1])
+
     if mode == "4d_fhost_alpha":
         if f_host_2500_psf is None or alpha_lambda is None:
             raise ValueError("f_host_2500_psf and alpha_lambda are required for 4D host/color completeness.")
         p_det = completeness_model(
-            m_grid[None, :],
+            map_m_grid[None, :],
             z[:, None],
             np.asarray(f_host_2500_psf)[:, None],
             np.asarray(alpha_lambda)[:, None],
@@ -137,9 +213,9 @@ def _cached_completeness_pdet(
     elif mode == "3d_fhost":
         if f_host_2500_psf is None:
             raise ValueError("f_host_2500_psf is required for 3D host-aware completeness.")
-        p_det = completeness_model(m_grid[None, :], z[:, None], np.asarray(f_host_2500_psf)[:, None])
+        p_det = completeness_model(map_m_grid[None, :], z[:, None], np.asarray(f_host_2500_psf)[:, None])
     else:
-        p_det = completeness_model(m_grid[None, :], z[:, None])
+        p_det = completeness_model(map_m_grid[None, :], z[:, None])
 
     p_det = np.asarray(p_det, dtype=float)
     cache[key] = p_det
@@ -154,6 +230,7 @@ def completeness_loglike(
     z,
     completeness_model,
     m_grid,
+    magnitude_support,
     sigma_completeness=0.0,
     tiny=1e-300,
     f_host_2500_psf=None,
@@ -170,7 +247,12 @@ def completeness_loglike(
     sigma_completeness : float, optional physical scatter in the selection variable.
         This should not be set from the completeness-map smoothing bandwidth.
     """
-    m_grid = np.asarray(m_grid)
+    m_grid = np.asarray(m_grid, dtype=float)
+    magnitude_support = _validate_magnitude_support(magnitude_support)
+    integration_grid = _cached_magnitude_integration_grid(
+        completeness_model, m_grid, magnitude_support
+    )
+    _validate_observed_magnitude_support(m_obs, magnitude_support)
     z      = np.asarray(z)
     m_model = np.asarray(m_model)
     mu_err  = np.asarray(mu_err)
@@ -180,35 +262,23 @@ def completeness_loglike(
 
     p_det = _cached_completeness_pdet(
         completeness_model,
-        m_grid,
+        integration_grid,
         z,
         f_host_2500_psf=f_host_2500_psf,
         alpha_lambda=alpha_lambda,
     )
 
     # Model-centered selection factor: Z_i
-    dx = (m_grid[None, :] - m_model[:, None]) / sig
+    dx = (integration_grid[None, :] - m_model[:, None]) / sig
     pdf_model = np.exp(-0.5 * dx**2) * (_INV_SQRT_2PI / sig)  # (N,G)
     wpdf_model = pdf_model * p_det
 
-    Z = np.trapezoid(wpdf_model, m_grid, axis=1)                            # (N,)
-    m_Z = np.trapezoid(wpdf_model * m_grid[None, :], m_grid, axis=1)
-    m2_Z = np.trapezoid(wpdf_model * m_grid[None, :] ** 2, m_grid, axis=1)
-
-    # Completeness maps clamp magnitudes brighter than their first grid point
-    # to the bright-edge probability. Include that semi-infinite Gaussian tail
-    # analytically; otherwise bright objects acquire a large, artificial
-    # selection correction solely because the numerical grid starts at ~18.5.
-    m_bright = float(m_grid[0])
-    a = (m_bright - m_model) / sig[:, 0]
-    cdf_bright = ndtr(a)
-    pdf_bright = np.exp(-0.5 * a**2) * _INV_SQRT_2PI
-    p_bright = p_det[:, 0]
-    Z += p_bright * cdf_bright
-    m_Z += p_bright * (m_model * cdf_bright - sig[:, 0] * pdf_bright)
-    m2_Z += p_bright * (
-        (m_model**2 + sig[:, 0] ** 2) * cdf_bright
-        - sig[:, 0] * (m_model + m_bright) * pdf_bright
+    Z = np.trapezoid(wpdf_model, integration_grid, axis=1)
+    m_Z = np.trapezoid(
+        wpdf_model * integration_grid[None, :], integration_grid, axis=1
+    )
+    m2_Z = np.trapezoid(
+        wpdf_model * integration_grid[None, :] ** 2, integration_grid, axis=1
     )
 
     Z = np.clip(Z, tiny, None)                                          # guard denom
@@ -277,6 +347,15 @@ def joint_posterior_completeness_loglike_for_data(
     """Marginalize the simple 2D selection integral over paired spectra-v3 draws."""
     model, m_grid = completeness_params[:2]
     m_grid = np.asarray(m_grid, dtype=float)
+    magnitude_support = getattr(
+        model, "magnitude_support", (float(m_grid[0]), float(m_grid[-1]))
+    )
+    integration_grid = _cached_magnitude_integration_grid(
+        model, m_grid, magnitude_support
+    )
+    _validate_observed_magnitude_support(
+        agn_data[COMPLETENESS_MAG_COL], magnitude_support
+    )
     hubble_magnitude = np.asarray(hubble_magnitude, dtype=float)
     model_magnitude = np.asarray(hubble_model_magnitude, dtype=float)
     total_error = np.asarray(hubble_total_error, dtype=float)
@@ -291,16 +370,22 @@ def joint_posterior_completeness_loglike_for_data(
     epsilon = dereddened - hubble_magnitude[:, None]
     attenuation = attenuated - dereddened
     centers = model_magnitude[:, None] + epsilon + attenuation
-    p_det = _cached_completeness_pdet(model, m_grid, np.asarray(z, dtype=float))
+    p_det = _cached_completeness_pdet(
+        model, integration_grid, np.asarray(z, dtype=float)
+    )
     sigma = external_error[:, None, None]
-    dx = (m_grid[None, None, :] - centers[:, :, None]) / sigma
+    dx = (integration_grid[None, None, :] - centers[:, :, None]) / sigma
     weighted = np.exp(-0.5 * dx**2) * (_INV_SQRT_2PI / sigma)
     weighted *= p_det[:, None, :]
     weighted = np.where(valid[:, :, None], weighted, 0.0)
-    component_z = np.trapezoid(weighted, m_grid, axis=2)
-    hubble_grid = m_grid[None, None, :] - attenuation[:, :, None]
-    component_mz = np.trapezoid(weighted * hubble_grid, m_grid, axis=2)
-    component_m2z = np.trapezoid(weighted * hubble_grid**2, m_grid, axis=2)
+    component_z = np.trapezoid(weighted, integration_grid, axis=2)
+    hubble_grid = integration_grid[None, None, :] - attenuation[:, :, None]
+    component_mz = np.trapezoid(
+        weighted * hubble_grid, integration_grid, axis=2
+    )
+    component_m2z = np.trapezoid(
+        weighted * hubble_grid**2, integration_grid, axis=2
+    )
     norm = counts.astype(float)
     z_raw = np.sum(component_z, axis=1) / norm
     mz = np.sum(component_mz, axis=1) / norm
@@ -596,6 +681,11 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
             mu_err=selection_total_error,
             z=z,
             completeness_model=completeness_model, m_grid=mag_centers,
+            magnitude_support=getattr(
+                completeness_model,
+                "magnitude_support",
+                (float(mag_centers[0]), float(mag_centers[-1])),
+            ),
             sigma_completeness=0.0,
             f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL),
             alpha_lambda=agn_data.get("alpha_lambda"),
@@ -847,6 +937,11 @@ def log_likelihood_nearbylcs(
                 mu_err=selection_total_error_nc,
                 z=z_nc,
                 completeness_model=completeness_model, m_grid=mag_centers,
+                magnitude_support=getattr(
+                    completeness_model,
+                    "magnitude_support",
+                    (float(mag_centers[0]), float(mag_centers[-1])),
+                ),
                 sigma_completeness=0.0,
                 f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL, None)[mask_noncal] if agn_data.get(COMPLETENESS_FHOST_COL, None) is not None else None,
                 alpha_lambda=agn_data.get("alpha_lambda", None)[mask_noncal] if agn_data.get("alpha_lambda", None) is not None else None,

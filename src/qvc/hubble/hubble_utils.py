@@ -28,6 +28,8 @@ from scipy.stats import gaussian_kde
 
 from qvc.hubble.cuts import (
     ALLOW_MISSING_SCALAR_CUT_COLUMNS,
+    COMPLETENESS_MAG_2500_MAX,
+    COMPLETENESS_MAG_2500_MIN,
     EXCLUDED_SDSS_NAMES,
     LIGHT_CURVE_N_POINTS_COLUMN,
     LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
@@ -1080,7 +1082,8 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                   plot_diagnostics=True,
                   *,
                   magnitude_convention,
-                  completeness_magnitude="dereddened"):
+                  completeness_magnitude="dereddened",
+                  enforce_completeness_support=False):
     if (
         not isinstance(magnitude_convention, str)
         or magnitude_convention not in {"dereddened", "attenuated"}
@@ -2120,6 +2123,16 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         tier="assembly",
     )
 
+    completeness_support_cuts = build_tier0_cuts(
+        completeness_magnitude=completeness_magnitude
+    )
+    if enforce_completeness_support:
+        df = _apply_scalar_cut_group(
+            df,
+            completeness_support_cuts,
+            tier="support",
+        )
+
     # Tier 0: sample eligibility and analysis support.
     if apply_tier0:
         exclusion_object_ids = []
@@ -2172,11 +2185,12 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                 "tier0:SDSS_RUN2D", cut_desc, df, run2d_mask, tier="0"
             )
 
-        df = _apply_scalar_cut_group(
-            df,
-            build_tier0_cuts(completeness_magnitude=completeness_magnitude),
-            tier="0",
-        )
+        if not enforce_completeness_support:
+            df = _apply_scalar_cut_group(
+                df,
+                completeness_support_cuts,
+                tier="0",
+            )
         _append_cut_report_row(
             cut_rows,
             step="tier0:summary",
@@ -2405,9 +2419,19 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
 
     resolved_cut_configuration = {
         "cut_tier": cut_tier,
+        "completeness_support": (
+            completeness_support_cuts if enforce_completeness_support else []
+        ),
+        "completeness_magnitude_support": [
+            float(COMPLETENESS_MAG_2500_MIN),
+            float(COMPLETENESS_MAG_2500_MAX),
+        ],
+        "completeness_redshift_support": None,
+        "completeness_support_enforced": bool(enforce_completeness_support),
+        "completeness_interpolation_policy": "constant-edge-v1",
         "tier0": (
-            build_tier0_cuts(completeness_magnitude=completeness_magnitude)
-            if apply_tier0 else []
+            completeness_support_cuts
+            if apply_tier0 and not enforce_completeness_support else []
         ),
         "tier1": build_tier1_cuts() if apply_tier1 else [],
         "tier2": (

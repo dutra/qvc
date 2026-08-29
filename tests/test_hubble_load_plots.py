@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from pathlib import Path
@@ -446,6 +447,51 @@ def test_load_agn_data_run2d_filter_bypassed_at_cut_tier_none(tmp_path, monkeypa
     )
 
     assert filtered["object_id"].tolist() == ["a", "b", "c", "d"]
+
+
+def test_completeness_support_is_structural_at_cut_tier_none(tmp_path, monkeypatch):
+    source_path = tmp_path / "agn.h5"
+    source_path.touch()
+    frame = _minimal_agn_frame(n=4)
+    frame["object_id"] = ["bright", "lower-edge", "upper-edge", "faint"]
+    values = [18.49, 18.5, 24.0, 24.01]
+    frame["m_2500_dereddened"] = values
+    frame["m_2500_attenuated_model"] = values
+
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *_args, **_kwargs: frame.copy(),
+    )
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda value: value)
+    _patch_load_agn_plotters(monkeypatch)
+
+    enabled, _ = hubble_utils.load_agn_data(
+        source_path,
+        magnitude_convention="dereddened",
+        completeness_magnitude="dereddened",
+        enforce_completeness_support=True,
+        cut_tier="none",
+        plot_path=str(tmp_path / "enabled"),
+        cut_report_path=tmp_path / "enabled.txt",
+    )
+    disabled, _ = hubble_utils.load_agn_data(
+        source_path,
+        magnitude_convention="dereddened",
+        completeness_magnitude="dereddened",
+        enforce_completeness_support=False,
+        cut_tier="none",
+        plot_path=str(tmp_path / "disabled"),
+        cut_report_path=tmp_path / "disabled.txt",
+    )
+
+    assert enabled["object_id"].tolist() == ["lower-edge", "upper-edge"]
+    assert disabled["object_id"].tolist() == [
+        "bright", "lower-edge", "upper-edge", "faint"
+    ]
+    config = json.loads(enabled.attrs["cut_configuration_json"])
+    assert config["completeness_support_enforced"] is True
+    assert config["completeness_interpolation_policy"] == "constant-edge-v1"
 
 
 def test_load_agn_data_target_selection_is_tier0_eligibility(

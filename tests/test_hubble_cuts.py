@@ -81,6 +81,8 @@ def test_build_agn_cuts_are_partitioned_in_tier_order():
         "log_sigma_uv_rhat": (None, LIGHT_CURVE_RHAT_MAX),
     }
     assert LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS == ("u",)
+    assert COMPLETENESS_MAG_2500_MIN == 18.5
+    assert COMPLETENESS_MAG_2500_MAX == 24.0
 
 
 def test_normalize_cut_tier_accepts_exact_four_modes():

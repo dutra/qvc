@@ -1,5 +1,6 @@
 import ast
 import inspect
+import json
 import os
 import sys
 from pathlib import Path
@@ -1082,6 +1083,22 @@ def test_completeness_redshift_support_covers_plot_sample_and_rejects_narrow_moc
             plot=False,
             z_range=(0.2, 3.5),
         )
+
+
+def test_constant_edge_support_is_recorded_in_checkpoint_selection_metadata():
+    frame = pd.DataFrame({"z": [0.5, 3.5]})
+    frame.attrs["cut_configuration_json"] = '{"cut_tier":"2"}'
+
+    hubble_fit.record_completeness_support_metadata(
+        (frame,),
+        magnitude_support=(18.5, 24.0),
+        redshift_support=(0.2, 3.5),
+    )
+
+    configuration = json.loads(frame.attrs["cut_configuration_json"])
+    assert configuration["completeness_magnitude_support"] == [18.5, 24.0]
+    assert configuration["completeness_redshift_support"] == [0.2, 3.5]
+    assert configuration["completeness_interpolation_policy"] == "constant-edge-v1"
 
 
 def test_compute_direct_full_sample_completeness_summaries_optionally_returns_selected_draws(

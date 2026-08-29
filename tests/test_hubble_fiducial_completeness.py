@@ -14,8 +14,10 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 
-def test_default_completeness_centers_match_fiducial_magnitude_support(tmp_path):
+def test_default_completeness_support_matches_histogram_edges(tmp_path):
     from qvc.hubble.cuts import (
+        COMPLETENESS_MAG_EDGE_MAX,
+        COMPLETENESS_MAG_EDGE_MIN,
         COMPLETENESS_MAG_2500_MAX,
         COMPLETENESS_MAG_2500_MIN,
     )
@@ -38,11 +40,16 @@ def test_default_completeness_centers_match_fiducial_magnitude_support(tmp_path)
             "z": [0.5, 1.5, 2.5],
         }
     )
-    _, mag_centers, *_ = get_completeness_function_2d(
+    completeness, mag_centers, *_ = get_completeness_function_2d(
         observed,
         sim_file=str(mock_path),
         smooth_counts=False,
     )
 
-    assert mag_centers[0] == pytest.approx(COMPLETENESS_MAG_2500_MIN)
-    assert mag_centers[-1] == pytest.approx(COMPLETENESS_MAG_2500_MAX)
+    assert COMPLETENESS_MAG_2500_MIN == pytest.approx(COMPLETENESS_MAG_EDGE_MIN)
+    assert COMPLETENESS_MAG_2500_MAX == pytest.approx(COMPLETENESS_MAG_EDGE_MAX)
+    assert completeness.magnitude_support == pytest.approx(
+        (COMPLETENESS_MAG_EDGE_MIN, COMPLETENESS_MAG_EDGE_MAX)
+    )
+    assert mag_centers[0] > COMPLETENESS_MAG_2500_MIN
+    assert mag_centers[-1] < COMPLETENESS_MAG_2500_MAX

@@ -4,6 +4,7 @@ import traceback
 
 import argparse
 import h5py
+import json
 from functools import partial
 from pathlib import Path
 
@@ -37,6 +38,8 @@ DEFAULT_COMPLETENESS_FOOTPRINT_AREA_DEG2 = 5.0
 Z_RANGE_SEMANTICS = "fit_only_v1"
 
 from qvc.hubble.cuts import (
+    COMPLETENESS_MAG_2500_MAX,
+    COMPLETENESS_MAG_2500_MIN,
     CUT_TIER_CHOICES,
     SDSS_TARGET_SELECTION_CHOICES,
     normalize_cut_tier,
@@ -1565,6 +1568,28 @@ def resolve_completeness_redshift_support(df_agn, z_range):
     return support_lo, support_hi
 
 
+def record_completeness_support_metadata(frames, *, magnitude_support, redshift_support):
+    """Persist constant-edge support in selection/checkpoint metadata."""
+
+    magnitude_support = [float(value) for value in magnitude_support]
+    redshift_support = [float(value) for value in redshift_support]
+    for frame in frames:
+        if frame is None:
+            continue
+        raw = frame.attrs.get("cut_configuration_json", "{}")
+        configuration = json.loads(raw) if raw else {}
+        configuration.update(
+            {
+                "completeness_magnitude_support": magnitude_support,
+                "completeness_redshift_support": redshift_support,
+                "completeness_interpolation_policy": "constant-edge-v1",
+            }
+        )
+        frame.attrs["cut_configuration_json"] = json.dumps(
+            configuration, sort_keys=True, separators=(",", ":")
+        )
+
+
 def _select_agn_fit_selection(
     df_agn,
     *,
@@ -1791,6 +1816,7 @@ def _build_completeness_params(
             plot=plot,
             plot_path=plot_path,
             df_agn_fhost_population=df_agn_all,
+            z_range=completeness_z_range,
         )
     if completeness_mode == "3d_fhost":
         return get_completeness_function_3d_fhost(
@@ -1799,6 +1825,7 @@ def _build_completeness_params(
             plot=plot,
             plot_path=plot_path,
             df_agn_fhost_population=df_agn_all,
+            z_range=completeness_z_range,
         )
     return get_completeness_function_2d(
         df_agn_completeness,
@@ -1922,9 +1949,9 @@ def _compute_direct_full_sample_completeness_summaries(
 ):
     """Replay completeness for the full plotting sample.
 
-    The completeness model linearly extrapolates redshifts outside its
-    interpolation centers from the outermost grid cells, while the Hubble fit
-    selection remains unchanged.
+    The completeness model clamps redshifts outside its interpolation centers
+    to the nearest smoothed edge value, while the Hubble fit selection remains
+    unchanged.
 
     The historical three-value summary return is unchanged when
     ``dmi_draw_indices`` is omitted.  When indices are supplied, the fourth
@@ -3033,6 +3060,15 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         if completeness
         else None
     )
+    if completeness:
+        record_completeness_support_metadata(
+            (df_agn, df_agn_all, df_agn_completeness_parent),
+            magnitude_support=(
+                COMPLETENESS_MAG_2500_MIN,
+                COMPLETENESS_MAG_2500_MAX,
+            ),
+            redshift_support=completeness_z_range,
+        )
     speed = normalize_speed(speed)
     _fit_mode_label(only_sna, only_agn)
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
@@ -4454,6 +4490,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 plot=True,
                 plot_path=plot_path,
                 df_agn_fhost_population=df_agn_all,
+                z_range=completeness_z_range,
             )
         elif completeness_mode == "3d_fhost":
             print("Plotting host-aware 3D completeness diagnostics...")
@@ -4463,11 +4500,13 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 plot=True,
                 plot_path=plot_path,
                 df_agn_fhost_population=df_agn_all,
+                z_range=completeness_z_range,
             )
         else:
             print("Plotting completeness vs magnitude at redshifts...")
             p_detect, mag_centers, z_centers, dm, dz, completeness_scatter = get_completeness_function_2d(
-                df_agn_completeness_plot_sample, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
+                df_agn_completeness_plot_sample, sim_file=completeness_sim_file,
+                plot=True, plot_path=plot_path, z_range=completeness_z_range
             )
             plot_completeness_vs_mag_at_redshifts(
                 p_detect, mag_centers, z_centers, plot_path=plot_path
@@ -5071,6 +5110,7 @@ if __name__ == "__main__":
                            completeness_magnitude=args.completeness_magnitude,
                            spectra_sdss_run2d=args.spectra_sdss_run2d,
                            correct_sigma_uv_host=args.correct_sigma_uv_host,
+                           enforce_completeness_support=not args.disable_completeness,
                            z_range=tuple(args.z_range), plot_path=agn_plot_path,
                            cut_report_path=cut_report_path,
                            plot_diagnostics=not args.minimal_plots)

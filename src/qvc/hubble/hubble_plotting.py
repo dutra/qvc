@@ -11395,7 +11395,7 @@ def plot_dmi_vs_z(z, dmi, outdir=None, title_suffix="", plot_path=None):
 def _hard_limit_m50_per_object(completeness2d, mag_centers, z, plot_path=None):
     """
     Robust m50(z) (hard limit) for plotting:
-    - use the completeness model's redshift extrapolation,
+    - use the completeness model's constant redshift-edge values,
     - find the first crossing of C=0.5 and linearly interpolate.
     """
     mgrid = np.asarray(mag_centers)

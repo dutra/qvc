@@ -16,6 +16,8 @@ from qvc.hubble.hubble_utils import convert_M2500_to_logL2500, resolve_qvc_data_
 from qvc.hubble.cuts import (
     COMPLETENESS_MAG_EDGE_MAX,
     COMPLETENESS_MAG_EDGE_MIN,
+    COMPLETENESS_MAG_2500_MAX,
+    COMPLETENESS_MAG_2500_MIN,
     COMPLETENESS_N_MAG_BINS,
 )
 
@@ -446,17 +448,83 @@ def _scaled_completeness_ratio(
     C = np.clip(C, 0.0, 1.0)
     return C
 
+def _normalize_physical_support(centers, support, *, name):
+    """Validate physical bin-edge support enclosing an interpolation grid."""
+
+    centers = np.asarray(centers, dtype=float)
+    if (
+        centers.ndim != 1
+        or centers.size < 2
+        or not np.all(np.isfinite(centers))
+        or np.any(np.diff(centers) <= 0.0)
+    ):
+        raise ValueError(f"{name} centers must be finite and strictly increasing.")
+    if support is None:
+        support = (centers[0], centers[-1])
+    values = np.asarray(support, dtype=float)
+    if values.shape != (2,) or not np.all(np.isfinite(values)):
+        raise ValueError(f"{name}_support must contain exactly two finite bounds.")
+    lower, upper = (float(value) for value in values)
+    if lower >= upper or lower > centers[0] or upper < centers[-1]:
+        raise ValueError(
+            f"{name}_support must be increasing and enclose all {name} centers; "
+            f"got ({lower}, {upper})."
+        )
+    return lower, upper
+
+
+def _resolve_redshift_edges(z_true, z_range, declared_min=np.nan, declared_max=np.nan):
+    """Resolve requested histogram edges and require mock coverage."""
+
+    if z_range is None:
+        return 0.0, 4.0
+    z_min, z_max = (float(z_range[0]), float(z_range[1]))
+    if not np.isfinite(z_min) or not np.isfinite(z_max) or z_min < 0.0 or z_min >= z_max:
+        raise ValueError(
+            "Completeness z_range must be finite, non-negative, and increasing."
+        )
+    if np.isfinite(declared_min) and np.isfinite(declared_max):
+        support_min, support_max = float(declared_min), float(declared_max)
+    else:
+        finite_z = np.asarray(z_true, dtype=float)
+        finite_z = finite_z[np.isfinite(finite_z)]
+        if finite_z.size == 0:
+            raise ValueError("Completeness mock contains no finite redshifts.")
+        support_min, support_max = float(np.min(finite_z)), float(np.max(finite_z))
+    tolerance = max(1e-6, 0.01 * (z_max - z_min))
+    if support_min > z_min + tolerance or support_max < z_max - tolerance:
+        raise ValueError(
+            "Completeness mock redshift support does not cover the plotting "
+            f"sample: mock=[{support_min:.6g}, {support_max:.6g}], "
+            f"required=[{z_min:.6g}, {z_max:.6g}]. Provide a compatible "
+            "mock or omit --completeness_sim_file to generate one."
+        )
+    return z_min, z_max
+
+
 class Completeness2D:
     """
     Interpolates p(detect | m, z) on a (mag, z) grid.
-    - Bright magnitudes are clipped to the bright grid edge; faint magnitudes
-      outside the grid return 0.
-    - Redshifts outside the grid are linearly extrapolated from the nearest
-      two redshift planes. Extrapolated probabilities are bounded to [0, 1].
+    Finite magnitude and redshift queries are clamped to the nearest smoothed
+    grid-center value. Physical support records the enclosing histogram edges.
     """
-    def __init__(self, mag_centers, z_centers, completeness_map):
+    def __init__(
+        self,
+        mag_centers,
+        z_centers,
+        completeness_map,
+        *,
+        magnitude_support=None,
+        redshift_support=None,
+    ):
         self.mag_centers = np.asarray(mag_centers)
         self.z_centers   = np.asarray(z_centers)
+        self.magnitude_support = _normalize_physical_support(
+            self.mag_centers, magnitude_support, name="magnitude"
+        )
+        self.redshift_support = _normalize_physical_support(
+            self.z_centers, redshift_support, name="redshift"
+        )
 
         # Ensure finite in [0,1]
         C = np.nan_to_num(completeness_map, nan=0.0, posinf=0.0, neginf=0.0)
@@ -465,13 +533,11 @@ class Completeness2D:
         self.mag_min, self.mag_max = float(self.mag_centers[0]),  float(self.mag_centers[-1])
         self.z_min,   self.z_max   = float(self.z_centers[0]),    float(self.z_centers[-1])
 
-        # ``fill_value=None`` enables multilinear extrapolation. __call__ masks
-        # unsupported faint magnitudes explicitly, so only redshift extrapolates.
         self._interp = RegularGridInterpolator(
             (self.mag_centers, self.z_centers),
             C,
             bounds_error=False,
-            fill_value=None,
+            fill_value=np.nan,
         )
         self._warned_oob = False
 
@@ -489,14 +555,15 @@ class Completeness2D:
                 "[WARNING] Completeness2D received objects outside the "
                 f"grid range m=[{self.mag_min:.2f}, {self.mag_max:.2f}], "
                 f"z=[{self.z_min:.2f}, {self.z_max:.2f}]. "
+                "Clamping finite queries to the nearest smoothed edge; "
                 f"count={int(np.count_nonzero(oob))}"
             )
             self._warned_oob = True
-        mag = np.maximum(np.asarray(mag, dtype=float), self.mag_min)
-        z = np.asarray(z, dtype=float)
+        mag = np.clip(np.asarray(mag, dtype=float), self.mag_min, self.mag_max)
+        z = np.clip(np.asarray(z, dtype=float), self.z_min, self.z_max)
         m_b, z_b = np.broadcast_arrays(mag, z)
         pts = np.column_stack([m_b.ravel(), z_b.ravel()])
-        finite = np.all(np.isfinite(pts), axis=1) & (pts[:, 0] <= self.mag_max)
+        finite = np.all(np.isfinite(pts), axis=1)
         vals = np.zeros(pts.shape[0], dtype=float)
         if np.any(finite):
             vals[finite] = np.clip(self._interp(pts[finite]), 0.0, 1.0)
@@ -504,7 +571,12 @@ class Completeness2D:
 
     @property
     def grid(self):
-        return dict(mag_centers=self.mag_centers, z_centers=self.z_centers)
+        return dict(
+            mag_centers=self.mag_centers,
+            z_centers=self.z_centers,
+            magnitude_support=self.magnitude_support,
+            redshift_support=self.redshift_support,
+        )
 
     @property
     def mode(self):
@@ -514,16 +586,29 @@ class Completeness2D:
 class Completeness3D:
     """
     Interpolates p(detect | m, z, f_host) on a (mag, z, f_host) grid.
-    - Bright magnitudes are clipped to the bright grid edge; faint magnitudes
-      outside the grid still return 0.
-    - Redshifts outside the grid are linearly extrapolated from the nearest
-      two redshift planes. Extrapolated probabilities are bounded to [0, 1].
+    Finite magnitude and redshift queries are clamped to the nearest smoothed
+    grid-center value.
     """
 
-    def __init__(self, mag_centers, z_centers, fhost_centers, completeness_cube):
+    def __init__(
+        self,
+        mag_centers,
+        z_centers,
+        fhost_centers,
+        completeness_cube,
+        *,
+        magnitude_support=None,
+        redshift_support=None,
+    ):
         self.mag_centers = np.asarray(mag_centers)
         self.z_centers = np.asarray(z_centers)
         self.fhost_centers = np.asarray(fhost_centers)
+        self.magnitude_support = _normalize_physical_support(
+            self.mag_centers, magnitude_support, name="magnitude"
+        )
+        self.redshift_support = _normalize_physical_support(
+            self.z_centers, redshift_support, name="redshift"
+        )
 
         C = np.nan_to_num(completeness_cube, nan=0.0, posinf=0.0, neginf=0.0)
         C = np.clip(C, 0.0, 1.0).astype(float)
@@ -536,7 +621,7 @@ class Completeness3D:
             (self.mag_centers, self.z_centers, self.fhost_centers),
             C,
             bounds_error=False,
-            fill_value=None,
+            fill_value=np.nan,
         )
         self._warned_oob = False
 
@@ -558,11 +643,12 @@ class Completeness3D:
                 f"grid range m=[{self.mag_min:.2f}, {self.mag_max:.2f}], "
                 f"z=[{self.z_min:.2f}, {self.z_max:.2f}], "
                 f"f_host=[{self.fhost_min:.3f}, {self.fhost_max:.3f}]. "
+                "Clamping finite queries to the nearest smoothed edge; "
                 f"count={int(np.count_nonzero(oob))}"
             )
             self._warned_oob = True
-        mag = np.maximum(np.asarray(mag, dtype=float), self.mag_min)
-        z = np.asarray(z, dtype=float)
+        mag = np.clip(np.asarray(mag, dtype=float), self.mag_min, self.mag_max)
+        z = np.clip(np.asarray(z, dtype=float), self.z_min, self.z_max)
         f_host = np.asarray(f_host)
         # The completeness cube is defined on bin centers, but f_host is a
         # bounded physical variable on [0, 1]. Clip to the nearest supported
@@ -571,7 +657,7 @@ class Completeness3D:
         f_host = np.clip(f_host, self.fhost_min, self.fhost_max)
         m_b, z_b, f_b = np.broadcast_arrays(mag, z, f_host)
         pts = np.column_stack([m_b.ravel(), z_b.ravel(), f_b.ravel()])
-        finite = np.all(np.isfinite(pts), axis=1) & (pts[:, 0] <= self.mag_max)
+        finite = np.all(np.isfinite(pts), axis=1)
         vals = np.zeros(pts.shape[0], dtype=float)
         if np.any(finite):
             vals[finite] = np.clip(self._interp(pts[finite]), 0.0, 1.0)
@@ -583,6 +669,8 @@ class Completeness3D:
             mag_centers=self.mag_centers,
             z_centers=self.z_centers,
             fhost_centers=self.fhost_centers,
+            magnitude_support=self.magnitude_support,
+            redshift_support=self.redshift_support,
         )
 
     @property
@@ -593,17 +681,31 @@ class Completeness3D:
 class Completeness4D:
     """
     Interpolates p(detect | m, z, f_host, alpha_lambda) on a regular grid.
-    - Bright magnitudes are clipped to the bright grid edge; faint magnitudes
-      outside the grid still return 0.
-    - Redshifts outside the grid are linearly extrapolated from the nearest
-      two redshift planes. Extrapolated probabilities are bounded to [0, 1].
+    Finite magnitude and redshift queries are clamped to the nearest smoothed
+    grid-center value.
     """
 
-    def __init__(self, mag_centers, z_centers, fhost_centers, alpha_centers, completeness_hypercube):
+    def __init__(
+        self,
+        mag_centers,
+        z_centers,
+        fhost_centers,
+        alpha_centers,
+        completeness_hypercube,
+        *,
+        magnitude_support=None,
+        redshift_support=None,
+    ):
         self.mag_centers = np.asarray(mag_centers)
         self.z_centers = np.asarray(z_centers)
         self.fhost_centers = np.asarray(fhost_centers)
         self.alpha_centers = np.asarray(alpha_centers)
+        self.magnitude_support = _normalize_physical_support(
+            self.mag_centers, magnitude_support, name="magnitude"
+        )
+        self.redshift_support = _normalize_physical_support(
+            self.z_centers, redshift_support, name="redshift"
+        )
 
         C = np.nan_to_num(completeness_hypercube, nan=0.0, posinf=0.0, neginf=0.0)
         C = np.clip(C, 0.0, 1.0).astype(float)
@@ -617,7 +719,7 @@ class Completeness4D:
             (self.mag_centers, self.z_centers, self.fhost_centers, self.alpha_centers),
             C,
             bounds_error=False,
-            fill_value=None,
+            fill_value=np.nan,
         )
         self._warned_oob = False
 
@@ -643,18 +745,19 @@ class Completeness4D:
                 f"z=[{self.z_min:.2f}, {self.z_max:.2f}], "
                 f"f_host=[{self.fhost_min:.3f}, {self.fhost_max:.3f}], "
                 f"alpha_lambda=[{self.alpha_min:.2f}, {self.alpha_max:.2f}]. "
+                "Clamping finite queries to the nearest smoothed edge; "
                 f"count={int(np.count_nonzero(oob))}"
             )
             self._warned_oob = True
-        mag = np.maximum(np.asarray(mag, dtype=float), self.mag_min)
-        z = np.asarray(z, dtype=float)
+        mag = np.clip(np.asarray(mag, dtype=float), self.mag_min, self.mag_max)
+        z = np.clip(np.asarray(z, dtype=float), self.z_min, self.z_max)
         f_host = np.asarray(f_host)
         alpha_lambda = np.asarray(alpha_lambda)
         f_host = np.clip(f_host, self.fhost_min, self.fhost_max)
         alpha_lambda = np.clip(alpha_lambda, self.alpha_min, self.alpha_max)
         m_b, z_b, f_b, a_b = np.broadcast_arrays(mag, z, f_host, alpha_lambda)
         pts = np.column_stack([m_b.ravel(), z_b.ravel(), f_b.ravel(), a_b.ravel()])
-        finite = np.all(np.isfinite(pts), axis=1) & (pts[:, 0] <= self.mag_max)
+        finite = np.all(np.isfinite(pts), axis=1)
         vals = np.zeros(pts.shape[0], dtype=float)
         if np.any(finite):
             vals[finite] = np.clip(self._interp(pts[finite]), 0.0, 1.0)
@@ -667,6 +770,8 @@ class Completeness4D:
             z_centers=self.z_centers,
             fhost_centers=self.fhost_centers,
             alpha_centers=self.alpha_centers,
+            magnitude_support=self.magnitude_support,
+            redshift_support=self.redshift_support,
         )
 
     @property
@@ -979,27 +1084,9 @@ def get_completeness_function_2d(
     m_true, z_true = m_true[ok_true], z_true[ok_true]
     # Grid
     mag_min, mag_max = COMPLETENESS_MAG_EDGE_MIN, COMPLETENESS_MAG_EDGE_MAX
-    if z_range is None:
-        z_min, z_max = 0.0, 4.0
-    else:
-        z_min, z_max = (float(z_range[0]), float(z_range[1]))
-        if not np.isfinite(z_min) or not np.isfinite(z_max) or z_min < 0.0 or z_min >= z_max:
-            raise ValueError(
-                "Completeness z_range must be finite, non-negative, and increasing."
-            )
-        if np.isfinite(declared_z_min) and np.isfinite(declared_z_max):
-            support_min, support_max = declared_z_min, declared_z_max
-        else:
-            support_min = float(np.nanmin(z_true))
-            support_max = float(np.nanmax(z_true))
-        tolerance = max(1e-6, 0.01 * (z_max - z_min))
-        if support_min > z_min + tolerance or support_max < z_max - tolerance:
-            raise ValueError(
-                "Completeness mock redshift support does not cover the plotting "
-                f"sample: mock=[{support_min:.6g}, {support_max:.6g}], "
-                f"required=[{z_min:.6g}, {z_max:.6g}]. Provide a compatible "
-                "mock or omit --completeness_sim_file to generate one."
-            )
+    z_min, z_max = _resolve_redshift_edges(
+        z_true, z_range, declared_z_min, declared_z_max
+    )
     mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
     z_edges   = np.linspace(z_min,  z_max,    n_z_bins   + 1)
     mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
@@ -1108,7 +1195,14 @@ def get_completeness_function_2d(
         plt.tight_layout()
         plt.savefig(os.path.join(plot_dir, "H_true_map.pdf"), dpi=600)
         plt.close()
-    return Completeness2D(mag_centers, z_centers, C), mag_centers, z_centers, dm, dz, sigma_mag
+    completeness2d = Completeness2D(
+        mag_centers,
+        z_centers,
+        C,
+        magnitude_support=(COMPLETENESS_MAG_2500_MIN, COMPLETENESS_MAG_2500_MAX),
+        redshift_support=(z_min, z_max),
+    )
+    return completeness2d, mag_centers, z_centers, dm, dz, sigma_mag
 
 
 def _plot_completeness_vs_fhost_slices(
@@ -1324,6 +1418,7 @@ def get_completeness_function_3d_fhost(
     sigma_z_abs=0.2,
     sigma_fhost=0.05,
     df_agn_fhost_population=None,
+    z_range=None,
 ):
     """
     Build p(detect | m, z, f_host_2500_psf), preferring mock PSF host
@@ -1351,6 +1446,8 @@ def get_completeness_function_3d_fhost(
             )
             fhost_true_raw, fhost_source = None, None
         mock_count_scale = f.attrs.get("mock_count_scale")
+        declared_z_min = float(f.attrs.get("mock_redshift_min", np.nan))
+        declared_z_max = float(f.attrs.get("mock_redshift_max", np.nan))
 
     z_obs = df_agn["z"].to_numpy(dtype=float)
     magnitude_col = resolve_completeness_magnitude_column(df_agn)
@@ -1394,8 +1491,10 @@ def get_completeness_function_3d_fhost(
         host_model["mock_fhost_mean"] = float(np.nanmean(fhost_true)) if np.size(fhost_true) else np.nan
         host_model["mock_fhost_sigma"] = float(np.nanstd(fhost_true, ddof=1)) if np.size(fhost_true) > 1 else 0.0
 
-    mag_min, mag_max = 18.5, 24.0
-    z_min, z_max = 0.0, 4.0
+    mag_min, mag_max = COMPLETENESS_MAG_EDGE_MIN, COMPLETENESS_MAG_EDGE_MAX
+    z_min, z_max = _resolve_redshift_edges(
+        z_true, z_range, declared_z_min, declared_z_max
+    )
     fhost_min, fhost_max = 0.0, 1.0
     mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
     z_edges = np.linspace(z_min, z_max, n_z_bins + 1)
@@ -1429,7 +1528,14 @@ def get_completeness_function_3d_fhost(
         eps=eps,
     )
 
-    completeness3d = Completeness3D(mag_centers, z_centers, fhost_centers, C)
+    completeness3d = Completeness3D(
+        mag_centers,
+        z_centers,
+        fhost_centers,
+        C,
+        magnitude_support=(COMPLETENESS_MAG_2500_MIN, COMPLETENESS_MAG_2500_MAX),
+        redshift_support=(z_min, z_max),
+    )
 
     if plot:
         base_plot_path = plot_path or "plots/hubble"
@@ -1514,6 +1620,7 @@ def get_completeness_function_4d_fhost_alpha(
     sigma_fhost=0.1,
     sigma_alpha=0.35,
     df_agn_fhost_population=None,
+    z_range=None,
 ):
     """
     Build p(detect | m, z, f_host_2500_psf, alpha_lambda), preferring mock
@@ -1553,6 +1660,8 @@ def get_completeness_function_4d_fhost_alpha(
             alpha_true_raw, alpha_source = None, None
         alpha_attr_model = _alpha_lambda_model_from_h5_attrs(f.attrs)
         mock_count_scale = f.attrs.get("mock_count_scale")
+        declared_z_min = float(f.attrs.get("mock_redshift_min", np.nan))
+        declared_z_max = float(f.attrs.get("mock_redshift_max", np.nan))
 
     z_obs = df_agn["z"].to_numpy(dtype=float)
     magnitude_col = resolve_completeness_magnitude_column(df_agn)
@@ -1614,8 +1723,10 @@ def get_completeness_function_4d_fhost_alpha(
     if alpha_true_raw is None:
         alpha_true = sample_alpha_lambda_population(np.shape(m_true), alpha_model, rng)
 
-    mag_min, mag_max = 18.5, 24.0
-    z_min, z_max = 0.0, 4.0
+    mag_min, mag_max = COMPLETENESS_MAG_EDGE_MIN, COMPLETENESS_MAG_EDGE_MAX
+    z_min, z_max = _resolve_redshift_edges(
+        z_true, z_range, declared_z_min, declared_z_max
+    )
     fhost_min, fhost_max = 0.0, 1.0
     alpha_min, alpha_max = _ALPHA_MIN, _ALPHA_MAX
     mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
@@ -1654,7 +1765,15 @@ def get_completeness_function_4d_fhost_alpha(
         eps=eps,
     )
 
-    completeness4d = Completeness4D(mag_centers, z_centers, fhost_centers, alpha_centers, C)
+    completeness4d = Completeness4D(
+        mag_centers,
+        z_centers,
+        fhost_centers,
+        alpha_centers,
+        C,
+        magnitude_support=(COMPLETENESS_MAG_2500_MIN, COMPLETENESS_MAG_2500_MAX),
+        redshift_support=(z_min, z_max),
+    )
 
     if plot:
         base_plot_path = plot_path or "plots/hubble"

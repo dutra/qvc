@@ -271,20 +271,33 @@ SPECTRAL_RHAT_MAX = _cut_env_float("QVC_CUT_SPECTRAL_RHAT_MAX", 1.20)
 LIGHT_CURVE_RHAT_MAX = _cut_env_float("QVC_CUT_LIGHT_CURVE_RHAT_MAX", 1.10)
 NUM_DIVERGENCES_MAX = _cut_env_float("QVC_CUT_NUM_DIVERGENCES_MAX", None)
 
-# The 2D completeness model is evaluated at histogram-bin centers. Keep the
-# fiducial magnitude support tied to that grid.
+# The completeness map is tabulated at histogram-bin centers, while the
+# selected sample occupies the full histogram interval.  Map evaluation uses
+# the nearest smoothed center value between a center and its physical edge.
 COMPLETENESS_MAG_EDGE_MIN = 18.5
 COMPLETENESS_MAG_EDGE_MAX = 24.0
 COMPLETENESS_N_MAG_BINS = 30
 COMPLETENESS_MAG_BIN_WIDTH = (
     COMPLETENESS_MAG_EDGE_MAX - COMPLETENESS_MAG_EDGE_MIN
 ) / COMPLETENESS_N_MAG_BINS
-COMPLETENESS_MAG_2500_MIN = (
-    COMPLETENESS_MAG_EDGE_MIN + 0.5 * COMPLETENESS_MAG_BIN_WIDTH
+COMPLETENESS_MAG_2500_MIN = _cut_env_float(
+    "QVC_CUT_COMPLETENESS_MAG_2500_MIN", COMPLETENESS_MAG_EDGE_MIN
 )
-COMPLETENESS_MAG_2500_MAX = (
-    COMPLETENESS_MAG_EDGE_MAX - 0.5 * COMPLETENESS_MAG_BIN_WIDTH
+COMPLETENESS_MAG_2500_MAX = _cut_env_float(
+    "QVC_CUT_COMPLETENESS_MAG_2500_MAX", COMPLETENESS_MAG_EDGE_MAX
 )
+if (
+    COMPLETENESS_MAG_2500_MIN is None
+    or COMPLETENESS_MAG_2500_MAX is None
+    or COMPLETENESS_MAG_2500_MIN < COMPLETENESS_MAG_EDGE_MIN
+    or COMPLETENESS_MAG_2500_MAX > COMPLETENESS_MAG_EDGE_MAX
+    or COMPLETENESS_MAG_2500_MIN >= COMPLETENESS_MAG_2500_MAX
+):
+    raise ValueError(
+        "Completeness magnitude support must be a finite increasing interval "
+        f"within [{COMPLETENESS_MAG_EDGE_MIN}, {COMPLETENESS_MAG_EDGE_MAX}]; "
+        f"got [{COMPLETENESS_MAG_2500_MIN}, {COMPLETENESS_MAG_2500_MAX}]."
+    )
 
 LIGHT_CURVE_N_POINTS_COLUMN = "light_curve_n_points"
 LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS = ("u",)
