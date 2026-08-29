@@ -31,6 +31,9 @@ from qvc.spectra.fit_spectra_jaxsedfit_joint import (
 )
 
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
 def _record_with_ugriz():
     record = {"object_id": "1452887"}
     for band in "ugriz":
@@ -172,7 +175,7 @@ def test_qvc_psf_photometry_replaces_saved_sdss_and_includes_z():
 
 def test_sdss_override_replaces_qvc_means_without_changing_values():
     override = joint.load_sdss_psf_photometry_overrides(
-        Path("experiments/j013453_sdss_dr16_psf_photometry.ecsv")
+        REPO_ROOT / "experiments/j013453_sdss_dr16_psf_photometry.ecsv"
     )
     record = _record_with_ugriz()
     record["object_id"] = "1414639"
