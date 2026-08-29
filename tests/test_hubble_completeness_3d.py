@@ -138,7 +138,9 @@ def test_completeness_loglike_respects_finite_hard_magnitude_support():
     np.testing.assert_allclose(blob[2, 0], np.sqrt(expected_variance), rtol=2e-5)
 
 
-def test_hard_support_extends_smoothed_edge_bin_values_and_rejects_outside_data():
+def test_hard_support_extends_smoothed_edge_bin_values_and_rejects_outside_data(
+    capsys,
+):
     lower, upper = 18.5, 24.0
     n_bins = 30
     width = (upper - lower) / n_bins
@@ -157,9 +159,11 @@ def test_hard_support_extends_smoothed_edge_bin_values_and_rejects_outside_data(
     expected_pdet = np.interp(
         integration_grid, centers, completeness_by_mag
     )
+    redshift_queries = np.linspace(0.1, 1.9, integration_grid.size)
     np.testing.assert_allclose(
-        model(integration_grid, np.ones_like(integration_grid)), expected_pdet
+        model(integration_grid, redshift_queries), expected_pdet
     )
+    assert "[WARNING]" not in capsys.readouterr().out
 
     log_z, _ = completeness_loglike(
         m_obs=np.array([lower, upper]),
@@ -172,6 +176,12 @@ def test_hard_support_extends_smoothed_edge_bin_values_and_rejects_outside_data(
         magnitude_support=(lower, upper),
     )
     assert np.isfinite(log_z)
+    assert "[WARNING]" not in capsys.readouterr().out
+
+    model(np.array([lower - 0.01]), np.array([1.0]))
+    warning = capsys.readouterr().out
+    assert "outside the physical support" in warning
+    assert "coordinate_count=1" in warning
 
     with pytest.raises(ValueError, match="observed selection magnitudes"):
         completeness_loglike(

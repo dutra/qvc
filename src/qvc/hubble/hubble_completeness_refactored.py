@@ -473,6 +473,14 @@ def _normalize_physical_support(centers, support, *, name):
     return lower, upper
 
 
+def _finite_outside_support(values, support):
+    """Flag finite coordinates outside declared physical support."""
+
+    values = np.asarray(values, dtype=float)
+    lower, upper = support
+    return np.isfinite(values) & ((values < lower) | (values > upper))
+
+
 def _resolve_redshift_edges(z_true, z_range, declared_min=np.nan, declared_max=np.nan):
     """Resolve requested histogram edges and require mock coverage."""
 
@@ -544,19 +552,18 @@ class Completeness2D:
     def __call__(self, mag, z):
         mag_raw = np.asarray(mag, dtype=float)
         z_raw = np.asarray(z, dtype=float)
-        oob = (
-            (mag_raw < self.mag_min)
-            | (mag_raw > self.mag_max)
-            | (z_raw < self.z_min)
-            | (z_raw > self.z_max)
-        )
-        if np.any(oob) and not self._warned_oob:
+        mag_oob = _finite_outside_support(mag_raw, self.magnitude_support)
+        z_oob = _finite_outside_support(z_raw, self.redshift_support)
+        if (np.any(mag_oob) or np.any(z_oob)) and not self._warned_oob:
+            coordinate_count = int(np.count_nonzero(mag_oob) + np.count_nonzero(z_oob))
             print(
-                "[WARNING] Completeness2D received objects outside the "
-                f"grid range m=[{self.mag_min:.2f}, {self.mag_max:.2f}], "
-                f"z=[{self.z_min:.2f}, {self.z_max:.2f}]. "
+                "[WARNING] Completeness2D received coordinates outside the "
+                f"physical support m=[{self.magnitude_support[0]:.2f}, "
+                f"{self.magnitude_support[1]:.2f}], "
+                f"z=[{self.redshift_support[0]:.2f}, "
+                f"{self.redshift_support[1]:.2f}]. "
                 "Clamping finite queries to the nearest smoothed edge; "
-                f"count={int(np.count_nonzero(oob))}"
+                f"coordinate_count={coordinate_count}"
             )
             self._warned_oob = True
         mag = np.clip(np.asarray(mag, dtype=float), self.mag_min, self.mag_max)
@@ -629,22 +636,28 @@ class Completeness3D:
         mag_raw = np.asarray(mag, dtype=float)
         z_raw = np.asarray(z, dtype=float)
         f_host_raw = np.asarray(f_host, dtype=float)
-        oob = (
-            (mag_raw < self.mag_min)
-            | (mag_raw > self.mag_max)
-            | (z_raw < self.z_min)
-            | (z_raw > self.z_max)
-            | (f_host_raw < self.fhost_min)
-            | (f_host_raw > self.fhost_max)
+        mag_oob = _finite_outside_support(mag_raw, self.magnitude_support)
+        z_oob = _finite_outside_support(z_raw, self.redshift_support)
+        fhost_oob = np.isfinite(f_host_raw) & (
+            (f_host_raw < self.fhost_min) | (f_host_raw > self.fhost_max)
         )
-        if np.any(oob) and not self._warned_oob:
+        if (
+            np.any(mag_oob) or np.any(z_oob) or np.any(fhost_oob)
+        ) and not self._warned_oob:
+            coordinate_count = int(
+                np.count_nonzero(mag_oob)
+                + np.count_nonzero(z_oob)
+                + np.count_nonzero(fhost_oob)
+            )
             print(
-                "[WARNING] Completeness3D received objects outside the "
-                f"grid range m=[{self.mag_min:.2f}, {self.mag_max:.2f}], "
-                f"z=[{self.z_min:.2f}, {self.z_max:.2f}], "
+                "[WARNING] Completeness3D received coordinates outside the "
+                f"physical support m=[{self.magnitude_support[0]:.2f}, "
+                f"{self.magnitude_support[1]:.2f}], "
+                f"z=[{self.redshift_support[0]:.2f}, "
+                f"{self.redshift_support[1]:.2f}], "
                 f"f_host=[{self.fhost_min:.3f}, {self.fhost_max:.3f}]. "
                 "Clamping finite queries to the nearest smoothed edge; "
-                f"count={int(np.count_nonzero(oob))}"
+                f"coordinate_count={coordinate_count}"
             )
             self._warned_oob = True
         mag = np.clip(np.asarray(mag, dtype=float), self.mag_min, self.mag_max)
@@ -728,25 +741,36 @@ class Completeness4D:
         z_raw = np.asarray(z, dtype=float)
         f_host_raw = np.asarray(f_host, dtype=float)
         alpha_raw = np.asarray(alpha_lambda, dtype=float)
-        oob = (
-            (mag_raw < self.mag_min)
-            | (mag_raw > self.mag_max)
-            | (z_raw < self.z_min)
-            | (z_raw > self.z_max)
-            | (f_host_raw < self.fhost_min)
-            | (f_host_raw > self.fhost_max)
-            | (alpha_raw < self.alpha_min)
-            | (alpha_raw > self.alpha_max)
+        mag_oob = _finite_outside_support(mag_raw, self.magnitude_support)
+        z_oob = _finite_outside_support(z_raw, self.redshift_support)
+        fhost_oob = np.isfinite(f_host_raw) & (
+            (f_host_raw < self.fhost_min) | (f_host_raw > self.fhost_max)
         )
-        if np.any(oob) and not self._warned_oob:
+        alpha_oob = np.isfinite(alpha_raw) & (
+            (alpha_raw < self.alpha_min) | (alpha_raw > self.alpha_max)
+        )
+        if (
+            np.any(mag_oob)
+            or np.any(z_oob)
+            or np.any(fhost_oob)
+            or np.any(alpha_oob)
+        ) and not self._warned_oob:
+            coordinate_count = int(
+                np.count_nonzero(mag_oob)
+                + np.count_nonzero(z_oob)
+                + np.count_nonzero(fhost_oob)
+                + np.count_nonzero(alpha_oob)
+            )
             print(
-                "[WARNING] Completeness4D received objects outside the "
-                f"grid range m=[{self.mag_min:.2f}, {self.mag_max:.2f}], "
-                f"z=[{self.z_min:.2f}, {self.z_max:.2f}], "
+                "[WARNING] Completeness4D received coordinates outside the "
+                f"physical support m=[{self.magnitude_support[0]:.2f}, "
+                f"{self.magnitude_support[1]:.2f}], "
+                f"z=[{self.redshift_support[0]:.2f}, "
+                f"{self.redshift_support[1]:.2f}], "
                 f"f_host=[{self.fhost_min:.3f}, {self.fhost_max:.3f}], "
                 f"alpha_lambda=[{self.alpha_min:.2f}, {self.alpha_max:.2f}]. "
                 "Clamping finite queries to the nearest smoothed edge; "
-                f"count={int(np.count_nonzero(oob))}"
+                f"coordinate_count={coordinate_count}"
             )
             self._warned_oob = True
         mag = np.clip(np.asarray(mag, dtype=float), self.mag_min, self.mag_max)
