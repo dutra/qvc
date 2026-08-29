@@ -491,7 +491,37 @@ def test_completeness_support_is_structural_at_cut_tier_none(tmp_path, monkeypat
     ]
     config = json.loads(enabled.attrs["cut_configuration_json"])
     assert config["completeness_support_enforced"] is True
-    assert config["completeness_interpolation_policy"] == "constant-edge-v1"
+    assert config["completeness_interpolation_policy"] == "strict-padded-v1"
+
+
+def test_tier0_applies_science_magnitude_support_before_completeness_parent(
+    tmp_path, monkeypatch
+):
+    source_path = tmp_path / "agn.h5"
+    source_path.touch()
+    frame = _minimal_agn_frame(n=7)
+    frame["object_id"] = ["map-bright-oob", "pad-bright", "lower", "upper", "pad-faint", "map-faint-oob", "middle"]
+    values = [17.9, 18.2, 18.5, 24.0, 24.3, 24.6, 21.0]
+    frame["m_2500_dereddened"] = values
+    frame["m_2500_attenuated_model"] = values
+
+    monkeypatch.setattr(hubble_utils, "read_quasars_from_hdf5_flat", lambda *_args, **_kwargs: frame.copy())
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda value: value)
+    _patch_load_agn_plotters(monkeypatch)
+
+    analysis, _all, parent = hubble_utils.load_agn_data(
+        source_path,
+        magnitude_convention="dereddened",
+        completeness_magnitude="dereddened",
+        enforce_completeness_support=True,
+        return_completeness_parent=True,
+        cut_tier="0",
+        plot_path=str(tmp_path / "figures"),
+        cut_report_path=tmp_path / "cuts.txt",
+    )
+
+    assert parent["object_id"].tolist() == ["lower", "upper", "middle"]
+    assert analysis["object_id"].tolist() == ["lower", "upper", "middle"]
 
 
 def test_load_agn_data_target_selection_is_tier0_eligibility(

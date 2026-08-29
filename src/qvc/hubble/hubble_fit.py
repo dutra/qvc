@@ -38,8 +38,14 @@ DEFAULT_COMPLETENESS_FOOTPRINT_AREA_DEG2 = 5.0
 Z_RANGE_SEMANTICS = "fit_only_v1"
 
 from qvc.hubble.cuts import (
+    COMPLETENESS_MAP_MAG_EDGE_MAX,
+    COMPLETENESS_MAP_MAG_EDGE_MIN,
+    COMPLETENESS_MAP_Z_EDGE_MAX,
+    COMPLETENESS_MAP_Z_EDGE_MIN,
     COMPLETENESS_MAG_2500_MAX,
     COMPLETENESS_MAG_2500_MIN,
+    COMPLETENESS_N_MAG_BINS,
+    COMPLETENESS_N_Z_BINS,
     CUT_TIER_CHOICES,
     SDSS_TARGET_SELECTION_CHOICES,
     normalize_cut_tier,
@@ -122,6 +128,10 @@ from qvc.hubble.hubble_model import (
     resolve_model_option_flags,
 )
 from qvc.hubble.hubble_completeness_refactored import (
+    COMPLETENESS_SMOOTH_SIGMA_MAG_ENV,
+    COMPLETENESS_SMOOTH_SIGMA_Z_ENV,
+    DEFAULT_COMPLETENESS_SMOOTH_SIGMA_MAG,
+    DEFAULT_COMPLETENESS_SMOOTH_SIGMA_Z,
     COMPLETENESS_FHOST_COL,
     COMPLETENESS_MAG_COL,
     COMPLETENESS_MAG_ERR_COL,
@@ -877,6 +887,9 @@ def validate_resume_checkpoint(
     expected_cut_configuration_json=None,
     expected_z_range_semantics=None,
 ):
+    _validate_strict_padded_checkpoint_metadata(
+        results, checkpoint_file, expected_cut_configuration_json
+    )
     required_keys = {
         "flat_samples",
         "dmi_max_w",
@@ -1001,6 +1014,9 @@ def _validate_resume_replot_checkpoint_params(
     expected_cut_configuration_json=None,
     expected_z_range_semantics=None,
 ):
+    _validate_strict_padded_checkpoint_metadata(
+        results, checkpoint_file, expected_cut_configuration_json
+    )
     if "flat_samples" not in results:
         raise RuntimeError(
             f"Resume-replot checkpoint '{checkpoint_file}' is missing required dataset 'flat_samples'."
@@ -1550,7 +1566,7 @@ def estimate_sky_box_area_deg2(df_agn_all):
 
 
 def resolve_completeness_redshift_support(df_agn, z_range):
-    """Return the finite redshift interval required for plot-time debiasing."""
+    """Validate plot/fit coverage and return the fixed completeness map edges."""
 
     if "z" not in df_agn:
         raise KeyError("Completeness redshift support requires a 'z' column.")
@@ -1558,18 +1574,22 @@ def resolve_completeness_redshift_support(df_agn, z_range):
     values = values[np.isfinite(values)]
     if values.size == 0:
         raise ValueError("Completeness redshift support requires at least one finite z.")
-    fit_lo, fit_hi = float(z_range[0]), float(z_range[1])
-    support_lo = min(float(np.min(values)), fit_lo)
-    support_hi = max(float(np.max(values)), fit_hi)
-    if support_lo < 0.0 or support_lo >= support_hi:
+    dz = (COMPLETENESS_MAP_Z_EDGE_MAX - COMPLETENESS_MAP_Z_EDGE_MIN) / COMPLETENESS_N_Z_BINS
+    center_lo = COMPLETENESS_MAP_Z_EDGE_MIN + 0.5 * dz
+    center_hi = COMPLETENESS_MAP_Z_EDGE_MAX - 0.5 * dz
+    requested = np.concatenate((values, np.asarray(z_range, dtype=float)))
+    outside = (requested < center_lo) | (requested > center_hi)
+    if np.any(outside):
         raise ValueError(
-            f"Invalid completeness redshift support [{support_lo}, {support_hi}]."
+            "Plot and fit redshifts must lie inside the strict completeness "
+            f"interpolation range [{center_lo}, {center_hi}]; got "
+            f"[{np.min(requested):.6g}, {np.max(requested):.6g}]."
         )
-    return support_lo, support_hi
+    return COMPLETENESS_MAP_Z_EDGE_MIN, COMPLETENESS_MAP_Z_EDGE_MAX
 
 
 def record_completeness_support_metadata(frames, *, magnitude_support, redshift_support):
-    """Persist constant-edge support in selection/checkpoint metadata."""
+    """Persist strict padded-map support in selection/checkpoint metadata."""
 
     magnitude_support = [float(value) for value in magnitude_support]
     redshift_support = [float(value) for value in redshift_support]
@@ -1582,12 +1602,132 @@ def record_completeness_support_metadata(frames, *, magnitude_support, redshift_
             {
                 "completeness_magnitude_support": magnitude_support,
                 "completeness_redshift_support": redshift_support,
-                "completeness_interpolation_policy": "constant-edge-v1",
+                "completeness_map_magnitude_support": [
+                    COMPLETENESS_MAP_MAG_EDGE_MIN, COMPLETENESS_MAP_MAG_EDGE_MAX
+                ],
+                "completeness_map_redshift_support": [
+                    COMPLETENESS_MAP_Z_EDGE_MIN, COMPLETENESS_MAP_Z_EDGE_MAX
+                ],
+                "completeness_map_n_magnitude_bins": COMPLETENESS_N_MAG_BINS,
+                "completeness_map_n_redshift_bins": COMPLETENESS_N_Z_BINS,
+                "completeness_smooth_sigma_mag": float(os.environ.get(
+                    COMPLETENESS_SMOOTH_SIGMA_MAG_ENV, DEFAULT_COMPLETENESS_SMOOTH_SIGMA_MAG
+                )),
+                "completeness_smooth_sigma_z": float(os.environ.get(
+                    COMPLETENESS_SMOOTH_SIGMA_Z_ENV, DEFAULT_COMPLETENESS_SMOOTH_SIGMA_Z
+                )),
+                "completeness_interpolation_policy": "strict-padded-v1",
             }
         )
         frame.attrs["cut_configuration_json"] = json.dumps(
             configuration, sort_keys=True, separators=(",", ":")
         )
+
+
+def completeness_checkpoint_metadata(completeness_sim_file):
+    """Return immutable fixed-grid and mock provenance for new checkpoints."""
+
+    provenance = {"path": None}
+    if completeness_sim_file is not None:
+        resolved = Path(completeness_sim_file).expanduser().resolve()
+        provenance = {"path": str(resolved), "exists": resolved.is_file()}
+        if resolved.is_file():
+            provenance["size_bytes"] = int(resolved.stat().st_size)
+            with h5py.File(resolved, "r") as handle:
+                for key in (
+                    "lf_model",
+                    "mock_redshift_min",
+                    "mock_redshift_max",
+                    "requested_redshift_min",
+                    "requested_redshift_max",
+                    "mock_count_scale",
+                    "area_deg2",
+                    "seed",
+                ):
+                    if key in handle.attrs:
+                        value = handle.attrs[key]
+                        if isinstance(value, bytes):
+                            value = value.decode("utf-8")
+                        elif isinstance(value, np.generic):
+                            value = value.item()
+                        provenance[key] = value
+                provenance["datasets"] = sorted(handle.keys())
+
+    return {
+        "completeness_interpolation_policy": "strict-padded-v1",
+        "completeness_map_magnitude_support": np.asarray(
+            [COMPLETENESS_MAP_MAG_EDGE_MIN, COMPLETENESS_MAP_MAG_EDGE_MAX],
+            dtype=float,
+        ),
+        "completeness_map_redshift_support": np.asarray(
+            [COMPLETENESS_MAP_Z_EDGE_MIN, COMPLETENESS_MAP_Z_EDGE_MAX],
+            dtype=float,
+        ),
+        "completeness_map_n_magnitude_bins": int(COMPLETENESS_N_MAG_BINS),
+        "completeness_map_n_redshift_bins": int(COMPLETENESS_N_Z_BINS),
+        "completeness_selection_magnitude_support": np.asarray(
+            [COMPLETENESS_MAG_2500_MIN, COMPLETENESS_MAG_2500_MAX], dtype=float
+        ),
+        "completeness_smooth_sigma_mag": float(
+            os.environ.get(
+                COMPLETENESS_SMOOTH_SIGMA_MAG_ENV,
+                DEFAULT_COMPLETENESS_SMOOTH_SIGMA_MAG,
+            )
+        ),
+        "completeness_smooth_sigma_z": float(
+            os.environ.get(
+                COMPLETENESS_SMOOTH_SIGMA_Z_ENV,
+                DEFAULT_COMPLETENESS_SMOOTH_SIGMA_Z,
+            )
+        ),
+        "completeness_mock_provenance_json": json.dumps(
+            provenance, sort_keys=True, separators=(",", ":")
+        ),
+    }
+
+
+def _validate_strict_padded_checkpoint_metadata(
+    results, checkpoint_file, expected_cut_configuration_json
+):
+    """Reject completeness checkpoints from older map/interpolation policies."""
+
+    if not expected_cut_configuration_json:
+        return
+    expected_configuration = json.loads(str(expected_cut_configuration_json))
+    if expected_configuration.get("completeness_interpolation_policy") != "strict-padded-v1":
+        return
+    expected = completeness_checkpoint_metadata(None)
+    required = set(expected)
+    missing = sorted(required - set(results))
+    if missing:
+        raise RuntimeError(
+            f"Resume checkpoint '{checkpoint_file}' predates strict padded "
+            f"completeness metadata; missing {missing}. Start a fresh run."
+        )
+    for key in required - {"completeness_mock_provenance_json"}:
+        stored = np.asarray(results[key])
+        wanted = np.asarray(expected[key])
+        if stored.dtype.kind in {"S", "U", "O"} or wanted.dtype.kind in {"S", "U", "O"}:
+            matches = _checkpoint_scalar_string(
+                results[key], field_name=key, checkpoint_file=checkpoint_file
+            ) == str(expected[key])
+        else:
+            matches = stored.shape == wanted.shape and np.allclose(stored, wanted)
+        if not matches:
+            raise RuntimeError(
+                f"Resume checkpoint '{checkpoint_file}' has incompatible {key}."
+            )
+    provenance = _checkpoint_scalar_string(
+        results["completeness_mock_provenance_json"],
+        field_name="completeness_mock_provenance_json",
+        checkpoint_file=checkpoint_file,
+    )
+    try:
+        json.loads(provenance)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"Resume checkpoint '{checkpoint_file}' has invalid completeness mock provenance."
+        ) from exc
 
 
 def _select_agn_fit_selection(
@@ -1949,9 +2089,8 @@ def _compute_direct_full_sample_completeness_summaries(
 ):
     """Replay completeness for the full plotting sample.
 
-    The completeness model clamps redshifts outside its interpolation centers
-    to the nearest smoothed edge value, while the Hubble fit selection remains
-    unchanged.
+    The fixed padded completeness model must cover every plotting coordinate,
+    while the Hubble fit selection remains unchanged.
 
     The historical three-value summary return is unchanged when
     ``dmi_draw_indices`` is omitted.  When indices are supplied, the fourth
@@ -2427,10 +2566,15 @@ def generate_fresh_completeness_sim_file(
     finite_z = np.asarray(z_all, dtype=float)
     finite_z = finite_z[np.isfinite(finite_z)]
     with h5py.File(output_path, "a") as handle:
+        handle.attrs["lf_model"] = "shen"
         handle.attrs["mock_redshift_min"] = float(np.min(finite_z))
         handle.attrs["mock_redshift_max"] = float(np.max(finite_z))
         handle.attrs["requested_redshift_min"] = z_range[0]
         handle.attrs["requested_redshift_max"] = z_range[1]
+        handle.attrs["completeness_map_magnitude_min"] = COMPLETENESS_MAP_MAG_EDGE_MIN
+        handle.attrs["completeness_map_magnitude_max"] = COMPLETENESS_MAP_MAG_EDGE_MAX
+        handle.attrs["completeness_map_redshift_min"] = COMPLETENESS_MAP_Z_EDGE_MIN
+        handle.attrs["completeness_map_redshift_max"] = COMPLETENESS_MAP_Z_EDGE_MAX
     print(
         f"Generated fresh completeness mock catalog: {output_path} "
         f"(area_deg2={float(area_deg2):.1f}, p_keep={thinning_probability:.4g})"
@@ -2943,6 +3087,10 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             z_range_semantics=Z_RANGE_SEMANTICS,
             selection_attenuation_mode=selection_attenuation_mode,
         )
+        if completeness:
+            checkpoint_payload.update(
+                completeness_checkpoint_metadata(completeness_sim_file)
+            )
         if not only_sna:
             checkpoint_payload.update(
                 _agn_pivot_checkpoint_payload(agn_pivot_context)
@@ -5098,7 +5246,7 @@ if __name__ == "__main__":
     df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_pantheon_data()
     agn_plot_path = f"plots/hubble/{args.prefix}"
     cut_report_path = Path(agn_plot_path) / "cut_summary.txt"
-    df_agn, df_agn_all = load_agn_data(args.agn_data_filepath, populate_sdss=args.force_populate_fields, 
+    loaded_agn = load_agn_data(args.agn_data_filepath, populate_sdss=args.force_populate_fields,
                            cut_tier=args.cut_tier,
                            residuals_sigma_clip=args.residuals_sigma_clip, residuals_csv=args.residuals_csv,
                            exclude_object_ids_csv=args.exclude_object_ids_csv,
@@ -5110,10 +5258,15 @@ if __name__ == "__main__":
                            spectra_sdss_run2d=args.spectra_sdss_run2d,
                            correct_sigma_uv_host=args.correct_sigma_uv_host,
                            enforce_completeness_support=not args.disable_completeness,
+                           return_completeness_parent=not args.disable_completeness,
                            z_range=tuple(args.z_range), plot_path=agn_plot_path,
                            cut_report_path=cut_report_path,
                            plot_diagnostics=not args.minimal_plots)
-    df_agn_completeness_parent = df_agn.copy()
+    if args.disable_completeness:
+        df_agn, df_agn_all = loaded_agn
+        df_agn_completeness_parent = df_agn.copy()
+    else:
+        df_agn, df_agn_all, df_agn_completeness_parent = loaded_agn
     effective_N = args.N
     if args.agn_calibrators:
         if args.agn_calibrators.endswith('.h5'):

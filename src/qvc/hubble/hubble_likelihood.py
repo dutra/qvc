@@ -196,10 +196,7 @@ def _cached_completeness_pdet(
     if key in cache:
         return cache[key]
 
-    map_mag_centers = np.asarray(
-        getattr(completeness_model, "mag_centers", m_grid), dtype=float
-    )
-    map_m_grid = np.clip(m_grid, map_mag_centers[0], map_mag_centers[-1])
+    map_m_grid = np.asarray(m_grid, dtype=float)
 
     if mode == "4d_fhost_alpha":
         if f_host_2500_psf is None or alpha_lambda is None:

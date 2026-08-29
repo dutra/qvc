@@ -138,21 +138,23 @@ def test_completeness_loglike_respects_finite_hard_magnitude_support():
     np.testing.assert_allclose(blob[2, 0], np.sqrt(expected_variance), rtol=2e-5)
 
 
-def test_hard_support_extends_smoothed_edge_bin_values_and_rejects_outside_data(
+def test_padded_map_covers_hard_support_and_rejects_outside_queries(
     capsys,
 ):
     lower, upper = 18.5, 24.0
-    n_bins = 30
-    width = (upper - lower) / n_bins
-    centers = lower + (np.arange(n_bins) + 0.5) * width
-    z_centers = np.array([0.5, 1.5])
+    map_lower, map_upper = 18.0, 24.5
+    n_bins = 65
+    width = (map_upper - map_lower) / n_bins
+    centers = map_lower + (np.arange(n_bins) + 0.5) * width
+    z_centers = np.arange(0.05, 2.0, 0.1)
     completeness_by_mag = np.linspace(0.85, 0.15, n_bins)
     model = hcr.Completeness2D(
         centers,
         z_centers,
-        np.repeat(completeness_by_mag[:, None], 2, axis=1),
-        magnitude_support=(lower, upper),
+        np.repeat(completeness_by_mag[:, None], z_centers.size, axis=1),
+        magnitude_support=(map_lower, map_upper),
         redshift_support=(0.0, 2.0),
+        selection_magnitude_support=(lower, upper),
     )
 
     integration_grid = np.concatenate(([lower], centers, [upper]))
@@ -178,10 +180,8 @@ def test_hard_support_extends_smoothed_edge_bin_values_and_rejects_outside_data(
     assert np.isfinite(log_z)
     assert "[WARNING]" not in capsys.readouterr().out
 
-    model(np.array([lower - 0.01]), np.array([1.0]))
-    warning = capsys.readouterr().out
-    assert "outside the physical support" in warning
-    assert "coordinate_count=1" in warning
+    with pytest.raises(ValueError, match="strict interpolation range"):
+        model(np.array([map_lower]), np.array([1.0]))
 
     with pytest.raises(ValueError, match="observed selection magnitudes"):
         completeness_loglike(
@@ -196,7 +196,7 @@ def test_hard_support_extends_smoothed_edge_bin_values_and_rejects_outside_data(
         )
 
 
-def test_cpu_and_jax_constant_edge_normalizations_match():
+def test_cpu_and_jax_strict_padded_normalizations_match():
     jax = pytest.importorskip("jax")
     jnp = pytest.importorskip("jax.numpy")
     from qvc.hubble.hubble_fit_jax import (
@@ -206,10 +206,11 @@ def test_cpu_and_jax_constant_edge_normalizations_match():
 
     jax.config.update("jax_enable_x64", True)
     support = (18.5, 24.0)
-    n_bins = 1200
-    width = (support[1] - support[0]) / n_bins
-    mag_centers = support[0] + (np.arange(n_bins) + 0.5) * width
-    z_centers = np.linspace(0.0, 4.0, 9)
+    map_support = (18.0, 24.5)
+    n_bins = 1300
+    width = (map_support[1] - map_support[0]) / n_bins
+    mag_centers = map_support[0] + (np.arange(n_bins) + 0.5) * width
+    z_centers = np.linspace(0.05, 4.45, 45)
     mm, zz = np.meshgrid(mag_centers, z_centers, indexing="ij")
     completeness_map = np.clip(
         0.95 - 0.04 * (mm - support[0]) - 0.03 * zz, 0.1, 1.0
@@ -218,8 +219,9 @@ def test_cpu_and_jax_constant_edge_normalizations_match():
         mag_centers,
         z_centers,
         completeness_map,
-        magnitude_support=support,
-        redshift_support=(-0.25, 4.25),
+        magnitude_support=map_support,
+        redshift_support=(0.0, 4.5),
+        selection_magnitude_support=support,
     )
     params = (
         model,
@@ -232,7 +234,7 @@ def test_cpu_and_jax_constant_edge_normalizations_match():
     m_obs = np.array([support[0], 21.2, support[1]])
     m_model = np.array([17.5, 21.2, 25.5])
     mu_err = np.array([0.3, 0.5, 0.3])
-    redshift = np.array([-0.2, 1.5, 4.2])
+    redshift = np.array([0.1, 1.5, 4.4])
 
     cpu_log_z, _ = completeness_loglike(
         m_obs=m_obs,
@@ -245,7 +247,7 @@ def test_cpu_and_jax_constant_edge_normalizations_match():
         magnitude_support=support,
     )
     prepared = _prepare_completeness_for_jax(
-        params, selection_magnitude=m_obs
+        params, selection_magnitude=m_obs, selection_redshift=redshift
     )
     jax_log_z = _completeness_loglike_jax(
         jnp.asarray(m_model),
@@ -261,17 +263,19 @@ def test_cpu_and_jax_constant_edge_normalizations_match():
 
 def test_joint_posterior_selection_uses_the_same_hard_support():
     support = (18.5, 24.0)
-    width = (support[1] - support[0]) / 30
-    mag_centers = support[0] + (np.arange(30) + 0.5) * width
-    z_centers = np.array([0.5, 1.5])
+    map_support = (18.0, 24.5)
+    width = 0.1
+    mag_centers = np.arange(18.05, 24.5, width)
+    z_centers = np.arange(0.05, 4.5, 0.1)
     model = hcr.Completeness2D(
         mag_centers,
         z_centers,
-        np.ones((30, 2)),
-        magnitude_support=support,
-        redshift_support=(0.0, 2.0),
+        np.ones((mag_centers.size, z_centers.size)),
+        magnitude_support=map_support,
+        redshift_support=(0.0, 4.5),
+        selection_magnitude_support=support,
     )
-    params = (model, mag_centers, z_centers, width, 1.0, 0.0)
+    params = (model, mag_centers, z_centers, width, 0.1, 0.0)
     agn_data = {
         hcr.COMPLETENESS_MAG_COL: np.array([20.3]),
         "m_2500_dereddened_draws": np.array([[20.0, 20.0]]),
@@ -476,7 +480,7 @@ def _write_fake_sim_file(
     include_fhost=False,
 ):
     rng = np.random.default_rng(seed)
-    z = rng.uniform(0.1, 3.5, size=n)
+    z = rng.uniform(0.001, 4.499, size=n)
     logL = rng.uniform(42.2, 46.0, size=n)
     M2500 = 90.0 - 2.5 * logL
     cosmo = FlatLambdaCDM(H0=70.0, Om0=0.3)
@@ -484,6 +488,8 @@ def _write_fake_sim_file(
     with h5py.File(path, "w") as handle:
         handle.create_dataset("z", data=z)
         handle.create_dataset("apparent_mag_2500", data=m2500)
+        handle.attrs["mock_redshift_min"] = 0.0
+        handle.attrs["mock_redshift_max"] = 4.5
         if include_alpha:
             alpha_lambda = alpha_center + 0.12 * (z - np.mean(z)) + rng.normal(0.0, 0.08, size=n)
             handle.create_dataset("alpha_lambda", data=alpha_lambda)
@@ -752,7 +758,7 @@ def test_completeness_callables_return_zero_for_nonfinite_queries():
     )
 
 
-def test_completeness_callables_clamp_magnitude_and_redshift_to_edge_values():
+def test_completeness_callables_reject_magnitude_and_redshift_outside_centers():
     mag_centers = np.array([20.0, 21.0])
     z_centers = np.array([1.0, 2.0])
     fhost_centers = np.array([0.1, 0.9])
@@ -764,12 +770,11 @@ def test_completeness_callables_clamp_magnitude_and_redshift_to_edge_values():
     comp2 = hcr.Completeness2D(mag_centers, z_centers, c2)
     comp3 = hcr.Completeness3D(mag_centers, z_centers, fhost_centers, c3)
     comp4 = hcr.Completeness4D(mag_centers, z_centers, fhost_centers, alpha_centers, c4)
-    z_query = np.array([0.5, 2.5])
-
-    np.testing.assert_allclose(comp2(20.5, z_query), [0.4, 0.6])
-    np.testing.assert_allclose(comp3(20.5, z_query, 0.5), [0.4, 0.6])
-    np.testing.assert_allclose(comp4(20.5, z_query, 0.5, -1.5), [0.4, 0.6])
-    np.testing.assert_allclose(comp2(22.0, z_query), [0.4, 0.6])
+    for model, extra in ((comp2, ()), (comp3, (0.5,)), (comp4, (0.5, -1.5))):
+        with pytest.raises(ValueError, match="strict interpolation range"):
+            model(20.5, np.array([0.5, 2.5]), *extra)
+        with pytest.raises(ValueError, match="strict interpolation range"):
+            model(22.0, 1.5, *extra)
 
 
 def test_get_completeness_function_4d_fhost_alpha_uses_mock_alpha_dataset(tmp_path):

@@ -271,14 +271,21 @@ SPECTRAL_RHAT_MAX = _cut_env_float("QVC_CUT_SPECTRAL_RHAT_MAX", 1.20)
 LIGHT_CURVE_RHAT_MAX = _cut_env_float("QVC_CUT_LIGHT_CURVE_RHAT_MAX", 1.10)
 NUM_DIVERGENCES_MAX = _cut_env_float("QVC_CUT_NUM_DIVERGENCES_MAX", None)
 
-# The completeness map is tabulated at histogram-bin centers, while the
-# selected sample occupies the full histogram interval.  Map evaluation uses
-# the nearest smoothed center value between a center and its physical edge.
+# The completeness map is tabulated at histogram-bin centers on a deliberately
+# padded physical grid. Science-selection coordinates lie inside that center
+# hull, so no magnitude/redshift extrapolation or clipping is needed.
+COMPLETENESS_MAP_MAG_EDGE_MIN = 18.0
+COMPLETENESS_MAP_MAG_EDGE_MAX = 24.5
+COMPLETENESS_N_MAG_BINS = 65
+COMPLETENESS_MAP_Z_EDGE_MIN = 0.0
+COMPLETENESS_MAP_Z_EDGE_MAX = 4.5
+COMPLETENESS_N_Z_BINS = 45
+
+# The Hubble sample selection is deliberately narrower than the padded map.
 COMPLETENESS_MAG_EDGE_MIN = 18.5
 COMPLETENESS_MAG_EDGE_MAX = 24.0
-COMPLETENESS_N_MAG_BINS = 30
 COMPLETENESS_MAG_BIN_WIDTH = (
-    COMPLETENESS_MAG_EDGE_MAX - COMPLETENESS_MAG_EDGE_MIN
+    COMPLETENESS_MAP_MAG_EDGE_MAX - COMPLETENESS_MAP_MAG_EDGE_MIN
 ) / COMPLETENESS_N_MAG_BINS
 COMPLETENESS_MAG_2500_MIN = _cut_env_float(
     "QVC_CUT_COMPLETENESS_MAG_2500_MIN", COMPLETENESS_MAG_EDGE_MIN

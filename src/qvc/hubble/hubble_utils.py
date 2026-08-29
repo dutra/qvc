@@ -28,6 +28,10 @@ from scipy.stats import gaussian_kde
 
 from qvc.hubble.cuts import (
     ALLOW_MISSING_SCALAR_CUT_COLUMNS,
+    COMPLETENESS_MAP_MAG_EDGE_MAX,
+    COMPLETENESS_MAP_MAG_EDGE_MIN,
+    COMPLETENESS_MAP_Z_EDGE_MAX,
+    COMPLETENESS_MAP_Z_EDGE_MIN,
     COMPLETENESS_MAG_2500_MAX,
     COMPLETENESS_MAG_2500_MIN,
     EXCLUDED_SDSS_NAMES,
@@ -1083,7 +1087,8 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                   *,
                   magnitude_convention,
                   completeness_magnitude="dereddened",
-                  enforce_completeness_support=False):
+                  enforce_completeness_support=False,
+                  return_completeness_parent=False):
     if (
         not isinstance(magnitude_convention, str)
         or magnitude_convention not in {"dereddened", "attenuated"}
@@ -2061,6 +2066,8 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
     if only_load:
         df_all = df.copy()
         _finalize_cut_report()
+        if return_completeness_parent:
+            return df, df_all, df.copy()
         return df, df_all
 
     df['log_t_rf_length'] = np.log10(df['t_rf_length'])
@@ -2127,11 +2134,28 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         completeness_magnitude=completeness_magnitude
     )
     if enforce_completeness_support:
-        df = _apply_scalar_cut_group(
-            df,
-            completeness_support_cuts,
-            tier="support",
-        )
+        if return_completeness_parent:
+            map_support_cuts = tuple(
+                (column, COMPLETENESS_MAP_MAG_EDGE_MIN, COMPLETENESS_MAP_MAG_EDGE_MAX)
+                for column, _lower, _upper in completeness_support_cuts
+            )
+            df = _apply_scalar_cut_group(df, map_support_cuts, tier="map-support")
+            redshift = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
+            df = _record_cut(
+                "map-support:redshift",
+                f"z in ({COMPLETENESS_MAP_Z_EDGE_MIN}, {COMPLETENESS_MAP_Z_EDGE_MAX}]",
+                df,
+                np.isfinite(redshift)
+                & (redshift > COMPLETENESS_MAP_Z_EDGE_MIN)
+                & (redshift <= COMPLETENESS_MAP_Z_EDGE_MAX),
+                tier="map-support",
+            )
+        else:
+            df = _apply_scalar_cut_group(
+                df,
+                completeness_support_cuts,
+                tier="support",
+            )
 
     # Tier 0: sample eligibility and analysis support.
     if apply_tier0:
@@ -2185,7 +2209,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                 "tier0:SDSS_RUN2D", cut_desc, df, run2d_mask, tier="0"
             )
 
-        if not enforce_completeness_support:
+        if not enforce_completeness_support or return_completeness_parent:
             df = _apply_scalar_cut_group(
                 df,
                 completeness_support_cuts,
@@ -2211,8 +2235,8 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             tier="0",
         )
 
-    # The completeness parent is the Tier-0 population.  Higher tiers define
-    # the selected observed sample used to estimate the empirical map.
+    # Preserve the historical Tier-0 population for host-population modeling.
+    # The map-count parent is captured below after the requested quality tier.
     df_all = df.copy()
 
     # Tier 1: mandatory fit quality whenever the selected level is >= 1.
@@ -2417,6 +2441,15 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             print(f"[WARNING] Residual CSV not found: {residuals_csv}")
             raise ValueError(f"Residual CSV not found: {residuals_csv}")
 
+    completeness_parent = None
+    if return_completeness_parent:
+        completeness_parent = df.copy().reset_index(drop=True)
+        df = _apply_scalar_cut_group(
+            df,
+            completeness_support_cuts,
+            tier="analysis-support",
+        ).reset_index(drop=True)
+
     resolved_cut_configuration = {
         "cut_tier": cut_tier,
         "completeness_support": (
@@ -2427,11 +2460,23 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             float(COMPLETENESS_MAG_2500_MAX),
         ],
         "completeness_redshift_support": None,
+        "completeness_map_magnitude_support": [
+            float(COMPLETENESS_MAP_MAG_EDGE_MIN),
+            float(COMPLETENESS_MAP_MAG_EDGE_MAX),
+        ],
+        "completeness_map_redshift_support": [
+            float(COMPLETENESS_MAP_Z_EDGE_MIN),
+            float(COMPLETENESS_MAP_Z_EDGE_MAX),
+        ],
         "completeness_support_enforced": bool(enforce_completeness_support),
-        "completeness_interpolation_policy": "constant-edge-v1",
+        "completeness_interpolation_policy": (
+            "strict-padded-v1" if enforce_completeness_support else None
+        ),
         "tier0": (
             completeness_support_cuts
-            if apply_tier0 and not enforce_completeness_support else []
+            if apply_tier0
+            and (not enforce_completeness_support or return_completeness_parent)
+            else []
         ),
         "tier1": build_tier1_cuts() if apply_tier1 else [],
         "tier2": (
@@ -2459,7 +2504,9 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
     cut_configuration_json = json.dumps(
         resolved_cut_configuration, sort_keys=True, separators=(",", ":")
     )
-    for frame in (df, df_all):
+    for frame in (df, df_all, completeness_parent):
+        if frame is None:
+            continue
         frame.attrs["cut_tier"] = cut_tier
         frame.attrs["cut_configuration_json"] = cut_configuration_json
 
@@ -2718,6 +2765,8 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             plt.close(fig_colorpanels)
     plot_Mi_relation(df_all.copy())
     _finalize_cut_report()
+    if return_completeness_parent:
+        return df, df_all, completeness_parent
     return df, df_all
 
 def load_pantheon_data():

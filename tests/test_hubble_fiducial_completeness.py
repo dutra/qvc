@@ -16,6 +16,8 @@ if str(SRC) not in sys.path:
 
 def test_default_completeness_support_matches_histogram_edges(tmp_path):
     from qvc.hubble.cuts import (
+        COMPLETENESS_MAP_MAG_EDGE_MAX,
+        COMPLETENESS_MAP_MAG_EDGE_MIN,
         COMPLETENESS_MAG_EDGE_MAX,
         COMPLETENESS_MAG_EDGE_MIN,
         COMPLETENESS_MAG_2500_MAX,
@@ -28,8 +30,10 @@ def test_default_completeness_support_matches_histogram_edges(tmp_path):
 
     mock_path = tmp_path / "mock.h5"
     with h5py.File(mock_path, "w") as handle:
-        handle.create_dataset("apparent_mag_2500", data=[19.0, 21.0, 23.0])
-        handle.create_dataset("z", data=[0.5, 1.5, 2.5])
+        handle.create_dataset("apparent_mag_2500", data=[17.9, 21.0, 24.6])
+        handle.create_dataset("z", data=[0.0, 2.25, 4.5])
+        handle.attrs["mock_redshift_min"] = 0.0
+        handle.attrs["mock_redshift_max"] = 4.5
         handle.attrs["mock_count_scale"] = 1.0
 
     observed = pd.DataFrame(
@@ -40,7 +44,7 @@ def test_default_completeness_support_matches_histogram_edges(tmp_path):
             "z": [0.5, 1.5, 2.5],
         }
     )
-    completeness, mag_centers, *_ = get_completeness_function_2d(
+    completeness, mag_centers, z_centers, dm, dz, sigma_mag = get_completeness_function_2d(
         observed,
         sim_file=str(mock_path),
         smooth_counts=False,
@@ -51,5 +55,13 @@ def test_default_completeness_support_matches_histogram_edges(tmp_path):
     assert completeness.magnitude_support == pytest.approx(
         (COMPLETENESS_MAG_EDGE_MIN, COMPLETENESS_MAG_EDGE_MAX)
     )
-    assert mag_centers[0] > COMPLETENESS_MAG_2500_MIN
-    assert mag_centers[-1] < COMPLETENESS_MAG_2500_MAX
+    assert completeness.map_magnitude_support == pytest.approx(
+        (COMPLETENESS_MAP_MAG_EDGE_MIN, COMPLETENESS_MAP_MAG_EDGE_MAX)
+    )
+    assert mag_centers[0] < COMPLETENESS_MAG_2500_MIN
+    assert mag_centers[-1] > COMPLETENESS_MAG_2500_MAX
+    assert len(mag_centers) == 65
+    assert len(z_centers) == 45
+    assert dm == pytest.approx(0.1)
+    assert dz == pytest.approx(0.1)
+    assert sigma_mag == 0.0

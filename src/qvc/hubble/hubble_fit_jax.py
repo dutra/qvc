@@ -74,6 +74,7 @@ from qvc.hubble.hubble_fit import (
     _annotate_agn_fit_membership,
     _compute_direct_full_sample_completeness_summaries,
     _select_agn_fit_selection,
+    completeness_checkpoint_metadata,
     estimate_sky_box_area_deg2,
     generate_fresh_completeness_sim_file,
     make_run_tag,
@@ -261,7 +262,9 @@ def _sigma_mu_from_z_err_jax(
     return jnp.where(jnp.isfinite(z_err) & (z_err > 0.0), sigma_mu, 0.0)
 
 
-def _prepare_completeness_for_jax(completeness_params, *, selection_magnitude=None):
+def _prepare_completeness_for_jax(
+    completeness_params, *, selection_magnitude=None, selection_redshift=None
+):
     if completeness_params is None:
         return None
     model = completeness_params[0]
@@ -276,6 +279,16 @@ def _prepare_completeness_for_jax(completeness_params, *, selection_magnitude=No
     )
     if selection_magnitude is not None:
         _validate_observed_magnitude_support(selection_magnitude, magnitude_support)
+    if selection_redshift is not None:
+        redshift = np.asarray(selection_redshift, dtype=float)
+        outside = np.isfinite(redshift) & (
+            (redshift < model.z_centers[0]) | (redshift > model.z_centers[-1])
+        )
+        if np.any(outside):
+            raise ValueError(
+                "JAX completeness redshifts lie outside the strict interpolation "
+                f"range [{model.z_centers[0]}, {model.z_centers[-1]}]."
+            )
     support_payload = {
         "magnitude_support": jnp.asarray(magnitude_support),
         "redshift_support": jnp.asarray(
@@ -324,7 +337,11 @@ def _interp_regular_2d(x, y, x_grid, y_grid, values):
     dy = y_grid[1] - y_grid[0]
     ux = (x - x_grid[0]) / dx
     uy = (y - y_grid[0]) / dy
-    valid = jnp.isfinite(ux) & jnp.isfinite(uy)
+    valid = (
+        jnp.isfinite(ux) & jnp.isfinite(uy)
+        & (ux >= 0.0) & (ux <= (x_grid.shape[0] - 1))
+        & (uy >= 0.0) & (uy <= (y_grid.shape[0] - 1))
+    )
     ix = jnp.clip(jnp.floor(ux).astype(jnp.int32), 0, x_grid.shape[0] - 2)
     iy = jnp.clip(jnp.floor(uy).astype(jnp.int32), 0, y_grid.shape[0] - 2)
     tx = jnp.clip(ux - ix, 0.0, 1.0)
@@ -352,6 +369,8 @@ def _interp_regular_3d(x, y, z, x_grid, y_grid, z_grid, values):
     valid = (
         jnp.isfinite(ux)
         & jnp.isfinite(uy)
+        & (ux >= 0.0) & (ux <= (x_grid.shape[0] - 1))
+        & (uy >= 0.0) & (uy <= (y_grid.shape[0] - 1))
         & (uz >= 0.0) & (uz <= (z_grid.shape[0] - 1))
     )
     ix = jnp.clip(jnp.floor(ux).astype(jnp.int32), 0, x_grid.shape[0] - 2)
@@ -394,6 +413,8 @@ def _interp_regular_4d(x, y, z, w, x_grid, y_grid, z_grid, w_grid, values):
     valid = (
         jnp.isfinite(ux)
         & jnp.isfinite(uy)
+        & (ux >= 0.0) & (ux <= (x_grid.shape[0] - 1))
+        & (uy >= 0.0) & (uy <= (y_grid.shape[0] - 1))
         & (uz >= 0.0) & (uz <= (z_grid.shape[0] - 1))
         & (uw >= 0.0) & (uw <= (w_grid.shape[0] - 1))
     )
@@ -426,11 +447,7 @@ def _completeness_loglike_jax(m_model, mu_err, z, completeness, f_host_2500_psf,
     if completeness is None:
         return 0.0
     m_grid = completeness.get("integration_mag_grid", completeness["mag_centers"])
-    map_m_grid = jnp.clip(
-        m_grid,
-        completeness["mag_centers"][0],
-        completeness["mag_centers"][-1],
-    )
+    map_m_grid = m_grid
     sigma = completeness["sigma"]
     sig = jnp.sqrt(mu_err[:, None] ** 2 + sigma**2)
     if completeness["mode"] == "4d_fhost_alpha":
@@ -968,7 +985,7 @@ def run_single_jax(
             )
         if completeness_mode == "4d_fhost_alpha":
             completeness_params = get_completeness_function_4d_fhost_alpha(
-                df_agn_fit,
+                df_agn_completeness_parent,
                 sim_file=completeness_sim_file,
                 plot=True,
                 plot_path=plot_path,
@@ -977,7 +994,7 @@ def run_single_jax(
             )
         elif completeness_mode == "3d_fhost":
             completeness_params = get_completeness_function_3d_fhost(
-                df_agn_fit,
+                df_agn_completeness_parent,
                 sim_file=completeness_sim_file,
                 plot=True,
                 plot_path=plot_path,
@@ -1023,6 +1040,7 @@ def run_single_jax(
             if completeness_params is not None
             else None
         ),
+        selection_redshift=(agn_data.get("z") if completeness_params is not None else None),
     )
 
     priors, model_labels, _ = get_model_params(
@@ -1120,6 +1138,10 @@ def run_single_jax(
         cut_configuration_json=str(df_agn.attrs.get("cut_configuration_json", "")),
         z_range_semantics=Z_RANGE_SEMANTICS,
     )
+    if completeness:
+        checkpoint_payload.update(
+            completeness_checkpoint_metadata(completeness_sim_file)
+        )
     if not only_sna:
         checkpoint_payload.update(
             object_id_fit_selection=agn_data["object_id"],
@@ -1504,7 +1526,7 @@ def main():
     _require_jax_stack()
     df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_pantheon_data()
     agn_plot_path = f"plots/hubble/{args.prefix}"
-    df_agn, df_agn_all = load_agn_data(
+    loaded_agn = load_agn_data(
         args.agn_data_filepath,
         cut_tier=args.cut_tier,
         spectra_fit_csv=args.spectra_fit_csv,
@@ -1514,9 +1536,15 @@ def main():
         completeness_magnitude=args.completeness_magnitude,
         correct_sigma_uv_host=args.correct_sigma_uv_host,
         enforce_completeness_support=not args.disable_completeness,
+        return_completeness_parent=not args.disable_completeness,
         z_range=tuple(args.z_range),
         plot_path=agn_plot_path,
     )
+    if args.disable_completeness:
+        df_agn, df_agn_all = loaded_agn
+        df_agn_completeness_parent = df_agn
+    else:
+        df_agn, df_agn_all, df_agn_completeness_parent = loaded_agn
     run_single_jax(
         df_agn,
         df_agn_all,
@@ -1541,7 +1569,7 @@ def main():
         use_planck_om_prior=args.use_planck_om_prior,
         early_de_guard=args.early_de_guard,
         seed=args.seed,
-        df_agn_completeness_parent=df_agn,
+        df_agn_completeness_parent=df_agn_completeness_parent,
     )
 
 

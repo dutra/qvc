@@ -1067,7 +1067,7 @@ def test_completeness_redshift_support_covers_plot_sample_and_rejects_narrow_moc
     )
     assert hubble_fit.resolve_completeness_redshift_support(
         frame, (1.0, 3.16)
-    ) == (0.2, 3.5)
+    ) == (0.0, 4.5)
 
     mock_path = tmp_path / "narrow_mock.h5"
     with hubble_fit.h5py.File(mock_path, "w") as handle:
@@ -1076,7 +1076,7 @@ def test_completeness_redshift_support_covers_plot_sample_and_rejects_narrow_moc
         handle.attrs["mock_redshift_min"] = 1.0
         handle.attrs["mock_redshift_max"] = 3.16
 
-    with pytest.raises(ValueError, match="does not cover the plotting sample"):
+    with pytest.raises(ValueError, match="does not cover the fixed map"):
         hubble_completeness_refactored.get_completeness_function_2d(
             frame,
             sim_file=str(mock_path),
@@ -1085,7 +1085,7 @@ def test_completeness_redshift_support_covers_plot_sample_and_rejects_narrow_moc
         )
 
 
-def test_constant_edge_support_is_recorded_in_checkpoint_selection_metadata():
+def test_strict_padded_support_is_recorded_in_checkpoint_selection_metadata():
     frame = pd.DataFrame({"z": [0.5, 3.5]})
     frame.attrs["cut_configuration_json"] = '{"cut_tier":"2"}'
 
@@ -1098,7 +1098,25 @@ def test_constant_edge_support_is_recorded_in_checkpoint_selection_metadata():
     configuration = json.loads(frame.attrs["cut_configuration_json"])
     assert configuration["completeness_magnitude_support"] == [18.5, 24.0]
     assert configuration["completeness_redshift_support"] == [0.2, 3.5]
-    assert configuration["completeness_interpolation_policy"] == "constant-edge-v1"
+    assert configuration["completeness_map_magnitude_support"] == [18.0, 24.5]
+    assert configuration["completeness_map_redshift_support"] == [0.0, 4.5]
+    assert configuration["completeness_map_n_magnitude_bins"] == 65
+    assert configuration["completeness_map_n_redshift_bins"] == 45
+    assert configuration["completeness_interpolation_policy"] == "strict-padded-v1"
+
+
+def test_strict_padded_resume_rejects_checkpoint_without_map_metadata():
+    expected_configuration = json.dumps(
+        {"completeness_interpolation_policy": "strict-padded-v1"}
+    )
+    with pytest.raises(RuntimeError, match="predates strict padded completeness metadata"):
+        hubble_fit.validate_resume_checkpoint(
+            {},
+            "legacy.h5",
+            ndim=1,
+            n_agn=0,
+            expected_cut_configuration_json=expected_configuration,
+        )
 
 
 def test_compute_direct_full_sample_completeness_summaries_optionally_returns_selected_draws(
@@ -5400,3 +5418,5 @@ def test_run_hubble_forwards_configurable_cumulative_cut_tier():
     assert 'cut_tier not in {"none", "0", "1", "2"}' in runner
     assert "--cut-tier @(cut_tier)" in runner
     assert "tiers are cumulative" in runner
+    assert '"QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG", "0.10"' in runner
+    assert '"QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z", "0.30"' in runner

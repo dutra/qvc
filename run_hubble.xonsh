@@ -22,6 +22,12 @@ magnitude_convention = __xonsh__.env.get("QVC_HUBBLE_MAGNITUDE_CONVENTION", "der
 completeness_magnitude = __xonsh__.env.get(
     "QVC_HUBBLE_COMPLETENESS_MAGNITUDE", "attenuated"
 )
+$QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG", "0.10"
+)
+$QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z", "0.30"
+)
 cut_tier = str(__xonsh__.env.get("QVC_HUBBLE_CUT_TIER", "2")).strip().lower()
 if cut_tier not in {"none", "0", "1", "2"}:
     raise ValueError(
