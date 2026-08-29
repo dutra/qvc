@@ -142,6 +142,16 @@ LINEAR_TREND_RF_SIGMA_MAG_PER_DAY = 1e-4
 # opt-in diagnostics rather than the production default.
 FLUX_LINEARIZED_REFINEMENT_ITERS = 1
 FLUX_LINEARIZED_MIN_TOTAL_FLUX_RATIO = 0.05
+HUBBLE_CONVERGENCE_FIELD_MAP = {
+    "log_sigma_uv": "log_sigma_uv",
+    # The catalog value is an affine rest-frame/base-10 transform of this
+    # observer-frame natural-log sampled site. ESS and R-hat are invariant
+    # under that transform.
+    "log_tau_uv_rf": "log_tau_uv",
+}
+HUBBLE_POSTERIOR_SITE_NAMES = tuple(
+    dict.fromkeys(HUBBLE_CONVERGENCE_FIELD_MAP.values())
+)
 SDSS_FILTER_BLUE_EDGE_OBS = {
     "u": 3055.11,
     "g": 3797.64,
@@ -2882,17 +2892,34 @@ def log_nonfinite_sample_summary(samples_dict, *, label, max_items=20):
     )
 
 
-def print_light_curve_posterior_summary(
-    object_id,
+def summarize_final_hubble_nuts_posterior(
+    samples_per_chain,
     *,
-    summary_dict,
+    fit_method,
+    heading,
+    resumed=False,
 ):
-    """Print one already-computed NumPyro posterior summary."""
+    """Compute final-NUTS diagnostics only for Hubble-consumed LC sites."""
 
-    print_numpyro_summary_dict(
-        summary_dict,
-        heading=f"[{object_id}] NumPyro posterior summary:",
+    if (
+        resumed
+        or fit_method not in ("nuts", "svi+nuts")
+        or samples_per_chain is None
+    ):
+        print_numpyro_summary_dict({}, heading=heading)
+        return {}
+    hubble_samples = {
+        site_name: samples_per_chain[site_name]
+        for site_name in HUBBLE_POSTERIOR_SITE_NAMES
+        if site_name in samples_per_chain
+    }
+    summary_dict = compute_numpyro_summary(
+        hubble_samples,
+        group_by_chain=True,
+        prob=0.90,
     )
+    print_numpyro_summary_dict(summary_dict, heading=heading)
+    return summary_dict
 
 
 def sigma_shift_to_uv(eta_sigma, lambda_center_rf, lambda_uv=2500.0):
@@ -4619,6 +4646,75 @@ def _trim_per_chain_samples(samples_per_chain, n_draws):
     return {k: np.asarray(v)[:, :n_draws] for k, v in samples_per_chain.items()}
 
 
+NUTS_EXTRA_FIELDS = ("accept_prob", "diverging", "num_steps", "energy")
+NUTS_DIAGNOSTIC_FIELDS = (
+    "accept_prob",
+    "num_divergences",
+    "nuts_mean_num_steps",
+    "nuts_max_num_steps",
+    "nuts_mean_tree_depth",
+    "nuts_max_tree_depth_observed",
+    "nuts_num_max_tree_depth",
+    "nuts_max_tree_depth_fraction",
+    "nuts_ebfmi",
+)
+
+
+def unavailable_nuts_diagnostics():
+    """Return serializable placeholders when final-chain state is unavailable."""
+    return {name: np.nan for name in NUTS_DIAGNOSTIC_FIELDS}
+
+
+def summarize_nuts_extra_fields(extra_fields, *, max_tree_depth):
+    """Summarize NumPyro final-chain diagnostics into scalar catalog fields.
+
+    ``nuts_ebfmi`` is the minimum per-chain E-BFMI. Tree depth follows
+    NumPyro's documented ``floor(log2(num_steps)) + 1`` definition.
+    """
+    diagnostics = unavailable_nuts_diagnostics()
+
+    accept_prob = np.asarray(extra_fields.get("accept_prob", []), dtype=float)
+    finite_accept = accept_prob[np.isfinite(accept_prob)]
+    if finite_accept.size:
+        diagnostics["accept_prob"] = float(np.mean(finite_accept))
+
+    diverging = np.asarray(extra_fields.get("diverging", []))
+    if diverging.size:
+        diagnostics["num_divergences"] = int(np.count_nonzero(diverging))
+
+    num_steps = np.asarray(extra_fields.get("num_steps", []), dtype=float)
+    finite_steps = num_steps[np.isfinite(num_steps) & (num_steps > 0.0)]
+    if finite_steps.size:
+        tree_depth = np.floor(np.log2(finite_steps)).astype(int) + 1
+        saturated = tree_depth >= int(max_tree_depth)
+        diagnostics.update(
+            {
+                "nuts_mean_num_steps": float(np.mean(finite_steps)),
+                "nuts_max_num_steps": int(np.max(finite_steps)),
+                "nuts_mean_tree_depth": float(np.mean(tree_depth)),
+                "nuts_max_tree_depth_observed": int(np.max(tree_depth)),
+                "nuts_num_max_tree_depth": int(np.count_nonzero(saturated)),
+                "nuts_max_tree_depth_fraction": float(np.mean(saturated)),
+            }
+        )
+
+    energy = np.asarray(extra_fields.get("energy", []), dtype=float)
+    if energy.ndim == 1:
+        energy = energy[None, :]
+    if energy.ndim == 2 and energy.shape[1] >= 2:
+        numerator = np.mean(np.square(np.diff(energy, axis=1)), axis=1)
+        denominator = np.var(energy, axis=1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ebfmi_by_chain = numerator / denominator
+        finite_ebfmi = ebfmi_by_chain[
+            np.isfinite(ebfmi_by_chain) & (ebfmi_by_chain >= 0.0)
+        ]
+        if finite_ebfmi.size:
+            diagnostics["nuts_ebfmi"] = float(np.min(finite_ebfmi))
+
+    return diagnostics
+
+
 def _run_nuts_inference(
     numpyro_model,
     rng_key,
@@ -4651,19 +4747,20 @@ def _run_nuts_inference(
         progress_bar=progress_bar,
     )
     t0 = time.perf_counter()
-    mcmc.run(rng_key, extra_fields=("accept_prob", "diverging"))
+    mcmc.run(rng_key, extra_fields=NUTS_EXTRA_FIELDS)
     elapsed = time.perf_counter() - t0
     samples_flat = tree_map(lambda x: np.asarray(device_get(x)), mcmc.get_samples(group_by_chain=False))
     samples_per_chain = tree_map(lambda x: np.asarray(device_get(x)), mcmc.get_samples(group_by_chain=True))
     extra_fields = {
         k: np.asarray(device_get(v))
-        for k, v in mcmc.get_extra_fields().items()
+        for k, v in mcmc.get_extra_fields(group_by_chain=True).items()
     }
-    diagnostics = {
-        "accept_prob": float(np.mean(extra_fields["accept_prob"])) if "accept_prob" in extra_fields else np.nan,
-        "num_divergences": int(np.sum(extra_fields["diverging"])) if "diverging" in extra_fields else 0,
-        "elapsed_sec": float(elapsed),
-    }
+    diagnostics = summarize_nuts_extra_fields(
+        extra_fields,
+        max_tree_depth=max_tree_depth,
+    )
+    diagnostics["elapsed_sec"] = float(elapsed)
+    diagnostics["nuts_elapsed_sec"] = float(elapsed)
     return samples_flat, samples_per_chain, diagnostics
 
 
@@ -4815,6 +4912,8 @@ def run_iterated_mag_flux_linearized_inference(
     samples_flat = None
     samples_per_chain = None
     posterior_summary = {}
+    final_nuts_diagnostics = unavailable_nuts_diagnostics()
+    final_nuts_diagnostics["nuts_elapsed_sec"] = np.nan
     diagnostics = {
         "flux_linearized_refinement_iters": int(refinement_iters),
         "flux_linearized_min_total_flux_ratio": float(FLUX_LINEARIZED_MIN_TOTAL_FLUX_RATIO),
@@ -4896,19 +4995,17 @@ def run_iterated_mag_flux_linearized_inference(
                 target_accept=target_accept,
                 init_strategy=init_strategy,
             )
-            posterior_summary = compute_numpyro_summary(
-                samples_per_chain,
-                group_by_chain=True,
-                prob=0.90,
-            )
-            print_numpyro_summary_dict(
-                posterior_summary,
-                heading=(
-                    f"[{obj_dict.get('object_id', 'unknown')}] NumPyro posterior "
-                    f"summary after NUTS refinement {iter_idx + 1}/"
-                    f"{int(refinement_iters)}:"
-                ),
-            )
+            if iter_idx == int(refinement_iters) - 1:
+                final_nuts_diagnostics = dict(iter_diag)
+                posterior_summary = summarize_final_hubble_nuts_posterior(
+                    samples_per_chain,
+                    fit_method=fit_method,
+                    heading=(
+                        f"[{obj_dict.get('object_id', 'unknown')}] NumPyro posterior "
+                        f"summary after final NUTS refinement {iter_idx + 1}/"
+                        f"{int(refinement_iters)}:"
+                    ),
+                )
             diagnostics["flux_linearized_nuts_runs"] += 1
             diagnostics[f"flux_linearized_iter{iter_idx + 1}_accept_prob"] = iter_diag[
                 "accept_prob"
@@ -4988,6 +5085,7 @@ def run_iterated_mag_flux_linearized_inference(
         if iter_idx < int(refinement_iters) - 1:
             y_fit, yerr_fit = y_next, yerr_next
 
+    diagnostics.update(final_nuts_diagnostics)
     diagnostics["accept_prob"] = diagnostics[
         f"flux_linearized_iter{int(refinement_iters)}_accept_prob"
     ]
@@ -5030,6 +5128,15 @@ def main():
     parser.add_argument("--filter_object_id", nargs="+", help="List of object IDs to filter.")
     parser.add_argument("--N", type=int, help="Number of objects to process.")
     parser.add_argument("--skip", type=int, help="Number of objects to skip.")
+    parser.add_argument(
+        "--outlier_half_window_days",
+        type=float,
+        default=30.0,
+        help=(
+            "Half-width in observer-frame days for rolling photometric outlier "
+            "rejection (default: 30)."
+        ),
+    )
     parser.add_argument("--filter_file", type=str, help="Path to file containing object IDs.")
     parser.add_argument("--plot", action="store_true", help="Enable plotting of results.")
     parser.add_argument("--progress", action="store_true", help="Show progress bar.")
@@ -5229,10 +5336,10 @@ def main():
         ),
     )
     parser.add_argument(
-        "--spectra_fit_csv",
+        "--spectra_fit_h5",
         nargs="+",
         default=None,
-        help="Spectra-fit CSV file(s) used to derive per-band PSF PL/total fractions.",
+        help="Spectra-fit HDF5 catalog file(s) used to derive per-band PSF AGN/total fractions.",
     )
     parser.add_argument(
         "--subtract_psf_constant_flux",
@@ -5241,6 +5348,11 @@ def main():
         help="Subtract spectra-derived constant contaminating flux in PSF light curves before GP fitting.",
     )
     args = parser.parse_args()
+    if (
+        not np.isfinite(args.outlier_half_window_days)
+        or args.outlier_half_window_days <= 0
+    ):
+        parser.error("--outlier_half_window_days must be positive")
     args = apply_resume_sample_save_policy(args)
     print("Args:", args)
 
@@ -5256,6 +5368,7 @@ def main():
             progress_bar=args.progress,
             N=args.N,
             skip=args.skip,
+            outlier_half_window_days=args.outlier_half_window_days,
         )
     print(f"Loaded {len(objs)} objects.")
 
@@ -5272,11 +5385,11 @@ def main():
         print(f"After restframe cut, {len(objs)} objects remain.")
 
     if args.subtract_psf_constant_flux:
-        if not args.spectra_fit_csv:
-            raise ValueError("--subtract_psf_constant_flux requires --spectra_fit_csv.")
+        if not args.spectra_fit_h5:
+            raise ValueError("--subtract_psf_constant_flux requires --spectra_fit_h5.")
         objs, correction_summary = apply_constant_flux_correction_to_objects(
             objs,
-            spectra_fit_csvs=args.spectra_fit_csv,
+            spectra_fit_h5s=args.spectra_fit_h5,
             progress_bar=args.progress,
         )
         print_constant_flux_correction_summary(correction_summary)
@@ -5443,7 +5556,7 @@ def main():
                 "cont,blr",
             )
 
-            stage_diagnostics = {}
+            stage_diagnostics = unavailable_nuts_diagnostics()
             flux_linearized_fit_obj = None
             posterior_summary = {}
             if args.resume:
@@ -5522,26 +5635,24 @@ def main():
                     else:
                         mcmc_key = key
                         init_strategy = numpyro.infer.init_to_median()
-                    nuts = NUTS(
+                    (
+                        samples_flat,
+                        samples_per_chain,
+                        nuts_diagnostics,
+                    ) = _run_nuts_inference(
                         numpyro_model,
-                        init_strategy=init_strategy,
-                        dense_mass=args.dense_mass,
-                        max_tree_depth=args.max_tree_depth,
-                        target_accept_prob=args.target_accept,
-                    )
-                    mcmc = MCMC(
-                        nuts,
+                        mcmc_key,
                         num_warmup=args.nwarm,
                         num_samples=args.nsamp,
-                        num_chains=max(1, args.nchains),
+                        num_chains=args.nchains,
                         chain_method=chain_method,
                         progress_bar=args.progress,
+                        dense_mass=args.dense_mass,
+                        max_tree_depth=args.max_tree_depth,
+                        target_accept=args.target_accept,
+                        init_strategy=init_strategy,
                     )
-                    mcmc.run(mcmc_key)
-                    samples_flat = mcmc.get_samples(group_by_chain=False)
-                    samples_per_chain = mcmc.get_samples(group_by_chain=True)
-                    samples_flat = tree_map(lambda x: np.asarray(device_get(x)), samples_flat)
-                    samples_per_chain = tree_map(lambda x: np.asarray(device_get(x)), samples_per_chain)
+                    stage_diagnostics.update(nuts_diagnostics)
                     obj_flat_samples = samples_flat
                 else:
                     ns_constructor_kwargs = {}
@@ -5589,20 +5700,12 @@ def main():
                     samples_per_chain = tree_map(lambda x: np.asarray(device_get(x)), samples_per_chain)
                     obj_flat_samples = samples_flat
 
-            if args.fit_method == "nuts":
-                posterior_summary = compute_numpyro_summary(
-                    samples_per_chain if samples_per_chain is not None else obj_flat_samples,
-                    group_by_chain=samples_per_chain is not None,
-                    prob=0.90,
-                )
-                print_light_curve_posterior_summary(
-                    oid,
-                    summary_dict=posterior_summary,
-                )
-            elif args.fit_method != "svi+nuts":
-                print_light_curve_posterior_summary(
-                    oid,
-                    summary_dict=posterior_summary,
+            if args.model_variant == "mag_linear":
+                posterior_summary = summarize_final_hubble_nuts_posterior(
+                    samples_per_chain,
+                    fit_method=args.fit_method,
+                    resumed=args.resume,
+                    heading=f"[{oid}] NumPyro posterior summary after final NUTS sampling:",
                 )
 
             obj_flat_samples = add_model_prediction_params(
@@ -5623,13 +5726,7 @@ def main():
 
             diagnostics = convergence_fields(
                 posterior_summary,
-                {
-                    "log_sigma_uv": "log_sigma_uv",
-                    # The catalog value is an affine rest-frame/base-10
-                    # transform of this sampled site, which leaves ESS and
-                    # R-hat unchanged.
-                    "log_tau_uv_rf": "log_tau_uv",
-                },
+                HUBBLE_CONVERGENCE_FIELD_MAP,
             )
             diagnostics |= stage_diagnostics
 
@@ -5893,8 +5990,8 @@ def main():
         "filter_file": args.filter_file,
         "nearby_light_curve_csv": args.load_nearby_lc_csv,
     }
-    for index, path in enumerate(args.spectra_fit_csv or []):
-        provenance_inputs[f"spectra_fit_csv_{index}"] = path
+    for index, path in enumerate(args.spectra_fit_h5 or []):
+        provenance_inputs[f"spectra_fit_h5_{index}"] = path
     provenance_object_id = (
         str(results[0]["object_id"])
         if len(results) == 1 and "object_id" in results[0]

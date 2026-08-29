@@ -98,7 +98,7 @@ def test_sbatch_runs_each_chunk_object_in_a_fresh_process():
         ),
         _args(),
         "data/input.csv",
-        "results/data/spectra.csv",
+        "results/data/spectra.h5",
     )
 
     assert 'export N="3"' in script
@@ -109,8 +109,8 @@ def test_sbatch_runs_each_chunk_object_in_a_fresh_process():
     assert '--filter_object_id "$OBJECT_ID"' in script
     assert "--filter_object_id $IDS" not in script
     assert "--subtract_psf_constant_flux" in script
-    assert "--spectra_fit_csv" in script
-    assert "results/data/spectra.csv" in script
+    assert "--spectra_fit_h5" in script
+    assert "results/data/spectra.h5" in script
     assert script.count("python -m qvc.light_curve.fit_light_curves") == 1
     encoded = re.search(
         r'^export QVC_SUBMISSION_PROVENANCE_B64="([^"]+)"$',
@@ -120,7 +120,7 @@ def test_sbatch_runs_each_chunk_object_in_a_fresh_process():
     submission = decode_record(encoded)
     assert submission["resolved"]["job"]["object_count"] == 3
     assert submission["resolved"]["resources"]["memory"] == "12G"
-    assert "--spectra_fit_csv" in submission["resolved"]["fit_flags"]
+    assert "--spectra_fit_h5" in submission["resolved"]["fit_flags"]
     assert "--svi_lr" in submission["resolved"]["fit_flags"]
     assert "0.001" in submission["resolved"]["fit_flags"]
     assert "--svi_steps" in submission["resolved"]["fit_flags"]
@@ -133,7 +133,7 @@ def test_generated_multi_object_sbatch_is_valid_bash():
         JobConfig(description="stone", object_ids=["1", "2"]),
         _args(fit="stone", N=2),
         None,
-        "results/data/spectra.csv",
+        "results/data/spectra.h5",
         object_ids_path=Path("/tmp/probe_object_ids.txt"),
     )
 
@@ -151,7 +151,7 @@ def test_chunk_count_still_uses_objects_per_slurm_task():
     assert validate_chunking(total_objects=7, n_per_job=3, skip=0, num_jobs=-1) == (3, 0, 2)
 
 
-def test_chisq_jobs_require_an_explicit_spectra_fit_csv(monkeypatch, capsys):
+def test_chisq_jobs_require_an_explicit_spectra_fit_h5(monkeypatch, capsys):
     monkeypatch.setattr(
         sys,
         "argv",
@@ -162,15 +162,15 @@ def test_chisq_jobs_require_an_explicit_spectra_fit_csv(monkeypatch, capsys):
         parse_args()
 
     assert exc_info.value.code == 2
-    assert "--spectra-fit-csv is required when --fit chisq is used." in capsys.readouterr().err
+    assert "--spectra-fit-h5 is required when --fit chisq is used." in capsys.readouterr().err
 
 
-def test_non_chisq_jobs_do_not_require_a_spectra_fit_csv(monkeypatch):
+def test_non_chisq_jobs_do_not_require_a_spectra_fit_h5(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["sfitlc.py", "--fit", "stone"])
 
     args = parse_args()
 
-    assert args.spectra_fit_csv is None
+    assert args.spectra_fit_h5 is None
     assert args.stone_linear_mode == "both"
     assert args.svi_steps == 4000
     assert args.svi_lr == pytest.approx(1e-3)

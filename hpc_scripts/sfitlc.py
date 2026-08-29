@@ -52,10 +52,10 @@ def parse_args():
     )
     parser.add_argument("--chisq-csv", type=str, default=None, help="CSV file with object_id column for --fit chisq.")
     parser.add_argument(
-        "--spectra-fit-csv",
+        "--spectra-fit-h5",
         type=str,
         default=None,
-        help="Spectra-fit CSV used for PSF constant-flux subtraction in --fit chisq jobs.",
+        help="Spectra-fit HDF5 catalog used for PSF constant-flux subtraction in --fit chisq jobs.",
     )
     parser.add_argument("--num-jobs", type=int, default=-1, help="-1 means submit all chunks after skip.")
     parser.add_argument("--skip", type=int, default=0, help="Number of chunks to skip.")
@@ -88,8 +88,8 @@ def parse_args():
     args.extra_fit_flags = tuple(extra_fit_flags)
     if args.fit == "chisq" and not args.chisq_csv:
         parser.error("--chisq-csv is required when --fit chisq is used.")
-    if args.fit == "chisq" and not args.spectra_fit_csv:
-        parser.error("--spectra-fit-csv is required when --fit chisq is used.")
+    if args.fit == "chisq" and not args.spectra_fit_h5:
+        parser.error("--spectra-fit-h5 is required when --fit chisq is used.")
     if args.fit != "stone" and args.stone_linear_mode != "both":
         parser.error(
             "--stone-linear-mode linear or nolinear requires --fit stone."
@@ -300,7 +300,7 @@ def build_sbatch_script(
     job: JobConfig,
     args,
     chisq_csv: str,
-    spectra_fit_csv: str | None,
+    spectra_fit_h5: str | None,
     object_ids_path: Path | None = None,
 ) -> str:
     log_dir = LOG_ROOT / prefix
@@ -342,8 +342,8 @@ def build_sbatch_script(
         base_flags.extend(
             [
                 "--subtract_psf_constant_flux",
-                "--spectra_fit_csv",
-                spectra_fit_csv,
+                "--spectra_fit_h5",
+                spectra_fit_h5,
             ]
         )
     base_flags.extend(job.extra_flags)
@@ -362,7 +362,7 @@ def build_sbatch_script(
             },
             "inputs": {
                 "chisq_csv": chisq_csv,
-                "spectra_fit_csv": spectra_fit_csv,
+                "spectra_fit_h5": spectra_fit_h5,
                 "object_ids_path": object_id_file,
             },
             "resources": {
@@ -742,7 +742,7 @@ def main():
         part for part in (run_stamp, args.description, git_hash) if part
     )
     chisq_csv = args.chisq_csv
-    spectra_fit_csv = args.spectra_fit_csv
+    spectra_fit_h5 = args.spectra_fit_h5
     samelength_merge_job_ids = []
 
     for job in build_job_configs(
@@ -761,7 +761,7 @@ def main():
             job,
             args,
             chisq_csv,
-            spectra_fit_csv,
+            spectra_fit_h5,
             object_ids_path=object_ids_path,
         )
         merge_sbatch_script = build_merge_sbatch_script(

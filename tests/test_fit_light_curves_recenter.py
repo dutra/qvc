@@ -140,12 +140,18 @@ def test_make_lc_preserves_and_normalizes_epoch_seeing():
 
 
 @pytest.mark.parametrize(
-    ("refinement_strategy", "expected_nuts_runs"),
-    (("nuts_each", 3), ("svi_then_nuts", 1)),
+    ("fit_method", "refinement_strategy", "expected_svi_runs", "expected_nuts_runs"),
+    (
+        ("nuts", "nuts_each", 0, 3),
+        ("svi+nuts", "nuts_each", 3, 3),
+        ("svi+nuts", "svi_then_nuts", 3, 1),
+    ),
 )
 def test_flux_linearized_refinement_strategy_controls_nuts_runs(
     monkeypatch,
+    fit_method,
     refinement_strategy,
+    expected_svi_runs,
     expected_nuts_runs,
 ):
     calls = {
@@ -181,11 +187,18 @@ def test_flux_linearized_refinement_strategy_controls_nuts_runs(
 
     def fake_nuts(*_args, **_kwargs):
         calls["nuts"] += 1
-        samples = {"theta": np.array([100.0 + calls["nuts"], 102.0 + calls["nuts"]])}
-        per_chain = {"theta": samples["theta"][None, :]}
+        samples = {
+            "theta": np.array([100.0 + calls["nuts"], 102.0 + calls["nuts"]]),
+            "log_sigma_uv": np.array([-1.0, -0.9]),
+            "log_tau_uv": np.array([5.0, 5.1]),
+        }
+        per_chain = {name: values[None, :] for name, values in samples.items()}
         return samples, per_chain, {
             "accept_prob": 0.9,
             "num_divergences": 0,
+            "nuts_ebfmi": 0.5 + 0.1 * calls["nuts"],
+            "nuts_max_tree_depth_fraction": 0.01 * calls["nuts"],
+            "nuts_elapsed_sec": 2.0,
             "elapsed_sec": 2.0,
         }
 
@@ -194,15 +207,20 @@ def test_flux_linearized_refinement_strategy_controls_nuts_runs(
 
     def fake_summary(samples, *, group_by_chain, prob):
         calls["summary"] += 1
-        assert samples["theta"].shape == (1, 2)
+        assert set(samples) == {"log_sigma_uv", "log_tau_uv"}
+        assert samples["log_sigma_uv"].shape == (1, 2)
+        assert samples["log_tau_uv"].shape == (1, 2)
         assert group_by_chain is True
         assert prob == 0.90
-        return {"theta": {"mean": np.array(0.0)}}
+        return {
+            "log_sigma_uv": {"mean": np.array(-0.95)},
+            "log_tau_uv": {"mean": np.array(5.05)},
+        }
 
     def fake_print(summary_dict, *, heading):
         calls["print"] += 1
-        assert "theta" in summary_dict
-        assert "NUTS refinement" in heading
+        assert set(summary_dict) == {"log_sigma_uv", "log_tau_uv"}
+        assert "final NUTS refinement 3/3" in heading
 
     monkeypatch.setattr(fit_lc, "compute_numpyro_summary", fake_summary)
     monkeypatch.setattr(fit_lc, "print_numpyro_summary_dict", fake_print)
@@ -240,7 +258,7 @@ def test_flux_linearized_refinement_strategy_controls_nuts_runs(
             np.array([2500.0]),
             np.array([np.log(0.01)]),
             rng_key=jax.random.PRNGKey(0),
-            fit_method="svi+nuts",
+            fit_method=fit_method,
             num_warmup=2,
             num_samples=2,
             num_chains=1,
@@ -250,26 +268,180 @@ def test_flux_linearized_refinement_strategy_controls_nuts_runs(
             max_tree_depth=4,
             svi_steps=2,
             svi_lr=1e-2,
-                disable_lag_blr=True,
-                refinement_strategy=refinement_strategy,
-                refinement_iters=3,
-            )
+            disable_lag_blr=True,
+            refinement_strategy=refinement_strategy,
+            refinement_iters=3,
         )
+    )
 
-    assert calls["svi"] == 3
+    assert calls["svi"] == expected_svi_runs
     assert calls["nuts"] == expected_nuts_runs
-    assert calls["summary"] == expected_nuts_runs
-    assert calls["print"] == expected_nuts_runs
+    assert calls["summary"] == 1
+    assert calls["print"] == 1
     assert len(calls["pseudo_params"]) == 3
     assert diagnostics["flux_linearized_nuts_runs"] == expected_nuts_runs
     assert diagnostics["elapsed_sec"] == 2.0 * expected_nuts_runs
+    assert diagnostics["nuts_ebfmi"] == pytest.approx(
+        0.5 + 0.1 * expected_nuts_runs
+    )
+    assert diagnostics["nuts_max_tree_depth_fraction"] == pytest.approx(
+        0.01 * expected_nuts_runs
+    )
+    assert diagnostics["nuts_elapsed_sec"] == 2.0
     assert np.isfinite(samples["theta"]).all()
     assert np.isfinite(per_chain["theta"]).all()
-    assert "theta" in posterior_summary
+    assert set(posterior_summary) == {"log_sigma_uv", "log_tau_uv"}
     if refinement_strategy == "svi_then_nuts":
         assert calls["pseudo_params"][:2] == [11.0, 12.0]
         assert diagnostics["flux_linearized_iter1_elapsed_sec"] == 0.0
         assert diagnostics["flux_linearized_iter2_elapsed_sec"] == 0.0
+
+
+@pytest.mark.parametrize("fit_method", ("nuts", "svi+nuts"))
+def test_mag_linear_final_nuts_summary_filters_hubble_sites_and_reuses_result(
+    monkeypatch,
+    fit_method,
+):
+    calls = {"compute": 0, "print": 0}
+    samples_per_chain = {
+        "log_sigma_uv": np.array([[-1.1, -1.0, -0.9, -0.8]]),
+        "log_tau_uv": np.array([[4.8, 4.9, 5.0, 5.1]]),
+        "nuisance": np.ones((1, 4)),
+    }
+    expected_summary = {
+        "log_sigma_uv": {"n_eff": np.array(4.0), "r_hat": np.array(1.0)},
+        "log_tau_uv": {"n_eff": np.array(4.0), "r_hat": np.array(1.0)},
+    }
+
+    def fake_compute(samples, *, group_by_chain, prob):
+        calls["compute"] += 1
+        assert set(samples) == {"log_sigma_uv", "log_tau_uv"}
+        assert group_by_chain is True
+        assert prob == 0.90
+        return expected_summary
+
+    def fake_print(summary_dict, *, heading):
+        calls["print"] += 1
+        assert summary_dict is expected_summary
+        assert heading == "posterior"
+
+    monkeypatch.setattr(fit_lc, "compute_numpyro_summary", fake_compute)
+    monkeypatch.setattr(fit_lc, "print_numpyro_summary_dict", fake_print)
+
+    result = fit_lc.summarize_final_hubble_nuts_posterior(
+        samples_per_chain,
+        fit_method=fit_method,
+        heading="posterior",
+    )
+
+    assert result is expected_summary
+    assert calls == {"compute": 1, "print": 1}
+
+
+@pytest.mark.parametrize(
+    ("fit_method", "resumed", "samples_per_chain"),
+    (
+        ("nuts", True, {"log_sigma_uv": np.ones((1, 4))}),
+        ("ns", False, {"log_sigma_uv": np.ones((1, 4))}),
+        ("svi", False, {"log_sigma_uv": np.ones((1, 4))}),
+        ("nuts", False, None),
+    ),
+)
+def test_final_nuts_summary_unavailable_paths_return_nan_fields(
+    monkeypatch,
+    fit_method,
+    resumed,
+    samples_per_chain,
+):
+    printed = []
+    monkeypatch.setattr(
+        fit_lc,
+        "compute_numpyro_summary",
+        lambda *_args, **_kwargs: pytest.fail("summary should not be computed"),
+    )
+    monkeypatch.setattr(
+        fit_lc,
+        "print_numpyro_summary_dict",
+        lambda summary_dict, *, heading: printed.append((summary_dict, heading)),
+    )
+
+    summary = fit_lc.summarize_final_hubble_nuts_posterior(
+        samples_per_chain,
+        fit_method=fit_method,
+        resumed=resumed,
+        heading="posterior unavailable",
+    )
+    fields = fit_lc.convergence_fields(
+        summary,
+        fit_lc.HUBBLE_CONVERGENCE_FIELD_MAP,
+    )
+
+    assert summary == {}
+    assert printed == [({}, "posterior unavailable")]
+    assert all(np.isnan(value) for value in fields.values())
+
+
+def test_summarize_nuts_extra_fields_reports_sampling_pathologies():
+    extra_fields = {
+        "accept_prob": np.array([[0.7, 0.8, 0.9, 1.0], [0.6, 0.7, 0.8, 0.9]]),
+        "diverging": np.array(
+            [[False, True, False, False], [False, False, True, False]]
+        ),
+        "num_steps": np.array([[1, 3, 7, 15], [2, 4, 8, 15]]),
+        "energy": np.array([[0.0, 1.0, 0.0, 1.0], [0.0, 2.0, 0.0, 2.0]]),
+    }
+
+    diagnostics = fit_lc.summarize_nuts_extra_fields(
+        extra_fields,
+        max_tree_depth=4,
+    )
+
+    assert np.isclose(diagnostics["accept_prob"], 0.8)
+    assert diagnostics["num_divergences"] == 2
+    assert np.isclose(diagnostics["nuts_mean_num_steps"], 6.875)
+    assert diagnostics["nuts_max_num_steps"] == 15
+    assert np.isclose(diagnostics["nuts_mean_tree_depth"], 2.875)
+    assert diagnostics["nuts_max_tree_depth_observed"] == 4
+    assert diagnostics["nuts_num_max_tree_depth"] == 3
+    assert np.isclose(diagnostics["nuts_max_tree_depth_fraction"], 3.0 / 8.0)
+    assert np.isclose(diagnostics["nuts_ebfmi"], 4.0)
+
+
+def test_unavailable_nuts_diagnostics_are_serializable_nans():
+    diagnostics = fit_lc.summarize_nuts_extra_fields({}, max_tree_depth=8)
+
+    assert set(diagnostics) == set(fit_lc.NUTS_DIAGNOSTIC_FIELDS)
+    assert all(np.isnan(value) for value in diagnostics.values())
+
+
+def test_run_nuts_inference_collects_final_chain_diagnostics():
+    def model():
+        fit_lc.numpyro.sample("x", fit_lc.dist.Normal(0.0, 1.0))
+
+    samples, samples_per_chain, diagnostics = fit_lc._run_nuts_inference(
+        model,
+        jax.random.PRNGKey(41),
+        num_warmup=5,
+        num_samples=8,
+        num_chains=1,
+        chain_method="sequential",
+        progress_bar=False,
+        dense_mass=True,
+        max_tree_depth=2,
+        target_accept=0.7,
+    )
+
+    assert samples["x"].shape == (8,)
+    assert samples_per_chain["x"].shape == (1, 8)
+    assert 0.0 <= diagnostics["accept_prob"] <= 1.0
+    assert diagnostics["num_divergences"] >= 0
+    assert diagnostics["nuts_mean_num_steps"] > 0.0
+    assert diagnostics["nuts_max_num_steps"] <= 3
+    assert 1 <= diagnostics["nuts_max_tree_depth_observed"] <= 2
+    assert 0.0 <= diagnostics["nuts_max_tree_depth_fraction"] <= 1.0
+    assert np.isfinite(diagnostics["nuts_ebfmi"])
+    assert diagnostics["nuts_elapsed_sec"] > 0.0
+    assert diagnostics["elapsed_sec"] == diagnostics["nuts_elapsed_sec"]
 
 
 def test_svi_then_nuts_refinement_requires_svi_backend():

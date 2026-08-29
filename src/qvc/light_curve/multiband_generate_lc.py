@@ -75,7 +75,7 @@ def rolling_photometric_outlier_mask(
     magerrs = np.asarray(magerrs, dtype=float)
     if not (times.shape == mags.shape == magerrs.shape):
         raise ValueError("times, mags, and magerrs must have matching shapes")
-    if half_window_days <= 0:
+    if not np.isfinite(half_window_days) or half_window_days <= 0:
         raise ValueError("half_window_days must be positive")
     if min_neighbors < 1:
         raise ValueError("min_neighbors must be at least 1")
@@ -413,12 +413,19 @@ def concat_light_curves(
     N=None,
     *,
     load_seeing=True,
+    outlier_half_window_days=30.0,
 ):
     """Vectorized light-curve concatenation.
 
     Missing seeing sidecars are optional. Set ``load_seeing=False`` for callers,
     such as spectral fitting, that do not use epoch-level seeing information.
     """
+    if (
+        not np.isfinite(outlier_half_window_days)
+        or outlier_half_window_days <= 0
+    ):
+        raise ValueError("outlier_half_window_days must be positive")
+
     print(
         f"[DEBUG] Loading concat_light_curves with filter_object_ids={filter_object_ids}, skip={skip}, N={N}"
     )
@@ -657,6 +664,7 @@ def concat_light_curves(
             group["time"].to_numpy(dtype=float),
             group["mag"].to_numpy(dtype=float),
             group["magerr"].to_numpy(dtype=float),
+            half_window_days=outlier_half_window_days,
         )
     obs = obs.loc[~rejected].copy()
     obs = obs.sort_values(["object_id", "band_idx", "time"], kind="mergesort")

@@ -89,3 +89,29 @@ def test_short_summary_failure_returns_empty_mapping(monkeypatch):
     monkeypatch.setitem(sys.modules, "numpyro.diagnostics", diagnostics_module)
 
     assert compute_numpyro_summary({"x": np.ones((1, 2))}) == {}
+
+
+def test_one_chain_summary_has_finite_hubble_diagnostics():
+    rng = np.random.default_rng(20260820)
+    summary = compute_numpyro_summary(
+        {
+            "log_sigma_uv": rng.normal(-1.0, 0.1, size=(1, 500)),
+            "log_tau_uv": rng.normal(5.0, 0.2, size=(1, 500)),
+        },
+        group_by_chain=True,
+    )
+    fields = convergence_fields(
+        summary,
+        {
+            "log_sigma_uv": "log_sigma_uv",
+            "log_tau_uv_rf": "log_tau_uv",
+        },
+    )
+
+    assert set(fields) == {
+        "log_sigma_uv_rhat",
+        "log_sigma_uv_ess",
+        "log_tau_uv_rf_rhat",
+        "log_tau_uv_rf_ess",
+    }
+    assert all(np.isfinite(value) for value in fields.values())
