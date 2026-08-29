@@ -18,6 +18,31 @@ def _patch_concat_light_curves(monkeypatch, lc_objects):
     )
 
 
+def test_load_lc_psf_photometry_does_not_load_seeing(monkeypatch):
+    import qvc.light_curve.multiband_generate_lc as multiband_generate_lc
+
+    calls = []
+
+    def fake_concat_light_curves(*args, **kwargs):
+        calls.append(kwargs)
+        return []
+
+    monkeypatch.setattr(
+        multiband_generate_lc,
+        "concat_light_curves",
+        fake_concat_light_curves,
+    )
+
+    assert fit_spectra.load_lc_psf_photometry_by_object_id(["1458203"]) == {}
+    assert calls == [
+        {
+            "filter_object_ids": ["1458203", 1458203],
+            "progress_bar": False,
+            "load_seeing": False,
+        }
+    ]
+
+
 def _build_records_args(**overrides):
     values = {
         "fpath_in": None,

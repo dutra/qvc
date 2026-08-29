@@ -1,0 +1,11 @@
+# %ECSV 1.0
+# ---
+# datatype:
+# - {name: object_id, datatype: string}
+# - {name: plate, datatype: int64}
+# - {name: mjd, datatype: int64}
+# - {name: fiber, datatype: int64}
+# - {name: z, datatype: float64}
+# schema: astropy-2.0
+object_id plate mjd fiber z
+1414639 698 52203 279 0.3036496

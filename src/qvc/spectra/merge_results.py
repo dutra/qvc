@@ -5,12 +5,66 @@ import glob
 import os
 import sys
 
+import numpy as np
 import pandas as pd
 from astropy.io import fits
 from tqdm import tqdm
 
 from qvc.hubble.hubble_utils import populate_sdss_fields
 from qvc.hubble.hubble_utils import resolve_qvc_data_path
+from qvc.provenance import build_run_record
+from qvc.spectra.catalog_hdf5 import (
+    JOINT_PSF_PHOTOMETRY_BANDS,
+    JOINT_PSF_PHOTOMETRY_DRAW_COUNT,
+    JOINT_POSTERIOR_DRAW_COUNT,
+    JOINT_POSTERIOR_DRAW_FIELDS,
+    PSF_AGN_FRACTION_BANDS,
+    PSF_AGN_FRACTION_DRAW_COUNT,
+    SPECTRA_CATALOG_FORMAT,
+    SpectraCatalog,
+    read_spectra_catalog_hdf5,
+    write_spectra_catalog_hdf5,
+)
+
+
+SDSS_SPECOBJ_STRING_FIELDS = {
+    "RUN2D": "SDSS_RUN2D",
+    "SURVEY": "SDSS_SURVEY",
+    "INSTRUMENT": "SDSS_INSTRUMENT",
+    "PROGRAMNAME": "SDSS_PROGRAMNAME",
+    "SOURCETYPE": "SDSS_SOURCETYPE",
+    "TARGETTYPE": "SDSS_TARGETTYPE",
+    "CHUNK": "SDSS_CHUNK",
+    "PLATERUN": "SDSS_PLATERUN",
+    # TARGETOBJID is stored as a 22-character FITS field, not a numeric column.
+    "TARGETOBJID": "SDSS_TARGETOBJID",
+}
+SDSS_SPECOBJ_INTEGER_FIELDS = {
+    "THING_ID": "SDSS_THING_ID",
+    "THING_ID_TARGETING": "SDSS_THING_ID_TARGETING",
+    "PRIMTARGET": "SDSS_PRIMTARGET",
+    "SECTARGET": "SDSS_SECTARGET",
+    "LEGACY_TARGET1": "SDSS_LEGACY_TARGET1",
+    "LEGACY_TARGET2": "SDSS_LEGACY_TARGET2",
+    "SPECIAL_TARGET1": "SDSS_SPECIAL_TARGET1",
+    "SPECIAL_TARGET2": "SDSS_SPECIAL_TARGET2",
+    "SEGUE1_TARGET1": "SDSS_SEGUE1_TARGET1",
+    "SEGUE1_TARGET2": "SDSS_SEGUE1_TARGET2",
+    "SEGUE2_TARGET1": "SDSS_SEGUE2_TARGET1",
+    "SEGUE2_TARGET2": "SDSS_SEGUE2_TARGET2",
+    "BOSS_TARGET1": "SDSS_BOSS_TARGET1",
+    "BOSS_TARGET2": "SDSS_BOSS_TARGET2",
+    "EBOSS_TARGET0": "SDSS_EBOSS_TARGET0",
+    "EBOSS_TARGET1": "SDSS_EBOSS_TARGET1",
+    "EBOSS_TARGET2": "SDSS_EBOSS_TARGET2",
+    "EBOSS_TARGET_ID": "SDSS_EBOSS_TARGET_ID",
+    "ANCILLARY_TARGET1": "SDSS_ANCILLARY_TARGET1",
+    "ANCILLARY_TARGET2": "SDSS_ANCILLARY_TARGET2",
+}
+SDSS_SPECOBJ_OUTPUT_FIELDS = (
+    *SDSS_SPECOBJ_STRING_FIELDS.values(),
+    *SDSS_SPECOBJ_INTEGER_FIELDS.values(),
+)
 
 
 def read_quasars_from_csv(csv_path):
@@ -45,6 +99,76 @@ def write_quasars_to_csv(quasars, csv_path, fields=None):
             writer.writerow({k: q.get(k, "") for k in fields})
 
     print(f"Wrote {len(quasars)} rows to {csv_path}")
+
+
+def partition_fit_status_object_ids(quasars):
+    """Return unique successful and failed object IDs in first-seen order."""
+
+    status_by_object_id = {}
+    for row_index, quasar in enumerate(quasars):
+        if "object_id" not in quasar:
+            raise ValueError(
+                f"Merged spectra row {row_index} is missing required field 'object_id'."
+            )
+        object_id = quasar["object_id"]
+        if is_missing_value(object_id) or str(object_id).strip() == "":
+            raise ValueError(
+                f"Merged spectra row {row_index} has a missing or blank object_id."
+            )
+        object_id = str(object_id).strip()
+
+        if "fit_ok" not in quasar:
+            raise ValueError(
+                f"Merged spectra row {row_index} is missing required field 'fit_ok'."
+            )
+        fit_ok = quasar["fit_ok"]
+        if isinstance(fit_ok, (bool, np.bool_)):
+            succeeded = bool(fit_ok)
+        elif isinstance(fit_ok, str) and fit_ok.strip().lower() in {"true", "false"}:
+            succeeded = fit_ok.strip().lower() == "true"
+        else:
+            raise ValueError(
+                f"Merged spectra row {row_index} has unrecognized fit_ok value "
+                f"{fit_ok!r}; expected true or false."
+            )
+
+        if object_id not in status_by_object_id:
+            status_by_object_id[object_id] = succeeded
+        else:
+            status_by_object_id[object_id] = (
+                status_by_object_id[object_id] or succeeded
+            )
+
+    successful = [
+        object_id
+        for object_id, succeeded in status_by_object_id.items()
+        if succeeded
+    ]
+    failed = [
+        object_id
+        for object_id, succeeded in status_by_object_id.items()
+        if not succeeded
+    ]
+    return successful, failed
+
+
+def write_fit_status_object_id_csvs(out_path, successful, failed):
+    """Write successful and failed object-ID CSVs beside a merged catalog."""
+
+    output_stem, _extension = os.path.splitext(os.fspath(out_path))
+    successful_path = f"{output_stem}_successful_object_ids.csv"
+    failed_path = f"{output_stem}_failed_object_ids.csv"
+    write_quasars_to_csv(
+        [{"object_id": object_id} for object_id in successful],
+        successful_path,
+        fields=["object_id"],
+    )
+    write_quasars_to_csv(
+        [{"object_id": object_id} for object_id in failed],
+        failed_path,
+        fields=["object_id"],
+    )
+    return successful_path, failed_path
 
 
 def enforce_expected_count(per_file_count, expected_n, file_path):
@@ -123,9 +247,322 @@ def load_and_merge_csv(file_list, expected_n):
     return all_quasars
 
 
-def _normalize_run2d(value):
+def _dedup_row_indices(frame, keys):
+    if not keys:
+        return np.arange(len(frame), dtype=int)
+    seen = {}
+    order = []
+    for index, row in frame.iterrows():
+        values = []
+        for key in keys:
+            value = row.get(key)
+            if is_missing_value(value) or value == "":
+                comparison_key = ("__row__", int(index))
+                break
+            values.append(value)
+        else:
+            comparison_key = tuple(values)
+        if comparison_key not in seen:
+            order.append(comparison_key)
+        seen[comparison_key] = int(index)
+    return np.asarray([seen[key] for key in order], dtype=int)
+
+
+_NUMERIC_DTYPE_KINDS = frozenset("iufc")
+
+
+def _scalar_dtype_kinds_compatible(left, right):
+    """Return whether two shard dtypes can share one scalar catalog column."""
+
+    if left == right:
+        return True
+    return left in _NUMERIC_DTYPE_KINDS and right in _NUMERIC_DTYPE_KINDS
+
+
+def _prediction_provenance_differences(reference, candidate):
+    """Return human-readable field differences between provenance records."""
+
+    missing = "<missing>"
+    differences = []
+    for key in sorted(set(reference) | set(candidate)):
+        reference_value = reference.get(key, missing)
+        candidate_value = candidate.get(key, missing)
+        if reference_value != candidate_value:
+            differences.append(
+                f"{key}: reference={reference_value!r}, shard={candidate_value!r}"
+            )
+    return differences
+
+
+def _report_ignored_prediction_provenance(provenance_records):
+    """Report ignored shard provenance mismatches and return the chosen record."""
+
+    if not provenance_records:
+        return {}
+    reference_path, reference, _ = next(
+        (record for record in provenance_records if record[2]),
+        provenance_records[0],
+    )
+    mismatches = []
+    for path, candidate, has_valid_draws in provenance_records:
+        differences = _prediction_provenance_differences(reference, candidate)
+        if differences:
+            mismatches.append((path, has_valid_draws, differences))
+    if mismatches:
+        print(
+            "[WARNING] Ignored "
+            f"{len(mismatches)} joint PSF photometry prediction provenance "
+            "mismatch(es)."
+        )
+        print(f"Reference provenance retained from {reference_path}.")
+        for path, has_valid_draws, differences in mismatches:
+            draw_status = "has valid draws" if has_valid_draws else "no valid draws"
+            print(f"  - {path} ({draw_status}): {'; '.join(differences)}")
+    return dict(reference)
+
+
+def deduplicate_h5_catalog(catalog, keys):
+    """Deduplicate an in-memory catalog while preserving draw alignment."""
+
+    keep = _dedup_row_indices(catalog.frame, keys or [])
+    return SpectraCatalog(
+        frame=catalog.frame.iloc[keep].reset_index(drop=True),
+        fraction_draws=catalog.fraction_draws[keep],
+        valid_count=catalog.valid_count[keep],
+        bands=catalog.bands,
+        f_host_2500_psf_draws=catalog.f_host_2500_psf_draws[keep],
+        f_host_2500_psf_valid_count=catalog.f_host_2500_psf_valid_count[keep],
+        catalog_format=catalog.catalog_format,
+        joint_posterior_draws={
+            name: catalog.joint_posterior_draws[name][keep]
+            for name in JOINT_POSTERIOR_DRAW_FIELDS
+        },
+        joint_posterior_valid_count=catalog.joint_posterior_valid_count[keep],
+        joint_posterior_index=catalog.joint_posterior_index[keep],
+        joint_posterior_source_draw_count=(
+            catalog.joint_posterior_source_draw_count[keep]
+        ),
+        joint_posterior_selection_seed=catalog.joint_posterior_selection_seed,
+        joint_psf_photometry_draws=catalog.joint_psf_photometry_draws[keep],
+        joint_psf_photometry_bands=catalog.joint_psf_photometry_bands,
+        joint_psf_photometry_provenance=(
+            catalog.joint_psf_photometry_provenance
+        ),
+    )
+
+
+def load_and_merge_h5(file_list, expected_n=None, dedup_keys=None):
+    """Load HDF5 shards and keep optional fields and fraction draws aligned."""
+
+    frames = []
+    draws = []
+    counts = []
+    joint_draws = {name: [] for name in JOINT_POSTERIOR_DRAW_FIELDS}
+    joint_counts = []
+    joint_indices = []
+    joint_source_counts = []
+    joint_psf_photometry = []
+    joint_psf_photometry_provenance_records = []
+    selection_seed = None
+    column_order = []
+    column_dtype_kinds = {}
+    column_sources = {}
+    for path in tqdm(file_list, desc="Merging HDF5 shards", unit="file"):
+        catalog = read_spectra_catalog_hdf5(path)
+        if catalog.catalog_format != SPECTRA_CATALOG_FORMAT:
+            raise ValueError(
+                f"Cannot merge legacy spectra catalog {path} with format "
+                f"{catalog.catalog_format!r}; all shards must use "
+                f"{SPECTRA_CATALOG_FORMAT!r}."
+            )
+        if catalog.joint_posterior_selection_seed is None:
+            raise ValueError(
+                f"Spectra catalog {path} has no joint posterior selection seed."
+            )
+        if selection_seed is None:
+            selection_seed = catalog.joint_posterior_selection_seed
+        elif catalog.joint_posterior_selection_seed != selection_seed:
+            raise ValueError(
+                "Cannot merge spectra catalogs selected with different joint "
+                "posterior seeds: "
+                f"{selection_seed} != {catalog.joint_posterior_selection_seed} "
+                f"in {path}."
+            )
+        if not enforce_expected_count(len(catalog.frame), expected_n, path):
+            continue
+        if catalog.bands != PSF_AGN_FRACTION_BANDS:
+            raise ValueError(f"Incompatible fraction bands in {path}: {catalog.bands}")
+        for column in catalog.frame.columns:
+            dtype_kind = catalog.frame[column].dtype.kind
+            if column not in column_dtype_kinds:
+                column_order.append(column)
+                column_dtype_kinds[column] = dtype_kind
+                column_sources[column] = path
+                continue
+            reference_kind = column_dtype_kinds[column]
+            if not _scalar_dtype_kinds_compatible(reference_kind, dtype_kind):
+                raise ValueError(
+                    f"Incompatible scalar catalog dtype for column {column!r} in "
+                    f"{path}: kind {dtype_kind!r} cannot be merged with kind "
+                    f"{reference_kind!r} first seen in {column_sources[column]}."
+                )
+        frames.append(catalog.frame)
+        draws.append(catalog.fraction_draws)
+        counts.append(catalog.valid_count)
+        for name in JOINT_POSTERIOR_DRAW_FIELDS:
+            joint_draws[name].append(catalog.joint_posterior_draws[name])
+        joint_counts.append(catalog.joint_posterior_valid_count)
+        joint_indices.append(catalog.joint_posterior_index)
+        joint_source_counts.append(catalog.joint_posterior_source_draw_count)
+        if catalog.joint_psf_photometry_draws is None:
+            raise ValueError(f"Required joint PSF photometry is absent in {path}.")
+        if catalog.joint_psf_photometry_bands != JOINT_PSF_PHOTOMETRY_BANDS:
+            raise ValueError(
+                f"Incompatible joint PSF photometry bands in {path}: "
+                f"{catalog.joint_psf_photometry_bands}."
+            )
+        joint_psf_photometry_provenance_records.append(
+            (
+                path,
+                dict(catalog.joint_psf_photometry_provenance),
+                bool(np.any(catalog.joint_posterior_valid_count > 0)),
+            )
+        )
+        joint_psf_photometry.append(catalog.joint_psf_photometry_draws)
+
+    joint_psf_photometry_provenance = _report_ignored_prediction_provenance(
+        joint_psf_photometry_provenance_records
+    )
+
+    if not frames:
+        return SpectraCatalog(
+            frame=pd.DataFrame(),
+            fraction_draws=np.empty(
+                (0, PSF_AGN_FRACTION_DRAW_COUNT, len(PSF_AGN_FRACTION_BANDS)),
+                dtype=np.float32,
+            ),
+            valid_count=np.empty(0, dtype=np.int16),
+            bands=PSF_AGN_FRACTION_BANDS,
+            f_host_2500_psf_draws=np.empty(
+                (0, JOINT_POSTERIOR_DRAW_COUNT), dtype=np.float32
+            ),
+            f_host_2500_psf_valid_count=np.empty(0, dtype=np.int16),
+            catalog_format=SPECTRA_CATALOG_FORMAT,
+            joint_posterior_draws={
+                name: np.empty(
+                    (0, JOINT_POSTERIOR_DRAW_COUNT), dtype=np.float32
+                )
+                for name in JOINT_POSTERIOR_DRAW_FIELDS
+            },
+            joint_posterior_valid_count=np.empty(0, dtype=np.int16),
+            joint_posterior_index=np.empty(
+                (0, JOINT_POSTERIOR_DRAW_COUNT), dtype=np.int32
+            ),
+            joint_posterior_source_draw_count=np.empty(0, dtype=np.int32),
+            joint_posterior_selection_seed=selection_seed,
+            joint_psf_photometry_draws=np.empty(
+                (0, JOINT_PSF_PHOTOMETRY_DRAW_COUNT, len(JOINT_PSF_PHOTOMETRY_BANDS)),
+                dtype=np.float32,
+            ),
+            joint_psf_photometry_bands=JOINT_PSF_PHOTOMETRY_BANDS,
+            joint_psf_photometry_provenance={
+                "prediction_source": "empty_merge",
+                "jaxsedfit_git_commit": "not_applicable",
+            },
+        )
+
+    # Posterior sites can legitimately vary by object because the fitted line
+    # set depends on spectral coverage.  Concatenation forms their union and
+    # fills fields absent from a shard with NaN.  Preserve deterministic
+    # first-seen column order rather than requiring identical shard ordering.
+    frame = pd.concat(frames, ignore_index=True, sort=False).reindex(
+        columns=column_order
+    )
+    draw_array = np.concatenate(draws, axis=0)
+    count_array = np.concatenate(counts, axis=0)
+    joint_draw_arrays = {
+        name: np.concatenate(values, axis=0)
+        for name, values in joint_draws.items()
+    }
+    joint_count_array = np.concatenate(joint_counts, axis=0)
+    joint_index_array = np.concatenate(joint_indices, axis=0)
+    joint_source_count_array = np.concatenate(joint_source_counts, axis=0)
+    joint_psf_photometry_array = np.concatenate(
+        joint_psf_photometry,
+        axis=0,
+    )
+    return deduplicate_h5_catalog(
+        SpectraCatalog(
+            frame=frame,
+            fraction_draws=draw_array,
+            valid_count=count_array,
+            bands=PSF_AGN_FRACTION_BANDS,
+            f_host_2500_psf_draws=joint_draw_arrays["f_host_2500_psf"],
+            f_host_2500_psf_valid_count=joint_count_array,
+            catalog_format=SPECTRA_CATALOG_FORMAT,
+            joint_posterior_draws=joint_draw_arrays,
+            joint_posterior_valid_count=joint_count_array,
+            joint_posterior_index=joint_index_array,
+            joint_posterior_source_draw_count=joint_source_count_array,
+            joint_posterior_selection_seed=selection_seed,
+            joint_psf_photometry_draws=joint_psf_photometry_array,
+            joint_psf_photometry_bands=JOINT_PSF_PHOTOMETRY_BANDS,
+            joint_psf_photometry_provenance=(
+                joint_psf_photometry_provenance or {}
+            ),
+        ),
+        dedup_keys,
+    )
+
+
+def enrich_h5_catalog_rows(catalog, enrichment):
+    """Run record enrichment and restore the exact fraction-draw row order."""
+
+    marker = "_qvc_fraction_draw_row_index"
+    if marker in catalog.frame.columns:
+        raise ValueError(f"Reserved alignment column {marker!r} is already present.")
+    frame = catalog.frame.copy()
+    frame[marker] = np.arange(len(frame), dtype=int)
+    enriched = pd.DataFrame.from_records(enrichment(frame.to_dict("records")))
+    if marker not in enriched.columns:
+        raise ValueError("Spectral enrichment discarded the HDF5 row-alignment marker.")
+    marker_values = pd.to_numeric(enriched[marker], errors="coerce").to_numpy()
+    expected = np.arange(len(frame), dtype=int)
+    if len(enriched) != len(frame) or set(marker_values.tolist()) != set(expected.tolist()):
+        raise ValueError("Spectral enrichment added, removed, or duplicated HDF5 catalog rows.")
+    enriched = (
+        enriched.sort_values(marker, kind="stable")
+        .drop(columns=[marker])
+        .reset_index(drop=True)
+    )
+    return SpectraCatalog(
+        frame=enriched,
+        fraction_draws=catalog.fraction_draws,
+        valid_count=catalog.valid_count,
+        bands=catalog.bands,
+        f_host_2500_psf_draws=catalog.f_host_2500_psf_draws,
+        f_host_2500_psf_valid_count=catalog.f_host_2500_psf_valid_count,
+        catalog_format=catalog.catalog_format,
+        joint_posterior_draws=catalog.joint_posterior_draws,
+        joint_posterior_valid_count=catalog.joint_posterior_valid_count,
+        joint_posterior_index=catalog.joint_posterior_index,
+        joint_posterior_source_draw_count=(
+            catalog.joint_posterior_source_draw_count
+        ),
+        joint_posterior_selection_seed=catalog.joint_posterior_selection_seed,
+        joint_psf_photometry_draws=catalog.joint_psf_photometry_draws,
+        joint_psf_photometry_bands=catalog.joint_psf_photometry_bands,
+        joint_psf_photometry_provenance=(
+            catalog.joint_psf_photometry_provenance
+        ),
+    )
+
+
+def _normalize_sdss_text(value):
     if pd.isna(value):
         return pd.NA
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
     text = str(value).strip()
     if text.startswith("b'") and text.endswith("'"):
         text = text[2:-1]
@@ -135,8 +572,20 @@ def _normalize_run2d(value):
     return text
 
 
+def _normalize_run2d(value):
+    """Backward-compatible name for callers that normalize RUN2D only."""
+    return _normalize_sdss_text(value)
+
+
 def populate_sdss_run2d_from_fits(quasars, fits_path):
-    """Populate SDSS_RUN2D using DR17 specObj keys (plate, mjd, fiberid/fiber)."""
+    """Populate SDSS spectroscopic metadata using exact DR17 specObj keys.
+
+    The historical function name is retained for compatibility.  In addition
+    to ``SDSS_RUN2D``, this copies the survey/program labels and targeting bit
+    masks needed to distinguish BOSS from eBOSS and their target channels.
+    Only matching specObj rows are materialized, which keeps memory bounded
+    when reading the 5.8-million-row DR17 table.
+    """
     if not quasars:
         return list(quasars)
 
@@ -147,9 +596,13 @@ def populate_sdss_run2d_from_fits(quasars, fits_path):
     has_fiberid = "fiberid" in out.columns
     has_fiber = "fiber" in out.columns
     if not all(c in out.columns for c in key_cols) or (not has_fiberid and not has_fiber):
-        out["SDSS_RUN2D"] = pd.NA
+        for column in SDSS_SPECOBJ_STRING_FIELDS.values():
+            out[column] = pd.NA
+        for column in SDSS_SPECOBJ_INTEGER_FIELDS.values():
+            out[column] = -1
+        out["SDSS_SPECOBJ_MATCHED"] = False
         print(
-            "[WARNING] Cannot populate SDSS_RUN2D: merged data is missing required key columns "
+            "[WARNING] Cannot populate SDSS metadata: merged data is missing required key columns "
             "(need plate, mjd, and fiberid or fiber)."
         )
         return out.to_dict("records")
@@ -159,40 +612,124 @@ def populate_sdss_run2d_from_fits(quasars, fits_path):
     else:
         fiber_col = "fiber"
 
+    plate_key = pd.to_numeric(out["plate"], errors="coerce")
+    mjd_key = pd.to_numeric(out["mjd"], errors="coerce")
+    fiber_key = pd.to_numeric(out[fiber_col], errors="coerce")
+    valid_key = plate_key.notna() & mjd_key.notna() & fiber_key.notna()
+    target_keys = (
+        (
+            plate_key[valid_key].to_numpy(dtype=np.int64) * 100_000
+            + mjd_key[valid_key].to_numpy(dtype=np.int64)
+        )
+        * 10_000
+        + fiber_key[valid_key].to_numpy(dtype=np.int64)
+    )
+
     try:
         with fits.open(fits_path, memmap=True) as hdul:
             data = hdul[1].data
-            table = pd.DataFrame(
-                {
-                    "plate": data["PLATE"],
-                    "mjd": data["MJD"],
-                    "fiberid": data["FIBERID"],
-                    "SDSS_RUN2D": data["RUN2D"],
-                }
+            available = set(data.names)
+            required = {"PLATE", "MJD", "FIBERID", "RUN2D"}
+            missing_required = sorted(required.difference(available))
+            if missing_required:
+                raise ValueError(
+                    f"specObj table is missing required columns {missing_required}"
+                )
+            spec_plate = np.asarray(data["PLATE"], dtype=np.int64)
+            spec_mjd = np.asarray(data["MJD"], dtype=np.int64)
+            spec_fiber = np.asarray(data["FIBERID"], dtype=np.int64)
+            spec_keys = (
+                (spec_plate * 100_000 + spec_mjd) * 10_000 + spec_fiber
             )
+            matched_indices = np.flatnonzero(
+                np.isin(spec_keys, np.unique(target_keys), assume_unique=False)
+            )
+            table_data = {
+                "_sdss_plate_key": spec_plate[matched_indices],
+                "_sdss_mjd_key": spec_mjd[matched_indices],
+                "_sdss_fiber_key": spec_fiber[matched_indices],
+            }
+            for source, output in SDSS_SPECOBJ_STRING_FIELDS.items():
+                if source in available:
+                    table_data[output] = [
+                        _normalize_sdss_text(value)
+                        for value in data[source][matched_indices]
+                    ]
+            for source, output in SDSS_SPECOBJ_INTEGER_FIELDS.items():
+                if source in available:
+                    # Nullable Int64 prevents pandas from promoting the whole
+                    # column to float64 when a left-join row has no specObj
+                    # match.  That promotion would corrupt targeting masks
+                    # above 2**53.
+                    table_data[output] = pd.array(
+                        np.asarray(data[source][matched_indices], dtype=np.int64),
+                        dtype="Int64",
+                    )
+            table = pd.DataFrame(table_data)
     except Exception as exc:
-        out["SDSS_RUN2D"] = pd.NA
-        print(f"[WARNING] Could not read SDSS RUN2D FITS file {fits_path}: {exc}")
+        for column in SDSS_SPECOBJ_STRING_FIELDS.values():
+            out[column] = pd.NA
+        for column in SDSS_SPECOBJ_INTEGER_FIELDS.values():
+            out[column] = -1
+        out["SDSS_SPECOBJ_MATCHED"] = False
+        print(f"[WARNING] Could not read SDSS metadata FITS file {fits_path}: {exc}")
         return out.to_dict("records")
 
-    for col in ("plate", "mjd", "fiberid"):
-        table[col] = pd.to_numeric(table[col], errors="coerce").astype("Int64")
-    table["SDSS_RUN2D"] = table["SDSS_RUN2D"].apply(_normalize_run2d).astype("string")
-    table = table.drop_duplicates(subset=["plate", "mjd", "fiberid"], keep="first")
-
-    out["plate"] = pd.to_numeric(out["plate"], errors="coerce").astype("Int64")
-    out["mjd"] = pd.to_numeric(out["mjd"], errors="coerce").astype("Int64")
-    out["_fiber_merge_key"] = pd.to_numeric(out[fiber_col], errors="coerce").astype("Int64")
-
-    merged = out.merge(
-        table.rename(columns={"fiberid": "_fiber_merge_key"}),
-        on=["plate", "mjd", "_fiber_merge_key"],
-        how="left",
+    table = table.drop_duplicates(
+        subset=["_sdss_plate_key", "_sdss_mjd_key", "_sdss_fiber_key"],
+        keep="first",
     )
-    merged = merged.drop(columns=["_fiber_merge_key"])
-    n_matched = int(pd.notna(merged["SDSS_RUN2D"]).sum())
+    existing = {
+        column: out.pop(column).reset_index(drop=True)
+        for column in SDSS_SPECOBJ_OUTPUT_FIELDS
+        if column in out
+    }
+    out["_sdss_catalog_row"] = np.arange(len(out), dtype=np.int64)
+    out["_sdss_plate_key"] = plate_key.fillna(-1).to_numpy(dtype=np.int64)
+    out["_sdss_mjd_key"] = mjd_key.fillna(-1).to_numpy(dtype=np.int64)
+    out["_sdss_fiber_key"] = fiber_key.fillna(-1).to_numpy(dtype=np.int64)
+    merged = out.merge(
+        table,
+        on=["_sdss_plate_key", "_sdss_mjd_key", "_sdss_fiber_key"],
+        how="left",
+        validate="many_to_one",
+        sort=False,
+    )
+    merged = merged.sort_values("_sdss_catalog_row", kind="stable").reset_index(drop=True)
+    matched = merged["SDSS_RUN2D"].notna()
+    merged["SDSS_SPECOBJ_MATCHED"] = matched.to_numpy(dtype=bool)
+
+    for column in SDSS_SPECOBJ_STRING_FIELDS.values():
+        if column not in merged:
+            merged[column] = pd.NA
+        if column in existing:
+            missing = merged[column].isna() | (merged[column].astype("string").str.strip() == "")
+            merged.loc[missing, column] = existing[column][missing].to_numpy()
+        merged[column] = merged[column].apply(_normalize_sdss_text).astype("string")
+    for column in SDSS_SPECOBJ_INTEGER_FIELDS.values():
+        if column not in merged:
+            merged[column] = np.nan
+        if column in existing:
+            missing = pd.to_numeric(merged[column], errors="coerce").isna()
+            merged.loc[missing, column] = existing[column][missing].to_numpy()
+        merged[column] = (
+            pd.to_numeric(merged[column], errors="coerce")
+            .fillna(-1)
+            .astype(np.int64)
+        )
+
+    merged = merged.drop(
+        columns=[
+            "_sdss_catalog_row",
+            "_sdss_plate_key",
+            "_sdss_mjd_key",
+            "_sdss_fiber_key",
+        ]
+    )
+    n_matched = int(matched.sum())
     print(
-        f"Populated SDSS_RUN2D from {fits_path}: matched {n_matched} / {len(merged)} rows."
+        f"Populated SDSS spectroscopic metadata from {fits_path}: "
+        f"matched {n_matched} / {len(merged)} rows."
     )
     return merged.to_dict("records")
 
@@ -200,15 +737,15 @@ def populate_sdss_run2d_from_fits(quasars, fits_path):
 def main():
     p = argparse.ArgumentParser(
         description=(
-            "Merge CSV shards (*.csv) found in <base_dir>/<prefix>/ "
-            "and write merged output as CSV."
+            "Merge JAXSED HDF5 shards (or legacy CSV shards) found in "
+            "<base_dir>/<prefix>/."
         )
     )
     p.add_argument(
         "prefix",
         type=str,
         help=(
-            "Subdirectory under --base-dir containing top-level *.csv shards. "
+            "Subdirectory under --base-dir containing top-level shard files. "
             "Also used for the default output name."
         ),
     )
@@ -217,7 +754,7 @@ def main():
         "-b",
         type=str,
         default="results/data",
-        help="Base directory that contains <prefix>/*.csv. Default: results/data",
+        help="Base directory that contains <prefix> shard files. Default: results/data",
     )
     p.add_argument(
         "--expected",
@@ -233,12 +770,16 @@ def main():
         help="Skip populate_sdss_fields before writing.",
     )
     p.add_argument(
+        "--populate_sdss_metadata_file",
         "--populate_sdss_run2d_file",
+        dest="populate_sdss_metadata_file",
+        metavar="FITS_PATH",
         nargs="?",
         const="data/SDSS_DR17/specObj-dr17.fits",
         default=None,
         help=(
-            "Populate SDSS_RUN2D using RUN2D from the given SDSS DR17 specObj FITS file. "
+            "Populate SDSS_RUN2D, SDSS_SURVEY, program/source labels, and targeting "
+            "bits from the given SDSS DR17 specObj FITS file. "
             "If passed without a value, defaults to data/SDSS_DR17/specObj-dr17.fits."
         ),
     )
@@ -246,7 +787,7 @@ def main():
         "--out",
         type=str,
         default=None,
-        help="Explicit output CSV path. If omitted, defaults to <base_dir>/<prefix>.csv",
+        help="Explicit output path. Defaults to .h5 for HDF5 shards and .csv for legacy shards.",
     )
     p.add_argument(
         "--dedup-keys",
@@ -261,55 +802,138 @@ def main():
     args = p.parse_args()
 
     shard_dir = os.path.join(args.base_dir, args.prefix)
-    file_list = sorted(glob.glob(os.path.join(shard_dir, "*.csv")))
-
+    h5_files = sorted(glob.glob(os.path.join(shard_dir, "*.h5"))) + sorted(
+        glob.glob(os.path.join(shard_dir, "*.hdf5"))
+    )
+    csv_files = sorted(glob.glob(os.path.join(shard_dir, "*.csv")))
+    if h5_files and csv_files:
+        print(f"Mixed HDF5 and CSV shards are not supported in {shard_dir}.")
+        sys.exit(1)
+    file_list = h5_files or csv_files
+    use_h5 = bool(h5_files)
     if not file_list:
-        print(f"No input shards found in {shard_dir} matching *.csv.")
+        print(f"No input HDF5 or CSV shards found in {shard_dir}.")
         sys.exit(1)
 
-    print(f"Discovered {len(file_list)} top-level CSV shard(s) in {shard_dir}.")
+    kind = "HDF5" if use_h5 else "legacy CSV"
+    print(f"Discovered {len(file_list)} top-level {kind} shard(s) in {shard_dir}.")
 
     out_path = args.out
     if not out_path:
-        out_path = os.path.join(args.base_dir, f"{args.prefix}.csv")
+        suffix = ".h5" if use_h5 else ".csv"
+        out_path = os.path.join(args.base_dir, f"{args.prefix}{suffix}")
 
     print(f"Output: {out_path}")
 
-    all_quasars = load_and_merge_csv(file_list, expected_n=args.expected)
-    print(f"Loaded total of {len(all_quasars)} rows from {len(file_list)} shards.")
-
-    dedup_keys = args.dedup_keys
-    if dedup_keys:
-        before = len(all_quasars)
-        all_quasars = deduplicate(all_quasars, keys=dedup_keys)
-        print(f"De-duplicated by {dedup_keys}: {before} -> {len(all_quasars)}")
+    if use_h5:
+        merged_catalog = load_and_merge_h5(
+            file_list,
+            expected_n=args.expected,
+            dedup_keys=[],
+        )
+        before_count = len(merged_catalog.frame)
+        merged_catalog = deduplicate_h5_catalog(
+            merged_catalog,
+            args.dedup_keys,
+        )
+        all_quasars = merged_catalog.frame.to_dict("records")
+        print(f"Loaded total of {before_count} rows from {len(file_list)} shards.")
+        if args.dedup_keys:
+            print(
+                f"De-duplicated by {args.dedup_keys}: "
+                f"{before_count} -> {len(all_quasars)}"
+            )
+    else:
+        all_quasars = load_and_merge_csv(file_list, expected_n=args.expected)
+        print(f"Loaded total of {len(all_quasars)} rows from {len(file_list)} shards.")
+        if args.dedup_keys:
+            before = len(all_quasars)
+            all_quasars = deduplicate(all_quasars, keys=args.dedup_keys)
+            print(f"De-duplicated by {args.dedup_keys}: {before} -> {len(all_quasars)}")
 
     if not args.skip_populate_sdss and all_quasars:
         print("Populating SDSS fields...")
-        all_quasars = populate_sdss_fields(all_quasars)
+        if use_h5:
+            merged_catalog = enrich_h5_catalog_rows(
+                merged_catalog,
+                populate_sdss_fields,
+            )
+            all_quasars = merged_catalog.frame.to_dict("records")
+        else:
+            all_quasars = populate_sdss_fields(all_quasars)
 
-    if args.populate_sdss_run2d_file and all_quasars:
+    if args.populate_sdss_metadata_file and all_quasars:
         try:
-            fits_path = resolve_qvc_data_path(args.populate_sdss_run2d_file)
+            fits_path = resolve_qvc_data_path(args.populate_sdss_metadata_file)
         except FileNotFoundError:
-            fits_path = args.populate_sdss_run2d_file
+            fits_path = args.populate_sdss_metadata_file
         if not os.path.exists(fits_path):
             print(
-                f"[WARNING] --populate_sdss_run2d_file requested, but file not found: {fits_path}. "
-                "Continuing without SDSS_RUN2D enrichment."
+                f"[WARNING] --populate_sdss_metadata_file requested, but file not found: "
+                f"{fits_path}. Continuing without SDSS spectroscopic metadata enrichment."
             )
         else:
-            all_quasars = populate_sdss_run2d_from_fits(all_quasars, fits_path)
+            if use_h5:
+                merged_catalog = enrich_h5_catalog_rows(
+                    merged_catalog,
+                    lambda rows: populate_sdss_run2d_from_fits(rows, fits_path),
+                )
+                all_quasars = merged_catalog.frame.to_dict("records")
+            else:
+                all_quasars = populate_sdss_run2d_from_fits(all_quasars, fits_path)
 
-    seen = []
-    seen_set = set()
-    for q in all_quasars:
-        for k in q.keys():
-            if k not in seen_set:
-                seen_set.add(k)
-                seen.append(k)
+    successful_object_ids, failed_object_ids = partition_fit_status_object_ids(
+        all_quasars
+    )
 
-    write_quasars_to_csv(all_quasars, out_path, fields=seen)
+    if use_h5:
+        frame = pd.DataFrame.from_records(all_quasars)
+        provenance = build_run_record(
+            "qvc.spectra.merge_results",
+            args,
+            input_paths={f"shard_{index}": path for index, path in enumerate(file_list)},
+            event_type="merge",
+        )
+        write_spectra_catalog_hdf5(
+            out_path,
+            frame,
+            merged_catalog.fraction_draws,
+            merged_catalog.valid_count,
+            joint_posterior_draws=merged_catalog.joint_posterior_draws,
+            joint_posterior_valid_count=(
+                merged_catalog.joint_posterior_valid_count
+            ),
+            joint_posterior_index=merged_catalog.joint_posterior_index,
+            joint_posterior_source_draw_count=(
+                merged_catalog.joint_posterior_source_draw_count
+            ),
+            joint_posterior_selection_seed=(
+                merged_catalog.joint_posterior_selection_seed
+            ),
+            joint_psf_photometry_draws=(
+                merged_catalog.joint_psf_photometry_draws
+            ),
+            joint_psf_photometry_provenance=(
+                merged_catalog.joint_psf_photometry_provenance
+            ),
+            provenance=provenance,
+        )
+        print(f"Wrote {len(frame)} rows to merged HDF5 {out_path}")
+    else:
+        seen = []
+        seen_set = set()
+        for q in all_quasars:
+            for k in q.keys():
+                if k not in seen_set:
+                    seen_set.add(k)
+                    seen.append(k)
+        write_quasars_to_csv(all_quasars, out_path, fields=seen)
+
+    write_fit_status_object_id_csvs(
+        out_path,
+        successful_object_ids,
+        failed_object_ids,
+    )
 
     print("Done.")
 

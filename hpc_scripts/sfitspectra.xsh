@@ -27,7 +27,7 @@ from qvc.provenance import (
 # 1. Define your job settings here
 # ==========================================
 partition = "day"
-time_limit = "4:00:00"
+time_limit = "8:00:00"
 
 # Number of object_ids per array task
 chunk_size = 4
@@ -690,25 +690,26 @@ if len(ids_this_task) == 0:
     raise SystemExit(0)
 
 chunk_tag = f"chunk{{task_id:04d}}"
-out_csv = f"{{output_dir}}/{{prefix}}_{{chunk_tag}}.csv"
+out_suffix = ".h5" if fit_script == "fit_spectra_jaxsedfit_joint.py" else ".csv"
+out_catalog = f"{{output_dir}}/{{prefix}}_{{chunk_tag}}{{out_suffix}}"
 real_output_dir = f"{{output_dir}}/all"
 
 print(f"Running task {{task_id}}")
 print(f"Processing rows {{start}}:{{stop}}")
 print(f"Number of object_ids in this task: {{len(ids_this_task)}}")
-print(f"Output CSV: {{out_csv}}")
+print(f"Output catalog: {{out_catalog}}")
 print(f"object_ids: {{ids_this_task}}")
 
 cmd = [
     python_bin,
     "-m", fit_module,
     "--mode", "fit",
-    out_csv,
+    out_catalog,
     "--cache-dir", cache_dir,
     "--verbose",
-    "--optax-steps", "2000",
-    "--optax-lr", "0.01",
-    "--nuts-warmup", "250",
+    "--optax-steps", "4000",
+    "--optax-lr", "0.001",
+    "--nuts-warmup", "500",
     "--nuts-samples", "250",
     "--nuts-chains", "1",
     "--output-dir", real_output_dir,

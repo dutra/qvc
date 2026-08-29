@@ -2,10 +2,10 @@
 """Merge jaxqsofit figure PDFs into one stamped PDF.
 
 Workflow:
-1. Load all rows from an input CSV.
+1. Load all scalar rows from an input spectral HDF5 catalog.
 2. Resolve one figure PDF per row using `sdss_name` (prefer z-matched filename).
 3. Stamp the figure with host/BC/iron fractions.
-4. Append one page per CSV row (in CSV order), skipping missing figures.
+4. Append one page per catalog row (in catalog order), skipping missing figures.
 """
 
 from __future__ import annotations
@@ -23,6 +23,8 @@ import multiprocessing as mp
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+
+from qvc.spectra.catalog_hdf5 import read_spectra_catalog_hdf5
 
 try:
     from pypdf import PdfReader, PdfWriter
@@ -52,12 +54,12 @@ SDSS_TOKEN_RE = re.compile(r"\d{6}\.\d{2}[+-]\d{6}\.\d")
 
 def parse_args():
     p = argparse.ArgumentParser(description="Build a stamped combined PDF from jaxqsofit figures.")
-    p.add_argument("csv", type=Path, help="Input CSV with one row per entry to include.")
+    p.add_argument("spectra_fit_h5", type=Path, help="Input spectral HDF5 catalog.")
     p.add_argument("output", type=Path, help="Output merged PDF path.")
     p.add_argument("--fig-dir", type=Path, default=Path("plots/jaxqsofit"),
                    help="Directory containing figure PDFs. Default: plots/jaxqsofit")
     p.add_argument("--sort-by", type=str, default=None,
-                   help="Optional CSV column to sort rows by before stamping.")
+                   help="Optional catalog column to sort rows by before stamping.")
     p.add_argument("--sort-order", type=str, default="ascending",
                    choices=["ascending", "descending", "asc", "desc"],
                    help="Sort direction when --sort-by is used. Default: ascending")
@@ -69,11 +71,13 @@ def parse_args():
     return p.parse_args()
 
 
-def load_csv(csv_path: Path, *, sort_by: str | None = None, ascending: bool = True) -> pd.DataFrame:
-    df = pd.read_csv(csv_path)
+def load_h5(h5_path: Path, *, sort_by: str | None = None, ascending: bool = True) -> pd.DataFrame:
+    df = read_spectra_catalog_hdf5(
+        h5_path, include_fraction_draws=False
+    ).frame
     missing = [c for c in sorted(REQUIRED_COLS) if c not in df.columns]
     if missing:
-        raise ValueError(f"CSV missing required columns: {missing}")
+        raise ValueError(f"Spectral HDF5 catalog missing required columns: {missing}")
 
     df = df.copy()
     df["sdss_name"] = df["sdss_name"].astype(str).str.strip()
@@ -241,21 +245,25 @@ def main():
     args = parse_args()
     ascending = args.sort_order in {"ascending", "asc"}
 
-    if not args.csv.exists():
-        print(f"[ERROR] CSV not found: {args.csv}", file=sys.stderr)
+    if not args.spectra_fit_h5.exists():
+        print(f"[ERROR] HDF5 catalog not found: {args.spectra_fit_h5}", file=sys.stderr)
         return 2
     if not args.fig_dir.exists():
         print(f"[ERROR] Figure directory not found: {args.fig_dir}", file=sys.stderr)
         return 2
 
     try:
-        df = load_csv(args.csv, sort_by=args.sort_by, ascending=ascending)
+        df = load_h5(
+            args.spectra_fit_h5,
+            sort_by=args.sort_by,
+            ascending=ascending,
+        )
     except Exception as exc:
-        print(f"[ERROR] Failed to load CSV: {exc}", file=sys.stderr)
+        print(f"[ERROR] Failed to load HDF5 catalog: {exc}", file=sys.stderr)
         return 2
 
     if df.empty:
-        print("[WARN] CSV has zero rows. Nothing to do.", file=sys.stderr)
+        print("[WARN] HDF5 catalog has zero rows. Nothing to do.", file=sys.stderr)
         return 1
 
     fig_index = build_figure_index(args.fig_dir)

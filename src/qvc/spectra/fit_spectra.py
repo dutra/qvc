@@ -1279,7 +1279,11 @@ def load_lc_psf_photometry_by_object_id(object_ids):
         except Exception:
             pass
 
-    lc_objects = concat_light_curves(filter_object_ids=filter_values, progress_bar=False)
+    lc_objects = concat_light_curves(
+        filter_object_ids=filter_values,
+        progress_bar=False,
+        load_seeing=False,
+    )
     by_object_id = {}
     for obj in lc_objects:
         norm_id = normalize_object_id(obj.get("object_id"))
