@@ -64,8 +64,14 @@ from qvc.hubble.hubble_utils import (
     write_results_tex_variables,
 )
 from qvc.hubble.hubble_likelihood import (
+    JOINT_ATTENUATED_MAG_DRAWS_COL,
+    JOINT_DEREDDENED_MAG_DRAWS_COL,
+    JOINT_POSTERIOR_VALID_COUNT_COL,
+    SELECTION_ATTENUATION_MODES,
+    _joint_attenuation_draw_arrays,
     log_likelihood,
     log_likelihood_nearbylcs,
+    normalize_selection_attenuation_mode,
     sigma_lens_from_dc,
     sigma_mu_from_z_err,
 )
@@ -604,6 +610,7 @@ def make_run_tag(
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
+    selection_attenuation_mode="fixed-offset",
 ):
     speed = normalize_speed(speed)
     zmin, zmax = z_range
@@ -623,10 +630,31 @@ def make_run_tag(
     alpha_tag = "_alphaLam" if use_alpha_lambda_term else ""
     eta_sigma_tag = "_etaSigma" if use_eta_sigma_term else ""
     logf_tag = "_logfz" if use_redshift_log_f_term else ""
+    attenuation_tag = (
+        "_attsel-jointpost"
+        if normalize_selection_attenuation_mode(selection_attenuation_mode)
+        == "joint-posterior"
+        else ""
+    )
     return (
         f"{cosmo_model}_{_fit_mode_label(only_sna, only_agn)}_{speed}_{n_tag}_{z_tag}"
-        f"{completeness_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}"
+        f"{completeness_tag}{attenuation_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}"
     )
+
+
+def validate_selection_attenuation_configuration(
+    df_agn, *, selection_attenuation_mode, completeness,
+    completeness_magnitude, only_sna=False,
+):
+    mode = normalize_selection_attenuation_mode(selection_attenuation_mode)
+    if mode == "fixed-offset":
+        return mode
+    if not completeness or only_sna:
+        raise ValueError("joint-posterior attenuation selection requires active AGN completeness.")
+    if completeness_magnitude != "attenuated":
+        raise ValueError("joint-posterior attenuation selection requires --completeness_magnitude attenuated.")
+    _joint_attenuation_draw_arrays(df_agn, df_agn["apparent_mag_2500"])
+    return mode
 
 
 def _agn_pivot_checkpoint_payload(agn_pivot_context):
@@ -841,6 +869,7 @@ def validate_resume_checkpoint(
     ndim,
     n_agn,
     *,
+    expected_selection_attenuation_mode="fixed-offset",
     expected_cut_tier=None,
     expected_cut_configuration_json=None,
     expected_z_range_semantics=None,
@@ -909,6 +938,18 @@ def validate_resume_checkpoint(
                 f"--z_range semantics {stored_semantics!r}; expected "
                 f"{expected_z_range_semantics!r}."
             )
+    stored_attenuation_mode = _checkpoint_scalar_string(
+        results.get("selection_attenuation_mode", "fixed-offset"),
+        field_name="selection_attenuation_mode",
+        checkpoint_file=checkpoint_file,
+    )
+    if stored_attenuation_mode != normalize_selection_attenuation_mode(
+        expected_selection_attenuation_mode
+    ):
+        raise RuntimeError(
+            f"Resume checkpoint '{checkpoint_file}' selection attenuation mode "
+            "does not match the current run."
+        )
 
     for key in ("dmi_max_w", "integrals_max_w"):
         value = np.asarray(results[key])
@@ -952,6 +993,7 @@ def _validate_resume_replot_checkpoint_params(
     checkpoint_file,
     ndim,
     *,
+    expected_selection_attenuation_mode="fixed-offset",
     expected_cut_tier=None,
     expected_cut_configuration_json=None,
     expected_z_range_semantics=None,
@@ -1004,6 +1046,18 @@ def _validate_resume_replot_checkpoint_params(
                 f"Resume-replot checkpoint '{checkpoint_file}' uses "
                 f"incompatible --z_range semantics {stored_semantics!r}."
             )
+    stored_attenuation_mode = _checkpoint_scalar_string(
+        results.get("selection_attenuation_mode", "fixed-offset"),
+        field_name="selection_attenuation_mode",
+        checkpoint_file=checkpoint_file,
+    )
+    if stored_attenuation_mode != normalize_selection_attenuation_mode(
+        expected_selection_attenuation_mode
+    ):
+        raise RuntimeError(
+            f"Resume-replot checkpoint '{checkpoint_file}' selection attenuation "
+            "mode does not match the current run."
+        )
 
 
 def _remap_resume_replot_checkpoint(
@@ -1012,6 +1066,7 @@ def _remap_resume_replot_checkpoint(
     df_agn_fit_selection,
     ndim,
     *,
+    expected_selection_attenuation_mode="fixed-offset",
     expected_cut_tier=None,
     expected_cut_configuration_json=None,
     expected_z_range_semantics=None,
@@ -1022,6 +1077,7 @@ def _remap_resume_replot_checkpoint(
         results,
         checkpoint_file,
         ndim,
+        expected_selection_attenuation_mode=expected_selection_attenuation_mode,
         expected_cut_tier=expected_cut_tier,
         expected_cut_configuration_json=expected_cut_configuration_json,
         expected_z_range_semantics=expected_z_range_semantics,
@@ -1861,6 +1917,7 @@ def _compute_direct_full_sample_completeness_summaries(
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
     early_de_guard=False,
+    selection_attenuation_mode="fixed-offset",
     dmi_draw_indices=None,
 ):
     """Replay completeness for the full plotting sample.
@@ -1978,6 +2035,7 @@ def _compute_direct_full_sample_completeness_summaries(
             use_eta_sigma_term=use_eta_sigma_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
             early_de_guard=early_de_guard,
+            selection_attenuation_mode=selection_attenuation_mode,
             only_sna=False,
             only_agn=only_agn,
             use_full_cov=use_full_cov,
@@ -2177,6 +2235,7 @@ def _run_fit_stage(
     prefix,
     completeness_sim_file,
     completeness_mode,
+    selection_attenuation_mode,
     compare_sigma_only,
     minimal_plots=False,
     disable_ceph_dist_calibration,
@@ -2226,6 +2285,7 @@ def _run_fit_stage(
         checkpoint_file_override=checkpoint_file_override,
         completeness_sim_file=completeness_sim_file,
         completeness_mode=completeness_mode,
+        selection_attenuation_mode=selection_attenuation_mode,
         completeness_magnitude=df_agn_fit_selection.attrs.get(
             "completeness_magnitude",
             "dereddened",
@@ -2363,6 +2423,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
                       completeness_mode="2d",
                       completeness_magnitude="dereddened",
+                      selection_attenuation_mode="fixed-offset",
                       N=None,
                       compare_sigma_only=False,
                       minimal_plots=False,
@@ -2382,6 +2443,13 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     validate_completeness_mode(completeness_mode)
     completeness_magnitude = normalize_completeness_magnitude(
         df_agn.attrs.get("completeness_magnitude", completeness_magnitude)
+    )
+    selection_attenuation_mode = validate_selection_attenuation_configuration(
+        df_agn,
+        selection_attenuation_mode=selection_attenuation_mode,
+        completeness=completeness,
+        completeness_magnitude=completeness_magnitude,
+        only_sna=only_sna,
     )
     if completeness and COMPLETENESS_MAG_COL not in df_agn.columns:
         df_agn = prepare_completeness_magnitude_columns(
@@ -2437,6 +2505,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        selection_attenuation_mode=selection_attenuation_mode,
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -2524,6 +2593,12 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     agn_fields += ('apparent_mag_2500', 'apparent_mag_2500_err', 'z', 'z_err', 'object_id')
     if completeness:
         agn_fields += (COMPLETENESS_MAG_COL, COMPLETENESS_MAG_ERR_COL)
+    if selection_attenuation_mode == "joint-posterior":
+        agn_fields += (
+            JOINT_DEREDDENED_MAG_DRAWS_COL,
+            JOINT_ATTENUATED_MAG_DRAWS_COL,
+            JOINT_POSTERIOR_VALID_COUNT_COL,
+        )
     if COMPLETENESS_FHOST_COL in df_agn.columns:
         agn_fields += (COMPLETENESS_FHOST_COL,)
     if 'alpha_lambda' in df_agn.columns:
@@ -2579,6 +2654,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     checkpoint_file,
                     df_agn,
                     ndim,
+                    expected_selection_attenuation_mode=selection_attenuation_mode,
                     expected_cut_tier=df_agn.attrs.get("cut_tier"),
                     expected_cut_configuration_json=df_agn.attrs.get("cut_configuration_json"),
                     expected_z_range_semantics=(
@@ -2597,6 +2673,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     checkpoint_file=checkpoint_file,
                     ndim=ndim,
                     n_agn=len(agn_data["z"]),
+                    expected_selection_attenuation_mode=selection_attenuation_mode,
                     expected_cut_tier=df_agn.attrs.get("cut_tier"),
                     expected_cut_configuration_json=df_agn.attrs.get(
                         "cut_configuration_json"
@@ -2675,6 +2752,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 use_eta_sigma_term=use_eta_sigma_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 early_de_guard=early_de_guard,
+                selection_attenuation_mode=selection_attenuation_mode,
             )
             ptform_kwargs = dict(priors=priors, model_labels=model_labels)
             loglike_func = (
@@ -2836,6 +2914,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             cut_tier=str(df_agn.attrs.get("cut_tier", "")),
             cut_configuration_json=str(df_agn.attrs.get("cut_configuration_json", "")),
             z_range_semantics=Z_RANGE_SEMANTICS,
+            selection_attenuation_mode=selection_attenuation_mode,
         )
         if not only_sna:
             checkpoint_payload.update(
@@ -2908,6 +2987,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
                completeness_mode="2d",
                completeness_magnitude="dereddened",
+               selection_attenuation_mode="fixed-offset",
                compare_sigma_only=False,
                minimal_plots=False,
                disable_ceph_dist_calibration=False,
@@ -2931,6 +3011,13 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     df_agn_all = prepare_completeness_magnitude_columns(
         df_agn_all,
         completeness_magnitude,
+    )
+    selection_attenuation_mode = validate_selection_attenuation_configuration(
+        df_agn,
+        selection_attenuation_mode=selection_attenuation_mode,
+        completeness=completeness,
+        completeness_magnitude=completeness_magnitude,
+        only_sna=only_sna,
     )
     if df_agn_completeness_parent is None:
         df_agn_completeness_parent = df_agn.copy()
@@ -2966,6 +3053,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        selection_attenuation_mode=selection_attenuation_mode,
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -3205,6 +3293,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 prefix=prefix,
                 completeness_sim_file=completeness_sim_file,
                 completeness_mode=completeness_mode,
+                selection_attenuation_mode=selection_attenuation_mode,
                 compare_sigma_only=compare_sigma_only,
                 minimal_plots=minimal_plots,
                 disable_ceph_dist_calibration=disable_ceph_dist_calibration,
@@ -3250,6 +3339,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_eta_sigma_term=use_eta_sigma_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 early_de_guard=early_de_guard,
+                selection_attenuation_mode=selection_attenuation_mode,
                 dmi_draw_indices=posterior_sample_indices_pass1,
             )
             pass1_residuals_full, pass1_clipping_sigma_full, _, _, _ = plot_hubble(
@@ -3416,6 +3506,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                         use_redshift_log_f_term=use_redshift_log_f_term,
                     )[1]),
                     n_agn=len(expected_pass1_fit_selection),
+                    expected_selection_attenuation_mode=selection_attenuation_mode,
                     expected_cut_tier=expected_pass1_fit_selection.attrs.get("cut_tier"),
                     expected_cut_configuration_json=expected_pass1_fit_selection.attrs.get("cut_configuration_json"),
                     expected_z_range_semantics=(
@@ -3532,6 +3623,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         checkpoint_file_override=pass2_checkpoint_file if apply_two_pass_sigma_clip else single_checkpoint_file,
         completeness_sim_file=completeness_sim_file,
         completeness_mode=completeness_mode,
+        selection_attenuation_mode=selection_attenuation_mode,
         compare_sigma_only=compare_sigma_only,
         minimal_plots=minimal_plots,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
@@ -3598,6 +3690,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             use_eta_sigma_term=use_eta_sigma_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
             early_de_guard=early_de_guard,
+            selection_attenuation_mode=selection_attenuation_mode,
             dmi_draw_indices=posterior_sample_indices,
         )
         (
@@ -3696,6 +3789,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         early_de_guard=early_de_guard,
+        selection_attenuation_mode=selection_attenuation_mode,
         dmi_draw_indices=posterior_sample_indices,
     )
     dmi_posterior_median_full = dmi_posterior_median_full_direct
@@ -4006,6 +4100,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_eta_sigma_term=use_eta_sigma_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 early_de_guard=early_de_guard,
+                selection_attenuation_mode=selection_attenuation_mode,
             )
         mu_table, mu_err_table = _compute_debiased_agn_table_mu(
             flat_samples,
@@ -4881,6 +4976,15 @@ if __name__ == "__main__":
         help="Correct log_sigma_uv using f_host_2500, propagate f_host_2500_err into log_sigma_uv_std_psd, and save diagnostics plots.",
     )
     parser.add_argument(
+        "--selection-attenuation-mode",
+        choices=SELECTION_ATTENUATION_MODES,
+        default="fixed-offset",
+        help=(
+            "Selection attenuation treatment. 'joint-posterior' marginalizes "
+            "the simple 2D completeness integral over paired spectra-v3 draws."
+        ),
+    )
+    parser.add_argument(
         "--fit_alpha_lambda_term",
         action="store_true",
         default=False,
@@ -4924,6 +5028,13 @@ if __name__ == "__main__":
     if args.only_sna and args.only_agn:
         raise ValueError("--only_sna and --only_agn cannot be used together.")
     validate_plot_mode_args(args)
+    if args.selection_attenuation_mode == "joint-posterior" and (
+        args.run != "single" or args.use_jax
+    ):
+        raise NotImplementedError(
+            "joint-posterior selection attenuation currently supports only "
+            "the default non-JAX single Hubble run."
+        )
 
     if args.disable_full_covariance:
         print("Warning: Running without full covariance may lead to underestimated uncertainties.")
@@ -5079,6 +5190,7 @@ if __name__ == "__main__":
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
                 completeness_magnitude=args.completeness_magnitude,
+                selection_attenuation_mode=args.selection_attenuation_mode,
                 compare_sigma_only=args.compare_sigma_only,
                 minimal_plots=args.minimal_plots,
                 disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
