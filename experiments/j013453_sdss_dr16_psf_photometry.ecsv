@@ -1,0 +1,14 @@
+# %ECSV 1.0
+# ---
+# datatype:
+# - {name: object_id, datatype: int64}
+# - {name: filter_name, datatype: string}
+# - {name: flux_mjy, unit: mJy, datatype: float64}
+# - {name: flux_err_mjy, unit: mJy, datatype: float64}
+# schema: astropy-2.0
+object_id filter_name flux_mjy flux_err_mjy
+1414639 u_sdss 0.021198359299526164 0.001214184622648176
+1414639 g_sdss 0.03168182924375816 0.0008103245443177369
+1414639 r_sdss 0.042236726255460745 0.0009022591254456196
+1414639 i_sdss 0.0511717475777403 0.0016541449886567983
+1414639 z_sdss 0.07153823960134105 0.004220261567172738

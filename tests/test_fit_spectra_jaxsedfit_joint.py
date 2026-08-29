@@ -89,6 +89,55 @@ def test_saved_sed_loader_normalizes_object_id_and_upper_limits(tmp_path):
     assert result["is_upper_limit"].tolist() == [True]
 
 
+def _sdss_override_frame(object_id="1452887"):
+    return pd.DataFrame(
+        {
+            "object_id": [object_id] * 5,
+            "filter_name": [f"{band}_sdss" for band in "ugriz"],
+            "flux_mjy": [0.021, 0.032, 0.042, 0.051, 0.072],
+            "flux_err_mjy": [0.0012, 0.0008, 0.0009, 0.0017, 0.0042],
+        }
+    )
+
+
+def test_sdss_override_loader_preserves_fluxes_and_adds_static_metadata(tmp_path):
+    path = tmp_path / "sdss.csv"
+    source = _sdss_override_frame()
+    source.to_csv(path, index=False)
+
+    result = joint.load_sdss_psf_photometry_overrides(path)
+
+    np.testing.assert_allclose(result["flux_mjy"], source["flux_mjy"])
+    np.testing.assert_allclose(result["flux_err_mjy"], source["flux_err_mjy"])
+    assert result["photometry_method"].eq("psf").all()
+    assert result["psf_fwhm_arcsec"].tolist() == [
+        joint.SDSS_STATIC_PSF_FWHM_ARCSEC[band] for band in "ugriz"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda frame: frame.iloc[:-1], "missing filters"),
+        (lambda frame: pd.concat([frame, frame.iloc[[0]]]), "duplicate"),
+        (
+            lambda frame: frame.assign(
+                flux_mjy=[0.021, 0.032, 0.0, 0.051, 0.072]
+            ),
+            "invalid photometry",
+        ),
+    ],
+)
+def test_sdss_override_loader_rejects_incomplete_duplicate_or_invalid_rows(
+    tmp_path, mutation, message
+):
+    path = tmp_path / "bad_sdss.csv"
+    mutation(_sdss_override_frame()).to_csv(path, index=False)
+
+    with pytest.raises(ValueError, match=message):
+        joint.load_sdss_psf_photometry_overrides(path)
+
+
 def test_qvc_psf_photometry_replaces_saved_sdss_and_includes_z():
     saved = pd.DataFrame(
         {
@@ -111,7 +160,47 @@ def test_qvc_psf_photometry_replaces_saved_sdss_and_includes_z():
     )
     assert "host_capture_group" not in result
     assert result.loc[qvc_rows, "photometry_method"].eq("psf").all()
-    assert result.loc[qvc_rows, "psf_fwhm_arcsec"].isna().all()
+    actual_fwhm = dict(
+        zip(
+            result.loc[qvc_rows, "band"],
+            result.loc[qvc_rows, "psf_fwhm_arcsec"],
+            strict=True,
+        )
+    )
+    assert actual_fwhm == joint.SDSS_STATIC_PSF_FWHM_ARCSEC
+
+
+def test_sdss_override_replaces_qvc_means_without_changing_values():
+    override = joint.load_sdss_psf_photometry_overrides(
+        Path("experiments/j013453_sdss_dr16_psf_photometry.ecsv")
+    )
+    record = _record_with_ugriz()
+    record["object_id"] = "1414639"
+    record["_joint_sdss_psf_photometry"] = override.to_dict(orient="records")
+
+    result = add_qvc_psf_photometry(record, pd.DataFrame())
+
+    np.testing.assert_allclose(
+        result["flux_mjy"],
+        [
+            0.021198359299526164,
+            0.03168182924375816,
+            0.042236726255460745,
+            0.0511717475777403,
+            0.07153823960134105,
+        ],
+    )
+    np.testing.assert_allclose(
+        result["flux_err_mjy"],
+        [
+            0.001214184622648176,
+            0.0008103245443177369,
+            0.0009022591254456196,
+            0.0016541449886567983,
+            0.004220261567172738,
+        ],
+    )
+    assert result["catalog"].eq("sdss_dr16_notebook").all()
 
 
 def test_qvc_psf_photometry_requires_z_even_if_variability_fit_dropped_it():
@@ -196,7 +285,9 @@ def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
     assert float(burst_tau_prior.low) == pytest.approx(np.log(0.01))
     assert float(burst_tau_prior.high) == pytest.approx(np.log(0.2))
     assert not hasattr(config.photometry, "host_capture_group")
-    assert config.photometry.psf_fwhm_arcsec == [None] * 5
+    assert config.photometry.psf_fwhm_arcsec == [
+        joint.SDSS_STATIC_PSF_FWHM_ARCSEC[band] for band in "ugriz"
+    ]
 
 
 def test_dereddened_m2500_uses_intrinsic_disk_and_both_attenuation_terms():
@@ -743,7 +834,11 @@ def test_plot_init_saves_each_stage_without_showing(tmp_path):
             )
             self.plot_sed(
                 show=True,
-                title="Stage 2 full MAP initialization",
+                title="Stage 2 smooth spectral-feature MAP initialization",
+            )
+            self.plot_sed(
+                show=True,
+                title="Stage 3 full MAP initialization",
             )
             return "fit-result"
 
@@ -754,10 +849,11 @@ def test_plot_init_saves_each_stage_without_showing(tmp_path):
     result = joint.fit_with_saved_initialization_plots(fitter, rec, args)
 
     assert result == "fit-result"
-    assert [call["show"] for call in calls] == [False, False]
+    assert [call["show"] for call in calls] == [False, False, False]
     assert [Path(call["output_path"]).name for call in calls] == [
         "z0.304_013453.20-001842.3_joint_init_stage1.png",
         "z0.304_013453.20-001842.3_joint_init_stage2.png",
+        "z0.304_013453.20-001842.3_joint_init_stage3.png",
     ]
     assert all(Path(call["output_path"]).is_file() for call in calls)
     assert fitter.plot_sed.__func__ is FakeFitter.plot_sed
@@ -1232,7 +1328,7 @@ def test_resume_preflight_rejects_old_and_accepts_main_bundle(tmp_path):
 
     with pytest.raises(
         joint.IncompatibleHostCaptureResumeError,
-        match="five independent QVC ugriz",
+        match="static SDSS ugriz PSF FWHMs",
     ):
         joint.preflight_resume_host_capture_bundles([rec], args)
 
@@ -1243,8 +1339,8 @@ def test_resume_preflight_rejects_old_and_accepts_main_bundle(tmp_path):
         handle.attrs[joint.HOST_CAPTURE_PSF_FWHM_ATTR] = (
             joint.SDSS_TYPICAL_PSF_FWHM_ARCSEC
         )
-        handle.create_dataset(
-            "samples/missing_psf_host_capture_fraction", data=np.ones((2, 5))
+        handle.attrs[joint.HOST_CAPTURE_QVC_FWHM_ATTR] = np.asarray(
+            [joint.SDSS_STATIC_PSF_FWHM_ARCSEC[band] for band in "ugriz"]
         )
         handle.create_dataset("samples/log_host_capture_scale_arcsec", data=np.ones(2))
     joint.preflight_resume_host_capture_bundles([rec], args)
@@ -1272,9 +1368,6 @@ def test_resume_preflight_allows_only_explicitly_unannotated_main_bundle(
     path = joint.posterior_bundle_path(args.resume, rec)
     path.parent.mkdir(parents=True)
     with h5py.File(path, "w") as handle:
-        handle.create_dataset(
-            "samples/missing_psf_host_capture_fraction", data=np.ones((2, 5))
-        )
         handle.create_dataset("samples/log_host_capture_scale_arcsec", data=np.ones(2))
 
     with pytest.warns(RuntimeWarning, match="Explicitly accepting"):
@@ -1284,7 +1377,7 @@ def test_resume_preflight_allows_only_explicitly_unannotated_main_bundle(
         handle.attrs[joint.HOST_CAPTURE_BUNDLE_ATTR] = "some_other_group"
     with pytest.raises(
         joint.IncompatibleHostCaptureResumeError,
-        match="five independent QVC ugriz",
+        match="static SDSS ugriz PSF FWHMs",
     ):
         joint.preflight_resume_host_capture_bundles([rec], args)
 
@@ -1389,6 +1482,49 @@ def test_hybrid_resume_build_records_retains_fresh_fallback_photometry(
     assert records[0]["_joint_photometry"][0]["filter_name"] == "W1"
 
 
+def test_build_records_requires_override_for_every_selected_object(
+    monkeypatch, tmp_path
+):
+    base_path = tmp_path / "base.csv"
+    pd.DataFrame(
+        {
+            "object_id": ["1", "2"],
+            "filter_name": ["W1", "W1"],
+            "flux_mjy": [1.0, 1.0],
+            "flux_err_mjy": [0.1, 0.1],
+        }
+    ).to_csv(base_path, index=False)
+    override_path = tmp_path / "sdss.csv"
+    _sdss_override_frame(object_id="1").to_csv(override_path, index=False)
+    selected_records = [{"object_id": "1"}]
+    monkeypatch.setattr(
+        joint.legacy,
+        "build_records",
+        lambda args: [dict(record) for record in selected_records],
+    )
+    args = SimpleNamespace(
+        resume=None,
+        resume_only=False,
+        resume_records_path=None,
+        filter_object_id=["1"],
+        sed_photometry_path=str(base_path),
+        sdss_psf_photometry_path=str(override_path),
+    )
+
+    records = joint.build_records(args)
+
+    assert len(records[0]["_joint_sdss_psf_photometry"]) == 5
+    assert {
+        row["filter_name"] for row in records[0]["_joint_sdss_psf_photometry"]
+    } == {f"{band}_sdss" for band in "ugriz"}
+
+    selected_records.append({"object_id": "2"})
+    args.filter_object_id = ["1", "2"]
+
+    with pytest.raises(ValueError, match=r"lacks selected object ID.*2"):
+        joint.build_records(args)
+
+
 def test_parse_args_rejects_no_deredden_for_mandatory_v3_colors(tmp_path):
     with pytest.raises(SystemExit):
         joint.parse_args(
@@ -1441,6 +1577,138 @@ def test_parse_args_resume_keeps_current_inputs_and_separate_destinations(tmp_pa
     assert args.resume == str(resume_dir)
     assert args.resume_run_name == "old_run"
     assert args.output_dir != args.resume
+
+
+def test_parse_args_accepts_experiment_sdss_psf_photometry_path(tmp_path):
+    override = tmp_path / "sdss.csv"
+    args = joint.parse_args(
+        [
+            "--mode",
+            "fit",
+            str(tmp_path / "out.h5"),
+            "--sed-photometry-path",
+            str(tmp_path / "phot.csv"),
+            "--sdss-psf-photometry-path",
+            str(override),
+            "--filter_object_id",
+            "1414639",
+        ]
+    )
+
+    assert args.sdss_psf_photometry_path == str(override)
+
+
+def test_load_sdss_spectrum_selection_overrides(tmp_path):
+    path = tmp_path / "spectrum.csv"
+    pd.DataFrame(
+        {
+            "object_id": ["1414639"],
+            "plate": [698],
+            "mjd": [52203],
+            "fiber": [279],
+            "z": [0.3036496],
+        }
+    ).to_csv(path, index=False)
+
+    selection = joint.load_sdss_spectrum_selection_overrides(path).iloc[0]
+
+    assert selection["object_id"] == "1414639"
+    assert selection["plate"] == 698
+    assert selection["mjd"] == 52203
+    assert selection["fiber"] == 279
+    assert selection["z"] == pytest.approx(0.3036496)
+
+
+@pytest.mark.parametrize(
+    "rows,match",
+    [
+        (
+            [
+                {"object_id": "1", "plate": 1, "mjd": 2, "fiber": 3, "z": 0.3},
+                {"object_id": "1", "plate": 4, "mjd": 5, "fiber": 6, "z": 0.4},
+            ],
+            "duplicate",
+        ),
+        (
+            [{"object_id": "1", "plate": 1, "mjd": 2, "fiber": 0, "z": 0.3}],
+            "positive integer",
+        ),
+        (
+            [{"object_id": "1", "plate": 1, "mjd": 2, "fiber": 3, "z": float("nan")}],
+            "non-finite",
+        ),
+    ],
+)
+def test_load_sdss_spectrum_selection_overrides_rejects_invalid(
+    tmp_path, rows, match
+):
+    path = tmp_path / "spectrum.csv"
+    pd.DataFrame(rows).to_csv(path, index=False)
+    with pytest.raises(ValueError, match=match):
+        joint.load_sdss_spectrum_selection_overrides(path)
+
+
+def test_build_records_applies_exact_sdss_spectrum_selection(monkeypatch, tmp_path):
+    selection_path = tmp_path / "spectrum.csv"
+    pd.DataFrame(
+        {
+            "object_id": ["1414639"],
+            "plate": [698],
+            "mjd": [52203],
+            "fiber": [279],
+            "z": [0.3036496],
+        }
+    ).to_csv(selection_path, index=False)
+    phot_path = tmp_path / "phot.csv"
+    pd.DataFrame(
+        columns=["source_id", "filter_name", "flux_mjy", "flux_err_mjy"]
+    ).to_csv(phot_path, index=False)
+    monkeypatch.setattr(
+        joint.legacy,
+        "build_records",
+        lambda args: [
+            {
+                "object_id": "1414639",
+                "plate": 4230,
+                "mjd": 55483,
+                "fiber": 232,
+                "z": 0.3042515647,
+            }
+        ],
+    )
+    args = SimpleNamespace(
+        resume=None,
+        resume_only=False,
+        resume_records_path=None,
+        filter_object_id=["1414639"],
+        sed_photometry_path=str(phot_path),
+        sdss_psf_photometry_path=None,
+        sdss_spectrum_selection_path=str(selection_path),
+    )
+
+    record = joint.build_records(args)[0]
+
+    assert (record["plate"], record["mjd"], record["fiber"]) == (698, 52203, 279)
+    assert record["z"] == pytest.approx(0.3036496)
+
+
+def test_parse_args_accepts_experiment_sdss_spectrum_selection_path(tmp_path):
+    selection = tmp_path / "spectrum.ecsv"
+    args = joint.parse_args(
+        [
+            "--mode",
+            "fit",
+            str(tmp_path / "out.h5"),
+            "--sed-photometry-path",
+            str(tmp_path / "phot.csv"),
+            "--sdss-spectrum-selection-path",
+            str(selection),
+            "--filter_object_id",
+            "1414639",
+        ]
+    )
+
+    assert args.sdss_spectrum_selection_path == str(selection)
 
 
 def test_parse_args_rejects_resume_output_directory_alias(tmp_path):
@@ -1661,7 +1929,6 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
             "pl_slope": np.full(4, -1.8),
             "pl_bend_loc": np.full(4, 1000.0),
             "pl_bend_width": np.full(4, 10.0),
-            "missing_psf_host_capture_fraction": np.full((4, 5), 0.5),
             "log_host_capture_scale_arcsec": np.zeros(4),
         }
         config = SimpleNamespace(
@@ -1672,7 +1939,9 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
             photometry=SimpleNamespace(
                 filter_names=filter_names,
                 photometry_method=["psf"] * 5,
-                psf_fwhm_arcsec=[None] * 5,
+                psf_fwhm_arcsec=[
+                    joint.SDSS_STATIC_PSF_FWHM_ARCSEC[band] for band in "ugriz"
+                ],
             ),
             likelihood=SimpleNamespace(use_host_capture_model=True),
             galaxy=SimpleNamespace(cosmology_h0=70.0, cosmology_om0=0.3),
@@ -1697,10 +1966,6 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
                 handle.attrs["posterior_bundle_format"] = joint.POSTERIOR_BUNDLE_FORMAT
                 handle.create_dataset(
                     "samples/log_agn_amp", data=self.samples["log_agn_amp"]
-                )
-                handle.create_dataset(
-                    "samples/missing_psf_host_capture_fraction",
-                    data=self.samples["missing_psf_host_capture_fraction"],
                 )
                 handle.create_dataset(
                     "samples/log_host_capture_scale_arcsec",
@@ -1790,9 +2055,6 @@ def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_
     saved_path.parent.mkdir(parents=True)
     with h5py.File(saved_path, "w") as handle:
         handle.attrs["posterior_bundle_format"] = joint.POSTERIOR_BUNDLE_FORMAT
-        handle.create_dataset(
-            "samples/missing_psf_host_capture_fraction", data=np.full((4, 5), 0.5)
-        )
         handle.create_dataset("samples/log_host_capture_scale_arcsec", data=np.zeros(4))
 
     class DummyHDUL:

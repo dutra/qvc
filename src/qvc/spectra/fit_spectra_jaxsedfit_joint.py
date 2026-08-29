@@ -71,11 +71,19 @@ PSF_AGN_FRACTION_BANDS = tuple(legacy.SDSS_BANDS)
 QVC_PSF_HOST_CAPTURE_GROUP = "qvc_sdss_psf"
 HOST_FRACTION_REST_WAVELENGTH_ANGSTROM = 2500.0
 SDSS_TYPICAL_PSF_FWHM_ARCSEC = 1.4
+SDSS_STATIC_PSF_FWHM_ARCSEC = {
+    "u": 1.53,
+    "g": 1.44,
+    "r": 1.32,
+    "i": 1.26,
+    "z": 1.29,
+}
 SDSS_LEGACY_FIBER_DIAMETER_ARCSEC = 3.0
 SDSS_BOSS_FIBER_DIAMETER_ARCSEC = 2.0
 HOST_CAPTURE_BUNDLE_ATTR = "qvc_host_capture_model"
-HOST_CAPTURE_BUNDLE_MARKER = "independent_psf_fractions"
+HOST_CAPTURE_BUNDLE_MARKER = "static_sdss_psf_fwhm"
 HOST_CAPTURE_PSF_FWHM_ATTR = "qvc_f_host_2500_psf_fwhm_arcsec"
+HOST_CAPTURE_QVC_FWHM_ATTR = "qvc_sdss_psf_fwhm_arcsec"
 
 
 class IncompatibleHostCaptureResumeError(RuntimeError):
@@ -136,9 +144,9 @@ class M2500ReconstructionError(RuntimeError):
 def _host_capture_resume_message(path, detail):
     return (
         f"Cannot resume spectral posterior bundle {path}: {detail}. "
-        "This baseline requires JAXSEDFit main's five independent QVC ugriz "
-        "host-capture fractions and its fitted host-capture scale. Run fresh "
-        "spectral inference when the saved model contract differs."
+        "This run requires static SDSS ugriz PSF FWHMs and JAXSEDFit's fitted "
+        "host-capture scale, without QVC missing-PSF fraction parameters. Run "
+        "fresh spectral inference when the saved model contract differs."
     )
 
 
@@ -784,7 +792,12 @@ def summarize_spectral_convergence(
     return {name: value for name, value in fields.items() if name.endswith("_rhat")}
 
 
-def load_saved_sed_photometry(path):
+def load_saved_sed_photometry(
+    path,
+    *,
+    require_positive_flux=False,
+    reject_invalid=False,
+):
     """Load normalized long-form SED photometry from a saved table.
 
     Required columns are an object identifier, ``filter_name``, ``flux_mjy``,
@@ -847,44 +860,149 @@ def load_saved_sed_photometry(path):
         & np.isfinite(phot["flux_err_mjy"])
         & (phot["flux_err_mjy"] > 0)
     )
+    if require_positive_flux:
+        good &= phot["flux_mjy"] > 0
+    if reject_invalid and not bool(good.all()):
+        invalid_count = int((~good).sum())
+        raise ValueError(
+            f"{path} contains {invalid_count} invalid photometry row(s); "
+            "object IDs and filters must be nonempty, and fluxes and errors "
+            "must be finite and strictly positive."
+        )
     return phot.loc[good].copy()
 
 
+def load_sdss_psf_photometry_overrides(path):
+    """Load strict, object-keyed SDSS ugriz flux overrides for experiments."""
+    phot = load_saved_sed_photometry(
+        path,
+        require_positive_flux=True,
+        reject_invalid=True,
+    )
+    expected_filters = {f"{band}_sdss" for band in legacy.SDSS_BANDS}
+    unexpected = sorted(set(phot["filter_name"]) - expected_filters)
+    if unexpected:
+        raise ValueError(
+            f"{path} contains non-SDSS override filters: {unexpected}."
+        )
+    duplicates = phot.duplicated(["source_id", "filter_name"], keep=False)
+    if bool(duplicates.any()):
+        duplicate_rows = phot.loc[duplicates, ["source_id", "filter_name"]]
+        raise ValueError(
+            f"{path} contains duplicate SDSS override rows: "
+            f"{duplicate_rows.to_dict(orient='records')[:10]}."
+        )
+    for source_id, rows in phot.groupby("source_id", sort=False):
+        actual_filters = set(rows["filter_name"])
+        if actual_filters != expected_filters:
+            missing = sorted(expected_filters - actual_filters)
+            raise ValueError(
+                f"{path} must contain exactly one ugriz SDSS override for "
+                f"object_id={source_id}; missing filters: {missing}."
+            )
+    phot = phot.copy()
+    phot["catalog"] = "sdss_dr16_notebook"
+    phot["band"] = phot["filter_name"].str.removesuffix("_sdss")
+    phot["photometry_method"] = "psf"
+    phot["psf_fwhm_arcsec"] = phot["band"].map(SDSS_STATIC_PSF_FWHM_ARCSEC)
+    phot["is_upper_limit"] = False
+    return phot
+
+
+def load_sdss_spectrum_selection_overrides(path):
+    """Load strict per-object SDSS spectrum selections for experiments."""
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix in {".csv", ".txt"}:
+        frame = pd.read_csv(path)
+    elif suffix == ".ecsv":
+        from astropy.table import Table
+
+        frame = Table.read(path).to_pandas()
+    else:
+        raise ValueError(
+            f"Unsupported SDSS spectrum selection format {suffix!r}; "
+            "use CSV or ECSV."
+        )
+
+    aliases = {"source_id": "object_id", "fiberid": "fiber"}
+    for old, new in aliases.items():
+        if new not in frame and old in frame:
+            frame[new] = frame[old]
+    required = {"object_id", "plate", "mjd", "fiber", "z"}
+    missing = required - set(frame)
+    if missing:
+        raise ValueError(
+            f"{path} lacks SDSS spectrum selection columns: {sorted(missing)}"
+        )
+
+    frame = frame.loc[:, sorted(required)].copy()
+    frame["object_id"] = frame["object_id"].map(legacy.normalize_object_id)
+    if (frame["object_id"] == "").any():
+        raise ValueError(f"{path} contains an empty object_id.")
+    duplicates = frame["object_id"].duplicated(keep=False)
+    if bool(duplicates.any()):
+        duplicate_ids = frame.loc[duplicates, "object_id"].unique().tolist()
+        raise ValueError(
+            f"{path} contains duplicate SDSS spectrum selections for "
+            f"object IDs: {duplicate_ids[:10]}."
+        )
+    for column in ("plate", "mjd", "fiber", "z"):
+        frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    numeric = frame[["plate", "mjd", "fiber", "z"]].to_numpy(dtype=float)
+    if not np.isfinite(numeric).all():
+        raise ValueError(f"{path} contains non-finite SDSS spectrum metadata.")
+    for column in ("plate", "mjd", "fiber"):
+        values = frame[column].to_numpy(dtype=float)
+        if np.any(values <= 0) or np.any(values != np.floor(values)):
+            raise ValueError(
+                f"{path} requires positive integer values for {column}."
+            )
+        frame[column] = values.astype(int)
+    if np.any(frame["z"].to_numpy(dtype=float) <= 0):
+        raise ValueError(f"{path} requires a strictly positive spectrum redshift.")
+    return frame
+
+
 def add_qvc_psf_photometry(rec, phot):
-    """Replace saved SDSS rows with QVC light-curve mean ugriz PSF fluxes."""
+    """Add selected ugriz fluxes with static, typical SDSS PSF FWHMs."""
     phot = phot.copy()
     if "filter_name" in phot:
         sdss_names = {f"{band}_sdss" for band in legacy.SDSS_BANDS}
         phot = phot.loc[~phot["filter_name"].astype(str).isin(sdss_names)]
 
-    rows = []
-    missing = []
-    for band in legacy.SDSS_BANDS:
-        mag = legacy.safe_float(rec.get(f"psf_mag_{band}"))
-        mag_err = legacy.safe_float(rec.get(f"psf_mag_err_{band}"))
-        if not (np.isfinite(mag) and np.isfinite(mag_err) and mag_err > 0):
-            missing.append(band)
-            continue
-        rows.append(
-            {
-                "source_id": str(rec["object_id"]),
-                "catalog": "qvc_light_curve",
-                "band": band,
-                "filter_name": f"{band}_sdss",
-                "flux_mjy": float(ab_mag_to_mjy(mag)),
-                "flux_err_mjy": float(ab_mag_err_to_mjy_err(mag, mag_err)),
-                "psf_fwhm_arcsec": np.nan,
-                "photometry_method": "psf",
-                "is_upper_limit": False,
-            }
-        )
-    if missing:
-        raise ValueError(
-            "Joint SED fitting requires finite QVC light-curve PSF magnitudes "
-            f"and positive errors in all ugriz bands; missing/invalid: {missing}. "
-            "The z-band requirement applies even when z was excluded from the "
-            "variability fit."
-        )
+    override_rows = rec.get("_joint_sdss_psf_photometry")
+    if override_rows is not None:
+        rows = [dict(row) for row in override_rows]
+    else:
+        rows = []
+        missing = []
+        for band in legacy.SDSS_BANDS:
+            mag = legacy.safe_float(rec.get(f"psf_mag_{band}"))
+            mag_err = legacy.safe_float(rec.get(f"psf_mag_err_{band}"))
+            if not (np.isfinite(mag) and np.isfinite(mag_err) and mag_err > 0):
+                missing.append(band)
+                continue
+            rows.append(
+                {
+                    "source_id": str(rec["object_id"]),
+                    "catalog": "qvc_light_curve",
+                    "band": band,
+                    "filter_name": f"{band}_sdss",
+                    "flux_mjy": float(ab_mag_to_mjy(mag)),
+                    "flux_err_mjy": float(ab_mag_err_to_mjy_err(mag, mag_err)),
+                    "psf_fwhm_arcsec": SDSS_STATIC_PSF_FWHM_ARCSEC[band],
+                    "photometry_method": "psf",
+                    "is_upper_limit": False,
+                }
+            )
+        if missing:
+            raise ValueError(
+                "Joint SED fitting requires finite QVC light-curve PSF magnitudes "
+                f"and positive errors in all ugriz bands; missing/invalid: {missing}. "
+                "The z-band requirement applies even when z was excluded from the "
+                "variability fit."
+            )
     if rows:
         phot = pd.concat([phot, pd.DataFrame(rows)], ignore_index=True, sort=False)
     limit_values = phot.get(
@@ -1900,6 +2018,10 @@ def annotate_posterior_bundle(path, args, rec, *, event_type="fit", source_path=
         "input_catalog": getattr(args, "fpath_in", None),
         "dr16q_catalog": getattr(args, "dr16q_fits", None),
         "sed_photometry": getattr(args, "sed_photometry_path", None),
+        "sdss_psf_photometry": getattr(args, "sdss_psf_photometry_path", None),
+        "sdss_spectrum_selection": getattr(
+            args, "sdss_spectrum_selection_path", None
+        ),
         "dsps_ssp": getattr(args, "dsps_ssp_fn", None),
     }
     record = build_run_record(
@@ -1922,16 +2044,11 @@ def annotate_posterior_bundle(path, args, rec, *, event_type="fit", source_path=
     with h5py.File(path, "r+") as handle:
         missing_path = "samples/missing_psf_host_capture_fraction"
         scale_path = "samples/log_host_capture_scale_arcsec"
-        if missing_path not in handle:
+        if missing_path in handle:
             raise ValueError(
-                "New posterior bundle lacks independent QVC ugriz "
-                "missing_psf_host_capture_fraction samples."
-            )
-        shape = handle[missing_path].shape
-        if len(shape) < 2 or shape[-1] != len(PSF_AGN_FRACTION_BANDS):
-            raise ValueError(
-                "Expected five independent QVC ugriz host-capture fractions; "
-                f"found shape {shape}."
+                "New posterior bundle unexpectedly contains "
+                "missing_psf_host_capture_fraction samples despite static "
+                "PSF FWHMs."
             )
         if scale_path not in handle:
             raise ValueError(
@@ -1939,11 +2056,15 @@ def annotate_posterior_bundle(path, args, rec, *, event_type="fit", source_path=
             )
         handle.attrs[HOST_CAPTURE_BUNDLE_ATTR] = HOST_CAPTURE_BUNDLE_MARKER
         handle.attrs[HOST_CAPTURE_PSF_FWHM_ATTR] = SDSS_TYPICAL_PSF_FWHM_ARCSEC
+        handle.attrs[HOST_CAPTURE_QVC_FWHM_ATTR] = np.asarray(
+            [SDSS_STATIC_PSF_FWHM_ARCSEC[band] for band in PSF_AGN_FRACTION_BANDS],
+            dtype=float,
+        )
     return path
 
 
 def validate_resume_host_capture_fitter(fitter, path):
-    """Validate main's independent QVC host-capture model after loading."""
+    """Validate the static-FWHM QVC host-capture model after loading."""
     likelihood = getattr(getattr(fitter, "config", None), "likelihood", None)
     if not bool(getattr(likelihood, "use_host_capture_model", False)):
         raise IncompatibleHostCaptureResumeError(
@@ -1978,24 +2099,25 @@ def validate_resume_host_capture_fitter(fitter, path):
         str(filter_names[index])
         for index in qvc_indices
         if str(methods[index]).strip().lower() != "psf"
-        or np.isfinite(legacy.safe_float(scales[index]))
+        or not np.isclose(
+            legacy.safe_float(scales[index]),
+            SDSS_STATIC_PSF_FWHM_ARCSEC[str(filter_names[index])[0]],
+        )
     ]
     if invalid_metadata:
         raise IncompatibleHostCaptureResumeError(
             _host_capture_resume_message(
                 path,
-                "QVC measurements are not missing-scale PSF photometry: "
+                "QVC measurements do not use the expected static SDSS PSF FWHMs: "
                 f"{invalid_metadata}",
             )
         )
     samples = getattr(fitter, "samples", None) or {}
-    fractions = np.asarray(samples.get("missing_psf_host_capture_fraction", []))
-    if fractions.ndim < 2 or fractions.shape[-1] != len(expected_filters):
+    if "missing_psf_host_capture_fraction" in samples:
         raise IncompatibleHostCaptureResumeError(
             _host_capture_resume_message(
                 path,
-                "posterior does not contain five independent QVC ugriz "
-                "host-capture fractions",
+                "posterior unexpectedly contains missing-PSF host-capture fractions",
             )
         )
     scales = np.asarray(samples.get("log_host_capture_scale_arcsec", []))
@@ -2043,15 +2165,28 @@ def preflight_resume_host_capture_bundles(records, args):
                         f"prediction PSF FWHM is {fwhm!r}; expected "
                         f"{SDSS_TYPICAL_PSF_FWHM_ARCSEC} arcsec"
                     )
-                fraction_path = "samples/missing_psf_host_capture_fraction"
-                if fraction_path not in handle:
-                    raise ValueError("missing independent host-capture samples")
-                shape = handle[fraction_path].shape
-                if len(shape) < 2 or shape[-1] != len(PSF_AGN_FRACTION_BANDS):
+                qvc_fwhm = handle.attrs.get(HOST_CAPTURE_QVC_FWHM_ATTR)
+                expected_qvc_fwhm = np.asarray(
+                    [
+                        SDSS_STATIC_PSF_FWHM_ARCSEC[band]
+                        for band in PSF_AGN_FRACTION_BANDS
+                    ],
+                    dtype=float,
+                )
+                missing_unannotated_qvc_fwhm = (
+                    unannotated_accepted and qvc_fwhm is None
+                )
+                if not missing_unannotated_qvc_fwhm and (
+                    np.asarray(qvc_fwhm).shape != expected_qvc_fwhm.shape
+                    or not np.allclose(np.asarray(qvc_fwhm, dtype=float), expected_qvc_fwhm)
+                ):
                     raise ValueError(
-                        "expected five independent host-capture fractions, "
-                        f"found shape {shape}"
+                        f"QVC SDSS PSF FWHMs are {qvc_fwhm!r}; expected "
+                        f"{expected_qvc_fwhm.tolist()} arcsec in ugriz order"
                     )
+                fraction_path = "samples/missing_psf_host_capture_fraction"
+                if fraction_path in handle:
+                    raise ValueError("unexpected missing-PSF host-capture samples")
                 if "samples/log_host_capture_scale_arcsec" not in handle:
                     raise ValueError("missing fitted host-capture scale samples")
                 if unannotated_accepted:
@@ -2204,7 +2339,8 @@ def fit_with_saved_initialization_plots(fitter, rec, args):
 
     title_stages = {
         "Stage 1 continuum/host MAP initialization": "stage1",
-        "Stage 2 full MAP initialization": "stage2",
+        "Stage 2 smooth spectral-feature MAP initialization": "stage2",
+        "Stage 3 full MAP initialization": "stage3",
         "Full MAP initialization": "map",
     }
     original_plot_sed = fitter.plot_sed
@@ -2772,6 +2908,26 @@ def build_records(args):
         )
     else:
         records = legacy.build_records(args)
+    spectrum_override_path = getattr(args, "sdss_spectrum_selection_path", None)
+    if spectrum_override_path:
+        selections = load_sdss_spectrum_selection_overrides(
+            spectrum_override_path
+        ).set_index("object_id")
+        missing_ids = [
+            str(rec["object_id"])
+            for rec in records
+            if str(rec["object_id"]) not in selections.index
+        ]
+        if missing_ids:
+            raise ValueError(
+                f"SDSS spectrum selection file {spectrum_override_path} lacks "
+                f"selected object ID(s): {missing_ids[:10]}."
+            )
+        for rec in records:
+            selected = selections.loc[str(rec["object_id"])]
+            for column in ("plate", "mjd", "fiber"):
+                rec[column] = int(selected[column])
+            rec["z"] = float(selected["z"])
     if args.resume and bool(getattr(args, "resume_only", False)):
         # All photometry and spectroscopy needed for posterior prediction are
         # embedded in the saved bundle. Avoid re-reading the large SED table in
@@ -2786,6 +2942,27 @@ def build_records(args):
     )
     for rec in records:
         rec["_joint_photometry"] = grouped.get(str(rec["object_id"]), [])
+    override_path = getattr(args, "sdss_psf_photometry_path", None)
+    if override_path:
+        overrides = load_sdss_psf_photometry_overrides(override_path)
+        override_groups = {
+            str(key): value.to_dict(orient="records")
+            for key, value in overrides.groupby("source_id")
+        }
+        missing_ids = [
+            str(rec["object_id"])
+            for rec in records
+            if str(rec["object_id"]) not in override_groups
+        ]
+        if missing_ids:
+            raise ValueError(
+                f"SDSS PSF override file {override_path} lacks selected object "
+                f"ID(s): {missing_ids[:10]}."
+            )
+        for rec in records:
+            rec["_joint_sdss_psf_photometry"] = override_groups[
+                str(rec["object_id"])
+            ]
     return records
 
 
@@ -2830,6 +3007,12 @@ def run_fit(args):
         input_paths={
             "input_catalog": args.fpath_in,
             "sed_photometry": args.sed_photometry_path,
+            "sdss_psf_photometry": getattr(
+                args, "sdss_psf_photometry_path", None
+            ),
+            "sdss_spectrum_selection": getattr(
+                args, "sdss_spectrum_selection_path", None
+            ),
             "dr16q_catalog": args.dr16q_fits,
             "prepared_resume_records": getattr(args, "resume_records_path", None),
         },
@@ -2857,14 +3040,30 @@ def parse_args(argv=None):
             "filter_name, flux_mjy, and flux_err_mjy."
         ),
     )
+    parser.add_argument(
+        "--sdss-psf-photometry-path",
+        help=(
+            "Optional experiment-only long-form table containing exactly one "
+            "finite, positive ugriz SDSS PSF flux and error per selected object. "
+            "When supplied, these rows replace the default QVC light-curve means."
+        ),
+    )
+    parser.add_argument(
+        "--sdss-spectrum-selection-path",
+        help=(
+            "Optional experiment-only CSV/ECSV selecting one exact SDSS "
+            "plate/MJD/fiber and spectrum redshift for every selected object. "
+            "When supplied, these values replace the DR16Q spectrum match."
+        ),
+    )
     parser.add_argument("--output-dir", default="results/jaxsedfit_joint")
     parser.add_argument("--fig-dir", default="plots/jaxsedfit_joint")
     parser.add_argument(
         "--resume",
         help=(
             "Directory containing compatible per-object *_samples.h5 bundles. "
-            "Bundles must contain main's five independent QVC ugriz "
-            "host-capture fractions and fitted host-capture scale."
+            "Bundles must use the static SDSS ugriz PSF FWHMs and contain the "
+            "fitted host-capture scale without missing-PSF fraction samples."
         ),
     )
     parser.add_argument(
