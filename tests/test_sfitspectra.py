@@ -393,7 +393,7 @@ def test_sfitspectra_retry_resubmits_latest_unsuccessful_tasks_with_current_reso
     assert calls[0][:5] == [
         "--array=2,4-8",
         "--partition=day",
-        "--time=4:00:00",
+        "--time=8:00:00",
         "--mem=40G",
         "--cpus-per-task=1",
     ]
