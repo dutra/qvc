@@ -1187,6 +1187,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         plot_suberlak_style_sigma_tau_fits,
         plot_tau_sigma_vs_wu_catalog,
         plot_tau_sigma_vs_redshift,
+        plot_tier1_cuts_vs_redshift,
     )
 
     if not plot_diagnostics:
@@ -1231,6 +1232,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         plot_suberlak_style_sigma_tau_fits = _skip_diagnostic_plot
         plot_tau_sigma_vs_wu_catalog = _skip_diagnostic_plot
         plot_tau_sigma_vs_redshift = _skip_diagnostic_plot
+        plot_tier1_cuts_vs_redshift = _skip_diagnostic_plot
 
     if exclude_object_ids_csv is None:
         exclude_object_ids_csv = []
@@ -1762,6 +1764,13 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                 "correct_sigma_uv_host=True requires 'log_sigma_uv', 'f_PL', "
                 f"and 'log_sigma_uv_std_psd'. Missing: {missing_cols}"
             )
+
+    plot_tier1_cuts_vs_redshift(
+        df,
+        plot_path=plot_path,
+        show=False,
+        filename="tier1_cuts_vs_redshift_precut.pdf",
+    )
 
     if {"z", "apparent_mag_2500", "f_host_2500_psf"}.issubset(df.columns):
         plot_f_host_2500_vs_l2500(

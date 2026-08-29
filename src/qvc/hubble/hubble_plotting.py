@@ -19,7 +19,14 @@ from astropy.cosmology import FlatwCDM, FlatwpwaCDM, FlatLambdaCDM, Flatw0waCDM
 from astropy.cosmology.realizations import Planck18
 from astropy import units as u
 from matplotlib.lines import Line2D
-from matplotlib.ticker import FixedLocator, FormatStrFormatter, FuncFormatter, LogLocator, NullLocator
+from matplotlib.ticker import (
+    FixedLocator,
+    FormatStrFormatter,
+    FuncFormatter,
+    LogLocator,
+    NullFormatter,
+    NullLocator,
+)
 from scipy.interpolate import RegularGridInterpolator, interp1d
 from scipy.optimize import minimize_scalar
 from scipy.stats import chi2 as chi2_distribution
@@ -46,7 +53,11 @@ from qvc.hubble.hubble_model import (
     resolve_model_option_flags,
 )
 from qvc.hubble.hubble_likelihood import sigma_lens_from_dc, sigma_mu_from_z_err
-from qvc.hubble.cuts import LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS, light_curve_point_count_series
+from qvc.hubble.cuts import (
+    AGN_TIER1_FIT_QUALITY_CUTS,
+    LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
+    light_curve_point_count_series,
+)
 from qvc.light_curve.band_colors import BAND_COLORS as LIGHT_CURVE_BAND_COLORS
 from qvc.hubble.sigma_tau_lambda_fit import (
     SDSS_LAMBDA_PIVOT,
@@ -1331,6 +1342,125 @@ def plot_l2500_vs_eta_sigma_fiducial(
         fig,
         os.path.join(diagnostics_path, filename),
         dpi=200,
+        show=show,
+    )
+
+
+def plot_tier1_cuts_vs_redshift(
+    df,
+    plot_path="plots/hubble",
+    show=False,
+    filename="tier1_cuts_vs_redshift_precut.pdf",
+):
+    """Plot current spectra (top) and light-curve (bottom) Tier-1 cuts."""
+
+    spectra_columns = (
+        ("sed_reduced_chi2", r"SED $\chi^2_\nu$"),
+        ("spectroscopy_reduced_chi2", r"Spectroscopy $\chi^2_\nu$"),
+        ("joint_reduced_chi2", r"Joint $\chi^2_\nu$"),
+        ("m_2500_dereddened_rhat", r"$m_{2500,\rm dered}$ R-hat"),
+        ("m_2500_attenuated_model_rhat", r"$m_{2500,\rm atten}$ R-hat"),
+    )
+    light_curve_columns = (
+        ("loo_chi2_eff", r"LC LOO $\chi^2_{\rm eff}$"),
+        ("log_tau_uv_rf_rhat", r"$\log\,\tau_{\rm UV,RF}$ R-hat"),
+        ("log_sigma_uv_rhat", r"$\log\,\sigma_{\rm UV}$ R-hat"),
+    )
+    thresholds = {
+        column: upper
+        for column, lower, upper in AGN_TIER1_FIT_QUALITY_CUTS
+        if lower is None and upper is not None
+    }
+
+    fig = plt.figure(figsize=(18.5, 8.2))
+    outer = gridspec.GridSpec(2, 1, figure=fig, hspace=0.46)
+    top = outer[0].subgridspec(1, len(spectra_columns), wspace=0.34)
+    bottom = outer[1].subgridspec(1, len(light_curve_columns), wspace=0.25)
+    spectra_axes = [fig.add_subplot(top[0, index]) for index in range(len(spectra_columns))]
+    light_curve_axes = [
+        fig.add_subplot(bottom[0, index]) for index in range(len(light_curve_columns))
+    ]
+
+    z = (
+        pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
+        if "z" in df.columns
+        else np.full(len(df), np.nan, dtype=float)
+    )
+    tick_candidates = np.array(
+        [0.05, 0.1, 0.2, 0.5, 0.7, 1.0, 1.1, 1.2, 1.3, 1.5,
+         2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 50.0],
+        dtype=float,
+    )
+
+    def _plot_panel(axis, column, title, color):
+        threshold = thresholds.get(column)
+        axis.set_title(title, fontsize=12, pad=7)
+        axis.set_xlabel("Redshift", fontsize=11)
+        axis.set_xlim(0.0, 5.0)
+        axis.set_yscale("log")
+
+        if column not in df.columns or threshold is None:
+            axis.set_ylim(0.5, 5.0)
+            message = "Column missing" if column not in df.columns else "Cut disabled"
+            axis.text(0.5, 0.5, message, transform=axis.transAxes,
+                      ha="center", va="center", color="0.4")
+            return
+
+        values = pd.to_numeric(df[column], errors="coerce").to_numpy(dtype=float)
+        finite = np.isfinite(z) & np.isfinite(values) & (values > 0.0)
+        passed = finite & (values <= threshold)
+        failed = finite & (values > threshold)
+        positive = values[finite]
+        if positive.size:
+            lower = min(float(np.min(positive)), float(threshold)) / 1.12
+            upper = max(float(np.max(positive)), float(threshold)) * 1.12
+        else:
+            lower, upper = float(threshold) / 2.0, float(threshold) * 2.0
+        axis.set_ylim(lower, upper)
+
+        axis.scatter(z[passed], values[passed], s=9, color=color, alpha=0.34,
+                     edgecolors="none", rasterized=True)
+        axis.scatter(z[failed], values[failed], s=14, color="#A51C30", marker="x",
+                     alpha=0.78, linewidths=0.7, rasterized=True)
+        axis.axhline(threshold, color="#A51C30", lw=1.4, ls="--", zorder=1)
+        axis.text(0.97, threshold, f"cut = {threshold:g}",
+                  transform=axis.get_yaxis_transform(), ha="right", va="bottom",
+                  fontsize=8.5, color="#A51C30")
+
+        count = int(np.count_nonzero(finite))
+        annotation = (
+            f"N = {count:,}\npass = {100.0 * np.count_nonzero(passed) / count:.1f}%"
+            if count else "No finite values"
+        )
+        axis.text(0.03, 0.96, annotation, transform=axis.transAxes,
+                  ha="left", va="top", fontsize=8.5, color="0.25",
+                  bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.72})
+
+        ticks = tick_candidates[(tick_candidates >= lower) & (tick_candidates <= upper)]
+        ticks = np.unique(np.append(ticks, float(threshold)))
+        axis.yaxis.set_major_locator(FixedLocator(ticks))
+        axis.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:g}"))
+        axis.yaxis.set_minor_formatter(NullFormatter())
+        axis.grid(axis="y", which="major", color="0.86", lw=0.65, ls=":")
+        axis.tick_params(labelsize=9)
+
+    for axis, (column, title) in zip(spectra_axes, spectra_columns):
+        _plot_panel(axis, column, title, "#7A5195")
+    for axis, (column, title) in zip(light_curve_axes, light_curve_columns):
+        _plot_panel(axis, column, title, "#0072B2")
+
+    fig.text(0.012, 0.705, "Spectra Tier 1 diagnostic (log scale)", rotation=90,
+             va="center", ha="center", fontsize=12.5)
+    fig.text(0.012, 0.275, "Light-curve Tier 1 diagnostic (log scale)", rotation=90,
+             va="center", ha="center", fontsize=12.5)
+    fig.suptitle("Tier 1 cuts versus redshift (pre-cut sample)", fontsize=14, y=0.985)
+    fig.subplots_adjust(left=0.052, right=0.993, bottom=0.075, top=0.935)
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=220,
         show=show,
     )
 

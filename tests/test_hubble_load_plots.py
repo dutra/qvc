@@ -145,12 +145,47 @@ def _patch_load_agn_plotters(monkeypatch):
         "plot_suberlak_style_sigma_tau_fits",
         "plot_tau_sigma_vs_wu_catalog",
         "plot_tau_sigma_vs_redshift",
+        "plot_tier1_cuts_vs_redshift",
         "plot_f_host_2500_vs_l2500",
         "plot_blr_diagnostics_summary",
     )
     for name in plot_noops:
         monkeypatch.setattr(hubble_plotting, name, lambda *_args, **_kwargs: None)
     monkeypatch.setattr(hubble_utils, "plot_sigma_tau_identity_grid", lambda *_args, **_kwargs: None)
+
+
+def test_load_agn_data_makes_default_combined_tier1_diagnostic(tmp_path, monkeypatch):
+    source_path = tmp_path / "agn.h5"
+    source_path.touch()
+    frame = _minimal_agn_frame(n=4)
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *_args, **_kwargs: frame.copy(),
+    )
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda value: value)
+    _patch_load_agn_plotters(monkeypatch)
+
+    calls = []
+    monkeypatch.setattr(
+        hubble_plotting,
+        "plot_tier1_cuts_vs_redshift",
+        lambda data, **kwargs: calls.append((data.copy(), kwargs)),
+    )
+
+    hubble_utils.load_agn_data(
+        source_path,
+        magnitude_convention="dereddened",
+        spectra_fit_h5=None,
+        cut_tier="none",
+        plot_path=str(tmp_path / "plots"),
+    )
+
+    assert len(calls) == 1
+    plotted, kwargs = calls[0]
+    assert plotted["object_id"].tolist() == frame["object_id"].tolist()
+    assert kwargs["filename"] == "tier1_cuts_vs_redshift_precut.pdf"
+    assert kwargs["plot_path"] == str(tmp_path / "plots")
 
 
 def test_load_agn_data_makes_pre_and_postcut_joint_sed_and_blr_plots(tmp_path, monkeypatch):
@@ -206,6 +241,7 @@ def test_load_agn_data_makes_pre_and_postcut_joint_sed_and_blr_plots(tmp_path, m
         "plot_suberlak_style_sigma_tau_fits",
         "plot_tau_sigma_vs_wu_catalog",
         "plot_tau_sigma_vs_redshift",
+        "plot_tier1_cuts_vs_redshift",
     )
     for name in plot_noops:
         monkeypatch.setattr(hubble_plotting, name, lambda *_args, **_kwargs: None)
