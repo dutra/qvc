@@ -28,34 +28,67 @@ $QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG = __xonsh__.env.get(
 $QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z = __xonsh__.env.get(
     "QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z", "0.30"
 )
-cut_tier = str(__xonsh__.env.get("QVC_HUBBLE_CUT_TIER", "2")).strip().lower()
+cut_tier = str(__xonsh__.env.get("QVC_HUBBLE_CUT_TIER", "1")).strip().lower()
 if cut_tier not in {"none", "0", "1", "2"}:
     raise ValueError(
         "QVC_HUBBLE_CUT_TIER must be one of: none, 0, 1, 2; "
         f"got {cut_tier!r}."
     )
+
+# Hubble quality-cut thresholds. Edit the defaults here, or override any one
+# with the corresponding environment variable. Use "none" for thresholds that
+# are optional; the four tier-1 chi-square and R-hat limits must stay numeric.
+cut_threshold_defaults = {
+    # Tier 1: spectral/light-curve fit quality and convergence.
+    "QVC_CUT_JAXSEDFIT_JOINT_REDUCED_CHI2_MAX": "1.3",
+    "QVC_CUT_SED_REDUCED_CHI2_MAX": "2.0",
+    "QVC_CUT_SPECTROSCOPY_REDUCED_CHI2_MAX": "1.3",
+    "QVC_CUT_LOO_CHI2_EFF_MAX": "1.3",
+    "QVC_CUT_SPECTRAL_RHAT_MAX": "1.1",
+    "QVC_CUT_LIGHT_CURVE_RHAT_MAX": "1.1",
+    "QVC_CUT_NUM_DIVERGENCES_MAX": "none",
+    # Tier 2: fitted-parameter and science-quality cuts.
+    "QVC_CUT_LOG_TAU_UV_RF_MIN": "none",
+    "QVC_CUT_LOG_TAU_UV_RF_MAX": "none",
+    "QVC_CUT_T_RF_OVER_TAU_UV_RF_MIN": "none",
+    "QVC_CUT_APPARENT_MAG_2500_ERR_MAX": "1.0",
+    "QVC_CUT_A_2500_TOTAL_MAX": "none",
+    "QVC_CUT_LOW_L2500_FHOST_LOG_L_MAX": "none",
+    "QVC_CUT_LOW_L2500_FHOST_PSF_MAX": "none",
+}
+cut_thresholds = {}
+for name, default in cut_threshold_defaults.items():
+    value = str(__xonsh__.env.get(name, default)).strip()
+    __xonsh__.env[name] = value
+    cut_thresholds[name] = value
+
 resume_checkpoint = __xonsh__.env.get("QVC_HUBBLE_RESUME", "")
 resume_args = ["--resume", resume_checkpoint] if resume_checkpoint else []
 
-h5_file = "results/data/lc_data_all.h5"
 
-#h5_file = "results/data/lc_data_all_aug06_0115_f2b677d_N4000_BOSS_20260817.h5"
-#h5_file = "results/data/aug17_0501am_erlang_preview_chisq_legacy_n4000_boss_f2b677d_chisq.h5"
+#h5_file = "results/data/aug18_0955pm_erlang_preview_chisq_nofluxguard_n8000_ebdef2a_chisq.h5"
 #spectra_fit_csv = "results/data/jul29_2206_9dad47e_sedfit.csv"
+#spectra_fit_csv = "results/data/aug17_0205pm_spectrafit_090df0c_nested_N8000.csv"
+#spectra_fit_csv = "results/data/jaxqsofit/aug24_0152pm_spectrafit_e5d2897_chisqgt20_N8000_nested_fhostpsf_resumed_m2500norm12_v3.h5"
+spectra_fit_csv = "results/data/jaxqsofit/aug28_0111pm_spectrafit_f6a63a3_chisqgt20_N8000_nested_fhostpsf_delayedburst_galexauto.h5"
 
-h5_file = "results/data/aug18_0955pm_erlang_preview_chisq_nofluxguard_n8000_ebdef2a_chisq.h5"
-#spectra_fit_csv = "results/data/jul29_2206_9dad47e_sedfit.csv"
-spectra_fit_csv = "results/data/aug17_0205pm_spectrafit_090df0c_nested_N8000.csv"
+
 #h5_file = "results/data/aug16_0611am_mag_linear_svi4000w2000s500_f978995_stone.h5"
+#h5_file = "results/dat"a/aug27_1219pm_erlang_legacy_svithennuts_psflogitnormal_iters3_svi4000w250s250_stonechisq_specaug240152pmv3_n8000_536f607_chisq.h5"
+#h5_file = "results/data/aug27_1219pm_erlang_legacy_svithennuts_psflogitnormal_iters3_svi4000w250s250_stonechisq_specaug240152pmv3_n8000_536f607_chisq.h5"
+h5_file = "results/data/aug29_0158am_erlang_dho_svithennuts_psflogitnormal_iters1_svi10000lr0003w250s100_stonechisq_specaug280111pm_n8000_ce36392_chisq.h5"
 
 $PREFIX = __xonsh__.env.get(
     "QVC_HUBBLE_PREFIX",
-    f"aug19a_dereddened_wcuts_fixedzcompletenessrange_h5aug180955pmerlangnofluxguardn8000_specaug170205nestedn8000_{speed}",
+    f"aug29a_tier1_dho_newcompbinsext_dereddened_wcuts_h5aug290158pmdho_specaug280111pm_n8000_{speed}",
 )
 
 prefix = $PREFIX
 echo "Running hubble_fit.py and PREFIX=" $PREFIX
 echo "Using cumulative Hubble cut tier:" @(cut_tier)
+echo "Using Hubble cut thresholds:"
+for name, value in cut_thresholds.items():
+    echo "  " @(name) "=" @(value)
 
 python -m qvc.hubble.hubble_fit \
     @(resume_args) \
@@ -72,6 +105,9 @@ python -m qvc.hubble.hubble_fit \
     --disable_sigma_clip_pass \
     --sigma_clip_threshold 3.0 \
     @(h5_file)
+
+#--selection-attenuation-mode joint-posterior \
+#--completeness_magnitude attenuated
 
 # QVC_HUBBLE_CUT_TIER meanings (tiers are cumulative):
 #   none: no tiered cuts; 0: eligibility only; 1: tiers 0+1; 2: tiers 0+1+2
