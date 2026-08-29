@@ -2398,6 +2398,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                 before=len(df),
                 kept=len(df),
                 status="warning",
+                tier="post",
             )
             print(f"[WARNING] Residual CSV not found: {residuals_csv}")
             raise ValueError(f"Residual CSV not found: {residuals_csv}")
