@@ -1054,6 +1054,36 @@ def test_compute_direct_full_sample_completeness_summaries_freezes_fit_pivots(fa
     assert not np.allclose(naive_plot_blob[1][:-1], fit_blob[1], atol=1e-10)
 
 
+def test_completeness_redshift_support_covers_plot_sample_and_rejects_narrow_mock(
+    tmp_path,
+):
+    frame = pd.DataFrame(
+        {
+            "z": [0.2, 1.5, 3.5],
+            hubble_completeness_refactored.COMPLETENESS_MAG_COL: [20.0, 21.0, 22.0],
+            hubble_completeness_refactored.COMPLETENESS_MAG_ERR_COL: [0.1, 0.1, 0.1],
+        }
+    )
+    assert hubble_fit.resolve_completeness_redshift_support(
+        frame, (1.0, 3.16)
+    ) == (0.2, 3.5)
+
+    mock_path = tmp_path / "narrow_mock.h5"
+    with hubble_fit.h5py.File(mock_path, "w") as handle:
+        handle.create_dataset("z", data=np.linspace(1.0, 3.16, 100))
+        handle.create_dataset("apparent_mag_2500", data=np.linspace(19.0, 23.0, 100))
+        handle.attrs["mock_redshift_min"] = 1.0
+        handle.attrs["mock_redshift_max"] = 3.16
+
+    with pytest.raises(ValueError, match="does not cover the plotting sample"):
+        hubble_completeness_refactored.get_completeness_function_2d(
+            frame,
+            sim_file=str(mock_path),
+            plot=False,
+            z_range=(0.2, 3.5),
+        )
+
+
 def test_compute_direct_full_sample_completeness_summaries_optionally_returns_selected_draws(
     fake_data,
     monkeypatch,
@@ -4094,7 +4124,7 @@ def test_run_single_two_pass_sigma_clip_filters_outliers_and_writes_diagnostics(
     assert plot_hubble_calls[0]["sigma_clip_threshold"] == 3.0
     np.testing.assert_array_equal(
         plot_hubble_calls[1]["clipped_mask"],
-        np.array([False, True, True, False, False, True], dtype=bool),
+        np.array([False, True, True, False, False, False], dtype=bool),
     )
     assert plot_hubble_calls[1]["filename"] == "hubble_diagram_pass1_full_sample_clipped_debiased.pdf"
     assert plot_hubble_calls[1]["sigma_clip_threshold"] == 3.0
@@ -4108,19 +4138,20 @@ def test_run_single_two_pass_sigma_clip_filters_outliers_and_writes_diagnostics(
     pass1_membership_df = pd.read_csv(run_dir / "sigma_clip_membership_pass1.csv")
     pass2_membership_df = pd.read_csv(run_dir / "sigma_clip_membership_pass2.csv")
     assert set(pass1_df["object_id"]) == set(df_agn["object_id"])
-    assert pass1_df.loc[pass1_df["object_id"] == "agn_005", "was_clipped"].item()
-    assert set(pass1_df.loc[pass1_df["was_clipped"], "object_id"]) == {"agn_001", "agn_002", "agn_005"}
-    assert set(clipped_df["object_id"]) == {"agn_001", "agn_002", "agn_005"}
-    assert set(final_df["object_id"]) == {"agn_000", "agn_003", "agn_004"}
+    assert not pass1_df.loc[pass1_df["object_id"] == "agn_005", "was_clipped"].item()
+    assert not pass1_df.loc[pass1_df["object_id"] == "agn_005", "sigma_clip_eligible"].item()
+    assert set(pass1_df.loc[pass1_df["was_clipped"], "object_id"]) == {"agn_001", "agn_002"}
+    assert set(clipped_df["object_id"]) == {"agn_001", "agn_002"}
+    assert set(final_df["object_id"]) == {"agn_000", "agn_003", "agn_004", "agn_005"}
     assert final_df["was_clipped_pass1"].eq(False).all()
     assert final_df["was_clipped_pass2"].eq(False).all()
     assert final_df["is_in_pass2_sample"].eq(True).all()
     assert final_df["is_in_pass2_plot_sample"].eq(True).all()
-    assert final_df["is_in_pass2_fit_selection"].eq(True).all()
+    assert not final_df.loc[final_df["object_id"] == "agn_005", "is_in_pass2_fit_selection"].item()
     assert "mu_zscore_pass1" in final_df.columns
     assert "mu_zscore_pass2" in final_df.columns
-    assert set(pass1_membership_df.loc[pass1_membership_df["was_clipped_pass1"], "object_id"]) == {"agn_001", "agn_002", "agn_005"}
-    assert set(pass2_membership_df.loc[pass2_membership_df["is_in_pass2_sample"], "object_id"]) == {"agn_000", "agn_003", "agn_004"}
+    assert set(pass1_membership_df.loc[pass1_membership_df["was_clipped_pass1"], "object_id"]) == {"agn_001", "agn_002"}
+    assert set(pass2_membership_df.loc[pass2_membership_df["is_in_pass2_sample"], "object_id"]) == {"agn_000", "agn_003", "agn_004", "agn_005"}
     assert pass2_membership_df["is_in_pass2_plot_sample"].equals(pass2_membership_df["is_in_pass2_sample"])
     assert set(pass2_membership_df.loc[pass2_membership_df["is_in_pass2_fit_selection"], "object_id"]) == {"agn_000", "agn_003", "agn_004"}
     assert not set(pass2_membership_df.loc[pass2_membership_df["was_clipped_pass1"], "object_id"]) & set(
@@ -4168,7 +4199,9 @@ def test_run_single_two_pass_sigma_clip_filters_outliers_and_writes_diagnostics(
         "agn_000", "agn_001", "agn_002", "agn_003", "agn_004"
     }
     assert set(pass2_checkpoint["object_id_fit_selection"].astype(str)) == {"agn_000", "agn_003", "agn_004"}
-    assert set(pass2_checkpoint["object_id_plot_sample"].astype(str)) == {"agn_000", "agn_003", "agn_004"}
+    assert set(pass2_checkpoint["object_id_plot_sample"].astype(str)) == {
+        "agn_000", "agn_003", "agn_004", "agn_005"
+    }
 
 
 def test_run_single_two_pass_sigma_clip_fresh_mode_reruns_without_warm_start(monkeypatch, tmp_path):
@@ -4377,7 +4410,7 @@ def test_run_single_two_pass_sigma_clip_removes_clipped_object_ids_from_second_p
     )
 
     expected_full_ids = ["agn_000", "agn_001", "agn_002", "agn_003", "agn_004", "agn_001"]
-    expected_second_pass_ids = ["agn_000", "agn_003", "agn_004"]
+    expected_second_pass_ids = ["agn_000", "agn_003", "agn_004", "agn_001"]
     assert plot_hubble_calls[0]["object_ids"] == expected_full_ids
     assert plot_hubble_calls[0]["filename"] == "hubble_diagram_pass1_full_sample_debiased.pdf"
     assert plot_hubble_calls[0]["clipped_mask"] is None
@@ -4386,7 +4419,7 @@ def test_run_single_two_pass_sigma_clip_removes_clipped_object_ids_from_second_p
     assert plot_hubble_calls[1]["filename"] == "hubble_diagram_pass1_full_sample_clipped_debiased.pdf"
     np.testing.assert_array_equal(
         plot_hubble_calls[1]["clipped_mask"],
-        np.array([False, True, True, False, False, True], dtype=bool),
+        np.array([False, True, True, False, False, False], dtype=bool),
     )
     assert plot_hubble_calls[1]["sigma_clip_threshold"] == 3.0
     for call in plot_hubble_calls[2:]:
@@ -4604,7 +4637,9 @@ def test_run_single_two_pass_sigma_clip_keeps_out_of_range_survivor_in_stage2_pl
         prefix="unit",
     )
 
-    expected_stage2_plot_ids = ["agn_000", "agn_003", "agn_004", "agn_out_survivor"]
+    expected_stage2_plot_ids = [
+        "agn_000", "agn_003", "agn_004", "agn_out_survivor", "agn_out_clipped"
+    ]
     expected_stage2_fit_ids = ["agn_000", "agn_003", "agn_004"]
     assert pipeline_calls[0] == ["agn_000", "agn_001", "agn_002", "agn_003", "agn_004"]
     assert pipeline_calls[1] == expected_stage2_fit_ids
@@ -4632,11 +4667,13 @@ def test_run_single_two_pass_sigma_clip_keeps_out_of_range_survivor_in_stage2_pl
     assert final_df["was_clipped_pass1"].eq(False).all()
     assert final_df["is_in_pass2_plot_sample"].eq(True).all()
     assert set(final_df.loc[final_df["is_in_pass2_fit_selection"], "object_id"]) == set(expected_stage2_fit_ids)
-    assert set(final_df.loc[~final_df["is_in_pass2_fit_selection"], "object_id"]) == {"agn_out_survivor"}
+    assert set(final_df.loc[~final_df["is_in_pass2_fit_selection"], "object_id"]) == {
+        "agn_out_survivor", "agn_out_clipped"
+    }
     assert final_df.loc[final_df["object_id"] == "agn_out_survivor", "z"].item() > 3.16
     assert set(pass2_membership_df.loc[pass2_membership_df["is_in_pass2_plot_sample"], "object_id"]) == set(expected_stage2_plot_ids)
     assert set(pass2_membership_df.loc[pass2_membership_df["is_in_pass2_fit_selection"], "object_id"]) == set(expected_stage2_fit_ids)
-    assert not {"agn_001", "agn_002", "agn_out_clipped"} & set(final_df["object_id"])
+    assert not {"agn_001", "agn_002"} & set(final_df["object_id"])
 
 
 def test_run_single_resume_stage_pass2_skips_first_pass(monkeypatch, tmp_path):

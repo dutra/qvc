@@ -5421,6 +5421,7 @@ def _range_partitioned_weighted_bin_stats(
     *,
     min_count=3,
     center="mid",
+    fit_membership_mask=None,
 ):
     """Bin fit-range and out-of-range objects without mixed boundary bins.
 
@@ -5437,6 +5438,12 @@ def _range_partitioned_weighted_bin_stats(
         raise ValueError(
             "z, y, and yerr must have identical shapes for range-partitioned binning"
         )
+    if fit_membership_mask is None:
+        fit_membership = np.ones(z.shape, dtype=bool)
+    else:
+        fit_membership = np.asarray(fit_membership_mask, dtype=bool)
+        if fit_membership.shape != z.shape:
+            raise ValueError("fit_membership_mask must have the same shape as z")
     if len(z_range) != 2:
         raise ValueError("z_range must contain exactly two endpoints")
     z_lo, z_hi = map(float, z_range)
@@ -5462,7 +5469,11 @@ def _range_partitioned_weighted_bin_stats(
         )
 
     below = summarize(z < z_lo, bins[0], z_lo)
-    inside = summarize((z >= z_lo) & (z <= z_hi), z_lo, z_hi)
+    inside = summarize(
+        (z >= z_lo) & (z <= z_hi) & fit_membership,
+        z_lo,
+        z_hi,
+    )
     above = summarize(z > z_hi, z_hi, bins[-1])
     return inside, _concatenate_weighted_bin_stats((below, above))
 
@@ -5841,6 +5852,15 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     mu_pred_joint_consistent = (
         mu_cosmo_posterior_median + residuals
     )
+    fit_membership_mask = (
+        df_agn["is_fit_selection"].to_numpy(dtype=bool)
+        if "is_fit_selection" in df_agn.columns
+        else (
+            np.isfinite(z_values)
+            & (z_values >= z_range[0])
+            & (z_values <= z_range[1])
+        )
+    )
     chi2_redshift_mask = (
         np.isfinite(z_values)
         & np.isfinite(residuals)
@@ -5848,8 +5868,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         & np.isfinite(total_var)
         & (data_var > 0.0)
         & (total_var > 0.0)
-        & (z_values >= z_range[0])
-        & (z_values <= z_range[1])
+        & fit_membership_mask
     )
     if clipped_mask is not None:
         chi2_redshift_mask &= ~clipped_mask
@@ -5858,8 +5877,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     if debias and sigma_sel is not None:
         trend_mask = (
             np.isfinite(z_values)
-            & (z_values >= z_range[0])
-            & (z_values <= z_range[1])
+            & fit_membership_mask
         )
         if clipped_mask is not None:
             trend_mask &= ~clipped_mask
@@ -5896,6 +5914,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         z_range,
         min_count=5,
         center="mid",
+        fit_membership_mask=fit_membership_mask,
     )
 
     # Residual-panel bins use the same point-level fit-range partition as the
@@ -5908,6 +5927,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         z_range,
         min_count=5,
         center="mid",
+        fit_membership_mask=fit_membership_mask,
     )
 
     # Log-z bins for INSET (match inset xscale='log')
@@ -5925,6 +5945,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         binning_sigma,
         bins_log,
         z_range,
+        fit_membership_mask=fit_membership_mask,
     )
 
     if compute_only:
@@ -6749,6 +6770,9 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             "residuals",
             "mu_zscore",
         ]
+        for membership_col in ("in_fit_z_range", "is_fit_selection"):
+            if membership_col in residuals_df.columns:
+                fields.insert(1, membership_col)
         sedfit_fields = [
             "fit_backend",
             "fracAGN_5100_fit",
@@ -10561,7 +10585,12 @@ def plot_predicted_L2500_vs_sigmahat(
     )
 
     if show_residuals and ax_res is not None:
-        good_in = good & d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
+        fit_membership = (
+            d["is_fit_selection"].to_numpy(dtype=bool)
+            if "is_fit_selection" in d.columns
+            else d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
+        )
+        good_in = good & fit_membership
         good_in_plot = good_plot & d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
         good_out_plot = good_plot & ~d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
         if np.any(good_in_plot):

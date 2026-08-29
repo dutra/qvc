@@ -70,11 +70,15 @@ from qvc.hubble.hubble_fit import (
     DEFAULT_COMPLETENESS_SIM_FILE,
     SPEED_CHOICES,
     VALID_COMPLETENESS_MODES,
+    Z_RANGE_SEMANTICS,
+    _annotate_agn_fit_membership,
+    _compute_direct_full_sample_completeness_summaries,
     _select_agn_fit_selection,
     estimate_sky_box_area_deg2,
     generate_fresh_completeness_sim_file,
     make_run_tag,
     normalize_speed,
+    resolve_completeness_redshift_support,
     _validate_agn_pivot_context_for_reference,
     validate_completeness_mode,
     z_pivot_agn,
@@ -812,6 +816,7 @@ def run_single_jax(
     early_de_guard=False,
     seed=42,
     agn_pivot_context=None,
+    df_agn_completeness_parent=None,
 ):
     _require_jax_stack()
     if use_alpha_lambda_term:
@@ -870,6 +875,18 @@ def run_single_jax(
         N=N,
         uniform_redshift_distribution=uniform_redshift_distribution,
     )
+    if df_agn_completeness_parent is None:
+        df_agn_completeness_parent = df_agn
+    elif completeness:
+        df_agn_completeness_parent = prepare_completeness_magnitude_columns(
+            df_agn_completeness_parent, completeness_magnitude
+        )
+    df_agn_plot = _annotate_agn_fit_membership(df_agn, df_agn_fit, z_range)
+    completeness_z_range = (
+        resolve_completeness_redshift_support(df_agn_completeness_parent, z_range)
+        if completeness
+        else None
+    )
     if uniform_redshift_distribution:
         plot_redshift_histograms(df_pantheon, df_agn_fit, xscale="linear", plot_path=plot_path, only_agn=only_agn)
     else:
@@ -905,6 +922,8 @@ def run_single_jax(
                 plot_path,
                 area_deg2=completeness_area_deg2,
                 seed=seed,
+                z_range=completeness_z_range,
+                completeness_magnitude=completeness_magnitude,
             )
         if completeness_mode == "4d_fhost_alpha":
             completeness_params = get_completeness_function_4d_fhost_alpha(
@@ -924,7 +943,11 @@ def run_single_jax(
             )
         else:
             completeness_params = get_completeness_function_2d(
-                df_agn_fit, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
+                df_agn_completeness_parent,
+                sim_file=completeness_sim_file,
+                plot=True,
+                plot_path=plot_path,
+                z_range=completeness_z_range,
             )
     else:
         completeness_params = None
@@ -1067,6 +1090,31 @@ def run_single_jax(
         print("Skipping AGN-specific post-processing and plots for SNe-only run.")
         return flat_samples, model_labels, logZ, logZerr, age, age_err
 
+    (
+        dmi_posterior_median_full,
+        dmi_posterior_sigma_full,
+        dmi_selection_sigma_full,
+        dmi_posterior_draws_full,
+    ) = _compute_direct_full_sample_completeness_summaries(
+        flat_samples,
+        df_agn_fit_selection=df_agn_fit,
+        df_agn_plot_sample=df_agn_plot,
+        df_pantheon=df_pantheon,
+        _sna_L=_sna_L,
+        _sna_Lower=_sna_Lower,
+        _sna_LogdetCov=_sna_LogdetCov,
+        cosmo_model=cosmo_model,
+        completeness_params=completeness_params,
+        z_pivot_agn=z_pivot_agn,
+        agn_pivot_context=agn_pivot_context,
+        use_full_cov=True,
+        disable_ceph_dist_calibration=disable_ceph_dist_calibration,
+        use_planck_h0_prior=use_planck_h0_prior,
+        use_planck_om_prior=use_planck_om_prior,
+        only_agn=only_agn,
+        early_de_guard=early_de_guard,
+        dmi_draw_indices=posterior_sample_indices,
+    )
     debias_magnitude = (
         agn_data[COMPLETENESS_MAG_COL]
         if completeness
@@ -1102,7 +1150,7 @@ def run_single_jax(
     )
     plot_predicted_L2500_vs_sigmahat(
         flat_samples,
-        df_agn_fit,
+        df_agn_plot,
         cosmo_model=cosmo_model,
         z_pivot_agn=z_pivot_agn,
         debias=False,
@@ -1115,7 +1163,7 @@ def run_single_jax(
     )
     plot_predicted_L2500_vs_sigmahat(
         flat_samples,
-        df_agn_fit,
+        df_agn_plot,
         cosmo_model=cosmo_model,
         z_pivot_agn=z_pivot_agn,
         debias=False,
@@ -1128,12 +1176,13 @@ def run_single_jax(
     )
     plot_predicted_L2500_vs_sigmahat(
         flat_samples,
-        df_agn_fit,
+        df_agn_plot,
         cosmo_model=cosmo_model,
         z_pivot_agn=z_pivot_agn,
         debias=True,
         dm_interp=dm_interp,
-        dmi_selection_sigma_interp=dmi_selection_sigma_interp,
+        dmi_values=dmi_posterior_median_full,
+        dmi_selection_sigma=dmi_selection_sigma_full,
         show_residuals=False,
         show=False,
         plot_path=plot_path,
@@ -1143,12 +1192,13 @@ def run_single_jax(
     )
     L_residuals_debiased, L_pred_std_debiased = plot_predicted_L2500_vs_sigmahat(
         flat_samples,
-        df_agn_fit,
+        df_agn_plot,
         cosmo_model=cosmo_model,
         z_pivot_agn=z_pivot_agn,
         debias=True,
         dm_interp=dm_interp,
-        dmi_selection_sigma_interp=dmi_selection_sigma_interp,
+        dmi_values=dmi_posterior_median_full,
+        dmi_selection_sigma=dmi_selection_sigma_full,
         show_residuals=True,
         show=False,
         plot_path=plot_path,
@@ -1158,12 +1208,13 @@ def run_single_jax(
     )
     plot_L2500_vs_sigma_tau_separate(
         flat_samples,
-        df_agn_fit,
+        df_agn_plot,
         cosmo_model=cosmo_model,
         z_pivot_agn=z_pivot_agn,
         debias=True,
         dm_interp=dm_interp,
-        dmi_selection_sigma_interp=dmi_selection_sigma_interp,
+        dmi_values=dmi_posterior_median_full,
+        dmi_selection_sigma=dmi_selection_sigma_full,
         show_residuals=False,
         show=False,
         plot_path=plot_path,
@@ -1172,12 +1223,13 @@ def run_single_jax(
     )
     plot_L2500_vs_sigma_tau_separate(
         flat_samples,
-        df_agn_fit,
+        df_agn_plot,
         cosmo_model=cosmo_model,
         z_pivot_agn=z_pivot_agn,
         debias=True,
         dm_interp=dm_interp,
-        dmi_selection_sigma_interp=dmi_selection_sigma_interp,
+        dmi_values=dmi_posterior_median_full,
+        dmi_selection_sigma=dmi_selection_sigma_full,
         show_residuals=True,
         show=False,
         plot_path=plot_path,
@@ -1185,7 +1237,7 @@ def run_single_jax(
         agn_pivot_context=agn_pivot_context,
     )
     plot_catalog_quantity_vs_sigma_tau_separate(
-        df_agn_fit,
+        df_agn_plot,
         y_col="LOGMBH",
         yerr_col="LOGMBH_ERR",
         y_label=r"$\log M_{\rm BH}$",
@@ -1195,7 +1247,7 @@ def run_single_jax(
         z_range=z_range,
     )
     plot_catalog_quantity_vs_sigma_tau_separate(
-        df_agn_fit,
+        df_agn_plot,
         y_col="LOGLEDD_RATIO",
         yerr_col="LOGLEDD_RATIO_ERR",
         y_label=r"$\log (L/L_{\rm Edd})$",
@@ -1206,26 +1258,32 @@ def run_single_jax(
     )
     plot_blr_line_lags_vs_l2500(
         flat_samples,
-        df_agn_fit,
+        df_agn_plot,
         cosmo_model,
         z_pivot_agn,
         dm_interp,
+        dmi_values=dmi_posterior_median_full,
         plot_path=plot_path,
         show=False,
     )
     alpha_agn_idx = model_labels.index("alpha_agn")
     alpha_agn_median = float(np.nanmedian(flat_samples[:, alpha_agn_idx]))
     plot_sigma_uv_mpred_correction(
-        df_agn_fit,
+        df_agn_plot,
         alpha_agn_median,
         plot_path=plot_path,
         show=False,
         filename="sigma_uv_mpred_correction_postcut.pdf",
     )
-    chisq_red_L2500, _ = reduced_chi_squared(L_residuals_debiased, L_pred_std_debiased, n_params=len(model_labels) - 1)
+    fit_stat_mask = df_agn_plot["is_fit_selection"].to_numpy(dtype=bool)
+    chisq_red_L2500, _ = reduced_chi_squared(
+        np.asarray(L_residuals_debiased)[fit_stat_mask],
+        np.asarray(L_pred_std_debiased)[fit_stat_mask],
+        n_params=len(model_labels) - 1,
+    )
     print(f"Reduced chi-squared (debiased) M2500: {chisq_red_L2500:.3f}")
     plot_full_residuals(
-        df_agn_fit,
+        df_agn_plot,
         L_residuals_debiased,
         L_pred_std_debiased,
         flat_samples,
@@ -1233,6 +1291,7 @@ def run_single_jax(
         z_pivot_agn,
         debias=True,
         dm_interp=dm_interp,
+        dmi_values=dmi_posterior_median_full,
         show=False,
         plot_path=plot_path,
         z_range=z_range,
@@ -1242,7 +1301,7 @@ def run_single_jax(
 
     r = plot_hubble(
         flat_samples,
-        df_agn_fit,
+        df_agn_plot,
         df_pantheon,
         cosmo_model=cosmo_model,
         z_pivot_agn=z_pivot_agn,
@@ -1255,12 +1314,12 @@ def run_single_jax(
         verbose=True,
         residuals_sigma_clip=None,
         df_calibrators=None,
-        dmi_values=dmi_posterior_median,
-        dmi_sigma=dmi_posterior_sigma,
-        dmi_selection_sigma=dmi_selection_sigma_posterior_median,
+        dmi_values=dmi_posterior_median_full,
+        dmi_sigma=dmi_posterior_sigma_full,
+        dmi_selection_sigma=dmi_selection_sigma_full,
         z_range=z_range,
         only_agn=only_agn,
-        dmi_posterior_draws=dmi_posterior_draws,
+        dmi_posterior_draws=dmi_posterior_draws_full,
         posterior_sample_indices=posterior_sample_indices,
         agn_pivot_context=agn_pivot_context,
     )
@@ -1273,9 +1332,7 @@ def run_single_jax(
     ) = r
     n_agn_params = sum(label != "M0_sn" for label in model_labels)
     hubble_chi2_mask = (
-        df_agn_fit["z"]
-        .between(z_range[0], z_range[1])
-        .to_numpy(dtype=bool)
+        df_agn_plot["is_fit_selection"].to_numpy(dtype=bool)
         & np.isfinite(debiased_residuals)
         & np.isfinite(mu_pred_std_debiased)
         & np.isfinite(mu_pred_std_debiased_with_scatter)
@@ -1430,6 +1487,7 @@ def main():
         use_planck_om_prior=args.use_planck_om_prior,
         early_de_guard=args.early_de_guard,
         seed=args.seed,
+        df_agn_completeness_parent=df_agn,
     )
 
 

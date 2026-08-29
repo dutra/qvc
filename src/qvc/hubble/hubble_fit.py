@@ -3,6 +3,7 @@ import multiprocessing
 import traceback
 
 import argparse
+import h5py
 from functools import partial
 from pathlib import Path
 
@@ -33,6 +34,7 @@ z_pivot_sna = 0.0
 z_pivot_agn = 1.5
 DEFAULT_COMPLETENESS_SIM_FILE = None
 DEFAULT_COMPLETENESS_FOOTPRINT_AREA_DEG2 = 5.0
+Z_RANGE_SEMANTICS = "fit_only_v1"
 
 from qvc.hubble.cuts import (
     CUT_TIER_CHOICES,
@@ -1376,6 +1378,25 @@ def estimate_sky_box_area_deg2(df_agn_all):
     return area_deg2
 
 
+def resolve_completeness_redshift_support(df_agn, z_range):
+    """Return the finite redshift interval required for plot-time debiasing."""
+
+    if "z" not in df_agn:
+        raise KeyError("Completeness redshift support requires a 'z' column.")
+    values = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        raise ValueError("Completeness redshift support requires at least one finite z.")
+    fit_lo, fit_hi = float(z_range[0]), float(z_range[1])
+    support_lo = min(float(np.min(values)), fit_lo)
+    support_hi = max(float(np.max(values)), fit_hi)
+    if support_lo < 0.0 or support_lo >= support_hi:
+        raise ValueError(
+            f"Invalid completeness redshift support [{support_lo}, {support_hi}]."
+        )
+    return support_lo, support_hi
+
+
 def _select_agn_fit_selection(
     df_agn,
     *,
@@ -1383,13 +1404,16 @@ def _select_agn_fit_selection(
     N,
     uniform_redshift_distribution,
 ):
+    source_attrs = dict(df_agn.attrs)
     if uniform_redshift_distribution:
-        return select_agn_subset_uniform_with_replacement(
+        selected = select_agn_subset_uniform_with_replacement(
             df_agn,
             z_range=z_range,
             N=N,
             z_uniform_min=float(z_range[0]),
         )
+        selected.attrs.update(source_attrs)
+        return selected
     df_selection = df_agn[
         df_agn["z"].between(z_range[0], z_range[1], inclusive="both")
     ].copy()
@@ -1399,7 +1423,22 @@ def _select_agn_fit_selection(
         random_state=42,
         label="in-range AGN objects",
     )
+    df_selection.attrs.update(source_attrs)
     return df_selection
+
+
+def _annotate_agn_fit_membership(df_plot, df_fit_selection, z_range):
+    """Return a plotting frame with explicit redshift/likelihood membership."""
+
+    annotated = df_plot.copy()
+    annotated["in_fit_z_range"] = annotated["z"].between(
+        z_range[0], z_range[1], inclusive="both"
+    ).to_numpy(dtype=bool)
+    annotated["is_fit_selection"] = annotated.index.isin(
+        pd.Index(df_fit_selection.index)
+    )
+    annotated.attrs.update(df_plot.attrs)
+    return annotated
 
 
 def _prepare_shared_agn_pivot_context(
@@ -1531,10 +1570,10 @@ def _build_completeness_params(
     completeness_sim_file,
     plot_path,
     plot=False,
+    completeness_z_range=None,
 ):
     if not completeness:
         return None
-
     missing_magnitude_columns = {
         COMPLETENESS_MAG_COL,
         COMPLETENESS_MAG_ERR_COL,
@@ -1598,6 +1637,7 @@ def _build_completeness_params(
         sim_file=completeness_sim_file,
         plot=plot,
         plot_path=plot_path,
+        z_range=completeness_z_range,
     )
 
 
@@ -1842,6 +1882,17 @@ def _compute_direct_full_sample_completeness_summaries(
         - np.percentile(dmi_draws, 16, axis=0)
     )
     dmi_selection_sigma_full_direct = np.median(sigma_sel_draws, axis=0)
+    for value_name, values in (
+        ("dmi_posterior_median", dmi_posterior_median_full_direct),
+        ("dmi_posterior_sigma", dmi_posterior_sigma_full_direct),
+        ("dmi_selection_sigma", dmi_selection_sigma_full_direct),
+    ):
+        if np.any(~np.isfinite(values)):
+            bad = np.flatnonzero(~np.isfinite(values))[:10].tolist()
+            raise RuntimeError(
+                "Full plotting-sample completeness replay produced nonfinite "
+                f"{value_name} values at row(s) {bad}."
+            )
     summaries = (
         dmi_posterior_median_full_direct,
         dmi_posterior_sigma_full_direct,
@@ -1860,6 +1911,7 @@ def _build_sigma_clip_diagnostics(
     residuals_err,
     *,
     sigma_clip_threshold,
+    eligible_mask=None,
 ):
     residuals = np.asarray(residuals, dtype=float)
     residuals_err = np.asarray(residuals_err, dtype=float)
@@ -1876,13 +1928,27 @@ def _build_sigma_clip_diagnostics(
 
     with np.errstate(divide="ignore", invalid="ignore"):
         mu_zscore = np.abs(residuals) / residuals_err
-    keep_mask = np.isfinite(mu_zscore) & (mu_zscore < float(sigma_clip_threshold))
+    if eligible_mask is None:
+        eligible = np.ones(len(df_agn_diagnostics), dtype=bool)
+    else:
+        eligible = np.asarray(eligible_mask, dtype=bool)
+        if eligible.shape != (len(df_agn_diagnostics),):
+            raise ValueError(
+                "Sigma-clip eligible_mask must match the diagnostics sample."
+            )
+    passes_threshold = np.isfinite(mu_zscore) & (
+        mu_zscore < float(sigma_clip_threshold)
+    )
+    # Redshift-excluded rows are diagnostic/display-only.  They must never be
+    # removed by a fit-stage clipping decision.
+    keep_mask = ~eligible | passes_threshold
 
     diagnostics_df = df_agn_diagnostics.copy()
     diagnostics_df["residuals"] = residuals
     diagnostics_df["residuals_err"] = residuals_err
     diagnostics_df["mu_zscore"] = mu_zscore
-    diagnostics_df["was_clipped"] = ~keep_mask
+    diagnostics_df["sigma_clip_eligible"] = eligible
+    diagnostics_df["was_clipped"] = eligible & ~passes_threshold
     preferred_columns = [
         "object_id",
         "sdss_name",
@@ -1892,6 +1958,7 @@ def _build_sigma_clip_diagnostics(
         "residuals",
         "residuals_err",
         "mu_zscore",
+        "sigma_clip_eligible",
         "was_clipped",
     ]
     remaining_columns = [
@@ -2012,6 +2079,7 @@ def _run_fit_stage(
     warm_start_flat_samples=None,
     logZ_is_approximate=False,
     df_agn_completeness=None,
+    completeness_z_range=None,
 ):
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
     (
@@ -2063,6 +2131,7 @@ def _run_fit_stage(
         warm_start_flat_samples=warm_start_flat_samples,
         logZ_is_approximate=logZ_is_approximate,
         df_agn_completeness=df_agn_completeness,
+        completeness_z_range=completeness_z_range,
     )
     display_results_summary(
         flat_samples,
@@ -2097,8 +2166,19 @@ def _run_fit_stage(
     )
 
 
-def generate_fresh_completeness_sim_file(plot_path, *, area_deg2, seed=123):
+def generate_fresh_completeness_sim_file(
+    plot_path,
+    *,
+    area_deg2,
+    seed=123,
+    z_range=(0.44, 3.16),
+    completeness_magnitude="dereddened",
+):
     """Generate a fresh Shen-LF mock catalog for completeness-map construction."""
+    del completeness_magnitude
+    z_range = tuple(float(value) for value in z_range)
+    if len(z_range) != 2 or z_range[0] < 0.0 or z_range[0] >= z_range[1]:
+        raise ValueError("Completeness mock z_range must be increasing and non-negative.")
     completeness_dir = Path(plot_path) / "completeness"
     completeness_dir.mkdir(parents=True, exist_ok=True)
     output_path = completeness_dir / "mock_completeness_catalog_fresh.h5"
@@ -2145,6 +2225,13 @@ def generate_fresh_completeness_sim_file(plot_path, *, area_deg2, seed=123):
         alpha_nu_parent_mean=alpha_nu_parent_mean,
         alpha_nu_parent_sigma=alpha_nu_parent_sigma,
     )
+    finite_z = np.asarray(z_all, dtype=float)
+    finite_z = finite_z[np.isfinite(finite_z)]
+    with h5py.File(output_path, "a") as handle:
+        handle.attrs["mock_redshift_min"] = float(np.min(finite_z))
+        handle.attrs["mock_redshift_max"] = float(np.max(finite_z))
+        handle.attrs["requested_redshift_min"] = z_range[0]
+        handle.attrs["requested_redshift_max"] = z_range[1]
     print(
         f"Generated fresh completeness mock catalog: {output_path} "
         f"(area_deg2={float(area_deg2):.1f}, p_keep={thinning_probability:.4g})"
@@ -2178,6 +2265,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       warm_start_flat_samples=None,
                       logZ_is_approximate=False,
                       df_agn_completeness=None,
+                      completeness_z_range=None,
                       ):
     validate_completeness_mode(completeness_mode)
     completeness_magnitude = normalize_completeness_magnitude(
@@ -2203,6 +2291,10 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             completeness_magnitude,
         )
     speed = normalize_speed(speed)
+    if completeness_z_range is None and completeness and df_agn_completeness is not None:
+        completeness_z_range = resolve_completeness_redshift_support(
+            df_agn_completeness, z_range
+        )
     _fit_mode_label(only_sna, only_agn)
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
     if only_sna:
@@ -2286,6 +2378,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             completeness_sim_file = generate_fresh_completeness_sim_file(
                 plot_path,
                 area_deg2=completeness_area_deg2,
+                z_range=completeness_z_range,
+                completeness_magnitude=completeness_magnitude,
             )
         print(f"Building {completeness_mode} completeness map using mock catalog: {completeness_sim_file}")
         completeness_params = _build_completeness_params(
@@ -2296,6 +2390,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             completeness_sim_file=completeness_sim_file,
             plot_path=plot_path,
             plot=not (compare_sigma_only or minimal_plots),
+            completeness_z_range=completeness_z_range,
         )
         if not compare_sigma_only:
             _plot_completeness_cut_audit(
@@ -2691,7 +2786,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                use_redshift_log_f_term=False,
                early_de_guard=False,
                resume_replot_with_cuts=False,
-               agn_pivot_context=None):
+               agn_pivot_context=None,
+               df_agn_completeness_parent=None):
     validate_completeness_mode(completeness_mode)
     completeness_magnitude = normalize_completeness_magnitude(
         completeness_magnitude
@@ -2703,6 +2799,20 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     df_agn_all = prepare_completeness_magnitude_columns(
         df_agn_all,
         completeness_magnitude,
+    )
+    if df_agn_completeness_parent is None:
+        df_agn_completeness_parent = df_agn.copy()
+    else:
+        df_agn_completeness_parent = prepare_completeness_magnitude_columns(
+            df_agn_completeness_parent,
+            completeness_magnitude,
+        )
+    completeness_z_range = (
+        resolve_completeness_redshift_support(
+            df_agn_completeness_parent, z_range
+        )
+        if completeness
+        else None
     )
     speed = normalize_speed(speed)
     _fit_mode_label(only_sna, only_agn)
@@ -2743,6 +2853,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             completeness_sim_file = generate_fresh_completeness_sim_file(
                 plot_path,
                 area_deg2=completeness_area_deg2,
+                z_range=completeness_z_range,
+                completeness_magnitude=completeness_magnitude,
             )
         else:
             print(f"Completeness enabled with mock catalog file: {completeness_sim_file}")
@@ -2877,6 +2989,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 completeness_sim_file=completeness_sim_file,
                 plot_path=plot_path,
                 plot=False,
+                completeness_z_range=completeness_z_range,
             )
         return direct_completeness_params
 
@@ -2971,7 +3084,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 early_de_guard=early_de_guard,
                 checkpoint_file_override=pass1_checkpoint_file,
                 resume_replot_with_cuts=False,
-                df_agn_completeness=df_agn_full_sample_preclip,
+                df_agn_completeness=df_agn_completeness_parent,
+                completeness_z_range=completeness_z_range,
             )
             posterior_sample_indices_pass1 = (
                 get_hubble_posterior_sample_indices(
@@ -3042,6 +3156,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 pass1_residuals_full,
                 pass1_clipping_sigma_full,
                 sigma_clip_threshold=sigma_clip_threshold,
+                eligible_mask=df_agn_full_sample_preclip["z"].between(
+                    z_range[0], z_range[1], inclusive="both"
+                ).to_numpy(dtype=bool),
             )
             df_agn_pass2_plot_sample = df_agn_full_sample_preclip.loc[keep_mask_full].copy()
             df_agn_pass2_fit_selection = _select_agn_fit_selection(
@@ -3204,6 +3321,17 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         else:
             print("Running fresh second Hubble-fit pass on the clipped AGN sample.")
 
+    df_agn_pass2_plot_sample = _annotate_agn_fit_membership(
+        df_agn_pass2_plot_sample,
+        df_agn_pass2_fit_selection,
+        z_range,
+    )
+    df_agn_full_sample_preclip = _annotate_agn_fit_membership(
+        df_agn_full_sample_preclip,
+        df_agn_pass2_fit_selection,
+        z_range,
+    )
+
     if uniform_redshift_distribution:
         if not (compare_sigma_only or minimal_plots):
             plot_redshift_histograms(df_pantheon, df_agn_pass2_fit_selection, xscale="linear", plot_path=plot_path, only_agn=only_agn)
@@ -3275,7 +3403,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         resume_replot_with_cuts=resume_replot_with_cuts,
         warm_start_flat_samples=pass2_warm_start_flat_samples if warm_start_pass2 else None,
         logZ_is_approximate=warm_start_pass2,
-        df_agn_completeness=df_agn_full_sample_preclip,
+        df_agn_completeness=df_agn_completeness_parent,
+        completeness_z_range=completeness_z_range,
     )
     if apply_two_pass_sigma_clip:
         _write_stage_checkpoint(
@@ -3580,7 +3709,14 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         show=False,
     )
 
-    chisq_red_L2500, _ = reduced_chi_squared(L_residuals_debiased, L_pred_std_debiased, n_params=len(model_labels)-1)
+    fit_stat_mask = df_agn_pass2_plot_sample["is_fit_selection"].to_numpy(
+        dtype=bool
+    )
+    chisq_red_L2500, _ = reduced_chi_squared(
+        np.asarray(L_residuals_debiased)[fit_stat_mask],
+        np.asarray(L_pred_std_debiased)[fit_stat_mask],
+        n_params=len(model_labels) - 1,
+    )
     df_agn_agn_likelihood_chi2_selection = df_agn_pass2_fit_selection
     if resume_replot_with_cuts:
         df_agn_agn_likelihood_chi2_selection = df_agn_pass2_plot_sample[
@@ -3633,6 +3769,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             debiased_residuals,
             debiased_clipping_sigma,
             sigma_clip_threshold=sigma_clip_threshold,
+            eligible_mask=df_agn_pass2_plot_sample["z"].between(
+                z_range[0], z_range[1], inclusive="both"
+            ).to_numpy(dtype=bool),
         )
         final_diagnostics_df = final_diagnostics_df.rename(
             columns={
@@ -3649,8 +3788,10 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             ].to_numpy(dtype=bool)
         final_diagnostics_df["is_in_pass2_sample"] = True
         final_diagnostics_df["is_in_pass2_plot_sample"] = True
-        final_diagnostics_df["is_in_pass2_fit_selection"] = final_diagnostics_df["z"].between(
-            z_range[0], z_range[1]
+        final_diagnostics_df["is_in_pass2_fit_selection"] = (
+            final_diagnostics_df.index.isin(
+                pd.Index(df_agn_pass2_fit_selection.index)
+            )
         )
         _write_sigma_clip_diagnostics(
             final_diagnostics_df,
@@ -3769,14 +3910,13 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_eta_sigma_term=use_eta_sigma_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 only_agn=only_agn,
-                agn_pivot_context=agn_pivot_context)
+                agn_pivot_context=agn_pivot_context,
+                df_agn_completeness_parent=df_agn_completeness_parent)
     biased_residuals, biased_residuals_err, _, _, _ = r
 
     n_agn_params = sum(label != "M0_sn" for label in model_labels)
     hubble_chi2_mask = (
-        df_agn_pass2_plot_sample["z"]
-        .between(z_range[0], z_range[1])
-        .to_numpy(dtype=bool)
+        df_agn_pass2_plot_sample["is_fit_selection"].to_numpy(dtype=bool)
         & np.isfinite(debiased_residuals)
         & np.isfinite(mu_pred_std_debiased)
         & np.isfinite(mu_pred_std_debiased_with_scatter)
@@ -3925,7 +4065,11 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_redshift_log_f_term=use_redshift_log_f_term,
         agn_pivot_context=agn_pivot_context,
     )
-    chisq_red_M2500_debiased, _ = reduced_chi_squared(M2500_residuals_debiased, M2500_std_debiased, n_params=len(model_labels)-1)
+    chisq_red_M2500_debiased, _ = reduced_chi_squared(
+        np.asarray(M2500_residuals_debiased)[fit_stat_mask],
+        np.asarray(M2500_std_debiased)[fit_stat_mask],
+        n_params=len(model_labels) - 1,
+    )
     print("Plotting debiased residuals...")
     plot_full_residuals(
         df_agn_pass2_plot_sample,
@@ -4751,6 +4895,7 @@ if __name__ == "__main__":
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
                 early_de_guard=args.early_de_guard,
                 agn_pivot_context=agn_pivot_context,
+                df_agn_completeness_parent=df_agn_completeness_parent,
             )
     elif args.run == "single": # default
         cosmo_models_dict = {k: {} for k in args.cosmo_models}

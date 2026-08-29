@@ -2104,6 +2104,22 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
 
     tier0_start = target_before
 
+    if "z" not in df.columns:
+        raise ValueError("AGN analysis requires the redshift column 'z'.")
+    z_values = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
+    # Finite redshift is a structural data requirement, not an analysis-range
+    # cut, so it remains active even in the explicit uncut diagnostic mode.
+    df = _record_cut(
+        "redshift_support",
+        (
+            "finite z; --z_range "
+            f"[{z_range[0]}, {z_range[1]}] deferred to fit selection"
+        ),
+        df,
+        np.isfinite(z_values),
+        tier="assembly",
+    )
+
     # Tier 0: sample eligibility and analysis support.
     if apply_tier0:
         exclusion_object_ids = []
@@ -2409,6 +2425,8 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         ),
         "sdss_target_selection": sdss_target_selection,
         "spectra_sdss_run2d": str(spectra_sdss_run2d),
+        "z_range": [float(z_range[0]), float(z_range[1])],
+        "z_range_semantics": "fit_only_v1",
         "excluded_sdss_names": list(EXCLUDED_SDSS_NAMES),
         "exclude_object_ids_csv": [str(value) for value in exclude_object_ids_csv],
         "residuals_sigma_clip": residuals_sigma_clip,

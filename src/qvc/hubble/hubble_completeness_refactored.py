@@ -947,6 +947,7 @@ def get_completeness_function_2d(
     plot_path=None,
     fill_along_mag=False,
     fill_along_z=False,
+    z_range=None,
 ):
     """
     Build p(detect | m, z)
@@ -965,6 +966,8 @@ def get_completeness_function_2d(
             m_true = np.asarray(f["apparent_mag_i_rest"][:], dtype=float)
         z_true  = np.asarray(f["z"][:], dtype=float)
         mock_count_scale = f.attrs.get("mock_count_scale")
+        declared_z_min = float(f.attrs.get("mock_redshift_min", np.nan))
+        declared_z_max = float(f.attrs.get("mock_redshift_max", np.nan))
 
     # Filter finite
     z_obs = df_agn["z"].to_numpy(dtype=float)
@@ -976,7 +979,27 @@ def get_completeness_function_2d(
     m_true, z_true = m_true[ok_true], z_true[ok_true]
     # Grid
     mag_min, mag_max = COMPLETENESS_MAG_EDGE_MIN, COMPLETENESS_MAG_EDGE_MAX
-    z_min,   z_max   = 0.0, 4.0
+    if z_range is None:
+        z_min, z_max = 0.0, 4.0
+    else:
+        z_min, z_max = (float(z_range[0]), float(z_range[1]))
+        if not np.isfinite(z_min) or not np.isfinite(z_max) or z_min < 0.0 or z_min >= z_max:
+            raise ValueError(
+                "Completeness z_range must be finite, non-negative, and increasing."
+            )
+        if np.isfinite(declared_z_min) and np.isfinite(declared_z_max):
+            support_min, support_max = declared_z_min, declared_z_max
+        else:
+            support_min = float(np.nanmin(z_true))
+            support_max = float(np.nanmax(z_true))
+        tolerance = max(1e-6, 0.01 * (z_max - z_min))
+        if support_min > z_min + tolerance or support_max < z_max - tolerance:
+            raise ValueError(
+                "Completeness mock redshift support does not cover the plotting "
+                f"sample: mock=[{support_min:.6g}, {support_max:.6g}], "
+                f"required=[{z_min:.6g}, {z_max:.6g}]. Provide a compatible "
+                "mock or omit --completeness_sim_file to generate one."
+            )
     mag_edges = np.linspace(mag_min, mag_max, n_mag_bins + 1)
     z_edges   = np.linspace(z_min,  z_max,    n_z_bins   + 1)
     mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
