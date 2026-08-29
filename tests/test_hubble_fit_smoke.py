@@ -3976,6 +3976,7 @@ def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_c
     assert agn_chi2_calls == [expected_fit_ids]
     for plot_call in plot_hubble_calls:
         assert "agn_likelihood_space_chi2" not in plot_call["keyword_names"]
+        assert "df_agn_completeness_parent" not in plot_call["keyword_names"]
         assert (
             "agn_likelihood_space_chi2_zgt1"
             not in plot_call["keyword_names"]

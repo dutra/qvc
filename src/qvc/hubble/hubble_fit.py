@@ -4182,8 +4182,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_eta_sigma_term=use_eta_sigma_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 only_agn=only_agn,
-                agn_pivot_context=agn_pivot_context,
-                df_agn_completeness_parent=df_agn_completeness_parent)
+                agn_pivot_context=agn_pivot_context)
     biased_residuals, biased_residuals_err, _, _, _ = r
 
     n_agn_params = sum(label != "M0_sn" for label in model_labels)
