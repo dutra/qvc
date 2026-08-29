@@ -5373,3 +5373,12 @@ def test_resume_checkpoint_validates_cut_and_redshift_metadata():
             n_agn,
             expected_z_range_semantics=hubble_fit.Z_RANGE_SEMANTICS,
         )
+
+
+def test_run_hubble_forwards_configurable_cumulative_cut_tier():
+    runner = (ROOT / "run_hubble.xonsh").read_text(encoding="utf-8")
+
+    assert '__xonsh__.env.get("QVC_HUBBLE_CUT_TIER", "2")' in runner
+    assert 'cut_tier not in {"none", "0", "1", "2"}' in runner
+    assert "--cut-tier @(cut_tier)" in runner
+    assert "tiers are cumulative" in runner

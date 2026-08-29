@@ -22,6 +22,12 @@ magnitude_convention = __xonsh__.env.get("QVC_HUBBLE_MAGNITUDE_CONVENTION", "der
 completeness_magnitude = __xonsh__.env.get(
     "QVC_HUBBLE_COMPLETENESS_MAGNITUDE", "attenuated"
 )
+cut_tier = str(__xonsh__.env.get("QVC_HUBBLE_CUT_TIER", "2")).strip().lower()
+if cut_tier not in {"none", "0", "1", "2"}:
+    raise ValueError(
+        "QVC_HUBBLE_CUT_TIER must be one of: none, 0, 1, 2; "
+        f"got {cut_tier!r}."
+    )
 resume_checkpoint = __xonsh__.env.get("QVC_HUBBLE_RESUME", "")
 resume_args = ["--resume", resume_checkpoint] if resume_checkpoint else []
 
@@ -43,6 +49,7 @@ $PREFIX = __xonsh__.env.get(
 
 prefix = $PREFIX
 echo "Running hubble_fit.py and PREFIX=" $PREFIX
+echo "Using cumulative Hubble cut tier:" @(cut_tier)
 
 python -m qvc.hubble.hubble_fit \
     @(resume_args) \
@@ -52,6 +59,7 @@ python -m qvc.hubble.hubble_fit \
     --spectra_fit_csv @(spectra_fit_csv) \
     --magnitude-convention @(magnitude_convention) \
     --completeness_magnitude @(completeness_magnitude) \
+    --cut-tier @(cut_tier) \
     --result_prefix "fiducial" \
     --z_range 0.44 3.16 \
     --prefix @(prefix) \
@@ -59,4 +67,5 @@ python -m qvc.hubble.hubble_fit \
     --sigma_clip_threshold 3.0 \
     @(h5_file)
 
-#     --no-cuts \
+# QVC_HUBBLE_CUT_TIER meanings (tiers are cumulative):
+#   none: no tiered cuts; 0: eligibility only; 1: tiers 0+1; 2: tiers 0+1+2
