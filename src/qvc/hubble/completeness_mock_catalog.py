@@ -14,6 +14,14 @@ from astropy import units as u
 from astropy.cosmology import FlatLambdaCDM
 from scipy.interpolate import RegularGridInterpolator
 from scipy.optimize import brentq
+from scipy.special import ndtr, ndtri
+
+from qvc.hubble.empirical_luminosity_functions import (
+    EMPIRICAL_LF_MODEL_IDS,
+    LFGrid,
+    ReddeningSemantics,
+    build_empirical_lf,
+)
 
 
 COSMO = FlatLambdaCDM(H0=70.0, Om0=0.3)
@@ -23,6 +31,10 @@ LOG10_MAG_JACOBIAN = np.log10(0.4)
 NU_2500_HZ = 2.99792458e18 / 2500.0
 AB_ABSOLUTE_MAG_ZEROPOINT = 51.59477721004232
 SHEN_GLOBAL_FIT = "A"
+COMPLETENESS_LF_MODELS = ("shen", *EMPIRICAL_LF_MODEL_IDS)
+EMPIRICAL_LF_NATIVE_MAGNITUDE_GRID = np.linspace(-33.0, -16.0, 341)
+EMPIRICAL_LF_REDSHIFT_STEP = 0.05
+DEFAULT_M2500_SUPPORT = (18.5, 24.0)
 
 
 def log_nu_lnu_to_ab_absolute_magnitude(log_nu_lnu, frequency_hz):
@@ -176,6 +188,107 @@ def build_shen_lf(pubtools_path):
     return phi_log10, m_grid, z_bins
 
 
+def normalize_completeness_lf_model(model):
+    """Return a canonical completeness-LF identifier."""
+
+    normalized = str(model).strip().lower().replace("-", "_")
+    if normalized not in COMPLETENESS_LF_MODELS:
+        raise ValueError(
+            f"Unknown completeness LF model {model!r}; expected one of "
+            f"{COMPLETENESS_LF_MODELS}."
+        )
+    return normalized
+
+
+def build_completeness_lf(
+    lf_model,
+    *,
+    z_range=(0.44, 3.16),
+    shen_pubtools_path=None,
+    target_cosmology=COSMO,
+):
+    """Build a published LF grid in its native magnitude convention.
+
+    Empirical LFs are evaluated analytically on a common dense native-
+    magnitude grid.  The wavelength conversion to apparent ``m_2500`` is
+    intentionally deferred until an object-level continuum slope is drawn.
+    """
+
+    lf_model = normalize_completeness_lf_model(lf_model)
+    z_min, z_max = (float(value) for value in z_range)
+    if not np.isfinite(z_min) or not np.isfinite(z_max) or z_min >= z_max:
+        raise ValueError("z_range must contain two finite increasing values.")
+
+    if lf_model == "shen":
+        if not (
+            np.isclose(target_cosmology.H0.value, COSMO.H0.value)
+            and np.isclose(target_cosmology.Om0, COSMO.Om0)
+        ):
+            raise NotImplementedError(
+                "The Shen grid is native to H0=70, Om0=0.3; cosmology "
+                "remapping is currently implemented only for empirical LFs."
+            )
+        phi_log10, magnitude_grid, redshift_grid = build_shen_lf(
+            shen_pubtools_path
+        )
+        return LFGrid(
+            model_id="shen",
+            phi_log10=phi_log10,
+            native_magnitude_grid=magnitude_grid,
+            redshift_grid=redshift_grid,
+            reference_wavelength_angstrom=2500.0,
+            native_to_monochromatic_ab_offset=0.0,
+            native_magnitude_name="M_2500_AB",
+            source_cosmology=COSMO,
+            target_cosmology=target_cosmology,
+            calibration_redshift_range=(0.0, 7.0),
+            formula_version="shen2020_global_fit_a_observed_2500A",
+            reddening_semantics=ReddeningSemantics(
+                luminosity_semantics="shen_nh_attenuated_observed_2500A",
+                galactic_extinction="not_in_model",
+                internal_extinction="modeled_by_shen_nh_distribution",
+                selection_dust_treatment="all_nh_attenuated",
+                apply_additional_internal_extinction=False,
+            ),
+        )
+
+    n_redshift = max(
+        2,
+        int(np.ceil((z_max - z_min) / EMPIRICAL_LF_REDSHIFT_STEP)) + 1,
+    )
+    return build_empirical_lf(
+        lf_model,
+        EMPIRICAL_LF_NATIVE_MAGNITUDE_GRID,
+        np.linspace(z_min, z_max, n_redshift),
+        target_cosmology,
+    )
+
+
+def native_absolute_magnitude_to_m2500(
+    native_magnitude,
+    alpha_nu,
+    reference_wavelength_angstrom,
+    native_to_monochromatic_ab_offset=0.0,
+):
+    """Convert a native monochromatic AB magnitude to rest-frame 2500 A.
+
+    The convention is ``f_nu proportional to nu**alpha_nu``.  Any native
+    reference-redshift normalization (notably ``M_g(z=2)``) is removed before
+    applying the power-law color term.
+    """
+
+    native_magnitude = np.asarray(native_magnitude, dtype=float)
+    alpha_nu = np.asarray(alpha_nu, dtype=float)
+    wavelength = float(reference_wavelength_angstrom)
+    if not np.isfinite(wavelength) or wavelength <= 0.0:
+        raise ValueError("reference_wavelength_angstrom must be positive.")
+    return (
+        native_magnitude
+        + float(native_to_monochromatic_ab_offset)
+        + 2.5 * alpha_nu * np.log10(2500.0 / wavelength)
+    )
+
+
 def build_ananna_lf(ananna_xlf_path):
     if ananna_xlf_path is None:
         ananna_xlf_path = default_ananna_xlf_path()
@@ -227,6 +340,327 @@ def build_ananna_lf(ananna_xlf_path):
     phi_bol_log10 = np.log10(np.clip(phi_bol_lin, 1e-40, None)) + LOG10_MAG_JACOBIAN
     m_grid = 91.0 - 2.5 * loglbol_grid
     return phi_bol_log10, m_grid, z_bins
+
+
+def _normal_support_probability(lower, upper, mean, sigma):
+    if sigma == 0.0:
+        return ((lower <= mean) & (mean <= upper)).astype(float)
+    return np.clip(
+        ndtr((upper - mean) / sigma) - ndtr((lower - mean) / sigma),
+        0.0,
+        1.0,
+    )
+
+
+def _alpha_bounds_for_m2500_support(
+    native_magnitude,
+    distance_modulus,
+    *,
+    reference_wavelength_angstrom,
+    native_to_monochromatic_ab_offset,
+    m2500_support,
+):
+    base = (
+        np.asarray(native_magnitude, dtype=float)
+        + np.asarray(distance_modulus, dtype=float)
+        + float(native_to_monochromatic_ab_offset)
+    )
+    coefficient = 2.5 * np.log10(
+        2500.0 / float(reference_wavelength_angstrom)
+    )
+    bright, faint = m2500_support
+    if np.isclose(coefficient, 0.0, rtol=0.0, atol=1e-15):
+        allowed = (base >= bright) & (base <= faint)
+        return (
+            np.where(allowed, -np.inf, np.inf),
+            np.where(allowed, np.inf, -np.inf),
+        )
+    first = (bright - base) / coefficient
+    second = (faint - base) / coefficient
+    return np.minimum(first, second), np.maximum(first, second)
+
+
+def _sample_truncated_normal(rng, lower, upper, mean, sigma):
+    lower = np.asarray(lower, dtype=float)
+    upper = np.asarray(upper, dtype=float)
+    if sigma == 0.0:
+        if np.any((mean < lower) | (mean > upper)):
+            raise RuntimeError("Zero-scatter continuum slope lies outside support.")
+        return np.full(lower.shape, mean, dtype=float)
+    cdf_lower = ndtr((lower - mean) / sigma)
+    cdf_upper = ndtr((upper - mean) / sigma)
+    width = cdf_upper - cdf_lower
+    if np.any(width <= 0.0):
+        raise RuntimeError("Continuum-slope support has zero probability.")
+    quantile = cdf_lower + rng.random(lower.shape) * width
+    quantile = np.clip(
+        quantile,
+        np.nextafter(0.0, 1.0),
+        np.nextafter(1.0, 0.0),
+    )
+    return mean + sigma * ndtri(quantile)
+
+
+def _sample_piecewise_linear_grid(rng, grid, density, size=None):
+    """Sample from non-negative densities tabulated on a shared 1D grid.
+
+    ``density`` may be one-dimensional or have one row per requested draw.
+    Each grid interval is integrated and inverted assuming linear density,
+    matching the trapezoidal quadrature used for the expected counts.
+    """
+
+    grid = np.asarray(grid, dtype=float)
+    density = np.asarray(density, dtype=float)
+    if grid.ndim != 1 or grid.size < 2 or np.any(np.diff(grid) <= 0.0):
+        raise ValueError("grid must be a strictly increasing 1D array.")
+    if density.ndim == 1:
+        if density.shape != grid.shape:
+            raise ValueError("1D density must have the same shape as grid.")
+        requested = 1 if size is None else int(size)
+        density = np.broadcast_to(density, (requested, grid.size))
+    elif density.ndim == 2:
+        if density.shape[1] != grid.size:
+            raise ValueError("density rows must have the same length as grid.")
+        if size is not None and int(size) != density.shape[0]:
+            raise ValueError("size must match the number of density rows.")
+    else:
+        raise ValueError("density must be one- or two-dimensional.")
+
+    density = np.maximum(density, 0.0)
+    widths = np.diff(grid)
+    segment_mass = 0.5 * (density[:, :-1] + density[:, 1:]) * widths
+    cumulative = np.cumsum(segment_mass, axis=1)
+    totals = cumulative[:, -1]
+    if np.any(~np.isfinite(totals)) or np.any(totals <= 0.0):
+        raise RuntimeError("Piecewise-linear density has zero or invalid mass.")
+
+    targets = rng.random(density.shape[0]) * totals
+    interval = np.sum(cumulative < targets[:, None], axis=1)
+    interval = np.clip(interval, 0, grid.size - 2)
+    previous = np.where(
+        interval == 0,
+        0.0,
+        cumulative[np.arange(density.shape[0]), np.maximum(interval - 1, 0)],
+    )
+    local_mass_per_width = (targets - previous) / widths[interval]
+    left_density = density[np.arange(density.shape[0]), interval]
+    right_density = density[np.arange(density.shape[0]), interval + 1]
+    slope = right_density - left_density
+
+    fraction = np.empty_like(targets)
+    nearly_flat = np.abs(slope) <= 1.0e-12 * np.maximum(
+        1.0, np.maximum(left_density, right_density)
+    )
+    fraction[nearly_flat] = np.divide(
+        local_mass_per_width[nearly_flat],
+        left_density[nearly_flat],
+        out=np.zeros(np.count_nonzero(nearly_flat), dtype=float),
+        where=left_density[nearly_flat] > 0.0,
+    )
+    curved = ~nearly_flat
+    discriminant = left_density[curved] ** 2 + 2.0 * slope[curved] * local_mass_per_width[curved]
+    fraction[curved] = (
+        2.0 * local_mass_per_width[curved]
+        / (left_density[curved] + np.sqrt(np.maximum(discriminant, 0.0)))
+    )
+    fraction = np.clip(fraction, 0.0, 1.0)
+    return grid[interval] + fraction * widths[interval]
+
+
+def mock_lf_grid_per_zbin(
+    lf_grid,
+    area_deg2,
+    alpha_nu,
+    dalpha_nu,
+    cosmo,
+    *,
+    z_range=None,
+    m2500_support=DEFAULT_M2500_SUPPORT,
+    z_res=256,
+    kcorr_zref=2.0,
+    rng=None,
+    return_global=False,
+    return_alpha=False,
+):
+    """Sample an :class:`LFGrid`, conditioning on apparent ``m_2500``.
+
+    Conditioning the Poisson intensity before drawing avoids generating the
+    enormous unobservable faint population of steep empirical LFs.  The
+    continuum slope is then drawn from the corresponding truncated Gaussian,
+    so every returned object is exactly inside the declared support.
+    """
+
+    if not isinstance(lf_grid, LFGrid):
+        raise TypeError("lf_grid must be an LFGrid.")
+    rng = np.random.default_rng() if rng is None else rng
+    alpha_nu = float(alpha_nu)
+    dalpha_nu = float(abs(dalpha_nu))
+    if not np.isfinite(alpha_nu) or not np.isfinite(dalpha_nu):
+        raise ValueError("alpha_nu and dalpha_nu must be finite.")
+    m2500_support = tuple(float(value) for value in m2500_support)
+    if len(m2500_support) != 2 or not np.all(np.isfinite(m2500_support)):
+        raise ValueError("m2500_support must contain two finite values.")
+    if m2500_support[0] >= m2500_support[1]:
+        raise ValueError("m2500_support must be increasing.")
+
+    native_grid = np.asarray(lf_grid.native_magnitude_grid, dtype=float)
+    redshift_nodes = np.asarray(lf_grid.redshift_grid, dtype=float)
+    if z_range is None:
+        z_min, z_max = float(redshift_nodes[0]), float(redshift_nodes[-1])
+    else:
+        z_min, z_max = (float(value) for value in z_range)
+    if z_min < redshift_nodes[0] or z_max > redshift_nodes[-1] or z_min >= z_max:
+        raise ValueError("z_range must lie inside the LF redshift grid.")
+    interior = redshift_nodes[(redshift_nodes > z_min) & (redshift_nodes < z_max)]
+    z_edges = np.concatenate(([z_min], interior, [z_max]))
+
+    density = np.asarray(lf_grid.phi_log10, dtype=float)
+    interpolator = RegularGridInterpolator(
+        (redshift_nodes, native_grid),
+        density,
+        bounds_error=False,
+        fill_value=-np.inf,
+    )
+    area_sr = float(area_deg2) * (np.pi / 180.0) ** 2
+    per_z_m = []
+    per_z_m2500 = []
+    per_z = []
+    per_z_alpha_lambda = []
+    expected = np.zeros(z_edges.size - 1, dtype=float)
+    selected = np.zeros(z_edges.size - 1, dtype=int)
+
+    for index, (left, right) in enumerate(zip(z_edges[:-1], z_edges[1:])):
+        z_eval = np.linspace(left, right, int(z_res))
+        dm_eval = cosmo.distmod(z_eval).value
+        native_mesh = np.broadcast_to(native_grid, (z_eval.size, native_grid.size))
+        z_mesh = np.broadcast_to(z_eval[:, None], native_mesh.shape)
+        log_phi = interpolator(np.column_stack((z_mesh.ravel(), native_mesh.ravel()))).reshape(native_mesh.shape)
+        phi = np.where(np.isfinite(log_phi), 10.0**log_phi, 0.0)
+        lower, upper = _alpha_bounds_for_m2500_support(
+            native_mesh,
+            dm_eval[:, None],
+            reference_wavelength_angstrom=lf_grid.reference_wavelength_angstrom,
+            native_to_monochromatic_ab_offset=lf_grid.native_to_monochromatic_ab_offset,
+            m2500_support=m2500_support,
+        )
+        support_probability = _normal_support_probability(
+            lower, upper, alpha_nu, dalpha_nu
+        )
+        weighted_phi = phi * support_probability
+        phi_integral = np.trapezoid(weighted_phi, x=native_grid, axis=1)
+        dvdz = (
+            cosmo.differential_comoving_volume(z_eval).to_value(u.Mpc**3 / u.sr)
+            * area_sr
+        )
+        redshift_weight = phi_integral * dvdz
+        expected[index] = np.trapezoid(redshift_weight, x=z_eval)
+        if not np.isfinite(expected[index]) or expected[index] <= 0.0:
+            per_z_m.append(np.empty(0))
+            per_z_m2500.append(np.empty(0))
+            per_z.append(np.empty(0))
+            per_z_alpha_lambda.append(np.empty(0))
+            continue
+        count = rng.poisson(expected[index])
+        if count == 0:
+            per_z_m.append(np.empty(0))
+            per_z_m2500.append(np.empty(0))
+            per_z.append(np.empty(0))
+            per_z_alpha_lambda.append(np.empty(0))
+            continue
+
+        z_sample = _sample_piecewise_linear_grid(
+            rng, z_eval, redshift_weight, size=count
+        )
+        dm_sample = cosmo.distmod(z_sample).value
+        native_sample = np.empty(count, dtype=float)
+        chunk_size = 4096
+        for start in range(0, count, chunk_size):
+            stop = min(start + chunk_size, count)
+            z_chunk = z_sample[start:stop]
+            dm_chunk = dm_sample[start:stop]
+            z_chunk_mesh = np.broadcast_to(z_chunk[:, None], (stop - start, native_grid.size))
+            native_chunk_mesh = np.broadcast_to(native_grid, z_chunk_mesh.shape)
+            chunk_log_phi = interpolator(
+                np.column_stack((z_chunk_mesh.ravel(), native_chunk_mesh.ravel()))
+            ).reshape(z_chunk_mesh.shape)
+            chunk_phi = np.where(np.isfinite(chunk_log_phi), 10.0**chunk_log_phi, 0.0)
+            chunk_lower, chunk_upper = _alpha_bounds_for_m2500_support(
+                native_chunk_mesh,
+                dm_chunk[:, None],
+                reference_wavelength_angstrom=lf_grid.reference_wavelength_angstrom,
+                native_to_monochromatic_ab_offset=lf_grid.native_to_monochromatic_ab_offset,
+                m2500_support=m2500_support,
+            )
+            chunk_weight = chunk_phi * _normal_support_probability(
+                chunk_lower, chunk_upper, alpha_nu, dalpha_nu
+            )
+            native_sample[start:stop] = _sample_piecewise_linear_grid(
+                rng, native_grid, chunk_weight
+            )
+
+        lower, upper = _alpha_bounds_for_m2500_support(
+            native_sample,
+            dm_sample,
+            reference_wavelength_angstrom=lf_grid.reference_wavelength_angstrom,
+            native_to_monochromatic_ab_offset=lf_grid.native_to_monochromatic_ab_offset,
+            m2500_support=m2500_support,
+        )
+        alpha_sample = _sample_truncated_normal(
+            rng, lower, upper, alpha_nu, dalpha_nu
+        )
+        m2500_abs = native_absolute_magnitude_to_m2500(
+            native_sample,
+            alpha_sample,
+            lf_grid.reference_wavelength_angstrom,
+            lf_grid.native_to_monochromatic_ab_offset,
+        )
+        m2500_observed = m2500_abs + dm_sample
+        if kcorr_zref is None:
+            observed_band_magnitude = m2500_observed
+        else:
+            lambda_i_reference = 7480.0 / (1.0 + float(kcorr_zref))
+            m_i_reference = (
+                m2500_abs
+                - 2.5 * alpha_sample * np.log10(2500.0 / lambda_i_reference)
+                - 2.5 * np.log10(1.0 + float(kcorr_zref))
+            )
+            kcorr = -2.5 * (1.0 + alpha_sample) * np.log10(
+                (1.0 + z_sample) / (1.0 + float(kcorr_zref))
+            )
+            observed_band_magnitude = m_i_reference + dm_sample + kcorr
+
+        if np.any(m2500_observed < m2500_support[0]) or np.any(
+            m2500_observed > m2500_support[1]
+        ):
+            raise RuntimeError("Conditioned LF sampler escaped m_2500 support.")
+        per_z_m.append(observed_band_magnitude)
+        per_z_m2500.append(m2500_observed)
+        per_z.append(z_sample)
+        per_z_alpha_lambda.append(-alpha_sample - 2.0)
+        selected[index] = count
+
+    result = (per_z_m, expected, per_z, selected)
+    if return_global:
+        nonempty = [index for index, values in enumerate(per_z) if values.size]
+        if nonempty:
+            z_all = np.concatenate([per_z[index] for index in nonempty])
+            m_all = np.concatenate([per_z_m[index] for index in nonempty])
+            m2500_all = np.concatenate([per_z_m2500[index] for index in nonempty])
+            bin_index = np.concatenate(
+                [np.full(per_z[index].size, index, dtype=int) for index in nonempty]
+            )
+            alpha_all = np.concatenate(
+                [per_z_alpha_lambda[index] for index in nonempty]
+            )
+        else:
+            z_all = m_all = m2500_all = alpha_all = np.empty(0)
+            bin_index = np.empty(0, dtype=int)
+        result += (z_all, m_all, m2500_all, bin_index)
+        if return_alpha:
+            result += (alpha_all,)
+    elif return_alpha:
+        result += (per_z_alpha_lambda,)
+    return result
 
 
 def mock_m_per_zbin(
@@ -450,6 +884,9 @@ def save_mock_catalog(
     area_deg2=None,
     alpha_nu_parent_mean=None,
     alpha_nu_parent_sigma=None,
+    lf_grid=None,
+    m2500_support=None,
+    z_range=None,
 ):
     output_path = Path(output_path).expanduser().resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -495,6 +932,20 @@ def save_mock_catalog(
             h5file.attrs["alpha_lambda_parent_sigma"] = float(abs(alpha_nu_parent_sigma))
         if area_deg2 is not None and np.isfinite(area_deg2):
             h5file.attrs["area_deg2"] = float(area_deg2)
+        if lf_grid is not None:
+            if not isinstance(lf_grid, LFGrid):
+                raise TypeError("lf_grid must be an LFGrid when provided.")
+            h5file.attrs["lf_model"] = lf_grid.model_id
+            for key, value in lf_grid.to_metadata().items():
+                h5file.attrs[f"lf_{key}"] = value
+        if m2500_support is not None:
+            support = tuple(float(value) for value in m2500_support)
+            h5file.attrs["m2500_support_min"] = support[0]
+            h5file.attrs["m2500_support_max"] = support[1]
+        if z_range is not None:
+            requested_z = tuple(float(value) for value in z_range)
+            h5file.attrs["requested_redshift_min"] = requested_z[0]
+            h5file.attrs["requested_redshift_max"] = requested_z[1]
     print(
         "Saved mock catalog with "
         f"{n_after_thin} / {n_before_thin} sources after m_lim cut "
@@ -520,8 +971,8 @@ def plot_mock_catalog(z_all, m_values, plot_path, title, ylabel, bin_index):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Generate mock completeness catalogs from Shen or Ananna luminosity functions.")
-    parser.add_argument("--lf-model", choices=["shen", "ananna"], required=True, help="Luminosity-function model to use.")
+    parser = argparse.ArgumentParser(description="Generate mock completeness catalogs from published luminosity functions.")
+    parser.add_argument("--lf-model", choices=["shen", "ananna", *EMPIRICAL_LF_MODEL_IDS], required=True, help="Luminosity-function model to use.")
     parser.add_argument("--output", required=True, help="Output HDF5 file path.")
     parser.add_argument("--area-deg2", type=float, default=None, help="Survey area in deg^2. Defaults: 5 for Shen, 50 for Ananna.")
     parser.add_argument("--alpha-nu", type=float, default=-0.5, help="Mean spectral index for K-correction.")
@@ -530,6 +981,8 @@ def parse_args():
     parser.add_argument("--m-scatter", type=float, default=0.0, help="Additional Gaussian apparent-magnitude scatter.")
     parser.add_argument("--seed", type=int, default=123, help="Random seed.")
     parser.add_argument("--z-res", type=int, default=512, help="Redshift resolution inside each z bin.")
+    parser.add_argument("--z-range", type=float, nargs=2, default=(0.44, 3.16), help="Redshift interval for empirical-LF mocks.")
+    parser.add_argument("--m2500-support", type=float, nargs=2, default=DEFAULT_M2500_SUPPORT, help="Apparent m_2500 interval sampled from empirical LFs.")
     parser.add_argument("--plot", action="store_true", help="Save a diagnostic scatter plot.")
     parser.add_argument("--plot-path", default=None, help="Optional plot output path.")
     parser.add_argument("--plot-rest", action="store_true", help="Plot rest-frame 2500A apparent magnitudes instead of observed survey-band magnitudes.")
@@ -554,9 +1007,56 @@ def main():
     if args.lf_model == "shen":
         phi_log10, m_grid, z_bins = build_shen_lf(args.shen_pubtools_path)
         area_deg2 = 5.0 if args.area_deg2 is None else args.area_deg2
-    else:
+    elif args.lf_model == "ananna":
         phi_log10, m_grid, z_bins = build_ananna_lf(args.ananna_xlf_path)
         area_deg2 = 50.0 if args.area_deg2 is None else args.area_deg2
+    else:
+        lf_grid = build_completeness_lf(
+            args.lf_model,
+            z_range=args.z_range,
+            target_cosmology=COSMO,
+        )
+        area_deg2 = 5.0 if args.area_deg2 is None else args.area_deg2
+        _, nexp, _, nsel, z_all, m_all, m_rest_all, bin_index, alpha_lambda_all = mock_lf_grid_per_zbin(
+            lf_grid,
+            area_deg2,
+            args.alpha_nu,
+            args.dalpha_nu,
+            COSMO,
+            z_range=args.z_range,
+            m2500_support=args.m2500_support,
+            z_res=args.z_res,
+            rng=rng,
+            return_global=True,
+            return_alpha=True,
+        )
+        save_mock_catalog(
+            args.output,
+            z_all,
+            m_all,
+            m_rest_all,
+            alpha_lambda_all=alpha_lambda_all,
+            area_deg2=area_deg2,
+            alpha_nu_parent_mean=args.alpha_nu,
+            alpha_nu_parent_sigma=args.dalpha_nu,
+            lf_grid=lf_grid,
+            m2500_support=args.m2500_support,
+            z_range=args.z_range,
+        )
+        print(f"Saved mock catalog to {args.output}")
+        print(f"Generated {len(z_all)} total mock sources.")
+        if args.plot:
+            plot_path = args.plot_path or f"{Path(args.output).with_suffix('')}_{args.lf_model}.pdf"
+            plot_values = m_rest_all if args.plot_rest else m_all
+            plot_mock_catalog(
+                z_all,
+                plot_values,
+                plot_path,
+                f"Mock Survey from {args.lf_model} LF",
+                "Apparent Magnitude at 2500A" if args.plot_rest else "Observed-band Apparent Magnitude",
+                bin_index,
+            )
+        return
 
     _, nexp, _, nsel, z_all, m_all, m_rest_all, bin_index, alpha_lambda_all = mock_m_per_zbin(
         phi_log10,

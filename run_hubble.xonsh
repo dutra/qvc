@@ -22,6 +22,9 @@ magnitude_convention = __xonsh__.env.get("QVC_HUBBLE_MAGNITUDE_CONVENTION", "der
 completeness_magnitude = __xonsh__.env.get(
     "QVC_HUBBLE_COMPLETENESS_MAGNITUDE", "attenuated"
 )
+completeness_lf_model = __xonsh__.env.get(
+    "QVC_HUBBLE_COMPLETENESS_LF_MODEL", "wang2026_type1_lade_a"
+)
 $QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG = __xonsh__.env.get(
     "QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG", "0.10"
 )
@@ -101,6 +104,7 @@ python -m qvc.hubble.hubble_fit \
     --spectra_fit_csv @(spectra_fit_csv) \
     --magnitude-convention @(magnitude_convention) \
     --completeness_magnitude @(completeness_magnitude) \
+    --completeness_lf_model @(completeness_lf_model) \
     --cut-tier @(cut_tier) \
     --result_prefix "fiducial" \
     --z_range 0.44 3.16 \

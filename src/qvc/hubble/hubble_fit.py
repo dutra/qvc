@@ -144,8 +144,12 @@ from qvc.hubble.hubble_completeness_refactored import (
     prepare_completeness_magnitude_columns,
 )
 from qvc.hubble.completeness_mock_catalog import (
+    COMPLETENESS_LF_MODELS,
     COSMO as COMPLETENESS_MOCK_COSMO,
+    DEFAULT_M2500_SUPPORT,
+    build_completeness_lf,
     build_shen_lf,
+    mock_lf_grid_per_zbin,
     mock_m_per_zbin,
     save_mock_catalog,
 )
@@ -2511,39 +2515,76 @@ def generate_fresh_completeness_sim_file(
     seed=123,
     z_range=(0.44, 3.16),
     completeness_magnitude="dereddened",
+    lf_model="shen",
 ):
-    """Generate a fresh Shen-LF mock catalog for completeness-map construction."""
-    del completeness_magnitude
+    """Generate a fresh LF mock catalog for completeness-map construction."""
+    lf_model = str(lf_model).strip().lower().replace("-", "_")
+    if lf_model not in COMPLETENESS_LF_MODELS:
+        raise ValueError(
+            f"Unknown completeness LF model {lf_model!r}; expected one of "
+            f"{COMPLETENESS_LF_MODELS}."
+        )
+    if lf_model != "shen" and completeness_magnitude != "attenuated":
+        raise ValueError(
+            "Empirical Type-1 LFs retain their samples' implicit internal "
+            "attenuation and therefore require completeness_magnitude='attenuated'."
+        )
     z_range = tuple(float(value) for value in z_range)
     if len(z_range) != 2 or z_range[0] < 0.0 or z_range[0] >= z_range[1]:
         raise ValueError("Completeness mock z_range must be increasing and non-negative.")
     completeness_dir = Path(plot_path) / "completeness"
     completeness_dir.mkdir(parents=True, exist_ok=True)
-    output_path = completeness_dir / "mock_completeness_catalog_fresh.h5"
+    output_name = (
+        "mock_completeness_catalog_fresh.h5"
+        if lf_model == "shen"
+        else f"mock_completeness_catalog_fresh_{lf_model}.h5"
+    )
+    output_path = completeness_dir / output_name
     thinning_probability = 1.0
 
     rng = np.random.default_rng(seed)
-    phi_log10, m_grid, z_bins = build_shen_lf(None)
     alpha_nu_parent_mean = -0.5
     alpha_nu_parent_sigma = 0.3
-    _, _, _, _, z_all, m_all, m_rest_all, _, alpha_lambda_all = mock_m_per_zbin(
-        phi_log10,
-        m_grid,
-        z_bins,
-        float(area_deg2),
-        alpha_nu_parent_mean,
-        alpha_nu_parent_sigma,
-        COMPLETENESS_MOCK_COSMO,
-        z_res=512,
-        m_scatter=0.0,
-        kcorr_zref=2.0,
-        m_lim=28.0,
-        thinning_probability=thinning_probability,
-        rng=rng,
-        return_z=True,
-        return_global=True,
-        return_alpha=True,
-    )
+    lf_grid = None
+    if lf_model == "shen":
+        phi_log10, m_grid, z_bins = build_shen_lf(None)
+        _, _, _, _, z_all, m_all, m_rest_all, _, alpha_lambda_all = mock_m_per_zbin(
+            phi_log10,
+            m_grid,
+            z_bins,
+            float(area_deg2),
+            alpha_nu_parent_mean,
+            alpha_nu_parent_sigma,
+            COMPLETENESS_MOCK_COSMO,
+            z_res=512,
+            m_scatter=0.0,
+            kcorr_zref=2.0,
+            m_lim=28.0,
+            thinning_probability=thinning_probability,
+            rng=rng,
+            return_z=True,
+            return_global=True,
+            return_alpha=True,
+        )
+    else:
+        lf_grid = build_completeness_lf(
+            lf_model,
+            z_range=z_range,
+            target_cosmology=COMPLETENESS_MOCK_COSMO,
+        )
+        _, _, _, _, z_all, m_all, m_rest_all, _, alpha_lambda_all = mock_lf_grid_per_zbin(
+            lf_grid,
+            float(area_deg2),
+            alpha_nu_parent_mean,
+            alpha_nu_parent_sigma,
+            COMPLETENESS_MOCK_COSMO,
+            z_range=z_range,
+            m2500_support=DEFAULT_M2500_SUPPORT,
+            z_res=512,
+            rng=rng,
+            return_global=True,
+            return_alpha=True,
+        )
     n_generated = int(np.size(z_all))
     print(
         f"Fresh completeness mock generated {n_generated} sources "
@@ -2562,11 +2603,14 @@ def generate_fresh_completeness_sim_file(
         area_deg2=area_deg2,
         alpha_nu_parent_mean=alpha_nu_parent_mean,
         alpha_nu_parent_sigma=alpha_nu_parent_sigma,
+        lf_grid=lf_grid,
+        m2500_support=(DEFAULT_M2500_SUPPORT if lf_grid is not None else None),
+        z_range=z_range,
     )
     finite_z = np.asarray(z_all, dtype=float)
     finite_z = finite_z[np.isfinite(finite_z)]
     with h5py.File(output_path, "a") as handle:
-        handle.attrs["lf_model"] = "shen"
+        handle.attrs["lf_model"] = lf_model
         handle.attrs["mock_redshift_min"] = float(np.min(finite_z))
         handle.attrs["mock_redshift_max"] = float(np.max(finite_z))
         handle.attrs["requested_redshift_min"] = z_range[0]
@@ -3162,6 +3206,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
                completeness_mode="2d",
                completeness_magnitude="dereddened",
+               completeness_lf_model="shen",
                selection_attenuation_mode="fixed-offset",
                compare_sigma_only=False,
                minimal_plots=False,
@@ -3179,6 +3224,17 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     completeness_magnitude = normalize_completeness_magnitude(
         completeness_magnitude
     )
+    completeness_lf_model = str(completeness_lf_model).strip().lower().replace("-", "_")
+    if completeness_lf_model not in COMPLETENESS_LF_MODELS:
+        raise ValueError(
+            f"Unknown completeness LF model {completeness_lf_model!r}; "
+            f"expected one of {COMPLETENESS_LF_MODELS}."
+        )
+    if completeness_lf_model != "shen" and completeness_magnitude != "attenuated":
+        raise ValueError(
+            "Empirical Type-1 completeness LFs require "
+            "completeness_magnitude='attenuated'."
+        )
     df_agn = prepare_completeness_magnitude_columns(
         df_agn,
         completeness_magnitude,
@@ -3259,6 +3315,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 area_deg2=completeness_area_deg2,
                 z_range=completeness_z_range,
                 completeness_magnitude=completeness_magnitude,
+                lf_model=completeness_lf_model,
             )
         else:
             print(f"Completeness enabled with mock catalog file: {completeness_sim_file}")
@@ -5164,6 +5221,16 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--completeness_lf_model",
+        choices=list(COMPLETENESS_LF_MODELS),
+        default="shen",
+        help=(
+            "Luminosity function used when a fresh completeness mock is "
+            "generated. Empirical Type-1 models require "
+            "--completeness_magnitude attenuated."
+        ),
+    )
+    parser.add_argument(
         "--correct-sigma-uv-host",
         action="store_true",
         default=False,
@@ -5227,6 +5294,13 @@ if __name__ == "__main__":
     ):
         raise NotImplementedError(
             "joint-posterior selection attenuation currently supports only "
+            "the default non-JAX single Hubble run."
+        )
+    if args.completeness_lf_model != "shen" and (
+        args.run != "single" or args.use_jax
+    ):
+        raise NotImplementedError(
+            "Empirical completeness LF selection currently supports only "
             "the default non-JAX single Hubble run."
         )
 
@@ -5393,6 +5467,7 @@ if __name__ == "__main__":
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
                 completeness_magnitude=args.completeness_magnitude,
+                completeness_lf_model=args.completeness_lf_model,
                 selection_attenuation_mode=args.selection_attenuation_mode,
                 compare_sigma_only=args.compare_sigma_only,
                 minimal_plots=args.minimal_plots,
