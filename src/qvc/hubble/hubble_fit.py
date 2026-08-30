@@ -65,6 +65,7 @@ from qvc.hubble.hubble_utils import (
     load_pantheon_data,
     posterior_corr,
     reduced_chi_squared,
+    render_ascii_table,
     read_quasars_from_hdf5_flat,
     report_pivots,
     save_chains,
@@ -72,18 +73,27 @@ from qvc.hubble.hubble_utils import (
     select_agn_subset_uniform_with_replacement,
     sym_percentile,
     write_results_tex_variables,
+    _wrap_text_in_purple,
 )
 from qvc.hubble.hubble_likelihood import (
     JOINT_ATTENUATED_MAG_DRAWS_COL,
     JOINT_DEREDDENED_MAG_DRAWS_COL,
     JOINT_POSTERIOR_VALID_COUNT_COL,
+    LIGHT_CURVE_UNCERTAINTY_MODES,
     SELECTION_ATTENUATION_MODES,
     _joint_attenuation_draw_arrays,
+    _light_curve_posterior_draw_arrays,
     log_likelihood,
     log_likelihood_nearbylcs,
+    normalize_light_curve_uncertainty_mode,
     normalize_selection_attenuation_mode,
     sigma_lens_from_dc,
     sigma_mu_from_z_err,
+)
+from qvc.light_curve.posterior_draws import (
+    LIGHT_CURVE_LOG_SIGMA_DRAW_COL,
+    LIGHT_CURVE_LOG_TAU_RF_DRAW_COL,
+    LIGHT_CURVE_POSTERIOR_VALID_COUNT_COL,
 )
 from qvc.hubble.hubble_plotting import (
     HubblePosteriorDrawSelection,
@@ -645,6 +655,7 @@ def make_run_tag(
     use_f_agn_psf_2500_sigmoid_term=False,
     use_redshift_log_f_term=False,
     selection_attenuation_mode="fixed-offset",
+    light_curve_uncertainty_mode="covariance",
 ):
     speed = normalize_speed(speed)
     zmin, zmax = z_range
@@ -673,9 +684,19 @@ def make_run_tag(
         == "joint-posterior"
         else ""
     )
+    light_curve_uncertainty_tag = (
+        "_lcpost64"
+        if normalize_light_curve_uncertainty_mode(
+            light_curve_uncertainty_mode
+        )
+        == "posterior-draws"
+        else ""
+    )
     return (
         f"{cosmo_model}_{_fit_mode_label(only_sna, only_agn)}_{speed}_{n_tag}_{z_tag}"
-        f"{completeness_tag}{attenuation_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}{fagn_sigmoid_tag}{logf_tag}"
+        f"{completeness_tag}{attenuation_tag}{light_curve_uncertainty_tag}"
+        f"{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}"
+        f"{fagn_sigmoid_tag}{logf_tag}"
     )
 
 
@@ -691,6 +712,33 @@ def validate_selection_attenuation_configuration(
     if completeness_magnitude != "attenuated":
         raise ValueError("joint-posterior attenuation selection requires --completeness_magnitude attenuated.")
     _joint_attenuation_draw_arrays(df_agn, df_agn["apparent_mag_2500"])
+    return mode
+
+
+def validate_light_curve_uncertainty_configuration(
+    df_agn,
+    *,
+    light_curve_uncertainty_mode,
+    selection_attenuation_mode,
+    only_sna=False,
+    df_calibrators=None,
+):
+    mode = normalize_light_curve_uncertainty_mode(
+        light_curve_uncertainty_mode
+    )
+    if mode == "covariance" or only_sna:
+        return mode
+    if normalize_selection_attenuation_mode(selection_attenuation_mode) != "fixed-offset":
+        raise NotImplementedError(
+            "--light-curve-uncertainty-mode posterior-draws currently requires "
+            "--selection-attenuation-mode fixed-offset."
+        )
+    if df_calibrators is not None:
+        raise NotImplementedError(
+            "--light-curve-uncertainty-mode posterior-draws is not yet "
+            "supported with --agn_calibrators."
+        )
+    _light_curve_posterior_draw_arrays(df_agn)
     return mode
 
 
@@ -911,6 +959,7 @@ def validate_resume_checkpoint(
     n_agn,
     *,
     expected_selection_attenuation_mode="fixed-offset",
+    expected_light_curve_uncertainty_mode="covariance",
     expected_cut_tier=None,
     expected_cut_configuration_json=None,
     expected_z_range_semantics=None,
@@ -995,6 +1044,18 @@ def validate_resume_checkpoint(
             f"Resume checkpoint '{checkpoint_file}' selection attenuation mode "
             "does not match the current run."
         )
+    stored_light_curve_uncertainty_mode = _checkpoint_scalar_string(
+        results.get("light_curve_uncertainty_mode", "covariance"),
+        field_name="light_curve_uncertainty_mode",
+        checkpoint_file=checkpoint_file,
+    )
+    if stored_light_curve_uncertainty_mode != normalize_light_curve_uncertainty_mode(
+        expected_light_curve_uncertainty_mode
+    ):
+        raise RuntimeError(
+            f"Resume checkpoint '{checkpoint_file}' light-curve uncertainty "
+            "mode does not match the current run."
+        )
     stored_sigmoid = bool(
         np.asarray(
             results.get("use_f_agn_psf_2500_sigmoid_term", False)
@@ -1049,6 +1110,7 @@ def _validate_resume_replot_checkpoint_params(
     ndim,
     *,
     expected_selection_attenuation_mode="fixed-offset",
+    expected_light_curve_uncertainty_mode="covariance",
     expected_cut_tier=None,
     expected_cut_configuration_json=None,
     expected_z_range_semantics=None,
@@ -1117,6 +1179,18 @@ def _validate_resume_replot_checkpoint_params(
             f"Resume-replot checkpoint '{checkpoint_file}' selection attenuation "
             "mode does not match the current run."
         )
+    stored_light_curve_uncertainty_mode = _checkpoint_scalar_string(
+        results.get("light_curve_uncertainty_mode", "covariance"),
+        field_name="light_curve_uncertainty_mode",
+        checkpoint_file=checkpoint_file,
+    )
+    if stored_light_curve_uncertainty_mode != normalize_light_curve_uncertainty_mode(
+        expected_light_curve_uncertainty_mode
+    ):
+        raise RuntimeError(
+            f"Resume-replot checkpoint '{checkpoint_file}' light-curve "
+            "uncertainty mode does not match the current run."
+        )
     stored_sigmoid = bool(
         np.asarray(
             results.get("use_f_agn_psf_2500_sigmoid_term", False)
@@ -1136,6 +1210,7 @@ def _remap_resume_replot_checkpoint(
     ndim,
     *,
     expected_selection_attenuation_mode="fixed-offset",
+    expected_light_curve_uncertainty_mode="covariance",
     expected_cut_tier=None,
     expected_cut_configuration_json=None,
     expected_z_range_semantics=None,
@@ -1148,6 +1223,9 @@ def _remap_resume_replot_checkpoint(
         checkpoint_file,
         ndim,
         expected_selection_attenuation_mode=expected_selection_attenuation_mode,
+        expected_light_curve_uncertainty_mode=(
+            expected_light_curve_uncertainty_mode
+        ),
         expected_cut_tier=expected_cut_tier,
         expected_cut_configuration_json=expected_cut_configuration_json,
         expected_z_range_semantics=expected_z_range_semantics,
@@ -1852,6 +1930,7 @@ def _prepare_shared_agn_pivot_context(
     resume_stage,
     prefix,
     completeness_magnitude="dereddened",
+    light_curve_uncertainty_mode="covariance",
     resume_replot_with_cuts=False,
 ):
     """Build once, or strictly load once, for cosmologies sharing a fit sample."""
@@ -1889,6 +1968,7 @@ def _prepare_shared_agn_pivot_context(
             use_eta_sigma_term=use_eta_sigma_term,
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
+            light_curve_uncertainty_mode=light_curve_uncertainty_mode,
         )
         checkpoint_paths = _build_checkpoint_paths(prefix, run_tag)
         apply_two_pass = (
@@ -2145,6 +2225,7 @@ def _compute_direct_full_sample_completeness_summaries(
     use_redshift_log_f_term=False,
     early_de_guard=False,
     selection_attenuation_mode="fixed-offset",
+    light_curve_uncertainty_mode="covariance",
     dmi_draw_indices=None,
 ):
     """Replay completeness for the full plotting sample.
@@ -2263,6 +2344,7 @@ def _compute_direct_full_sample_completeness_summaries(
             use_redshift_log_f_term=use_redshift_log_f_term,
             early_de_guard=early_de_guard,
             selection_attenuation_mode=selection_attenuation_mode,
+            light_curve_uncertainty_mode=light_curve_uncertainty_mode,
             only_sna=False,
             only_agn=only_agn,
             use_full_cov=use_full_cov,
@@ -2463,6 +2545,7 @@ def _run_fit_stage(
     completeness_sim_file,
     completeness_mode,
     selection_attenuation_mode,
+    light_curve_uncertainty_mode,
     compare_sigma_only,
     minimal_plots=False,
     disable_ceph_dist_calibration,
@@ -2514,6 +2597,7 @@ def _run_fit_stage(
         completeness_sim_file=completeness_sim_file,
         completeness_mode=completeness_mode,
         selection_attenuation_mode=selection_attenuation_mode,
+        light_curve_uncertainty_mode=light_curve_uncertainty_mode,
         completeness_magnitude=df_agn_fit_selection.attrs.get(
             "completeness_magnitude",
             "dereddened",
@@ -2700,6 +2784,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       completeness_mode="2d",
                       completeness_magnitude="dereddened",
                       selection_attenuation_mode="fixed-offset",
+                      light_curve_uncertainty_mode="covariance",
                       N=None,
                       compare_sigma_only=False,
                       minimal_plots=False,
@@ -2727,6 +2812,13 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         completeness=completeness,
         completeness_magnitude=completeness_magnitude,
         only_sna=only_sna,
+    )
+    light_curve_uncertainty_mode = validate_light_curve_uncertainty_configuration(
+        df_agn,
+        light_curve_uncertainty_mode=light_curve_uncertainty_mode,
+        selection_attenuation_mode=selection_attenuation_mode,
+        only_sna=only_sna,
+        df_calibrators=df_calibrators,
     )
     if completeness and COMPLETENESS_MAG_COL not in df_agn.columns:
         df_agn = prepare_completeness_magnitude_columns(
@@ -2785,6 +2877,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         selection_attenuation_mode=selection_attenuation_mode,
+        light_curve_uncertainty_mode=light_curve_uncertainty_mode,
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -2907,6 +3000,12 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             JOINT_ATTENUATED_MAG_DRAWS_COL,
             JOINT_POSTERIOR_VALID_COUNT_COL,
         )
+    if light_curve_uncertainty_mode == "posterior-draws":
+        agn_fields += (
+            LIGHT_CURVE_LOG_SIGMA_DRAW_COL,
+            LIGHT_CURVE_LOG_TAU_RF_DRAW_COL,
+            LIGHT_CURVE_POSTERIOR_VALID_COUNT_COL,
+        )
     if COMPLETENESS_FHOST_COL in df_agn.columns:
         agn_fields += (COMPLETENESS_FHOST_COL,)
     if 'alpha_lambda' in df_agn.columns:
@@ -2964,6 +3063,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     df_agn,
                     ndim,
                     expected_selection_attenuation_mode=selection_attenuation_mode,
+                    expected_light_curve_uncertainty_mode=(
+                        light_curve_uncertainty_mode
+                    ),
                     expected_cut_tier=df_agn.attrs.get("cut_tier"),
                     expected_cut_configuration_json=df_agn.attrs.get("cut_configuration_json"),
                     expected_z_range_semantics=(
@@ -2986,6 +3088,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     ndim=ndim,
                     n_agn=len(agn_data["z"]),
                     expected_selection_attenuation_mode=selection_attenuation_mode,
+                    expected_light_curve_uncertainty_mode=(
+                        light_curve_uncertainty_mode
+                    ),
                     expected_cut_tier=df_agn.attrs.get("cut_tier"),
                     expected_cut_configuration_json=df_agn.attrs.get(
                         "cut_configuration_json"
@@ -3069,6 +3174,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 early_de_guard=early_de_guard,
                 selection_attenuation_mode=selection_attenuation_mode,
+                light_curve_uncertainty_mode=light_curve_uncertainty_mode,
             )
             ptform_kwargs = dict(priors=priors, model_labels=model_labels)
             loglike_func = (
@@ -3232,6 +3338,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             cut_configuration_json=str(df_agn.attrs.get("cut_configuration_json", "")),
             z_range_semantics=Z_RANGE_SEMANTICS,
             selection_attenuation_mode=selection_attenuation_mode,
+            light_curve_uncertainty_mode=light_curve_uncertainty_mode,
             use_f_agn_psf_2500_sigmoid_term=bool(
                 use_f_agn_psf_2500_sigmoid_term
             ),
@@ -3313,6 +3420,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                completeness_magnitude="dereddened",
                completeness_lf_model="shen",
                selection_attenuation_mode="fixed-offset",
+               light_curve_uncertainty_mode="covariance",
                compare_sigma_only=False,
                minimal_plots=False,
                disable_ceph_dist_calibration=False,
@@ -3355,6 +3463,13 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         completeness=completeness,
         completeness_magnitude=completeness_magnitude,
         only_sna=only_sna,
+    )
+    light_curve_uncertainty_mode = validate_light_curve_uncertainty_configuration(
+        df_agn,
+        light_curve_uncertainty_mode=light_curve_uncertainty_mode,
+        selection_attenuation_mode=selection_attenuation_mode,
+        only_sna=only_sna,
+        df_calibrators=df_calibrators,
     )
     if df_agn_completeness_parent is None:
         df_agn_completeness_parent = df_agn.copy()
@@ -3401,6 +3516,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         selection_attenuation_mode=selection_attenuation_mode,
+        light_curve_uncertainty_mode=light_curve_uncertainty_mode,
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -3646,6 +3762,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 completeness_sim_file=completeness_sim_file,
                 completeness_mode=completeness_mode,
                 selection_attenuation_mode=selection_attenuation_mode,
+                light_curve_uncertainty_mode=light_curve_uncertainty_mode,
                 compare_sigma_only=compare_sigma_only,
                 minimal_plots=minimal_plots,
                 disable_ceph_dist_calibration=disable_ceph_dist_calibration,
@@ -3694,6 +3811,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 early_de_guard=early_de_guard,
                 selection_attenuation_mode=selection_attenuation_mode,
+                light_curve_uncertainty_mode=light_curve_uncertainty_mode,
                 dmi_draw_indices=posterior_sample_indices_pass1,
             )
             pass1_residuals_full, pass1_clipping_sigma_full, _, _, _ = plot_hubble(
@@ -3864,6 +3982,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     )[1]),
                     n_agn=len(expected_pass1_fit_selection),
                     expected_selection_attenuation_mode=selection_attenuation_mode,
+                    expected_light_curve_uncertainty_mode=(
+                        light_curve_uncertainty_mode
+                    ),
                     expected_cut_tier=expected_pass1_fit_selection.attrs.get("cut_tier"),
                     expected_cut_configuration_json=expected_pass1_fit_selection.attrs.get("cut_configuration_json"),
                     expected_z_range_semantics=(
@@ -3984,6 +4105,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         completeness_sim_file=completeness_sim_file,
         completeness_mode=completeness_mode,
         selection_attenuation_mode=selection_attenuation_mode,
+        light_curve_uncertainty_mode=light_curve_uncertainty_mode,
         compare_sigma_only=compare_sigma_only,
         minimal_plots=minimal_plots,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
@@ -4053,6 +4175,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             use_redshift_log_f_term=use_redshift_log_f_term,
             early_de_guard=early_de_guard,
             selection_attenuation_mode=selection_attenuation_mode,
+            light_curve_uncertainty_mode=light_curve_uncertainty_mode,
             dmi_draw_indices=posterior_sample_indices,
         )
         (
@@ -4154,6 +4277,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_redshift_log_f_term=use_redshift_log_f_term,
         early_de_guard=early_de_guard,
         selection_attenuation_mode=selection_attenuation_mode,
+        light_curve_uncertainty_mode=light_curve_uncertainty_mode,
         dmi_draw_indices=posterior_sample_indices,
     )
     dmi_posterior_median_full = dmi_posterior_median_full_direct
@@ -4475,6 +4599,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 early_de_guard=early_de_guard,
                 selection_attenuation_mode=selection_attenuation_mode,
+                light_curve_uncertainty_mode=light_curve_uncertainty_mode,
             )
         mu_table, mu_err_table = _compute_debiased_agn_table_mu(
             flat_samples,
@@ -4922,7 +5047,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             use_eta_sigma_term=False,
             use_f_agn_psf_2500_sigmoid_term=False,
             use_redshift_log_f_term=False,
-            early_de_guard=False):
+            early_de_guard=False,
+            light_curve_uncertainty_mode="covariance"):
 
     validate_completeness_mode(completeness_mode)
     completeness_magnitude = normalize_completeness_magnitude(
@@ -4952,6 +5078,10 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         compare_run_tag += "_etaSigma"
     if use_redshift_log_f_term:
         compare_run_tag += "_logfz"
+    if normalize_light_curve_uncertainty_mode(
+        light_curve_uncertainty_mode
+    ) == "posterior-draws":
+        compare_run_tag += "_lcpost64"
     compare_plot_path = f"plots/hubble/{prefix}/{compare_run_tag}"
     os.makedirs(compare_plot_path, exist_ok=True)
 
@@ -4984,6 +5114,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         disable_sigma_clip_pass=disable_sigma_clip_pass,
         resume_stage=resume_stage,
         prefix=prefix,
+        light_curve_uncertainty_mode=light_curve_uncertainty_mode,
     )
     for cosmo_model in cosmo_models:
         model_resume = resume_by_model[cosmo_model]
@@ -5013,6 +5144,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        use_eta_sigma_term=use_eta_sigma_term,
                        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
                        use_redshift_log_f_term=use_redshift_log_f_term,
+                       light_curve_uncertainty_mode=light_curve_uncertainty_mode,
                        early_de_guard=early_de_guard,
                        agn_pivot_context=agn_pivot_context)
         
@@ -5050,6 +5182,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                            use_eta_sigma_term=use_eta_sigma_term,
                            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
                            use_redshift_log_f_term=use_redshift_log_f_term,
+                           light_curve_uncertainty_mode="covariance",
                            early_de_guard=early_de_guard,
                            agn_pivot_context=None)
             samples_sna, model_labels_sna, dm_interp_sna, logZ_sna, logZerr_sna, debiased_residuals_sna, age_sna, age_sna_err = r
@@ -5176,6 +5309,84 @@ def validate_plot_mode_args(args):
         raise ValueError("--minimal-plots cannot be used with a direct --only_sna run.")
     if args.minimal_plots and args.use_jax:
         raise ValueError("--minimal-plots is not supported with --use_jax.")
+
+
+def render_hubble_mode_table(args):
+    """Return a concise audit table of scientifically consequential modes."""
+    if args.only_sna:
+        sample = "SNe Ia only"
+    elif args.only_agn:
+        sample = "AGN only"
+    else:
+        sample = "joint AGN + SNe Ia"
+
+    agn_inactive = "inactive (SNe-only)"
+    if args.only_sna:
+        light_curve_uncertainty = agn_inactive
+        sigma_host_correction = agn_inactive
+        standardization = agn_inactive
+        intrinsic_scatter = agn_inactive
+    else:
+        light_curve_uncertainty = args.light_curve_uncertainty_mode
+        sigma_host_correction = (
+            "enabled" if args.correct_sigma_uv_host else "disabled"
+        )
+        regressors = ["log_sigma_uv", "log_tau_uv_rf"]
+        if args.fit_alpha_lambda_term:
+            regressors.append("alpha_lambda")
+        if args.fit_eta_sigma_term:
+            regressors.append("eta_sigma")
+        if args.fit_f_agn_psf_2500_sigmoid_term:
+            regressors.append("f_AGN_psf_2500 sigmoid")
+        standardization = " + ".join(regressors)
+        intrinsic_scatter = (
+            "redshift-dependent log_f(z)"
+            if args.fit_redshift_log_f_term
+            else "constant log_f"
+        )
+
+    if args.disable_completeness:
+        completeness = "disabled"
+        selection_attenuation = "inactive (completeness disabled)"
+    else:
+        completeness = (
+            f"{args.completeness_mode}; m2500={args.completeness_magnitude}; "
+            f"LF={args.completeness_lf_model}"
+        )
+        selection_attenuation = args.selection_attenuation_mode
+
+    if args.disable_sigma_clip_pass:
+        sigma_clipping = "disabled"
+    else:
+        sigma_clipping = (
+            f"two-pass; |mu_zscore| < {args.sigma_clip_threshold:g}; "
+            f"pass2={args.sigma_clip_second_pass_mode}"
+        )
+
+    sn_covariance = (
+        "inactive (AGN-only)"
+        if args.only_agn
+        else ("diagonal" if args.disable_full_covariance else "full")
+    )
+    rows = [
+        {"mode": "inference engine", "setting": "JAX / NumPyro" if args.use_jax else "NumPy / Dynesty"},
+        {"mode": "sample", "setting": sample},
+        {"mode": "cosmology", "setting": ", ".join(args.cosmo_models)},
+        {"mode": "cumulative cut tier", "setting": args.cut_tier},
+        {"mode": "Hubble m2500", "setting": args.magnitude_convention},
+        {"mode": "LC sigma/tau uncertainty", "setting": light_curve_uncertainty},
+        {"mode": "post-hoc sigma host correction", "setting": sigma_host_correction},
+        {"mode": "AGN standardization", "setting": standardization},
+        {"mode": "intrinsic scatter", "setting": intrinsic_scatter},
+        {"mode": "completeness", "setting": completeness},
+        {"mode": "selection attenuation", "setting": selection_attenuation},
+        {"mode": "sigma clipping", "setting": sigma_clipping},
+        {"mode": "SN covariance", "setting": sn_covariance},
+    ]
+    return "HUBBLE ANALYSIS MODES\n" + render_ascii_table(
+        rows,
+        (("mode", "mode"), ("setting", "active setting")),
+    )
 
 
 if __name__ == "__main__":
@@ -5401,6 +5612,17 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--light-curve-uncertainty-mode",
+        choices=LIGHT_CURVE_UNCERTAINTY_MODES,
+        default="covariance",
+        help=(
+            "Treatment of log_sigma_uv/log_tau_uv_rf uncertainty. "
+            "'covariance' keeps the existing Gaussian covariance propagation "
+            "(default); 'posterior-draws' marginalizes the Dynesty likelihood "
+            "over the paired compact light-curve posterior draws."
+        ),
+    )
+    parser.add_argument(
         "--fit_alpha_lambda_term",
         action="store_true",
         default=False,
@@ -5457,6 +5679,11 @@ if __name__ == "__main__":
             "--fit_f_agn_psf_2500_sigmoid_term is currently supported only "
             "by the CPU/Dynesty Hubble model and cannot be used with --use_jax."
         )
+    if args.use_jax and args.light_curve_uncertainty_mode != "covariance":
+        raise NotImplementedError(
+            "--light-curve-uncertainty-mode posterior-draws currently supports "
+            "only the default NumPy/Dynesty pipeline."
+        )
     validate_plot_mode_args(args)
     if args.selection_attenuation_mode == "joint-posterior" and (
         args.run != "single" or args.use_jax
@@ -5472,6 +5699,8 @@ if __name__ == "__main__":
             "Empirical completeness LF selection currently supports only "
             "the default non-JAX single Hubble run."
         )
+
+    print(_wrap_text_in_purple(render_hubble_mode_table(args)))
 
     if args.disable_full_covariance:
         print("Warning: Running without full covariance may lead to underestimated uncertainties.")
@@ -5512,6 +5741,9 @@ if __name__ == "__main__":
                            completeness_magnitude=args.completeness_magnitude,
                            spectra_sdss_run2d=args.spectra_sdss_run2d,
                            correct_sigma_uv_host=args.correct_sigma_uv_host,
+                           light_curve_uncertainty_mode=(
+                               args.light_curve_uncertainty_mode
+                           ),
                            enforce_completeness_support=not args.disable_completeness,
                            return_completeness_parent=not args.disable_completeness,
                            z_range=tuple(args.z_range), plot_path=agn_plot_path,
@@ -5566,6 +5798,7 @@ if __name__ == "__main__":
             disable_sigma_clip_pass=True,
             resume_stage="both",
             prefix=args.prefix,
+            light_curve_uncertainty_mode="covariance",
         )
         for cosmo_model in args.cosmo_models:
             run_single_jax(
@@ -5622,6 +5855,7 @@ if __name__ == "__main__":
             disable_sigma_clip_pass=args.disable_sigma_clip_pass,
             resume_stage=args.resume_stage,
             prefix=args.prefix,
+            light_curve_uncertainty_mode=args.light_curve_uncertainty_mode,
             resume_replot_with_cuts=args.resume_replot_with_cuts,
         )
         for cosmo_model in args.cosmo_models:
@@ -5641,6 +5875,7 @@ if __name__ == "__main__":
                 completeness_magnitude=args.completeness_magnitude,
                 completeness_lf_model=args.completeness_lf_model,
                 selection_attenuation_mode=args.selection_attenuation_mode,
+                light_curve_uncertainty_mode=args.light_curve_uncertainty_mode,
                 compare_sigma_only=args.compare_sigma_only,
                 minimal_plots=args.minimal_plots,
                 disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
@@ -5677,10 +5912,17 @@ if __name__ == "__main__":
             else ""
         )
         logf_tag = "_logfz" if args.fit_redshift_log_f_term else ""
+        light_curve_uncertainty_tag = (
+            "_lcpost64"
+            if args.light_curve_uncertainty_mode == "posterior-draws"
+            else ""
+        )
         mode_tag = _fit_mode_label(args.only_sna, args.only_agn)
         compare_path = (
             f"plots/hubble/{args.prefix}/single_compare_{mode_tag}_{args.speed}_{n_tag}_{z_tag}"
-            f"{completeness_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}{fagn_sigmoid_tag}{logf_tag}"
+            f"{completeness_tag}{light_curve_uncertainty_tag}{ceph_tag}"
+            f"{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}"
+            f"{fagn_sigmoid_tag}{logf_tag}"
         )
         os.makedirs(compare_path, exist_ok=True)
         if len(cosmo_models_dict) >= 2:
@@ -5719,6 +5961,7 @@ if __name__ == "__main__":
                 use_eta_sigma_term=args.fit_eta_sigma_term,
                 use_f_agn_psf_2500_sigmoid_term=args.fit_f_agn_psf_2500_sigmoid_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
+                light_curve_uncertainty_mode=args.light_curve_uncertainty_mode,
                 early_de_guard=args.early_de_guard)
     
     print(f"Finished running Hubble fit pipeline for {args.cosmo_models}")

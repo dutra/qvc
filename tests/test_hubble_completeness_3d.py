@@ -29,7 +29,10 @@ from qvc.hubble.completeness_mock_catalog import (
     log_nu_lnu_to_ab_absolute_magnitude,
     save_mock_catalog,
 )
-from qvc.hubble.hubble_likelihood import completeness_loglike
+from qvc.hubble.hubble_likelihood import (
+    completeness_loglike,
+    completeness_loglike_posterior_draws,
+)
 
 
 def test_configure_shen_paths_overrides_checkout_config(tmp_path):
@@ -136,6 +139,48 @@ def test_completeness_loglike_respects_finite_hard_magnitude_support():
     np.testing.assert_allclose(blob[0, 0], expected_z, rtol=2e-5)
     np.testing.assert_allclose(blob[1, 0], expected_bias, rtol=2e-5)
     np.testing.assert_allclose(blob[2, 0], np.sqrt(expected_variance), rtol=2e-5)
+
+
+def test_posterior_draw_completeness_matches_scalar_for_identical_draws():
+    lower, upper = 18.5, 24.0
+    mag_centers = np.linspace(lower, upper, 401)
+    z_centers = np.linspace(0.0, 4.0, 20)
+    completeness = hcr.Completeness2D(
+        mag_centers,
+        z_centers,
+        np.linspace(0.95, 0.25, mag_centers.size)[:, None]
+        * np.ones((1, z_centers.size)),
+    )
+    m_obs = np.array([20.0, 22.0])
+    m_model = np.array([20.2, 21.7])
+    mu_err = np.array([0.25, 0.4])
+    z = np.array([0.8, 2.1])
+
+    scalar_logl, scalar_blob = completeness_loglike(
+        m_obs=m_obs,
+        m_obs_err=np.full(2, 0.05),
+        m_model=m_model,
+        mu_err=mu_err,
+        z=z,
+        completeness_model=completeness,
+        m_grid=mag_centers,
+        magnitude_support=(lower, upper),
+    )
+    draw_logl, draw_blob = completeness_loglike_posterior_draws(
+        m_obs=m_obs,
+        m_obs_err=np.full(2, 0.05),
+        m_model_draws=np.repeat(m_model[:, None], 4, axis=1),
+        reference_m_model=m_model,
+        mu_err=mu_err,
+        draw_counts=np.array([2, 4]),
+        z=z,
+        completeness_model=completeness,
+        m_grid=mag_centers,
+        magnitude_support=(lower, upper),
+    )
+
+    assert draw_logl == pytest.approx(scalar_logl, abs=1e-12)
+    np.testing.assert_allclose(draw_blob, scalar_blob, rtol=0.0, atol=1e-12)
 
 
 def test_padded_map_covers_hard_support_and_rejects_outside_queries(

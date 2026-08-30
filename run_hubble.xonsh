@@ -37,6 +37,14 @@ if cut_tier not in {"none", "0", "1", "2"}:
         "QVC_HUBBLE_CUT_TIER must be one of: none, 0, 1, 2; "
         f"got {cut_tier!r}."
     )
+light_curve_uncertainty_mode = str(
+    __xonsh__.env.get("QVC_HUBBLE_LIGHT_CURVE_UNCERTAINTY_MODE", "covariance")
+).strip().lower()
+if light_curve_uncertainty_mode not in {"covariance", "posterior-draws"}:
+    raise ValueError(
+        "QVC_HUBBLE_LIGHT_CURVE_UNCERTAINTY_MODE must be covariance or "
+        f"posterior-draws; got {light_curve_uncertainty_mode!r}."
+    )
 
 # Hubble quality-cut thresholds. Edit the defaults here, or override any one
 # with the corresponding environment variable. Use "none" for thresholds that
@@ -92,6 +100,7 @@ $PREFIX = __xonsh__.env.get(
 prefix = $PREFIX
 echo "Running hubble_fit.py and PREFIX=" $PREFIX
 echo "Using cumulative Hubble cut tier:" @(cut_tier)
+echo "Using light-curve uncertainty mode:" @(light_curve_uncertainty_mode)
 echo "Using Hubble cut thresholds:"
 for name, value in cut_thresholds.items():
     echo "  " @(name) "=" @(value)
@@ -105,6 +114,7 @@ python -m qvc.hubble.hubble_fit \
     --magnitude-convention @(magnitude_convention) \
     --completeness_magnitude @(completeness_magnitude) \
     --completeness_lf_model @(completeness_lf_model) \
+    --light-curve-uncertainty-mode @(light_curve_uncertainty_mode) \
     --cut-tier @(cut_tier) \
     --result_prefix "fiducial" \
     --z_range 0.44 3.16 \

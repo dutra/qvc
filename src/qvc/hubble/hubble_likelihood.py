@@ -2,6 +2,7 @@
 from scipy.linalg import cho_solve
 from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
 import numpy as np
+from scipy.special import logsumexp
 
 #from qvc.hubble.hubble_utils import loglike_cmb_theta_simple
 from qvc.hubble.hubble_model import (
@@ -11,17 +12,24 @@ from qvc.hubble.hubble_model import (
     agn_model_pack_params,
     agn_model_pack_obs,
     evaluate_log_f,
+    get_agn_model_spec,
 )
 from qvc.hubble.hubble_completeness_refactored import (
     COMPLETENESS_FHOST_COL,
     COMPLETENESS_MAG_COL,
     COMPLETENESS_MAG_ERR_COL,
 )
+from qvc.light_curve.posterior_draws import (
+    LIGHT_CURVE_LOG_SIGMA_DRAW_COL,
+    LIGHT_CURVE_LOG_TAU_RF_DRAW_COL,
+    LIGHT_CURVE_POSTERIOR_VALID_COUNT_COL,
+)
 
 _LOG_2PI = np.log(2.0 * np.pi)
 _INV_SQRT_2PI = 1.0 / np.sqrt(2.0 * np.pi)
 
 SELECTION_ATTENUATION_MODES = ("fixed-offset", "joint-posterior")
+LIGHT_CURVE_UNCERTAINTY_MODES = ("covariance", "posterior-draws")
 JOINT_DEREDDENED_MAG_DRAWS_COL = "m_2500_dereddened_draws"
 JOINT_ATTENUATED_MAG_DRAWS_COL = "m_2500_attenuated_model_draws"
 JOINT_POSTERIOR_VALID_COUNT_COL = "joint_posterior_valid_count"
@@ -37,10 +45,141 @@ def normalize_selection_attenuation_mode(mode):
     return normalized
 
 
+def normalize_light_curve_uncertainty_mode(mode):
+    normalized = str(mode).strip().lower()
+    if normalized not in LIGHT_CURVE_UNCERTAINTY_MODES:
+        raise ValueError(
+            f"Invalid light_curve_uncertainty_mode={mode!r}; expected one of "
+            f"{LIGHT_CURVE_UNCERTAINTY_MODES}."
+        )
+    return normalized
+
+
 def _normal_logpdf_sum(residuals, sigma):
     residuals = np.asarray(residuals, dtype=float)
     sigma = np.asarray(sigma, dtype=float)
     return float(np.sum(-0.5 * (residuals / sigma) ** 2 - np.log(sigma) - 0.5 * _LOG_2PI))
+
+
+def _light_curve_posterior_draw_arrays(agn_data):
+    required = {
+        LIGHT_CURVE_LOG_SIGMA_DRAW_COL,
+        LIGHT_CURVE_LOG_TAU_RF_DRAW_COL,
+        LIGHT_CURVE_POSTERIOR_VALID_COUNT_COL,
+    }
+    missing = sorted(required - set(agn_data))
+    if missing:
+        raise KeyError(
+            "posterior-draws light-curve uncertainty requires aligned HDF5 "
+            f"fields {missing}."
+        )
+
+    def matrix(column):
+        raw = np.asarray(agn_data[column])
+        if raw.ndim == 1 and raw.dtype == object:
+            raw = np.stack(raw)
+        return np.asarray(raw, dtype=float)
+
+    sigma_draws = matrix(LIGHT_CURVE_LOG_SIGMA_DRAW_COL)
+    tau_draws = matrix(LIGHT_CURVE_LOG_TAU_RF_DRAW_COL)
+    counts_raw = np.asarray(
+        agn_data[LIGHT_CURVE_POSTERIOR_VALID_COUNT_COL]
+    )
+    if sigma_draws.ndim != 2 or tau_draws.shape != sigma_draws.shape:
+        raise ValueError(
+            "Paired light-curve sigma/tau posterior draws must have identical "
+            "2D shapes."
+        )
+    n_objects, n_draws = sigma_draws.shape
+    if counts_raw.shape != (n_objects,):
+        raise ValueError(
+            "Light-curve posterior valid counts must share the draw object axis."
+        )
+    if (
+        not np.all(np.isfinite(counts_raw))
+        or not np.all(counts_raw == np.floor(counts_raw))
+    ):
+        raise ValueError(
+            "Light-curve posterior valid counts must be exact integers."
+        )
+    counts = counts_raw.astype(int)
+    if np.any((counts <= 0) | (counts > n_draws)):
+        raise ValueError(
+            "Light-curve posterior valid counts are outside the stored draw axis."
+        )
+    valid = np.arange(n_draws)[None, :] < counts[:, None]
+    if np.any(~np.isfinite(sigma_draws[valid])) or np.any(
+        ~np.isfinite(tau_draws[valid])
+    ):
+        raise ValueError(
+            "Valid light-curve sigma/tau posterior draws must be finite."
+        )
+    return sigma_draws, tau_draws, counts
+
+
+def _agn_magnitude_posterior_draws(
+    M_pred,
+    params_arr,
+    obs_arr,
+    sigma_draws,
+    tau_draws,
+    *,
+    use_alpha_lambda_term=False,
+    use_eta_sigma_term=False,
+    use_f_agn_psf_2500_sigmoid_term=False,
+):
+    """Replace scalar sigma/tau coordinates with paired posterior draws."""
+    req_params, req_obs, _ = get_agn_model_spec(
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+    )
+    pidx = {name: index for index, name in enumerate(req_params)}
+    oidx = {name: index for index, name in enumerate(req_obs)}
+    M_pred = np.asarray(M_pred, dtype=float)
+    sigma_draws = np.asarray(sigma_draws, dtype=float)
+    tau_draws = np.asarray(tau_draws, dtype=float)
+    expected = (M_pred.size, sigma_draws.shape[1])
+    if sigma_draws.shape != expected or tau_draws.shape != expected:
+        raise ValueError(
+            "Light-curve posterior draw matrices must have one row per AGN; "
+            f"expected {expected}, got {sigma_draws.shape} and {tau_draws.shape}."
+        )
+    return (
+        M_pred[:, None]
+        + params_arr[pidx["alpha_agn"]]
+        * (
+            sigma_draws
+            - np.asarray(obs_arr[oidx["log_sigma_uv"]], dtype=float)[:, None]
+        )
+        + params_arr[pidx["beta_agn"]]
+        * (
+            tau_draws
+            - np.asarray(obs_arr[oidx["log_tau_uv_rf"]], dtype=float)[:, None]
+        )
+    )
+
+
+def _normal_logpdf_posterior_draw_mixture(residual_draws, sigma, counts):
+    residual_draws = np.asarray(residual_draws, dtype=float)
+    sigma = np.asarray(sigma, dtype=float)
+    counts = np.asarray(counts, dtype=int)
+    if residual_draws.ndim != 2:
+        raise ValueError("residual_draws must be a two-dimensional array.")
+    if sigma.shape != (residual_draws.shape[0],) or counts.shape != sigma.shape:
+        raise ValueError(
+            "sigma and counts must have one value per posterior-draw row."
+        )
+    if np.any(~np.isfinite(sigma)) or np.any(sigma <= 0.0):
+        raise ValueError("Posterior-mixture Gaussian sigmas must be finite and positive.")
+    valid = np.arange(residual_draws.shape[1])[None, :] < counts[:, None]
+    terms = (
+        -0.5 * (residual_draws / sigma[:, None]) ** 2
+        - np.log(sigma[:, None])
+        - 0.5 * _LOG_2PI
+    )
+    terms = np.where(valid, terms, -np.inf)
+    return float(np.sum(logsumexp(terms, axis=1) - np.log(counts)))
 
 
 def _attenuated_selection_inputs(
@@ -296,6 +435,107 @@ def completeness_loglike(
     return np.sum(loglike_terms), blob
 
 
+def completeness_loglike_posterior_draws(
+    m_obs,
+    m_obs_err,
+    m_model_draws,
+    reference_m_model,
+    mu_err,
+    draw_counts,
+    z,
+    completeness_model,
+    m_grid,
+    magnitude_support,
+    sigma_completeness=0.0,
+    tiny=1e-300,
+    f_host_2500_psf=None,
+    alpha_lambda=None,
+    draw_chunk_size=8,
+):
+    """Selection normalization marginalized over empirical model draws."""
+    del m_obs_err  # Retained for the same calling contract as completeness_loglike.
+    m_grid = np.asarray(m_grid, dtype=float)
+    magnitude_support = _validate_magnitude_support(magnitude_support)
+    integration_grid = _cached_magnitude_integration_grid(
+        completeness_model, m_grid, magnitude_support
+    )
+    _validate_observed_magnitude_support(m_obs, magnitude_support)
+    z = np.asarray(z, dtype=float)
+    centers = np.asarray(m_model_draws, dtype=float)
+    reference = np.asarray(reference_m_model, dtype=float)
+    mu_err = np.asarray(mu_err, dtype=float)
+    counts = np.asarray(draw_counts, dtype=int)
+    if centers.ndim != 2:
+        raise ValueError("m_model_draws must be a two-dimensional array.")
+    n_objects, n_draws = centers.shape
+    if (
+        reference.shape != (n_objects,)
+        or mu_err.shape != (n_objects,)
+        or counts.shape != (n_objects,)
+        or z.shape != (n_objects,)
+    ):
+        raise ValueError(
+            "Posterior-draw completeness inputs must share the object axis."
+        )
+    if np.any((counts <= 0) | (counts > n_draws)):
+        raise ValueError("Posterior-draw completeness counts are invalid.")
+    if np.any(~np.isfinite(mu_err)) or np.any(mu_err <= 0.0):
+        raise ValueError(
+            "Posterior-draw completeness errors must be finite and positive."
+        )
+
+    p_det = _cached_completeness_pdet(
+        completeness_model,
+        integration_grid,
+        z,
+        f_host_2500_psf=f_host_2500_psf,
+        alpha_lambda=alpha_lambda,
+    )
+    sigma = np.sqrt(mu_err**2 + float(sigma_completeness) ** 2)
+    mixture_pdf = np.zeros((n_objects, integration_grid.size), dtype=float)
+    draw_axis = np.arange(n_draws)[None, :]
+    chunk_size = max(1, int(draw_chunk_size))
+    for start in range(0, n_draws, chunk_size):
+        stop = min(start + chunk_size, n_draws)
+        valid = draw_axis[:, start:stop] < counts[:, None]
+        dx = (
+            integration_grid[None, None, :]
+            - centers[:, start:stop, None]
+        ) / sigma[:, None, None]
+        component_pdf = np.exp(-0.5 * dx**2) * (
+            _INV_SQRT_2PI / sigma[:, None, None]
+        )
+        mixture_pdf += np.sum(
+            np.where(valid[:, :, None], component_pdf, 0.0), axis=1
+        )
+    mixture_pdf /= counts[:, None]
+    weighted = mixture_pdf * p_det
+
+    Z_raw = np.trapezoid(weighted, integration_grid, axis=1)
+    m_Z = np.trapezoid(
+        weighted * integration_grid[None, :], integration_grid, axis=1
+    )
+    m2_Z = np.trapezoid(
+        weighted * integration_grid[None, :] ** 2,
+        integration_grid,
+        axis=1,
+    )
+    Z = np.clip(Z_raw, tiny, None)
+    usable = Z_raw > (100.0 * tiny)
+    expectation = np.where(usable, m_Z / Z, reference)
+    expectation2 = np.where(usable, m2_Z / Z, reference**2)
+    blob = np.vstack(
+        [
+            Z.astype(float),
+            (expectation - reference).astype(float),
+            np.sqrt(
+                np.clip(expectation2 - expectation**2, 0.0, None)
+            ).astype(float),
+        ]
+    )
+    return float(np.sum(np.log(Z))), blob
+
+
 def _joint_attenuation_draw_arrays(agn_data, hubble_magnitude):
     required = {
         JOINT_DEREDDENED_MAG_DRAWS_COL,
@@ -533,10 +773,22 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
                    only_sna=False,
                    only_agn=False,
                    use_full_cov=False,
-                   selection_attenuation_mode="fixed-offset"):
+                   selection_attenuation_mode="fixed-offset",
+                   light_curve_uncertainty_mode="covariance"):
     selection_attenuation_mode = normalize_selection_attenuation_mode(
         selection_attenuation_mode
     )
+    light_curve_uncertainty_mode = normalize_light_curve_uncertainty_mode(
+        light_curve_uncertainty_mode
+    )
+    if (
+        light_curve_uncertainty_mode == "posterior-draws"
+        and selection_attenuation_mode == "joint-posterior"
+    ):
+        raise NotImplementedError(
+            "Simultaneous light-curve posterior-draw and spectra "
+            "joint-posterior selection marginalization is not yet supported."
+        )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         only_sna=only_sna,
@@ -591,10 +843,14 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     # ------------------------
     # AGN likelihood
     # ------------------------
-    z = agn_data['z']
-    z_err = agn_data['z_err']
-    m_obs = agn_data['apparent_mag_2500']
-    m_err = agn_data['apparent_mag_2500_err']
+    # ``agn_data`` is usually a dictionary of ndarrays during the fit, but
+    # direct completeness summaries can pass pandas Series.  Normalize these
+    # numerical likelihood inputs before using NumPy-style broadcasting such
+    # as ``m_obs[:, None]`` in posterior-draw mode.
+    z = np.asarray(agn_data['z'], dtype=float)
+    z_err = np.asarray(agn_data['z_err'], dtype=float)
+    m_obs = np.asarray(agn_data['apparent_mag_2500'], dtype=float)
+    m_err = np.asarray(agn_data['apparent_mag_2500_err'], dtype=float)
 
     agn_params_arr = agn_model_pack_params(
         params,
@@ -618,6 +874,24 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
     )
+    M_pred_draws = None
+    light_curve_draw_counts = None
+    if light_curve_uncertainty_mode == "posterior-draws":
+        sigma_draws, tau_draws, light_curve_draw_counts = (
+            _light_curve_posterior_draw_arrays(agn_data)
+        )
+        M_pred_draws = _agn_magnitude_posterior_draws(
+            M_pred,
+            agn_params_arr,
+            agn_obs_arr,
+            sigma_draws,
+            tau_draws,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=(
+                use_f_agn_psf_2500_sigmoid_term
+            ),
+        )
     M_pred_err, idx = M_model_agn_err(
         agn_params_arr,
         agn_obs_arr,
@@ -627,6 +901,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        include_sigma_tau=(light_curve_uncertainty_mode == "covariance"),
     )
     if np.any(M_pred_err < 0):
         print(f"[ERROR] Negative AGN model error at indices: {idx}. Returning -inf log-likelihood.")
@@ -655,7 +930,14 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
 
     mu_cosmo = cosmo.distmod(z).value
 
-    ll_agn = _normal_logpdf_sum(mu_pred - mu_cosmo, mu_err)
+    if M_pred_draws is None:
+        ll_agn = _normal_logpdf_sum(mu_pred - mu_cosmo, mu_err)
+    else:
+        ll_agn = _normal_logpdf_posterior_draw_mixture(
+            m_obs[:, None] - M_pred_draws - mu_cosmo[:, None],
+            mu_err,
+            light_curve_draw_counts,
+        )
 
     m_model = M_pred + mu_cosmo  # model-predicted magnitude
 
@@ -677,22 +959,41 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
             hubble_total_error=mu_err,
         )
         if selection_attenuation_mode == "fixed-offset":
-            ll_completeness, comp_blob = completeness_loglike(
-            m_obs=selection_magnitude,
-            m_obs_err=selection_magnitude_error,
-            m_model=selection_model_magnitude,
-            mu_err=selection_total_error,
-            z=z,
-            completeness_model=completeness_model, m_grid=mag_centers,
-            magnitude_support=getattr(
-                completeness_model,
-                "magnitude_support",
-                (float(mag_centers[0]), float(mag_centers[-1])),
-            ),
-            sigma_completeness=0.0,
-            f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL),
-            alpha_lambda=agn_data.get("alpha_lambda"),
+            completeness_kwargs = dict(
+                m_obs=selection_magnitude,
+                m_obs_err=selection_magnitude_error,
+                mu_err=selection_total_error,
+                z=z,
+                completeness_model=completeness_model,
+                m_grid=mag_centers,
+                magnitude_support=getattr(
+                    completeness_model,
+                    "magnitude_support",
+                    (float(mag_centers[0]), float(mag_centers[-1])),
+                ),
+                sigma_completeness=0.0,
+                f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL),
+                alpha_lambda=agn_data.get("alpha_lambda"),
             )
+            if M_pred_draws is None:
+                ll_completeness, comp_blob = completeness_loglike(
+                    m_model=selection_model_magnitude,
+                    **completeness_kwargs,
+                )
+            else:
+                selection_model_draws = (
+                    selection_model_magnitude[:, None]
+                    + M_pred_draws
+                    - M_pred[:, None]
+                )
+                ll_completeness, comp_blob = (
+                    completeness_loglike_posterior_draws(
+                        m_model_draws=selection_model_draws,
+                        reference_m_model=selection_model_magnitude,
+                        draw_counts=light_curve_draw_counts,
+                        **completeness_kwargs,
+                    )
+                )
         else:
             ll_completeness, comp_blob = joint_posterior_completeness_loglike_for_data(
                 completeness_params=completeness_params,
@@ -730,6 +1031,7 @@ def log_likelihood_nearbylcs(
     only_agn=False,
     use_full_cov=False,
     selection_attenuation_mode="fixed-offset",
+    light_curve_uncertainty_mode="covariance",
 ):
     """
     AGN likelihood with separate calibrators table.
@@ -742,6 +1044,14 @@ def log_likelihood_nearbylcs(
     selection_attenuation_mode = normalize_selection_attenuation_mode(
         selection_attenuation_mode
     )
+    light_curve_uncertainty_mode = normalize_light_curve_uncertainty_mode(
+        light_curve_uncertainty_mode
+    )
+    if light_curve_uncertainty_mode != "covariance":
+        raise NotImplementedError(
+            "posterior-draws light-curve uncertainty is not yet supported with "
+            "the separate nearby-AGN calibrator likelihood."
+        )
     priors, model_labels, model_labels_latex = get_model_params(
         cosmo_model,
         only_sna=only_sna,

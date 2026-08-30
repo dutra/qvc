@@ -17,6 +17,9 @@ LIGHT_CURVE_POSTERIOR_DRAW_SELECTION = (
 LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY = (
     "_light_curve_posterior_draw_payload"
 )
+LIGHT_CURVE_LOG_SIGMA_DRAW_COL = "light_curve_log_sigma_uv_draws"
+LIGHT_CURVE_LOG_TAU_RF_DRAW_COL = "light_curve_log_tau_uv_rf_draws"
+LIGHT_CURVE_POSTERIOR_VALID_COUNT_COL = "light_curve_posterior_valid_count"
 
 
 def deterministic_posterior_indices(

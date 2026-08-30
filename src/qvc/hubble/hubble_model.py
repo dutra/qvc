@@ -932,6 +932,7 @@ def M_model_agn_err(
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
+    include_sigma_tau=True,
 ):
     req_params, req_obs, req_errs = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
@@ -964,16 +965,18 @@ def M_model_agn_err(
 
     # gamma_agn   = params_arr[agn_model_pidx["gamma_agn"]]
     # dm_psf_correction_err = err_arr[agn_model_eidx["dm_psf_correction_err"]]
-    components = {
-        "sigma": (alpha_agn * log_sigma_uv_std_psd) ** 2,
-        "tau": (beta_agn * log_tau_uv_rf_std_psd) ** 2,
-        "covariance": (
-            2
-            * alpha_agn
-            * beta_agn
-            * log_sigma_uv_log_tau_uv_rf_cov_psd
-        ),
-    }
+    components = {}
+    if include_sigma_tau:
+        components.update({
+            "sigma": (alpha_agn * log_sigma_uv_std_psd) ** 2,
+            "tau": (beta_agn * log_tau_uv_rf_std_psd) ** 2,
+            "covariance": (
+                2
+                * alpha_agn
+                * beta_agn
+                * log_sigma_uv_log_tau_uv_rf_cov_psd
+            ),
+        })
     if use_alpha_lambda_term:
         gamma_alpha_lambda = params_arr[pidx[AGN_ALPHA_LAMBDA_PARAM]]
         alpha_lambda_err = err_arr[eidx[AGN_ALPHA_LAMBDA_ERR]]
@@ -1001,10 +1004,13 @@ def M_model_agn_err(
         components["f_agn_psf_2500_sigmoid"] = np.square(
             derivative * err_arr[eidx[AGN_F_AGN_PSF_2500_ERR]]
         )
-    r = _clip_roundoff_negative_variance(
-        components,
-        where="AGN observable-error propagation",
-    )
+    if components:
+        r = _clip_roundoff_negative_variance(
+            components,
+            where="AGN observable-error propagation",
+        )
+    else:
+        r = np.zeros_like(log_sigma_uv_std_psd, dtype=float)
     if check_negative:
         return np.sqrt(r), None
     return np.sqrt(r)

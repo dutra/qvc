@@ -68,6 +68,12 @@ from qvc.hubble.hubble_model import (
 )
 from qvc.hubble.sigma_tau_lambda_fit import fit_sigma_tau_lambda_broken_pl
 from qvc.light_curve.plotting_appendix import plot_sigma_tau_identity_grid
+from qvc.light_curve.posterior_draws import (
+    LIGHT_CURVE_LOG_SIGMA_DRAW_COL,
+    LIGHT_CURVE_LOG_TAU_RF_DRAW_COL,
+    LIGHT_CURVE_POSTERIOR_VALID_COUNT_COL,
+    read_light_curve_posterior_draw_group,
+)
 from qvc.spectra.catalog_hdf5 import read_spectra_catalog_hdf5
 
 PURPLE_ANSI = "\033[95m"
@@ -160,23 +166,15 @@ def _append_cut_report_row(
     rows.append(row)
 
 
-def _render_cut_summary_table(rows):
-    columns = (
-        ("tier", "tier"),
-        ("step", "step"),
-        ("criterion", "criterion"),
-        ("before", "before"),
-        ("removed", "removed"),
-        ("removed_z_lt_1p5", "removed z < 1.5"),
-        ("removed_z_ge_1p5", "removed z >= 1.5"),
-        ("kept", "kept"),
-        ("status", "status"),
-    )
+def render_ascii_table(rows, columns):
+    """Render dictionaries as the boxed plain-text tables used by the CLI."""
+    columns = tuple(columns)
     keys = tuple(key for key, _label in columns)
     labels = dict(columns)
-    rendered_rows = []
-    for row in rows:
-        rendered_rows.append({key: str(row[key]) for key in keys})
+    rendered_rows = [
+        {key: str(row.get(key, "")) for key in keys}
+        for row in rows
+    ]
 
     widths = {
         key: (
@@ -199,6 +197,21 @@ def _render_cut_summary_table(rows):
     lines.extend(_line(row) for row in rendered_rows)
     lines.append(border)
     return "\n".join(lines)
+
+
+def _render_cut_summary_table(rows):
+    columns = (
+        ("tier", "tier"),
+        ("step", "step"),
+        ("criterion", "criterion"),
+        ("before", "before"),
+        ("removed", "removed"),
+        ("removed_z_lt_1p5", "removed z < 1.5"),
+        ("removed_z_ge_1p5", "removed z >= 1.5"),
+        ("kept", "kept"),
+        ("status", "status"),
+    )
+    return render_ascii_table(rows, columns)
 
 
 def _wrap_text_in_purple(text):
@@ -1016,7 +1029,12 @@ def read_quasars_from_hdf5(file_path, N=None):
     return quasar_list
 
 
-def read_quasars_from_hdf5_flat(file_path, N=None):
+def read_quasars_from_hdf5_flat(
+    file_path,
+    N=None,
+    *,
+    include_light_curve_posterior_draws=False,
+):
     """
     Read a flat columnar HDF5 file (top-level datasets) into a DataFrame.
     """
@@ -1081,6 +1099,32 @@ def read_quasars_from_hdf5_flat(file_path, N=None):
 
         for meta_key, meta_value in scalar_metadata.items():
             df[meta_key] = meta_value
+
+        if include_light_curve_posterior_draws:
+            payload = read_light_curve_posterior_draw_group(hdf)
+            if payload is None:
+                raise KeyError(
+                    "Requested empirical light-curve posterior marginalization, "
+                    "but the input HDF5 file has no "
+                    "'light_curve_posterior_draws' group."
+                )
+            row_limit = len(df)
+            if len(payload["valid_count"]) < row_limit:
+                raise ValueError(
+                    "The light_curve_posterior_draws group has fewer rows than "
+                    "the flat catalog."
+                )
+            sigma_draws = np.asarray(payload["log_sigma_uv"][:row_limit])
+            tau_draws = np.asarray(payload["log_tau_uv_rf"][:row_limit])
+            df[LIGHT_CURVE_LOG_SIGMA_DRAW_COL] = [
+                row.copy() for row in sigma_draws
+            ]
+            df[LIGHT_CURVE_LOG_TAU_RF_DRAW_COL] = [
+                row.copy() for row in tau_draws
+            ]
+            df[LIGHT_CURVE_POSTERIOR_VALID_COUNT_COL] = np.asarray(
+                payload["valid_count"][:row_limit], dtype=int
+            )
     return df
 
 
@@ -1115,6 +1159,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                   completeness_magnitude="dereddened",
                   enforce_completeness_support=False,
                   allow_legacy_v3_host_capture_metadata=False,
+                  light_curve_uncertainty_mode="covariance",
                   return_completeness_parent=False):
     if (
         not isinstance(magnitude_convention, str)
@@ -1432,8 +1477,26 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
     if exclude_object_ids_csv:
         exclude_object_ids_csv = [resolve_qvc_data_path(path) for path in exclude_object_ids_csv]
 
+    if light_curve_uncertainty_mode not in {"covariance", "posterior-draws"}:
+        raise ValueError(
+            "light_curve_uncertainty_mode must be 'covariance' or "
+            f"'posterior-draws', got {light_curve_uncertainty_mode!r}."
+        )
+    if light_curve_uncertainty_mode == "posterior-draws" and correct_sigma_uv_host:
+        raise ValueError(
+            "Empirical light-curve posterior draws cannot currently be combined "
+            "with --correct-sigma-uv-host because the post-hoc host correction "
+            "has not been propagated through those draws."
+        )
+
     file_path = resolve_qvc_data_path(file_path)
-    df = read_quasars_from_hdf5_flat(file_path)
+    if light_curve_uncertainty_mode == "posterior-draws":
+        df = read_quasars_from_hdf5_flat(
+            file_path,
+            include_light_curve_posterior_draws=True,
+        )
+    else:
+        df = read_quasars_from_hdf5_flat(file_path)
     df = _apply_column_compatibility_shim(df)
     print("Number of quasars loaded:", len(df))
     legacy_required = [f"mags_mean_{i}" for i in range(4)]

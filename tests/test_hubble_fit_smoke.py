@@ -4,6 +4,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -196,6 +197,61 @@ def test_completeness_magnitude_changes_run_tag():
     assert "_compmag-dereddened" in default_tag
     assert "_compmag-attenuated" in attenuated_tag
     assert default_tag != attenuated_tag
+
+
+def test_light_curve_posterior_draw_mode_changes_run_tag_only_when_requested():
+    common = ("FlatLambdaCDM", False, "fastest", None, (0.44, 3.16))
+
+    default_tag = hubble_fit.make_run_tag(*common)
+    explicit_covariance_tag = hubble_fit.make_run_tag(
+        *common,
+        light_curve_uncertainty_mode="covariance",
+    )
+    posterior_draw_tag = hubble_fit.make_run_tag(
+        *common,
+        light_curve_uncertainty_mode="posterior-draws",
+    )
+
+    assert default_tag == explicit_covariance_tag
+    assert "_lcpost64" not in default_tag
+    assert "_lcpost64" in posterior_draw_tag
+
+
+def test_hubble_mode_table_highlights_active_scientific_modes():
+    args = SimpleNamespace(
+        only_sna=False,
+        only_agn=False,
+        light_curve_uncertainty_mode="posterior-draws",
+        correct_sigma_uv_host=False,
+        fit_alpha_lambda_term=True,
+        fit_eta_sigma_term=False,
+        fit_f_agn_psf_2500_sigmoid_term=True,
+        fit_redshift_log_f_term=False,
+        disable_completeness=False,
+        completeness_mode="2d",
+        completeness_magnitude="attenuated",
+        completeness_lf_model="wang2026_type1_lade_a",
+        selection_attenuation_mode="fixed-offset",
+        disable_sigma_clip_pass=True,
+        sigma_clip_threshold=3.0,
+        sigma_clip_second_pass_mode="warm",
+        disable_full_covariance=False,
+        use_jax=False,
+        cosmo_models=["Flatw0waCDM"],
+        cut_tier="2",
+        magnitude_convention="dereddened",
+    )
+
+    table = hubble_fit.render_hubble_mode_table(args)
+
+    assert table.startswith("HUBBLE ANALYSIS MODES\n+-")
+    assert "| LC sigma/tau uncertainty" in table
+    assert "| posterior-draws" in table
+    assert "log_sigma_uv + log_tau_uv_rf + alpha_lambda" in table
+    assert "f_AGN_psf_2500 sigmoid" in table
+    assert "2d; m2500=attenuated; LF=wang2026_type1_lade_a" in table
+    assert "| sigma clipping" in table
+    assert "| disabled" in table
 
 
 def test_plot_completeness_pre_post_cut_audit_writes_four_panel_pdf(tmp_path):
@@ -769,6 +825,121 @@ def test_log_likelihood_finite_on_fake_lcdm_data(fake_data):
     assert blob.shape == (3, len(df_agn))
 
 
+def test_posterior_draw_likelihood_replaces_sigma_tau_covariance(fake_data):
+    df_agn, _ = fake_data
+    priors, model_labels, _ = hubble_model.get_model_params(
+        "FlatLambdaCDM", only_agn=True
+    )
+    parameters = {
+        key: (priors[key][0] + priors[key][1]) / 2.0
+        for key in model_labels
+    }
+    parameters["alpha_agn"] = 2.0
+    parameters["beta_agn"] = -1.0
+    theta = np.array([parameters[key] for key in model_labels], dtype=float)
+    agn_fields = hubble_model.agn_model_req_obs + hubble_model.agn_model_req_errs
+    agn_fields += (
+        "apparent_mag_2500",
+        "apparent_mag_2500_err",
+        "z",
+        "z_err",
+        "object_id",
+        hubble_completeness_refactored.COMPLETENESS_MAG_COL,
+        hubble_completeness_refactored.COMPLETENESS_MAG_ERR_COL,
+    )
+    agn_data = {col: df_agn[col].to_numpy() for col in agn_fields}
+    # Direct full-sample completeness summaries retain Series-valued catalog
+    # columns; posterior-draw broadcasting must accept that representation.
+    agn_data["apparent_mag_2500"] = df_agn["apparent_mag_2500"].copy()
+    n_objects = len(df_agn)
+    n_draws = 4
+    agn_data[hubble_likelihood.LIGHT_CURVE_LOG_SIGMA_DRAW_COL] = np.repeat(
+        df_agn["log_sigma_uv"].to_numpy()[:, None], n_draws, axis=1
+    )
+    agn_data[hubble_likelihood.LIGHT_CURVE_LOG_TAU_RF_DRAW_COL] = np.repeat(
+        df_agn["log_tau_uv_rf"].to_numpy()[:, None], n_draws, axis=1
+    )
+    agn_data[hubble_likelihood.LIGHT_CURVE_POSTERIOR_VALID_COUNT_COL] = (
+        np.full(n_objects, n_draws, dtype=int)
+    )
+    pivot_context = _agn_pivot_context(df_agn)
+    observed_magnitude = df_agn[
+        hubble_completeness_refactored.COMPLETENESS_MAG_COL
+    ].to_numpy()
+    lower = float(np.floor(np.min(observed_magnitude)) - 1.0)
+    upper = float(np.ceil(np.max(observed_magnitude)) + 1.0)
+    magnitude_grid = np.linspace(lower, upper, 81)
+    redshift_grid = np.linspace(0.0, 4.0, 21)
+    completeness_by_magnitude = np.linspace(0.98, 0.25, magnitude_grid.size)
+    completeness_model = hubble_completeness_refactored.Completeness2D(
+        magnitude_grid,
+        redshift_grid,
+        np.repeat(
+            completeness_by_magnitude[:, None], redshift_grid.size, axis=1
+        ),
+        magnitude_support=(lower, upper),
+    )
+
+    common = dict(
+        pantheon_data={},
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="FlatLambdaCDM",
+        completeness_params=(completeness_model, magnitude_grid),
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        agn_pivot_context=pivot_context,
+        agn_calibrators_data=None,
+        only_agn=True,
+        use_full_cov=False,
+    )
+    empirical_logl, _ = hubble_likelihood.log_likelihood(
+        theta,
+        agn_data=agn_data,
+        light_curve_uncertainty_mode="posterior-draws",
+        **common,
+    )
+
+    zero_covariance_data = dict(agn_data)
+    zero_covariance_data["log_sigma_uv_std_psd"] = np.zeros(n_objects)
+    zero_covariance_data["log_tau_uv_rf_std_psd"] = np.zeros(n_objects)
+    zero_covariance_data[
+        "log_sigma_uv_log_tau_uv_rf_cov_psd"
+    ] = np.zeros(n_objects)
+    zero_covariance_logl, _ = hubble_likelihood.log_likelihood(
+        theta,
+        agn_data=zero_covariance_data,
+        **common,
+    )
+    default_logl, _ = hubble_likelihood.log_likelihood(
+        theta,
+        agn_data=agn_data,
+        **common,
+    )
+
+    assert empirical_logl == pytest.approx(zero_covariance_logl, abs=1e-11)
+    assert empirical_logl != pytest.approx(default_logl, abs=1e-6)
+
+
+def test_posterior_draw_normal_logpdf_is_a_stable_equal_weight_mixture():
+    residuals = np.array([[0.0, 2.0, np.nan], [1.0, -1.0, 3.0]])
+    sigma = np.array([1.0, 2.0])
+    counts = np.array([2, 3])
+
+    actual = hubble_likelihood._normal_logpdf_posterior_draw_mixture(
+        residuals, sigma, counts
+    )
+    component_0 = np.exp(-0.5 * np.array([0.0, 2.0]) ** 2) / np.sqrt(
+        2.0 * np.pi
+    )
+    component_1 = np.exp(
+        -0.5 * (np.array([1.0, -1.0, 3.0]) / 2.0) ** 2
+    ) / (2.0 * np.sqrt(2.0 * np.pi))
+    expected = np.log(np.mean(component_0)) + np.log(np.mean(component_1))
+
+    assert actual == pytest.approx(expected, abs=1e-12)
+
+
 def test_log_likelihood_only_agn_skips_pantheon_and_sn_parameter(fake_data):
     df_agn, _ = fake_data
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_agn=True)
@@ -1053,6 +1224,41 @@ def test_compute_direct_full_sample_completeness_summaries_freezes_fit_pivots(fa
     assert np.isfinite(dmi_full_direct[-1])
     assert np.isfinite(sigma_sel_full_direct[-1])
     assert not np.allclose(naive_plot_blob[1][:-1], fit_blob[1], atol=1e-10)
+
+    # The replay path passes the plotting DataFrame directly to the likelihood,
+    # so its scalar columns are pandas Series rather than ndarrays.
+    df_plot_with_draws = df_plot.copy()
+    n_lc_draws = 4
+    df_plot_with_draws[
+        hubble_likelihood.LIGHT_CURVE_LOG_SIGMA_DRAW_COL
+    ] = [np.full(n_lc_draws, value) for value in df_plot["log_sigma_uv"]]
+    df_plot_with_draws[
+        hubble_likelihood.LIGHT_CURVE_LOG_TAU_RF_DRAW_COL
+    ] = [np.full(n_lc_draws, value) for value in df_plot["log_tau_uv_rf"]]
+    df_plot_with_draws[
+        hubble_likelihood.LIGHT_CURVE_POSTERIOR_VALID_COUNT_COL
+    ] = n_lc_draws
+    posterior_draw_summaries = (
+        hubble_fit._compute_direct_full_sample_completeness_summaries(
+            flat_samples[:1],
+            df_agn_fit_selection=df_fit,
+            df_agn_plot_sample=df_plot_with_draws,
+            df_pantheon=df_pantheon,
+            _sna_L=None,
+            _sna_Lower=True,
+            _sna_LogdetCov=None,
+            cosmo_model="FlatLambdaCDM",
+            completeness_params=completeness_params,
+            z_pivot_agn=hubble_fit.z_pivot_agn,
+            agn_pivot_context=fit_pivot_context,
+            use_full_cov=False,
+            disable_ceph_dist_calibration=False,
+            use_planck_h0_prior=False,
+            use_planck_om_prior=False,
+            light_curve_uncertainty_mode="posterior-draws",
+        )
+    )
+    assert all(np.all(np.isfinite(values)) for values in posterior_draw_summaries)
 
 
 def test_completeness_redshift_support_covers_plot_sample_and_rejects_narrow_mock(
@@ -5162,6 +5368,30 @@ def test_hubble_fit_cli_declares_and_forwards_spectra_sdss_run2d():
     assert "spectra_sdss_run2d" in load_kwargs
 
 
+def test_hubble_fit_cli_declares_and_forwards_light_curve_uncertainty_mode():
+    tree = ast.parse(Path(hubble_fit.__file__).read_text(encoding="utf-8"))
+    option_strings = set()
+    load_kwargs = set()
+    run_single_kwargs = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument":
+            option_strings.update(
+                arg.value
+                for arg in node.args
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+            )
+        if isinstance(node.func, ast.Name) and node.func.id == "load_agn_data":
+            load_kwargs.update(kw.arg for kw in node.keywords if kw.arg)
+        if isinstance(node.func, ast.Name) and node.func.id == "run_single":
+            run_single_kwargs.update(kw.arg for kw in node.keywords if kw.arg)
+
+    assert "--light-curve-uncertainty-mode" in option_strings
+    assert "light_curve_uncertainty_mode" in load_kwargs
+    assert "light_curve_uncertainty_mode" in run_single_kwargs
+
+
 def test_hubble_fit_clis_declare_and_forward_sdss_target_selection():
     for source_path in (
         Path(hubble_fit.__file__),
@@ -5409,6 +5639,24 @@ def test_resume_checkpoint_validates_cut_and_redshift_metadata():
             n_agn,
             expected_z_range_semantics=hubble_fit.Z_RANGE_SEMANTICS,
         )
+    with pytest.raises(RuntimeError, match="light-curve uncertainty"):
+        hubble_fit.validate_resume_checkpoint(
+            payload,
+            "wrong-light-curve-mode.h5",
+            3,
+            n_agn,
+            expected_light_curve_uncertainty_mode="posterior-draws",
+        )
+
+
+def test_run_hubble_forwards_light_curve_uncertainty_mode():
+    runner = (ROOT / "run_hubble.xonsh").read_text(encoding="utf-8")
+
+    assert (
+        '"QVC_HUBBLE_LIGHT_CURVE_UNCERTAINTY_MODE", "covariance"'
+        in runner
+    )
+    assert "--light-curve-uncertainty-mode @(light_curve_uncertainty_mode)" in runner
 
 
 def test_run_hubble_forwards_configurable_cumulative_cut_tier():
