@@ -12,6 +12,12 @@ suffix = os.environ.get('SUFFIX', "test")
 import logging
 
 from qvc.provenance import merge_history, read_hdf5_provenance, write_hdf5_provenance
+from qvc.light_curve.posterior_draws import (
+    LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY,
+    compact_log_sigma_tau_posterior_draws,
+    stack_light_curve_posterior_draw_payloads,
+    write_light_curve_posterior_draw_group,
+)
 
 logging.basicConfig(
     format='%(asctime)s - %(message)s',
@@ -679,6 +685,13 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024, prove
 
     rows = []
     total = len(quasars)
+    posterior_draw_payloads = [
+        quasar.get(LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY)
+        for quasar in quasars
+    ]
+    has_posterior_draws = any(
+        payload is not None for payload in posterior_draw_payloads
+    )
     output_dir = f"results/data/{prefix}"
     os.makedirs(output_dir, exist_ok=True)
     file_path = os.path.join(output_dir, _output_basename(quasars))
@@ -702,7 +715,11 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024, prove
 
         row = {"object_id": object_id}
         for key, value in quasar.items():
-            if key in ignored_keys or key == "object_id":
+            if (
+                key in ignored_keys
+                or key == "object_id"
+                or key == LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY
+            ):
                 continue
             _flatten_value(row, str(key), value, obj_bands)
         rows.append(row)
@@ -718,6 +735,14 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024, prove
             values = [row.get(col, None) for row in rows]
             arr = _build_column(values)
             hdf.create_dataset(col, data=arr)
+
+        if has_posterior_draws:
+            write_light_curve_posterior_draw_group(
+                hdf,
+                stack_light_curve_posterior_draw_payloads(
+                    posterior_draw_payloads
+                ),
+            )
 
         if provenance is not None:
             write_hdf5_provenance(hdf, merge_history(provenance, previous_provenance))
@@ -1063,6 +1088,16 @@ def process_samples(
     result['log_tau_uv_rf_std_psd'] = np.sqrt(vy)
     print("Hubble covariance term: ", cov_log_sigma_tau_reg)
     print("Hubble std terms: ", np.sqrt(vx), np.sqrt(vy))
+
+    result[LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY] = (
+        compact_log_sigma_tau_posterior_draws(
+            log_sigma_uv,
+            log_tau_uv,
+            redshift=data["z"],
+            object_id=data["object_id"],
+            selection_seed=0,
+        )
+    )
 
     return result
 

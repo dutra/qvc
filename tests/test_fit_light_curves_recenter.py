@@ -66,6 +66,9 @@ from qvc.light_curve.multiband_fit_plotting import (
 from qvc.light_curve import multiband_fit_utils
 from qvc.light_curve import fit_light_curves as fit_lc
 from qvc.light_curve.multiband_fit_utils import lambda_pivot, log_single_pl, process_samples
+from qvc.light_curve.posterior_draws import (
+    LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY,
+)
 
 
 def _make_raw_public(n_band):
@@ -1331,6 +1334,18 @@ def test_process_samples_keeps_uv_outputs_at_2500_and_stores_band_metadata():
     assert np.isclose(result["log_tau_uv"], np.percentile(log_tau_slow_center0 / np.log(10), 50))
     assert np.isclose(result["log_tau_uv_rf"], expected_log_tau_uv_rf)
     assert np.isclose(result["log_tau_fast_uv_rf"], expected_log_tau_fast_uv_rf)
+    compact_draws = result[LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY]
+    assert compact_draws["valid_count"] == 3
+    np.testing.assert_allclose(
+        compact_draws["log_sigma_uv"][:3],
+        log_sigma_center0 / np.log(10.0),
+    )
+    np.testing.assert_allclose(
+        compact_draws["log_tau_uv_rf"][:3],
+        log_tau_slow_center0 / np.log(10.0) - np.log10(1.0 + z),
+    )
+    assert np.all(np.isnan(compact_draws["log_sigma_uv"][3:]))
+    assert np.all(compact_draws["posterior_index"][3:] == -1)
     assert np.isclose(
         result["log_lag_blr_r_RF"],
         np.percentile(np.log10([35.0, 45.0, 55.0]) - np.log10(1.0 + z), 50),

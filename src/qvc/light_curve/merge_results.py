@@ -24,6 +24,15 @@ from qvc.light_curve.multiband_generate_lc import (
     read_macleod_band,
     resolve_stone_s82_matches,
 )
+from qvc.light_curve.posterior_draws import (
+    LIGHT_CURVE_POSTERIOR_DRAW_COUNT,
+    LIGHT_CURVE_POSTERIOR_DRAW_FORMAT,
+    LIGHT_CURVE_POSTERIOR_DRAW_GROUP,
+    LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY,
+    compact_log_sigma_tau_posterior_draws,
+    read_light_curve_posterior_draw_group,
+    write_light_curve_posterior_draw_group,
+)
 from qvc.light_curve.plotting_appendix import plot_sigma_tau_identity_grid
 from qvc.provenance import (
     build_run_record,
@@ -99,11 +108,15 @@ def _load_h5_shard(path, expected_n):
         with h5py.File(path, "r") as hdf:
             source_git_commit = _read_optional_h5_scalar(hdf, path, "git_commit")
             source_run_datetime = _read_optional_h5_scalar(hdf, path, "run_datetime")
+            embedded_draws = read_light_curve_posterior_draw_group(hdf)
 
             row_columns = {}
             n_rows = None
             for key in hdf.keys():
-                values = hdf[key][...]
+                node = hdf[key]
+                if not isinstance(node, h5py.Dataset):
+                    continue
+                values = node[...]
                 arr = np.asarray(values)
                 if arr.ndim == 0:
                     continue
@@ -134,6 +147,26 @@ def _load_h5_shard(path, expected_n):
                     row = {field: row_columns[field][idx] for field in fields}
                     row["git_commit"] = source_git_commit
                     row["run_datetime"] = source_run_datetime
+                    if embedded_draws is not None:
+                        if len(embedded_draws["valid_count"]) != n_rows:
+                            raise ValueError(
+                                f"Embedded posterior row count in {path} does not "
+                                f"match scalar row count {n_rows}."
+                            )
+                        row[LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY] = {
+                            name: embedded_draws[name][idx]
+                            for name in (
+                                "log_sigma_uv",
+                                "log_tau_uv_rf",
+                                "posterior_index",
+                                "valid_count",
+                                "finite_source_draw_count",
+                                "source_draw_count",
+                            )
+                        }
+                        row[LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY][
+                            "selection_seed"
+                        ] = embedded_draws["selection_seed"]
                     rows.append(row)
 
             return {"path": path, "ok": True, "skip": False, "rows": rows}
@@ -207,7 +240,13 @@ def _build_flat_column(values, string_dt):
     return float, out
 
 
-def write_quasars_to_h5_flat(quasars, h5_path, provenance=None):
+def write_quasars_to_h5_flat(
+    quasars,
+    h5_path,
+    provenance=None,
+    *,
+    posterior_draw_payload=None,
+):
     os.makedirs(os.path.dirname(h5_path) or ".", exist_ok=True)
     string_dt = h5py.string_dtype(encoding="utf-8")
 
@@ -215,6 +254,8 @@ def write_quasars_to_h5_flat(quasars, h5_path, provenance=None):
     seen = set()
     for q in quasars:
         for k in q.keys():
+            if k == LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY:
+                continue
             if k not in seen:
                 seen.add(k)
                 all_fields.append(k)
@@ -224,10 +265,159 @@ def write_quasars_to_h5_flat(quasars, h5_path, provenance=None):
             values = [q.get(field, None) for q in quasars]
             dtype, col = _build_flat_column(values, string_dt)
             hdf.create_dataset(field, data=col, dtype=dtype)
+        if posterior_draw_payload is not None:
+            write_light_curve_posterior_draw_group(
+                hdf,
+                posterior_draw_payload,
+            )
         if provenance is not None:
             write_hdf5_provenance(hdf, provenance)
 
     print(f"Wrote {len(quasars)} rows to flat HDF5 {h5_path}")
+
+
+def _row_text(row, key):
+    value = row.get(key)
+    if value is None:
+        return ""
+    value = _decode_h5_scalar(value)
+    if isinstance(value, float) and not np.isfinite(value):
+        return ""
+    return str(value).strip()
+
+
+def _resolve_object_sample_path(row, samples_dir):
+    object_id = _row_text(row, "object_id")
+    if not object_id:
+        return None
+
+    samples_dir = Path(samples_dir)
+    suffix = _row_text(row, "suffix")
+    if suffix:
+        exact = samples_dir / f"{object_id}_{suffix}.h5"
+        if exact.is_file():
+            return exact
+
+    bare = samples_dir / f"{object_id}.h5"
+    candidates = [bare] if bare.is_file() else []
+    candidates.extend(sorted(samples_dir.glob(f"{object_id}_*.h5")))
+    candidates = list(dict.fromkeys(candidates))
+    if not candidates:
+        return None
+    if len(candidates) > 1:
+        names = ", ".join(path.name for path in candidates[:5])
+        raise ValueError(
+            "Ambiguous light-curve posterior sample files for "
+            f"object_id={object_id!r}: {names}. The merged row suffix did not "
+            "resolve one exact file."
+        )
+    return candidates[0]
+
+
+def collect_light_curve_posterior_draws(
+    quasars,
+    samples_dir,
+    *,
+    selection_seed=0,
+    allow_missing=False,
+):
+    """Collect paired sigma/tau posterior draws aligned with merged catalog rows."""
+
+    n_rows = len(quasars)
+    draw_shape = (n_rows, LIGHT_CURVE_POSTERIOR_DRAW_COUNT)
+    log_sigma_uv = np.full(draw_shape, np.nan, dtype=np.float32)
+    log_tau_uv_rf = np.full(draw_shape, np.nan, dtype=np.float32)
+    posterior_index = np.full(draw_shape, -1, dtype=np.int32)
+    valid_count = np.zeros(n_rows, dtype=np.int16)
+    finite_source_draw_count = np.zeros(n_rows, dtype=np.int32)
+    source_draw_count = np.zeros(n_rows, dtype=np.int32)
+    missing = []
+
+    for row_index, row in enumerate(quasars):
+        object_id = _row_text(row, "object_id")
+        embedded = row.get(LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY)
+        if (
+            embedded is not None
+            and int(embedded.get("valid_count", 0)) > 0
+            and int(embedded.get("selection_seed", 0)) == int(selection_seed)
+        ):
+            for name in ("log_sigma_uv", "log_tau_uv_rf", "posterior_index"):
+                values = np.asarray(embedded[name])
+                if values.shape != (LIGHT_CURVE_POSTERIOR_DRAW_COUNT,):
+                    raise ValueError(
+                        f"Embedded posterior {name!r} for object_id={object_id!r} "
+                        f"has shape {values.shape}."
+                    )
+            log_sigma_uv[row_index] = embedded["log_sigma_uv"]
+            log_tau_uv_rf[row_index] = embedded["log_tau_uv_rf"]
+            posterior_index[row_index] = embedded["posterior_index"]
+            valid_count[row_index] = embedded["valid_count"]
+            finite_source_draw_count[row_index] = embedded[
+                "finite_source_draw_count"
+            ]
+            source_draw_count[row_index] = embedded["source_draw_count"]
+            continue
+
+        sample_path = _resolve_object_sample_path(row, samples_dir)
+        if sample_path is None:
+            missing.append(object_id or f"row {row_index}")
+            continue
+
+        try:
+            redshift = float(row["z"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Missing or invalid redshift for object_id={object_id!r}."
+            ) from exc
+        if not np.isfinite(redshift) or redshift <= -1.0:
+            raise ValueError(
+                f"Invalid redshift z={redshift!r} for object_id={object_id!r}."
+            )
+
+        with h5py.File(sample_path, "r") as hdf:
+            required = ("log_sigma_uv", "log_tau_uv")
+            absent = [name for name in required if name not in hdf]
+            if absent:
+                raise KeyError(
+                    f"Posterior sample file {sample_path} is missing {absent}."
+                )
+            sigma_raw = np.asarray(hdf["log_sigma_uv"][...], dtype=float).reshape(-1)
+            tau_raw = np.asarray(hdf["log_tau_uv"][...], dtype=float).reshape(-1)
+
+        compact = compact_log_sigma_tau_posterior_draws(
+            sigma_raw,
+            tau_raw,
+            redshift=redshift,
+            object_id=object_id,
+            selection_seed=selection_seed,
+        )
+        log_sigma_uv[row_index] = compact["log_sigma_uv"]
+        log_tau_uv_rf[row_index] = compact["log_tau_uv_rf"]
+        posterior_index[row_index] = compact["posterior_index"]
+        valid_count[row_index] = compact["valid_count"]
+        finite_source_draw_count[row_index] = compact[
+            "finite_source_draw_count"
+        ]
+        source_draw_count[row_index] = compact["source_draw_count"]
+
+    if missing and not allow_missing:
+        preview = ", ".join(missing[:10])
+        raise FileNotFoundError(
+            f"Missing light-curve posterior sample files for {len(missing)} "
+            f"merged row(s) in {samples_dir}: {preview}. Pass "
+            "--allow-missing-posterior-draws for a legacy/partial merge."
+        )
+
+    return {
+        "log_sigma_uv": log_sigma_uv,
+        "log_tau_uv_rf": log_tau_uv_rf,
+        "posterior_index": posterior_index,
+        "valid_count": valid_count,
+        "finite_source_draw_count": finite_source_draw_count,
+        "source_draw_count": source_draw_count,
+        "selection_seed": int(selection_seed),
+        "missing_count": len(missing),
+    }
 
 
 def summarize_source_provenance(file_list):
@@ -1145,6 +1335,37 @@ def main(argv=None):
         help="Output format. If omitted and --out is given, inferred from its extension. If both omitted, defaults to .h5.",
     )
     p.add_argument(
+        "--posterior-samples-dir",
+        type=str,
+        default=None,
+        help=(
+            "Directory containing per-object light-curve posterior sample HDF5 "
+            "files. Defaults to the sibling samples/<prefix> directory next to "
+            "--base-dir."
+        ),
+    )
+    p.add_argument(
+        "--posterior-draw-seed",
+        type=int,
+        default=0,
+        help="Seed for deterministic per-object selection of 64 paired posterior draws.",
+    )
+    p.add_argument(
+        "--allow-missing-posterior-draws",
+        action="store_true",
+        default=False,
+        help=(
+            "Write NaN/-1-padded posterior rows when legacy per-object sample "
+            "files are missing. By default an HDF5 merge fails instead."
+        ),
+    )
+    p.add_argument(
+        "--skip-posterior-draws",
+        action="store_true",
+        default=False,
+        help="Do not add the 64-draw light_curve_posterior_draws group to HDF5 output.",
+    )
+    p.add_argument(
         "--dedup-keys",
         type=str,
         nargs="*",
@@ -1251,11 +1472,33 @@ def main(argv=None):
         s = set()
         for q in all_quasars:
             for k in q.keys():
+                if k == LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY:
+                    continue
                 if k not in s:
                     s.add(k)
                     seen.append(k)
         write_quasars_to_csv(all_quasars, out_path, fields=seen)
     elif out_format == "h5":
+        posterior_draw_payload = None
+        if not args.skip_posterior_draws:
+            posterior_samples_dir = Path(
+                args.posterior_samples_dir
+                or Path(args.base_dir).parent / "samples" / args.prefix
+            )
+            posterior_draw_payload = collect_light_curve_posterior_draws(
+                all_quasars,
+                posterior_samples_dir,
+                selection_seed=args.posterior_draw_seed,
+                allow_missing=args.allow_missing_posterior_draws,
+            )
+            populated = int(
+                np.count_nonzero(posterior_draw_payload["valid_count"])
+            )
+            print(
+                "Collected paired light-curve posterior draws for "
+                f"{populated}/{len(all_quasars)} merged rows from "
+                f"{posterior_samples_dir}."
+            )
         merge_provenance = build_run_record(
             "qvc.light_curve.merge_results",
             args,
@@ -1263,7 +1506,12 @@ def main(argv=None):
             event_type="merge",
         )
         merge_provenance["source_runs"] = source_provenance
-        write_quasars_to_h5_flat(all_quasars, out_path, provenance=merge_provenance)
+        write_quasars_to_h5_flat(
+            all_quasars,
+            out_path,
+            provenance=merge_provenance,
+            posterior_draw_payload=posterior_draw_payload,
+        )
     else:
         print(f"ERROR: Unsupported out-format: {out_format}")
         sys.exit(1)

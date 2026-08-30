@@ -1051,7 +1051,10 @@ def read_quasars_from_hdf5_flat(file_path, N=None):
         scalar_metadata = {}
         n_rows = None
         for key in keys:
-            values = hdf[key][...]
+            node = hdf[key]
+            if not isinstance(node, h5py.Dataset):
+                continue
+            values = node[...]
             arr = np.asarray(values)
             if arr.ndim == 0:
                 scalar_metadata[key] = _decode_scalar(arr.item())

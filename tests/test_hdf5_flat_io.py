@@ -16,6 +16,11 @@ if str(SRC) not in sys.path:
 
 from qvc.hubble.hubble_utils import read_quasars_from_hdf5_flat
 from qvc.light_curve import multiband_fit_utils as mfu
+from qvc.light_curve.posterior_draws import (
+    LIGHT_CURVE_POSTERIOR_DRAW_GROUP,
+    LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY,
+    compact_log_sigma_tau_posterior_draws,
+)
 
 
 def _write_sample_hdf5(path, value):
@@ -237,6 +242,44 @@ def test_save_quasar_list_hdf5_persists_total_light_curve_fit_runtime(tmp_path, 
         )
 
 
+def test_save_quasar_list_hdf5_embeds_compact_sigma_tau_draws(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    mfu.prefix = "flat_io_draws"
+    mfu.suffix = "job0"
+    quasar = _mock_quasars()[0]
+    quasar[LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY] = (
+        compact_log_sigma_tau_posterior_draws(
+            np.linspace(-2.0, 0.0, 100),
+            np.linspace(3.0, 5.0, 100),
+            redshift=quasar["z"],
+            object_id=quasar["object_id"],
+        )
+    )
+
+    mfu.save_quasar_list_hdf5([quasar])
+
+    output = (
+        tmp_path
+        / "results"
+        / "data"
+        / "flat_io_draws"
+        / "qso-a-1.h5"
+    )
+    with h5py.File(output, "r") as handle:
+        group = handle[LIGHT_CURVE_POSTERIOR_DRAW_GROUP]
+        assert group["log_sigma_uv"].shape == (1, 64)
+        assert group["log_tau_uv_rf"].shape == (1, 64)
+        assert group["valid_count"][0] == 64
+        assert LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY not in handle
+
+    frame = read_quasars_from_hdf5_flat(output)
+    assert len(frame) == 1
+    assert frame.iloc[0]["object_id"] == "qso-a-1"
+
+
 def test_save_quasar_list_hdf5_uses_time_tied_random_filename_for_multiple_objects(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     mfu.prefix = "flat_io_multi"
@@ -264,6 +307,8 @@ def test_read_quasars_from_hdf5_flat_normalizes_endian_for_updates(tmp_path):
     with h5py.File(out_path, "w") as hdf:
         hdf.create_dataset("object_id", data=np.array([b"a", b"b"]))
         hdf.create_dataset("z", data=np.array([1.1, 2.2], dtype=">f8"))
+        draw_group = hdf.create_group("light_curve_posterior_draws")
+        draw_group.create_dataset("log_sigma_uv", data=np.ones((2, 64)))
 
     df = read_quasars_from_hdf5_flat(str(out_path))
     assert len(df) == 2
