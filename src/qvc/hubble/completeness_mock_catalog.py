@@ -16,6 +16,10 @@ from scipy.interpolate import RegularGridInterpolator
 from scipy.optimize import brentq
 from scipy.special import ndtr, ndtri
 
+from qvc.hubble.cuts import (
+    COMPLETENESS_MAP_MAG_EDGE_MAX,
+    COMPLETENESS_MAP_MAG_EDGE_MIN,
+)
 from qvc.hubble.empirical_luminosity_functions import (
     EMPIRICAL_LF_MODEL_IDS,
     LFGrid,
@@ -34,7 +38,10 @@ SHEN_GLOBAL_FIT = "A"
 COMPLETENESS_LF_MODELS = ("shen", *EMPIRICAL_LF_MODEL_IDS)
 EMPIRICAL_LF_NATIVE_MAGNITUDE_GRID = np.linspace(-33.0, -16.0, 341)
 EMPIRICAL_LF_REDSHIFT_STEP = 0.05
-DEFAULT_M2500_SUPPORT = (18.5, 24.0)
+DEFAULT_M2500_SUPPORT = (
+    COMPLETENESS_MAP_MAG_EDGE_MIN,
+    COMPLETENESS_MAP_MAG_EDGE_MAX,
+)
 
 
 def log_nu_lnu_to_ab_absolute_magnitude(log_nu_lnu, frequency_hz):

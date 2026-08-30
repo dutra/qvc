@@ -12,6 +12,9 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from qvc.hubble import hubble_fit
+from qvc.hubble.hubble_completeness_refactored import (
+    _validate_mock_magnitude_coverage,
+)
 
 
 def test_fresh_empirical_lf_mock_is_wired_through_and_records_provenance(
@@ -23,16 +26,17 @@ def test_fresh_empirical_lf_mock_is_wired_through_and_records_provenance(
         captured["model_id"] = lf_grid.model_id
         captured["area_deg2"] = area_deg2
         captured["z_range"] = kwargs["z_range"]
+        captured["m2500_support"] = kwargs["m2500_support"]
         return (
-            [np.array([21.0])],
-            np.array([1.0]),
-            [np.array([21.2])],
-            np.array([1]),
-            np.array([0.72]),
-            np.array([21.0]),
-            np.array([21.2]),
-            np.array([0]),
-            np.array([-1.5]),
+            [np.array([18.0, 24.0])],
+            np.array([2.0]),
+            [np.array([18.0, 24.5])],
+            np.array([2]),
+            np.array([0.70, 0.72]),
+            np.array([18.0, 24.0]),
+            np.array([18.0, 24.5]),
+            np.array([0, 0]),
+            np.array([-1.5, -1.5]),
         )
 
     monkeypatch.setattr(hubble_fit, "mock_lf_grid_per_zbin", fake_sampler)
@@ -48,10 +52,14 @@ def test_fresh_empirical_lf_mock_is_wired_through_and_records_provenance(
         "model_id": "kulkarni2019_type1_model2",
         "area_deg2": 0.25,
         "z_range": (0.68, 0.80),
+        "m2500_support": (18.0, 24.5),
     }
     with h5py.File(output, "r") as handle:
+        _validate_mock_magnitude_coverage(handle["apparent_mag_2500"][:])
         assert handle.attrs["lf_model"] == "kulkarni2019_type1_model2"
         assert handle.attrs["lf_native_magnitude_name"] == "M_1450_AB"
+        assert handle.attrs["m2500_support_min"] == 18.0
+        assert handle.attrs["m2500_support_max"] == 24.5
         assert handle.attrs["requested_redshift_min"] == 0.68
         assert handle.attrs["requested_redshift_max"] == 0.80
 
