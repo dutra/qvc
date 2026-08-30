@@ -199,6 +199,53 @@ def test_spectra_catalog_v3_round_trip_preserves_catalog_and_joint_draws(tmp_pat
         }
 
 
+def test_spectra_catalog_v3_legacy_host_capture_metadata_requires_opt_in(tmp_path):
+    path = tmp_path / "legacy_host_capture_metadata.h5"
+    _write_v3_catalog(path)
+    with h5py.File(path, "r+") as handle:
+        del handle.attrs["f_host_2500_psf_capture_model"]
+        del handle.attrs["f_host_2500_psf_fwhm_arcsec"]
+
+    with pytest.raises(ValueError, match="f_host_2500_psf_capture_model"):
+        read_spectra_catalog_hdf5(path)
+
+    with pytest.warns(
+        RuntimeWarning,
+        match="missing host-capture metadata",
+    ):
+        result = read_spectra_catalog_hdf5(
+            path,
+            allow_legacy_v3_host_capture_metadata=True,
+        )
+
+    assert len(result.frame) == 2
+    assert result.joint_posterior_draws["m_2500_dereddened"].shape == (2, 64)
+
+
+@pytest.mark.parametrize(
+    ("attribute", "bad_value"),
+    [
+        ("f_host_2500_psf_capture_model", "different_model"),
+        ("f_host_2500_psf_fwhm_arcsec", 2.0),
+    ],
+)
+def test_spectra_catalog_v3_legacy_opt_in_rejects_conflicting_metadata(
+    tmp_path,
+    attribute,
+    bad_value,
+):
+    path = tmp_path / f"conflicting_{attribute}.h5"
+    _write_v3_catalog(path)
+    with h5py.File(path, "r+") as handle:
+        handle.attrs[attribute] = bad_value
+
+    with pytest.raises(ValueError, match=attribute):
+        read_spectra_catalog_hdf5(
+            path,
+            allow_legacy_v3_host_capture_metadata=True,
+        )
+
+
 def test_spectra_catalog_v3_writer_rejects_missing_required_fitted_photometry(tmp_path):
     with pytest.raises(ValueError, match="requires joint_psf_photometry_draws"):
         _write_v3_catalog(

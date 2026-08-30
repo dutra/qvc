@@ -870,7 +870,12 @@ def _read_legacy_host_draws(handle, frame, path, include_draws, *, is_v1):
     return values, counts
 
 
-def _validate_v3_attrs(handle, path):
+def _validate_v3_attrs(
+    handle,
+    path,
+    *,
+    allow_legacy_v3_host_capture_metadata=False,
+):
     expected = {
         "joint_posterior_draw_count": JOINT_POSTERIOR_DRAW_COUNT,
         "joint_posterior_draw_selection": JOINT_POSTERIOR_DRAW_SELECTION,
@@ -918,12 +923,34 @@ def _validate_v3_attrs(handle, path):
         "f_host_2500_psf_capture_model": F_HOST_2500_PSF_CAPTURE_MODEL,
         "f_host_2500_psf_fwhm_arcsec": F_HOST_2500_PSF_FWHM_ARCSEC,
     }
+    legacy_host_capture_attrs = {
+        "f_host_2500_psf_capture_model",
+        "f_host_2500_psf_fwhm_arcsec",
+    }
+    assumed_legacy_attrs = []
     for name, expected_value in expected.items():
+        if (
+            allow_legacy_v3_host_capture_metadata
+            and name in legacy_host_capture_attrs
+            and name not in handle.attrs
+        ):
+            assumed_legacy_attrs.append((name, expected_value))
+            continue
         actual = _decode_attr(handle.attrs.get(name))
         if actual != expected_value:
             raise ValueError(
                 f"Spectra catalog {path} has incompatible {name}: {actual!r} != {expected_value!r}."
             )
+    if assumed_legacy_attrs:
+        assumptions = ", ".join(
+            f"{name}={value!r}" for name, value in assumed_legacy_attrs
+        )
+        warnings.warn(
+            f"Loading legacy v3 spectra catalog {path} with missing host-capture "
+            f"metadata; assuming {assumptions}.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
     try:
         return int(handle.attrs["joint_posterior_selection_seed"])
     except (KeyError, TypeError, ValueError) as exc:
@@ -932,8 +959,21 @@ def _validate_v3_attrs(handle, path):
         ) from exc
 
 
-def _read_v3_joint_draws(handle, frame, path, include_draws):
-    selection_seed = _validate_v3_attrs(handle, path)
+def _read_v3_joint_draws(
+    handle,
+    frame,
+    path,
+    include_draws,
+    *,
+    allow_legacy_v3_host_capture_metadata=False,
+):
+    selection_seed = _validate_v3_attrs(
+        handle,
+        path,
+        allow_legacy_v3_host_capture_metadata=(
+            allow_legacy_v3_host_capture_metadata
+        ),
+    )
     group = handle["joint_posterior_draws"]
     required = {
         "posterior_index",
@@ -1076,6 +1116,7 @@ def read_spectra_catalog_hdf5(
     include_fraction_draws=True,
     allow_v2=False,
     allow_v1=False,
+    allow_legacy_v3_host_capture_metadata=False,
 ):
     """Read and strongly validate a versioned spectral catalog.
 
@@ -1141,7 +1182,15 @@ def read_spectra_catalog_hdf5(
                 joint_indices,
                 source_counts,
                 selection_seed,
-            ) = _read_v3_joint_draws(handle, frame, path, include_fraction_draws)
+            ) = _read_v3_joint_draws(
+                handle,
+                frame,
+                path,
+                include_fraction_draws,
+                allow_legacy_v3_host_capture_metadata=(
+                    allow_legacy_v3_host_capture_metadata
+                ),
+            )
             host_draws = joint_draws["f_host_2500_psf"]
             host_counts = joint_counts
             (

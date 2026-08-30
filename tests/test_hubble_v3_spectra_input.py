@@ -37,15 +37,35 @@ def test_populate_spectra_fit_reads_v3_joint_draws(monkeypatch, tmp_path):
         },
         joint_posterior_valid_count=np.array([2], dtype=np.int16),
     )
+    reader_calls = []
+
+    def fake_read_spectra_catalog_hdf5(
+        path,
+        *,
+        include_fraction_draws,
+        allow_legacy_v3_host_capture_metadata=False,
+    ):
+        reader_calls.append(
+            {
+                "path": path,
+                "include_fraction_draws": include_fraction_draws,
+                "allow_legacy_v3_host_capture_metadata": (
+                    allow_legacy_v3_host_capture_metadata
+                ),
+            }
+        )
+        return catalog
+
     monkeypatch.setattr(
         hubble_utils,
         "read_spectra_catalog_hdf5",
-        lambda path, *, include_fraction_draws: catalog,
+        fake_read_spectra_catalog_hdf5,
     )
 
     result = hubble_utils.populate_spectra_fit(
         pd.DataFrame({"object_id": ["101"], "pl_slope": [-9.0]}),
         [spectra_path],
+        allow_legacy_v3_host_capture_metadata=True,
     )
 
     assert result.loc[0, "pl_slope"] == -1.5
@@ -58,3 +78,10 @@ def test_populate_spectra_fit_reads_v3_joint_draws(monkeypatch, tmp_path):
         result.loc[0, "m_2500_attenuated_model_draws"][:2],
         [20.2, 20.6],
     )
+    assert reader_calls == [
+        {
+            "path": str(spectra_path),
+            "include_fraction_draws": True,
+            "allow_legacy_v3_host_capture_metadata": True,
+        }
+    ]

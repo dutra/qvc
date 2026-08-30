@@ -5048,6 +5048,15 @@ if __name__ == "__main__":
         help="Path(s) to versioned JAXSEDFit joint spectral HDF5 catalogs.",
     )
     parser.add_argument(
+        "--allow-legacy-v3-host-capture-metadata",
+        action="store_true",
+        default=False,
+        help=(
+            "Allow a spectra v3 catalog to omit the historical host-capture "
+            "model and FWHM attributes, assuming the standard SDSS values."
+        ),
+    )
+    parser.add_argument(
         "--magnitude-convention",
         type=str,
         choices=["dereddened", "attenuated"],
@@ -5252,6 +5261,9 @@ if __name__ == "__main__":
                            exclude_object_ids_csv=args.exclude_object_ids_csv,
                            spectra_fit_csv=args.spectra_fit_csv,
                            spectra_fit_h5=args.spectra_fit_h5,
+                           allow_legacy_v3_host_capture_metadata=(
+                               args.allow_legacy_v3_host_capture_metadata
+                           ),
                            sdss_target_selection=args.sdss_target_selection,
                            magnitude_convention=args.magnitude_convention,
                            completeness_magnitude=args.completeness_magnitude,

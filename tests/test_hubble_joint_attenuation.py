@@ -18,6 +18,7 @@ class ConstantCompleteness:
 
 def test_joint_attenuation_uses_only_declared_valid_draws():
     data = {
+        "completeness_m_2500": np.array([20.3]),
         "m_2500_dereddened_draws": np.array([[20.0, 20.1, np.nan]]),
         "m_2500_attenuated_model_draws": np.array([[20.3, 20.5, np.nan]]),
         "joint_posterior_valid_count": np.array([2], dtype=np.int16),

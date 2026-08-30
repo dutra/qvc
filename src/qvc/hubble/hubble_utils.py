@@ -659,7 +659,12 @@ def _ensure_object_id(df):
     df["object_id"] = df["object_id"].astype(str)
     return df
 
-def populate_spectra_fit(df, spectra_fit_paths):
+def populate_spectra_fit(
+    df,
+    spectra_fit_paths,
+    *,
+    allow_legacy_v3_host_capture_metadata=False,
+):
     """Merge joint SED-fit products from legacy CSV or versioned spectra HDF5."""
     required_cols = {
         "fit_ok",
@@ -689,9 +694,12 @@ def populate_spectra_fit(df, spectra_fit_paths):
             f"({i+1}/{len(spectra_fit_paths)}): {input_path}\033[0m"
         )
         if is_hdf5:
+            reader_kwargs = {"include_fraction_draws": True}
+            if allow_legacy_v3_host_capture_metadata:
+                reader_kwargs["allow_legacy_v3_host_capture_metadata"] = True
             catalog = read_spectra_catalog_hdf5(
                 input_path,
-                include_fraction_draws=True,
+                **reader_kwargs,
             )
             df_spectra = catalog.frame.copy()
             if catalog.catalog_format == "qvc_spectra_catalog_v3":
@@ -1088,6 +1096,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                   magnitude_convention,
                   completeness_magnitude="dereddened",
                   enforce_completeness_support=False,
+                  allow_legacy_v3_host_capture_metadata=False,
                   return_completeness_parent=False):
     if (
         not isinstance(magnitude_convention, str)
@@ -1513,7 +1522,10 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
     spectra_fit_paths = spectra_fit_h5 or spectra_fit_csv
     if spectra_fit_paths is not None:
         print("Populating spectra fit data from:", spectra_fit_paths)
-        df = populate_spectra_fit(df, spectra_fit_paths)
+        populate_kwargs = {}
+        if allow_legacy_v3_host_capture_metadata:
+            populate_kwargs["allow_legacy_v3_host_capture_metadata"] = True
+        df = populate_spectra_fit(df, spectra_fit_paths, **populate_kwargs)
     else:
         print("[WARNING] spectra fit catalog not provided, assuming spectral fields are in agn h5 file")
         if 'alpha_lambda' not in df.columns:

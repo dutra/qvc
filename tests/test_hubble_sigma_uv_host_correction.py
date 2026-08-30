@@ -414,7 +414,15 @@ def test_load_agn_data_aliases_dereddened_spectral_magnitude(monkeypatch, tmp_pa
     df_in["apparent_mag_2500"] = attenuated_mag
     df_in["apparent_mag_2500_err"] = attenuated_err
 
-    def fake_populate_spectra_fit(frame, _spectra_fit_csv):
+    populate_calls = []
+
+    def fake_populate_spectra_fit(
+        frame,
+        _spectra_fit_csv,
+        *,
+        allow_legacy_v3_host_capture_metadata=False,
+    ):
+        populate_calls.append(allow_legacy_v3_host_capture_metadata)
         frame = frame.copy()
         frame["m_2500_attenuated_model"] = attenuated_mag
         frame["m_2500_attenuated_model_err"] = attenuated_err
@@ -442,6 +450,7 @@ def test_load_agn_data_aliases_dereddened_spectral_magnitude(monkeypatch, tmp_pa
         only_load=True,
         cut_tier="none",
         plot_diagnostics=False,
+        allow_legacy_v3_host_capture_metadata=True,
     )
 
     assert df_all.equals(df)
@@ -455,6 +464,7 @@ def test_load_agn_data_aliases_dereddened_spectral_magnitude(monkeypatch, tmp_pa
         np.sqrt(attenuated_err**2 + dereddened_err**2),
     )
     assert "Using m_2500_dereddened" in capsys.readouterr().out
+    assert populate_calls == [True]
 
 
 def test_load_agn_data_can_use_attenuated_spectral_magnitude(monkeypatch, tmp_path, capsys):
