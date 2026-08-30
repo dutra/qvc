@@ -127,12 +127,16 @@ def _agn_magnitude_posterior_draws(
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
 ):
     """Replace scalar sigma/tau coordinates with paired posterior draws."""
     req_params, req_obs, _ = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=(
+            use_f_agn_psf_2500_flux_fraction_term
+        ),
     )
     pidx = {name: index for index, name in enumerate(req_params)}
     oidx = {name: index for index, name in enumerate(req_obs)}
@@ -768,6 +772,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
                    use_alpha_lambda_term=False,
                    use_eta_sigma_term=False,
                    use_f_agn_psf_2500_sigmoid_term=False,
+                   use_f_agn_psf_2500_flux_fraction_term=False,
                    use_redshift_log_f_term=False,
                    early_de_guard=False,
                    only_sna=False,
@@ -798,6 +803,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     model_priors = {key: priors[key] for key in model_labels}
@@ -857,12 +863,14 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
     )
     agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(
         agn_data,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         pivot_context=agn_pivot_context,
     )
 
@@ -873,6 +881,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
     )
     M_pred_draws = None
     light_curve_draw_counts = None
@@ -891,6 +900,9 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
             use_f_agn_psf_2500_sigmoid_term=(
                 use_f_agn_psf_2500_sigmoid_term
             ),
+            use_f_agn_psf_2500_flux_fraction_term=(
+                use_f_agn_psf_2500_flux_fraction_term
+            ),
         )
     M_pred_err, idx = M_model_agn_err(
         agn_params_arr,
@@ -901,6 +913,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         include_sigma_tau=(light_curve_uncertainty_mode == "covariance"),
     )
     if np.any(M_pred_err < 0):
@@ -1025,6 +1038,7 @@ def log_likelihood_nearbylcs(
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
     use_redshift_log_f_term=False,
     early_de_guard=False,
     only_sna=False,
@@ -1061,6 +1075,7 @@ def log_likelihood_nearbylcs(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     model_priors = {key: priors[key] for key in model_labels}
@@ -1108,6 +1123,7 @@ def log_likelihood_nearbylcs(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
     )
 
     # pack obs/errs for the non-calibrator subset
@@ -1116,6 +1132,7 @@ def log_likelihood_nearbylcs(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         pivot_context=agn_pivot_context,
     )
 
@@ -1126,6 +1143,7 @@ def log_likelihood_nearbylcs(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
     )
     M_pred_err_nc, idx_nc = M_model_agn_err(
         agn_params_arr,
@@ -1136,6 +1154,7 @@ def log_likelihood_nearbylcs(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
     )
     if np.any(M_pred_err_nc < 0):
         print(f"[ERROR] Negative AGN model error at indices (non-cal): {idx_nc}.")
@@ -1179,6 +1198,7 @@ def log_likelihood_nearbylcs(
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+            use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             pivot_context=agn_pivot_context,
         )
 
@@ -1189,6 +1209,7 @@ def log_likelihood_nearbylcs(
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+            use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         )
         M_pred_err_c, idx_c = M_model_agn_err(
             agn_params_arr,
@@ -1199,6 +1220,7 @@ def log_likelihood_nearbylcs(
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+            use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         )
         if np.any(M_pred_err_c < 0):
             print(f"[ERROR] Negative AGN model error at indices (calibrators): {idx_c}.")

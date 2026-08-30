@@ -299,9 +299,9 @@ def test_parameter_order_priors_labels_tag_and_legacy_inference():
         "x0_f_agn_psf_2500",
     ]
     assert [name for name in labels if name in sigmoid_names] == sigmoid_names
-    assert priors[sigmoid_names[0]] == (-5.0, 5.0)
+    assert priors[sigmoid_names[0]] == (-10.0, 10.0)
     np.testing.assert_allclose(priors[sigmoid_names[1]], np.log([0.5, 100.0]))
-    assert priors[sigmoid_names[2]] == (0.0, 1.0)
+    assert priors[sigmoid_names[2]] == (-0.5, 1.5)
     assert all(latex[labels.index(name)].startswith("$") for name in sigmoid_names)
     assert "_fagnPsf2500Sigmoid" in hubble_fit.make_run_tag(
         "FlatLambdaCDM",

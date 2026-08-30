@@ -3290,6 +3290,7 @@ def extract_cosmo_results_from_samples(
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
     use_f_agn_psf_2500_sigmoid_term=None,
+    use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
 ):
     """
@@ -3330,6 +3331,7 @@ def extract_cosmo_results_from_samples(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
@@ -3339,6 +3341,7 @@ def extract_cosmo_results_from_samples(
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
 
@@ -3398,6 +3401,7 @@ def display_results_summary(
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
     use_f_agn_psf_2500_sigmoid_term=None,
+    use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
     sigma_sel_posterior_median=None,
 ):
@@ -3415,12 +3419,14 @@ def display_results_summary(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     if (
         use_alpha_lambda_term is None
         or use_eta_sigma_term is None
         or use_f_agn_psf_2500_sigmoid_term is None
+        or use_f_agn_psf_2500_flux_fraction_term is None
         or use_redshift_log_f_term is None
     ):
         if use_alpha_lambda_term is None:
@@ -3431,6 +3437,10 @@ def display_results_summary(
             use_f_agn_psf_2500_sigmoid_term = option_flags[
                 "use_f_agn_psf_2500_sigmoid_term"
             ]
+        if use_f_agn_psf_2500_flux_fraction_term is None:
+            use_f_agn_psf_2500_flux_fraction_term = option_flags[
+                "use_f_agn_psf_2500_flux_fraction_term"
+            ]
         if use_redshift_log_f_term is None:
             use_redshift_log_f_term = option_flags["use_redshift_log_f_term"]
     _, model_labels, _ = get_model_params(
@@ -3439,6 +3449,7 @@ def display_results_summary(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
 
@@ -3570,6 +3581,7 @@ def compute_age_universe_with_error(
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
     use_f_agn_psf_2500_sigmoid_term=None,
+    use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
 ):
     """
@@ -3609,6 +3621,7 @@ def compute_age_universe_with_error(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, _ = get_model_params(
@@ -3617,6 +3630,7 @@ def compute_age_universe_with_error(
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
 
@@ -3703,6 +3717,7 @@ def compute_pivot_redshift(flat_samples, cosmo_model, z_min=0.0, z_max=4.0):
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
     idx = {name: model_labels.index(name) for name in model_labels}
@@ -3774,6 +3789,7 @@ def posterior_corr(flat_samples, cosmo_model, z_pivot_agn):
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
     flat_samples = np.asarray(flat_samples)
@@ -3927,6 +3943,7 @@ def write_results_tex_variables(
     *,
     agn_pivot_context: AgnPivotContext,
     use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
 ):
     """
     Write key cosmological parameters AND model comparison results
@@ -4063,6 +4080,7 @@ def write_results_tex_variables(
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
             use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
             use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
         )
         results = {}
@@ -4108,6 +4126,9 @@ def write_results_tex_variables(
             use_f_agn_psf_2500_sigmoid_term=(
                 use_f_agn_psf_2500_sigmoid_term
             ),
+            use_f_agn_psf_2500_flux_fraction_term=(
+                use_f_agn_psf_2500_flux_fraction_term
+            ),
         )
         priors, model_labels, _ = get_model_params(
             model_name,
@@ -4115,6 +4136,7 @@ def write_results_tex_variables(
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
             use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
             use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
         )
         results = {}

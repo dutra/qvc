@@ -13,6 +13,9 @@ AGN_ETA_SIGMA_ERR = "eta_sigma_err"
 AGN_F_AGN_PSF_2500_AMPLITUDE_PARAM = "A_f_agn_psf_2500"
 AGN_F_AGN_PSF_2500_LOG_STEEPNESS_PARAM = "log_k_f_agn_psf_2500"
 AGN_F_AGN_PSF_2500_MIDPOINT_PARAM = "x0_f_agn_psf_2500"
+AGN_F_AGN_PSF_2500_FLUX_FRACTION_PARAM = (
+    "gamma_f_agn_psf_2500_flux_fraction"
+)
 AGN_F_AGN_PSF_2500_OBS = "f_AGN_psf_2500"
 AGN_F_AGN_PSF_2500_ERR = "f_AGN_psf_2500_err"
 AGN_LOGF_Z_PARAM = "gamma_log_f_z"
@@ -31,7 +34,16 @@ def get_agn_model_spec(
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
 ):
+    if (
+        use_f_agn_psf_2500_sigmoid_term
+        and use_f_agn_psf_2500_flux_fraction_term
+    ):
+        raise ValueError(
+            "The f_AGN_psf_2500 sigmoid and flux-fraction terms are "
+            "mutually exclusive."
+        )
     req_params = (
         "M0_agn",
         "alpha_agn",
@@ -60,6 +72,12 @@ def get_agn_model_spec(
             AGN_F_AGN_PSF_2500_LOG_STEEPNESS_PARAM,
             AGN_F_AGN_PSF_2500_MIDPOINT_PARAM,
         )
+    if use_f_agn_psf_2500_flux_fraction_term:
+        req_params += (AGN_F_AGN_PSF_2500_FLUX_FRACTION_PARAM,)
+    if (
+        use_f_agn_psf_2500_sigmoid_term
+        or use_f_agn_psf_2500_flux_fraction_term
+    ):
         req_obs += (AGN_F_AGN_PSF_2500_OBS,)
         req_errs += (AGN_F_AGN_PSF_2500_ERR,)
     return req_params, req_obs, req_errs
@@ -81,7 +99,7 @@ def _require(keys, provided, where):
 
 
 def infer_model_option_flags(cosmo_model, sample_dim, only_sna=False, only_agn=False):
-    """Infer legacy option flags without considering the opt-in sigmoid model."""
+    """Infer legacy flags without opt-in AGN-fraction regressors."""
     combos = []
     for use_alpha_lambda_term in (False, True):
         for use_eta_sigma_term in (False, True):
@@ -95,6 +113,7 @@ def infer_model_option_flags(cosmo_model, sample_dim, only_sna=False, only_agn=F
                     use_eta_sigma_term=use_eta_sigma_term,
                     use_redshift_log_f_term=use_redshift_log_f_term,
                     use_f_agn_psf_2500_sigmoid_term=False,
+                    use_f_agn_psf_2500_flux_fraction_term=False,
                 )
                 combos.append(
                     (
@@ -112,6 +131,7 @@ def infer_model_option_flags(cosmo_model, sample_dim, only_sna=False, only_agn=F
             "use_eta_sigma_term": use_eta_sigma_term,
             "use_redshift_log_f_term": use_redshift_log_f_term,
             "use_f_agn_psf_2500_sigmoid_term": False,
+            "use_f_agn_psf_2500_flux_fraction_term": False,
         }
     expected = sorted({n for n, _, _, _ in combos})
     raise ValueError(
@@ -131,7 +151,18 @@ def resolve_model_option_flags(
     use_eta_sigma_term=None,
     use_redshift_log_f_term=None,
     use_f_agn_psf_2500_sigmoid_term=None,
+    use_f_agn_psf_2500_flux_fraction_term=None,
 ):
+    if (
+        use_f_agn_psf_2500_sigmoid_term is not None
+        and use_f_agn_psf_2500_flux_fraction_term is not None
+        and bool(use_f_agn_psf_2500_sigmoid_term)
+        and bool(use_f_agn_psf_2500_flux_fraction_term)
+    ):
+        raise ValueError(
+            "The f_AGN_psf_2500 sigmoid and flux-fraction terms are "
+            "mutually exclusive."
+        )
     combos = []
     only_agn_options = (False,) if only_sna and only_agn is None else (
         (False, True) if only_agn is None else (bool(only_agn),)
@@ -144,31 +175,48 @@ def resolve_model_option_flags(
         if use_f_agn_psf_2500_sigmoid_term is None
         else (bool(use_f_agn_psf_2500_sigmoid_term),)
     )
+    # Like the sigmoid variant, the one-column flux-fraction variant must be
+    # supplied explicitly because its dimension collides with legacy optional
+    # one-parameter regressors.
+    flux_fraction_options = (
+        (False,)
+        if use_f_agn_psf_2500_flux_fraction_term is None
+        else (bool(use_f_agn_psf_2500_flux_fraction_term),)
+    )
     for only_agn_flag in only_agn_options:
         for alpha_flag in (False, True):
             for eta_flag in (False, True):
                 for logf_flag in (False, True):
                     for sigmoid_flag in sigmoid_options:
-                        _, labels, _ = get_model_params(
-                            cosmo_model,
-                            only_sna=only_sna,
-                            only_agn=only_agn_flag,
-                            use_planck_h0_prior=use_planck_h0_prior,
-                            use_alpha_lambda_term=alpha_flag,
-                            use_eta_sigma_term=eta_flag,
-                            use_redshift_log_f_term=logf_flag,
-                            use_f_agn_psf_2500_sigmoid_term=sigmoid_flag,
-                        )
-                        combos.append(
-                            {
-                                "sample_dim": len(labels),
-                                "only_agn": only_agn_flag,
-                                "use_alpha_lambda_term": alpha_flag,
-                                "use_eta_sigma_term": eta_flag,
-                                "use_redshift_log_f_term": logf_flag,
-                                "use_f_agn_psf_2500_sigmoid_term": sigmoid_flag,
-                            }
-                        )
+                        for flux_fraction_flag in flux_fraction_options:
+                            if sigmoid_flag and flux_fraction_flag:
+                                continue
+                            _, labels, _ = get_model_params(
+                                cosmo_model,
+                                only_sna=only_sna,
+                                only_agn=only_agn_flag,
+                                use_planck_h0_prior=use_planck_h0_prior,
+                                use_alpha_lambda_term=alpha_flag,
+                                use_eta_sigma_term=eta_flag,
+                                use_redshift_log_f_term=logf_flag,
+                                use_f_agn_psf_2500_sigmoid_term=sigmoid_flag,
+                                use_f_agn_psf_2500_flux_fraction_term=(
+                                    flux_fraction_flag
+                                ),
+                            )
+                            combos.append(
+                                {
+                                    "sample_dim": len(labels),
+                                    "only_agn": only_agn_flag,
+                                    "use_alpha_lambda_term": alpha_flag,
+                                    "use_eta_sigma_term": eta_flag,
+                                    "use_redshift_log_f_term": logf_flag,
+                                    "use_f_agn_psf_2500_sigmoid_term": sigmoid_flag,
+                                    "use_f_agn_psf_2500_flux_fraction_term": (
+                                        flux_fraction_flag
+                                    ),
+                                }
+                            )
 
     matches = [combo for combo in combos if combo["sample_dim"] == sample_dim]
     if use_alpha_lambda_term is not None:
@@ -200,6 +248,9 @@ def resolve_model_option_flags(
             "use_f_agn_psf_2500_sigmoid_term": matches[0][
                 "use_f_agn_psf_2500_sigmoid_term"
             ],
+            "use_f_agn_psf_2500_flux_fraction_term": matches[0][
+                "use_f_agn_psf_2500_flux_fraction_term"
+            ],
         }
 
     expected = sorted({combo["sample_dim"] for combo in combos})
@@ -208,6 +259,9 @@ def resolve_model_option_flags(
         "use_eta_sigma_term": use_eta_sigma_term,
         "use_redshift_log_f_term": use_redshift_log_f_term,
         "use_f_agn_psf_2500_sigmoid_term": use_f_agn_psf_2500_sigmoid_term,
+        "use_f_agn_psf_2500_flux_fraction_term": (
+            use_f_agn_psf_2500_flux_fraction_term
+        ),
     }
     if len(matches) > 1:
         matching_configs = [
@@ -219,6 +273,9 @@ def resolve_model_option_flags(
                 "use_f_agn_psf_2500_sigmoid_term": combo[
                     "use_f_agn_psf_2500_sigmoid_term"
                 ],
+                "use_f_agn_psf_2500_flux_fraction_term": combo[
+                    "use_f_agn_psf_2500_flux_fraction_term"
+                ],
             }
             for combo in matches
         ]
@@ -227,7 +284,8 @@ def resolve_model_option_flags(
             f"cosmo_model={cosmo_model!r}. Matching configurations: "
             f"{matching_configs}. Pass explicit use_alpha_lambda_term, "
             f"use_eta_sigma_term, use_redshift_log_f_term, and/or "
-            f"use_f_agn_psf_2500_sigmoid_term."
+            f"use_f_agn_psf_2500_sigmoid_term, and/or "
+            f"use_f_agn_psf_2500_flux_fraction_term."
         )
 
     raise ValueError(
@@ -269,11 +327,15 @@ def agn_model_pack_params(
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
 ):
     req_params, _, _ = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=(
+            use_f_agn_psf_2500_flux_fraction_term
+        ),
     )
     _require(req_params, params_dict, "params")
     params = np.array([params_dict[k] for k in req_params], dtype=float)
@@ -383,6 +445,7 @@ class AgnPivotContext:
         use_alpha_lambda_term=False,
         use_eta_sigma_term=False,
         use_f_agn_psf_2500_sigmoid_term=False,
+        use_f_agn_psf_2500_flux_fraction_term=False,
     ):
         """Return values in the canonical order for the requested model."""
 
@@ -390,6 +453,9 @@ class AgnPivotContext:
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+            use_f_agn_psf_2500_flux_fraction_term=(
+                use_f_agn_psf_2500_flux_fraction_term
+            ),
         )
         if self.observable_names != expected_names:
             raise ValueError(
@@ -408,6 +474,7 @@ def build_agn_pivot_context(
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
 ):
     """Compute the one AGN observable pivot context used by an entire fit."""
 
@@ -415,6 +482,9 @@ def build_agn_pivot_context(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=(
+            use_f_agn_psf_2500_flux_fraction_term
+        ),
     )
     required = ("z", "object_id") + req_obs
     _require(required, df_agn, "AGN pivot reference data")
@@ -454,6 +524,20 @@ def build_agn_pivot_context(
                 f"AGN pivot reference observable {name!r} contains "
                 f"{int(np.count_nonzero(bad))} nonfinite fitted value(s)."
             )
+        if name == AGN_F_AGN_PSF_2500_OBS:
+            lower_invalid = (
+                values <= 0.0
+                if use_f_agn_psf_2500_flux_fraction_term
+                else values < 0.0
+            )
+            invalid_fraction = lower_invalid | (values > 1.0)
+            if np.any(invalid_fraction):
+                interval = "(0, 1]" if use_f_agn_psf_2500_flux_fraction_term else "[0, 1]"
+                raise ValueError(
+                    f"AGN pivot reference observable {name!r} must be within "
+                    f"{interval}; found {int(np.count_nonzero(invalid_fraction))} "
+                    "invalid fitted value(s)."
+                )
         pivot = _fixed_pivot_from_observable(name, values)
         if not np.isfinite(pivot):
             raise ValueError(
@@ -478,6 +562,7 @@ def agn_model_pack_obs(
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
     *,
     pivot_context,
 ):
@@ -485,14 +570,25 @@ def agn_model_pack_obs(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=(
+            use_f_agn_psf_2500_flux_fraction_term
+        ),
     )
     _require(req_obs, obs_dict, "observables")
     _require(req_errs, obs_dict, "errors")
     obs = np.array([obs_dict[k] for k in req_obs], dtype=float)
     err = np.array([obs_dict[k] for k in req_errs], dtype=float)
-    if use_f_agn_psf_2500_sigmoid_term:
+    if (
+        use_f_agn_psf_2500_sigmoid_term
+        or use_f_agn_psf_2500_flux_fraction_term
+    ):
         f_agn = obs[req_obs.index(AGN_F_AGN_PSF_2500_OBS)]
-        invalid = ~np.isfinite(f_agn) | (f_agn < 0.0) | (f_agn > 1.0)
+        lower_invalid = (
+            f_agn <= 0.0
+            if use_f_agn_psf_2500_flux_fraction_term
+            else f_agn < 0.0
+        )
+        invalid = ~np.isfinite(f_agn) | lower_invalid | (f_agn > 1.0)
         if np.any(invalid):
             locations = _format_invalid_agn_locations(
                 invalid,
@@ -502,15 +598,23 @@ def agn_model_pack_obs(
                     else None
                 ),
             )
+            interval = (
+                "(0, 1]"
+                if use_f_agn_psf_2500_flux_fraction_term
+                else "[0, 1]"
+            )
             raise ValueError(
                 f"AGN observable {AGN_F_AGN_PSF_2500_OBS!r} must be finite "
-                f"and within [0, 1]; invalid value(s) at {locations}."
+                f"and within {interval}; invalid value(s) at {locations}."
             )
     validate_agn_observable_uncertainties(
         err,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=(
+            use_f_agn_psf_2500_flux_fraction_term
+        ),
         object_ids=(
             np.asarray(obs_dict["object_id"], dtype=object)
             if "object_id" in obs_dict
@@ -526,6 +630,9 @@ def agn_model_pack_obs(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=(
+            use_f_agn_psf_2500_flux_fraction_term
+        ),
     )
     return obs, err, pivots
 
@@ -544,6 +651,25 @@ def anchored_f_agn_psf_2500_sigmoid(f_agn, f_agn_pivot, amplitude, log_k, x0):
     )
 
 
+def anchored_f_agn_psf_2500_flux_fraction(f_agn, f_agn_pivot, gamma):
+    """Evaluate the physical, pivot-anchored AGN flux-fraction correction."""
+    f_agn = np.asarray(f_agn, dtype=float)
+    f_agn_pivot = float(f_agn_pivot)
+    if (
+        np.any(~np.isfinite(f_agn))
+        or np.any(f_agn <= 0.0)
+        or np.any(f_agn > 1.0)
+    ):
+        raise ValueError("f_agn must contain only finite values within (0, 1].")
+    if (
+        not np.isfinite(f_agn_pivot)
+        or f_agn_pivot <= 0.0
+        or f_agn_pivot > 1.0
+    ):
+        raise ValueError("f_agn_pivot must be finite and within (0, 1].")
+    return float(gamma) * (-2.5 * np.log10(f_agn / f_agn_pivot))
+
+
 def M_model_agn(
     params_arr,
     obs_arr,
@@ -551,11 +677,15 @@ def M_model_agn(
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
 ):
     req_params, req_obs, _ = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=(
+            use_f_agn_psf_2500_flux_fraction_term
+        ),
     )
     pidx = {k: i for i, k in enumerate(req_params)}
     oidx = {k: i for i, k in enumerate(req_obs)}
@@ -603,6 +733,12 @@ def M_model_agn(
             params_arr[pidx[AGN_F_AGN_PSF_2500_LOG_STEEPNESS_PARAM]],
             params_arr[pidx[AGN_F_AGN_PSF_2500_MIDPOINT_PARAM]],
         )
+    if use_f_agn_psf_2500_flux_fraction_term:
+        M_pred = M_pred + anchored_f_agn_psf_2500_flux_fraction(
+            obs_arr[oidx[AGN_F_AGN_PSF_2500_OBS]],
+            pivots_array[oidx[AGN_F_AGN_PSF_2500_OBS]],
+            params_arr[pidx[AGN_F_AGN_PSF_2500_FLUX_FRACTION_PARAM]],
+        )
     return M_pred
 
 
@@ -613,6 +749,7 @@ def M_model_agn_posterior_samples(
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
 ):
     """Evaluate the affine AGN magnitude relation for all samples at once.
 
@@ -634,6 +771,9 @@ def M_model_agn_posterior_samples(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=(
+            use_f_agn_psf_2500_flux_fraction_term
+        ),
     )
     samples = np.asarray(params_samples, dtype=float)
     observables = np.asarray(obs_arr, dtype=float)
@@ -688,6 +828,23 @@ def M_model_agn_posterior_samples(
         predicted += amplitude * (
             expit(k * (f_agn - x0)) - expit(k * (f_pivot - x0))
         )
+    if use_f_agn_psf_2500_flux_fraction_term:
+        f_agn = observables[oidx[AGN_F_AGN_PSF_2500_OBS]][None, :]
+        f_pivot = pivots[oidx[AGN_F_AGN_PSF_2500_OBS]]
+        if (
+            np.any(~np.isfinite(f_agn))
+            or np.any(f_agn <= 0.0)
+            or not np.isfinite(f_pivot)
+            or f_pivot <= 0.0
+        ):
+            raise ValueError(
+                "f_AGN_psf_2500 values and pivot must be finite and "
+                "strictly positive for the flux-fraction term."
+            )
+        gamma = samples[
+            :, pidx[AGN_F_AGN_PSF_2500_FLUX_FRACTION_PARAM], None
+        ]
+        predicted += gamma * (-2.5 * np.log10(f_agn / f_pivot))
     return predicted
 
 
@@ -710,6 +867,7 @@ def validate_agn_observable_uncertainties(
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
     *,
     object_ids=None,
 ):
@@ -724,6 +882,9 @@ def validate_agn_observable_uncertainties(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=(
+            use_f_agn_psf_2500_flux_fraction_term
+        ),
     )
     errors = np.asarray(err_arr, dtype=float)
     if errors.ndim not in (1, 2) or errors.shape[0] != len(req_errs):
@@ -742,7 +903,10 @@ def validate_agn_observable_uncertainties(
         error_names.append(AGN_ALPHA_LAMBDA_ERR)
     if use_eta_sigma_term:
         error_names.append(AGN_ETA_SIGMA_ERR)
-    if use_f_agn_psf_2500_sigmoid_term:
+    if (
+        use_f_agn_psf_2500_sigmoid_term
+        or use_f_agn_psf_2500_flux_fraction_term
+    ):
         error_names.append(AGN_F_AGN_PSF_2500_ERR)
 
     for name in error_names:
@@ -822,6 +986,7 @@ def M_model_agn_observable_variance_posterior(
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
     *,
     obs_arr=None,
     pivots_array=None,
@@ -837,6 +1002,9 @@ def M_model_agn_observable_variance_posterior(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=(
+            use_f_agn_psf_2500_flux_fraction_term
+        ),
     )
     samples = np.asarray(params_samples, dtype=float)
     errors = np.asarray(err_arr, dtype=float)
@@ -859,6 +1027,9 @@ def M_model_agn_observable_variance_posterior(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=(
+            use_f_agn_psf_2500_flux_fraction_term
+        ),
     )
 
     pidx = {name: index for index, name in enumerate(req_params)}
@@ -916,6 +1087,27 @@ def M_model_agn_observable_variance_posterior(
             np.mean(np.square(derivative), axis=0)
             * np.square(errors[eidx[AGN_F_AGN_PSF_2500_ERR]])
         )
+    if use_f_agn_psf_2500_flux_fraction_term:
+        observables = np.asarray(obs_arr, dtype=float)
+        if observables.ndim != 2 or observables.shape[0] != len(req_obs):
+            raise ValueError(
+                "obs_arr must have shape "
+                f"({len(req_obs)}, n_objects); got {observables.shape}"
+            )
+        oidx = {name: index for index, name in enumerate(req_obs)}
+        f_agn = observables[oidx[AGN_F_AGN_PSF_2500_OBS]]
+        if np.any(~np.isfinite(f_agn)) or np.any(f_agn <= 0.0):
+            raise ValueError(
+                "f_AGN_psf_2500 must be finite and strictly positive for "
+                "flux-fraction error propagation."
+            )
+        gamma = samples[:, pidx[AGN_F_AGN_PSF_2500_FLUX_FRACTION_PARAM]]
+        derivative_scale = 2.5 / (np.log(10.0) * f_agn)
+        components["f_agn_psf_2500_flux_fraction"] = (
+            np.mean(np.square(gamma))
+            * np.square(derivative_scale)
+            * np.square(errors[eidx[AGN_F_AGN_PSF_2500_ERR]])
+        )
     variance = _clip_roundoff_negative_variance(
         components,
         where="Posterior AGN observable-error propagation",
@@ -932,12 +1124,16 @@ def M_model_agn_err(
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
     include_sigma_tau=True,
 ):
     req_params, req_obs, req_errs = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=(
+            use_f_agn_psf_2500_flux_fraction_term
+        ),
     )
     params_arr = np.asarray(params_arr, dtype=float)
     if params_arr.shape != (len(req_params),):
@@ -952,6 +1148,9 @@ def M_model_agn_err(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=(
+            use_f_agn_psf_2500_flux_fraction_term
+        ),
     )
     pidx = {k: i for i, k in enumerate(req_params)}
     eidx = {k: i for i, k in enumerate(req_errs)}
@@ -987,7 +1186,10 @@ def M_model_agn_err(
         gamma_eta_sigma = params_arr[pidx[AGN_ETA_SIGMA_PARAM]]
         eta_sigma_err = err_arr[eidx[AGN_ETA_SIGMA_ERR]]
         components["eta_sigma"] = (gamma_eta_sigma * eta_sigma_err) ** 2
-    if use_f_agn_psf_2500_sigmoid_term:
+    if (
+        use_f_agn_psf_2500_sigmoid_term
+        or use_f_agn_psf_2500_flux_fraction_term
+    ):
         obs_arr = np.asarray(obs_arr, dtype=float)
         if obs_arr.ndim not in (1, 2) or obs_arr.shape[0] != len(req_obs):
             raise ValueError(
@@ -996,12 +1198,25 @@ def M_model_agn_err(
                 f"got {obs_arr.shape}"
             )
         oidx = {name: index for index, name in enumerate(req_obs)}
+    if use_f_agn_psf_2500_sigmoid_term:
         amplitude = params_arr[pidx[AGN_F_AGN_PSF_2500_AMPLITUDE_PARAM]]
         k = np.exp(params_arr[pidx[AGN_F_AGN_PSF_2500_LOG_STEEPNESS_PARAM]])
         x0 = params_arr[pidx[AGN_F_AGN_PSF_2500_MIDPOINT_PARAM]]
         sigmoid = expit(k * (obs_arr[oidx[AGN_F_AGN_PSF_2500_OBS]] - x0))
         derivative = amplitude * k * sigmoid * (1.0 - sigmoid)
         components["f_agn_psf_2500_sigmoid"] = np.square(
+            derivative * err_arr[eidx[AGN_F_AGN_PSF_2500_ERR]]
+        )
+    if use_f_agn_psf_2500_flux_fraction_term:
+        f_agn = obs_arr[oidx[AGN_F_AGN_PSF_2500_OBS]]
+        if np.any(~np.isfinite(f_agn)) or np.any(f_agn <= 0.0):
+            raise ValueError(
+                "f_AGN_psf_2500 must be finite and strictly positive for "
+                "flux-fraction error propagation."
+            )
+        gamma = params_arr[pidx[AGN_F_AGN_PSF_2500_FLUX_FRACTION_PARAM]]
+        derivative = -2.5 * gamma / (np.log(10.0) * f_agn)
+        components["f_agn_psf_2500_flux_fraction"] = np.square(
             derivative * err_arr[eidx[AGN_F_AGN_PSF_2500_ERR]]
         )
     if components:
@@ -1026,9 +1241,18 @@ def get_model_params(
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
 ):
     if only_sna and only_agn:
         raise ValueError("only_sna and only_agn cannot both be True.")
+    if (
+        use_f_agn_psf_2500_sigmoid_term
+        and use_f_agn_psf_2500_flux_fraction_term
+    ):
+        raise ValueError(
+            "The f_AGN_psf_2500 sigmoid and flux-fraction terms are "
+            "mutually exclusive."
+        )
     
     priors = OrderedDict([
         ("M0_sn",       (-20, -18)),    # SN absolute magnitude, MLE: ~-19.3
@@ -1038,12 +1262,18 @@ def get_model_params(
         ("beta_agn",  (-20.0,  20.0)),
         (AGN_ALPHA_LAMBDA_PARAM, (-20.0, 20.0)),
         (AGN_ETA_SIGMA_PARAM, (-20.0, 20.0)),
-        (AGN_F_AGN_PSF_2500_AMPLITUDE_PARAM, (-5.0, 5.0)),
+        # The first f_AGN sigmoid run reached the original A_f=-5 and x0=1
+        # edges.  The midpoint may legitimately lie outside the observed
+        # fraction interval: it locates the sigmoid transition and is not an
+        # observed fraction itself.  Keep the bounds symmetric while allowing
+        # the posterior to move away from those artificial edges.
+        (AGN_F_AGN_PSF_2500_AMPLITUDE_PARAM, (-10.0, 10.0)),
         (
             AGN_F_AGN_PSF_2500_LOG_STEEPNESS_PARAM,
             (np.log(0.5), np.log(100.0)),
         ),
-        (AGN_F_AGN_PSF_2500_MIDPOINT_PARAM, (0.0, 1.0)),
+        (AGN_F_AGN_PSF_2500_MIDPOINT_PARAM, (-0.5, 1.5)),
+        (AGN_F_AGN_PSF_2500_FLUX_FRACTION_PARAM, (-5.0, 5.0)),
         
         # ("A",    (-5.0,  5.0)),
         # ("k",    (0,  20.0)),
@@ -1070,6 +1300,8 @@ def get_model_params(
         priors.pop(AGN_F_AGN_PSF_2500_AMPLITUDE_PARAM)
         priors.pop(AGN_F_AGN_PSF_2500_LOG_STEEPNESS_PARAM)
         priors.pop(AGN_F_AGN_PSF_2500_MIDPOINT_PARAM)
+    if not use_f_agn_psf_2500_flux_fraction_term:
+        priors.pop(AGN_F_AGN_PSF_2500_FLUX_FRACTION_PARAM)
     if not use_redshift_log_f_term:
         priors.pop(AGN_LOGF_Z_PARAM)
     if only_agn:
@@ -1111,6 +1343,9 @@ def get_model_params(
         AGN_F_AGN_PSF_2500_AMPLITUDE_PARAM: r"$A_{f,2500}$",
         AGN_F_AGN_PSF_2500_LOG_STEEPNESS_PARAM: r"$\log k_{f,2500}$",
         AGN_F_AGN_PSF_2500_MIDPOINT_PARAM: r"$x_{0,f,2500}$",
+        AGN_F_AGN_PSF_2500_FLUX_FRACTION_PARAM: (
+            r"$\gamma_{f,2500}^{\rm flux}$"
+        ),
         "gamma_agn": r"$\gamma_{\rm AGN}$",
         "log_f": r"$\log f$",
         AGN_LOGF_Z_PARAM: r"$\gamma_{\log f,z}$",

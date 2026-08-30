@@ -226,6 +226,7 @@ def test_hubble_mode_table_highlights_active_scientific_modes():
         fit_alpha_lambda_term=True,
         fit_eta_sigma_term=False,
         fit_f_agn_psf_2500_sigmoid_term=True,
+        fit_f_agn_psf_2500_flux_fraction_term=False,
         fit_redshift_log_f_term=False,
         disable_completeness=False,
         completeness_mode="2d",
