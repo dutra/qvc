@@ -35,6 +35,7 @@ from qvc.light_curve.fit_light_curves import (
     compute_band_adf,
     compute_g_band_residual_drift_diagnostics,
     compute_g_band_raw_drift_diagnostics,
+    eta_sigma_prior,
     TAU_FAST_TO_SLOW_PRIOR_RATIO,
     log_tau_fast_center0_prior,
     log_tau_fast_separation_raw_prior,
@@ -86,6 +87,48 @@ def _make_raw_public(n_band):
         "lag0": jnp.array(5.0),
         "lag_beta": jnp.array(4.0 / 3.0),
     }
+
+
+def test_modified_eta_prior_profile_has_requested_sigma_prior():
+    prior = eta_sigma_prior("modified")
+
+    assert float(prior.base_dist.loc) == pytest.approx(-0.8)
+    assert float(prior.base_dist.scale) == pytest.approx(0.3)
+
+
+@pytest.mark.parametrize("shared_latent", (False, True))
+def test_modified_eta_prior_profile_fixes_eta_tau(shared_latent):
+    obj = {
+        "object_id": "modified-eta-prior-smoke",
+        "z": 1.0,
+        "X": (
+            np.array([0.0, 5.0, 10.0, 15.0]),
+            np.array([0, 1, 0, 1], dtype=np.int32),
+        ),
+        "y": np.array([0.0, 0.02, -0.01, 0.01]),
+        "yerr": np.full(4, 0.03),
+        "survey_idx": np.zeros(4, dtype=np.int32),
+        "mags_means": np.array([20.0, 20.0]),
+        "bands": ["g", "r"],
+        "survey_names": ("sdss", "ps1", "ztf"),
+    }
+    model = build_single_object_model_mag_flux_linearized(
+        obj,
+        np.array([2000.0, 3000.0]),
+        log_jitter_mean=np.full((2, 3), np.log(0.03)),
+        shared_latent=shared_latent,
+        eta_prior_profile="modified",
+    )
+
+    sites = fit_lc.trace(
+        fit_lc.seed(model, jax.random.PRNGKey(0))
+    ).get_trace()
+
+    assert sites["eta_tau"]["type"] == "deterministic"
+    assert float(sites["eta_tau"]["value"]) == pytest.approx(0.5)
+    eta_sigma_dist = sites["eta_sigma"]["fn"]
+    assert float(eta_sigma_dist.base_dist.loc) == pytest.approx(-0.8)
+    assert float(eta_sigma_dist.base_dist.scale) == pytest.approx(0.3)
 
 
 def _make_object(z=1.6):
@@ -1544,6 +1587,22 @@ def test_compute_parameter_kls_returns_expected_keys():
     }
     assert expected_keys.issubset(kls.keys())
     assert all(np.isfinite(kls[key]) for key in expected_keys)
+
+    modified_kls = compute_parameter_kls(
+        flat_samples,
+        bands=bands,
+        survey_names=("sdss", "ps1", "ztf"),
+        t_ref=np.array([0.0, 10.0, 20.0], dtype=float),
+        z=z,
+        lambda_center_rf=lambda_center_rf,
+        log_jitter_mean=np.asarray([np.log(0.03), np.log(0.03)]),
+        disable_lag_bc=False,
+        n_blr_terms=2,
+        eta_prior_profile="modified",
+    )
+
+    assert "eta_sigma_kl" in modified_kls
+    assert "eta_tau_kl" not in modified_kls
 
 
 def test_compute_parameter_kls_includes_band_slope_offset_terms():

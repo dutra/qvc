@@ -2941,16 +2941,42 @@ def tau_shift_to_uv(eta_tau, lambda_center_rf, lambda_uv=2500.0):
     return jnp.log(10.0) * log_single_pl(lambda_uv, lambda_center_rf, eta_tau)
 
 
-def eta_sigma_prior():
-    """Quasar-like wavelength scaling for the stationary continuum RMS."""
+DEFAULT_ETA_PRIOR_PROFILE = "default"
+ETA_PRIOR_PROFILES = (DEFAULT_ETA_PRIOR_PROFILE, "modified")
+MODIFIED_ETA_TAU_VALUE = 0.5
 
-    return dist.TruncatedNormal(-0.5, 0.3, low=-1.5, high=0.25)
+
+def _validate_eta_prior_profile(eta_prior_profile):
+    if eta_prior_profile not in ETA_PRIOR_PROFILES:
+        raise ValueError(
+            f"eta_prior_profile must be one of {ETA_PRIOR_PROFILES}, "
+            f"got {eta_prior_profile!r}."
+        )
+
+
+def eta_sigma_prior(eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE):
+    """Wavelength-scaling prior for the stationary continuum RMS."""
+
+    _validate_eta_prior_profile(eta_prior_profile)
+    loc = -0.8 if eta_prior_profile == "modified" else -0.5
+    return dist.TruncatedNormal(loc, 0.3, low=-1.5, high=0.25)
 
 
 def eta_tau_prior():
-    """Weakly informative wavelength scaling for the DRW-style timescale."""
+    """Default wavelength-scaling prior for the DRW-style timescale."""
 
     return dist.TruncatedNormal(0.2, 0.35, low=-0.5, high=1.25)
+
+
+def eta_tau_is_sampled(
+    *,
+    eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE,
+    shared_latent=False,
+):
+    """Whether eta_tau is stochastic for the selected model and prior profile."""
+
+    _validate_eta_prior_profile(eta_prior_profile)
+    return eta_prior_profile == DEFAULT_ETA_PRIOR_PROFILE and not shared_latent
 
 
 def log_sigma_center0_prior(eta_sigma, lambda_center_rf):
@@ -3408,6 +3434,7 @@ def compute_parameter_kls(
     tau_fast_truncated=False,
     n_blr_terms=1,
     drw_parameterization=False,
+    eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE,
 ):
     """Return approximate KL(q||p) for sampled light-curve parameters."""
 
@@ -3436,9 +3463,12 @@ def compute_parameter_kls(
 
     kls["eta_sigma_kl"] = kl_from_samples(
         eta_sigma,
-        lambda x: _dist_log_prob_array(eta_sigma_prior(), x),
+        lambda x: _dist_log_prob_array(eta_sigma_prior(eta_prior_profile), x),
     )
-    if model_variant != SHARED_LATENT_BLR_VARIANT:
+    if eta_tau_is_sampled(
+        eta_prior_profile=eta_prior_profile,
+        shared_latent=(model_variant == SHARED_LATENT_BLR_VARIANT),
+    ):
         kls["eta_tau_kl"] = kl_from_samples(
             eta_tau,
             lambda x: _dist_log_prob_array(eta_tau_prior(), x),
@@ -4313,9 +4343,11 @@ def build_single_object_model_mag_flux_linearized(
     enforce_positive_flux_guard=False,
     enable_seeing_dependence=False,
     psf_fraction_mode=None,
+    eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE,
 ):
     """Return the relative-flux quasi-separable model for one object."""
 
+    _validate_eta_prior_profile(eta_prior_profile)
     if n_blr_terms != 1:
         raise ValueError(
             "model_variant='mag_flux_linearized' currently supports only n_blr_terms=1."
@@ -4372,12 +4404,19 @@ def build_single_object_model_mag_flux_linearized(
     _, survey_offset_active_mask = _get_object_active_noise_calibration_masks(obj_dict, B)
 
     def model():
-        eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
-        eta_tau = (
-            numpyro.deterministic("eta_tau", jnp.asarray(0.0))
-            if shared_latent
-            else numpyro.sample("eta_tau", eta_tau_prior())
+        eta_sigma = numpyro.sample(
+            "eta_sigma",
+            eta_sigma_prior(eta_prior_profile),
         )
+        if eta_prior_profile == "modified":
+            eta_tau = numpyro.deterministic(
+                "eta_tau",
+                jnp.asarray(MODIFIED_ETA_TAU_VALUE),
+            )
+        elif shared_latent:
+            eta_tau = numpyro.deterministic("eta_tau", jnp.asarray(0.0))
+        else:
+            eta_tau = numpyro.sample("eta_tau", eta_tau_prior())
 
         tau_center_prior_fn = (
             log_tau_drw_center0_prior
@@ -4940,6 +4979,7 @@ def run_iterated_mag_flux_linearized_inference(
     enforce_positive_flux_guard=False,
     enable_seeing_dependence=False,
     psf_fraction_mode=None,
+    eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE,
 ):
     """Iteratively refit the relative-flux QS model using local pseudo-data.
 
@@ -4993,6 +5033,7 @@ def run_iterated_mag_flux_linearized_inference(
         enforce_positive_flux_guard=enforce_positive_flux_guard,
         enable_seeing_dependence=enable_seeing_dependence,
         psf_fraction_mode=psf_fraction_mode,
+        eta_prior_profile=eta_prior_profile,
     )
 
     for iter_idx in range(int(refinement_iters)):
@@ -5423,6 +5464,17 @@ def main():
         ),
     )
     parser.add_argument(
+        "--eta_prior_profile",
+        "--eta-prior-profile",
+        choices=ETA_PRIOR_PROFILES,
+        default=DEFAULT_ETA_PRIOR_PROFILE,
+        help=(
+            "Wavelength-scaling prior profile. 'default' preserves the existing "
+            "eta_sigma and model-specific eta_tau behavior; 'modified' uses "
+            "eta_sigma ~ TruncatedNormal(-0.8, 0.3) and fixes eta_tau=0.5."
+        ),
+    )
+    parser.add_argument(
         "--enable_seeing_dependence",
         action="store_true",
         default=False,
@@ -5728,6 +5780,7 @@ def main():
                                 and args.psf_fraction_mode != "median"
                                 else None
                             ),
+                            eta_prior_profile=args.eta_prior_profile,
                         )
                 elif args.fit_method in ("nuts", "svi+nuts"):
                     if args.fit_method == "svi+nuts":
@@ -5995,6 +6048,7 @@ def main():
                 tau_fast_truncated=args.tau_fast_truncated,
                 n_blr_terms=args.n_blr_terms,
                 drw_parameterization=args.dho_drw_parameterization,
+                eta_prior_profile=args.eta_prior_profile,
             )
 
             if args.plot:
@@ -6083,7 +6137,7 @@ def main():
                     logging.error(f"[{oid}] Plotting error: {e}")
                     logging.error(traceback.format_exc())
 
-            final_result = obj | result | adf_result | drift_result | raw_drift_result | psd_break_result | sf_result | kl_result | loo_residual_result | diagnostics | dict(prefix=prefix, suffix=suffix, model_variant=args.model_variant, seeing_dependence_enabled=args.enable_seeing_dependence)
+            final_result = obj | result | adf_result | drift_result | raw_drift_result | psd_break_result | sf_result | kl_result | loo_residual_result | diagnostics | dict(prefix=prefix, suffix=suffix, model_variant=args.model_variant, eta_prior_profile=args.eta_prior_profile, seeing_dependence_enabled=args.enable_seeing_dependence)
             final_result["psf_fraction_mode"] = (
                 args.psf_fraction_mode
                 if args.subtract_psf_constant_flux
