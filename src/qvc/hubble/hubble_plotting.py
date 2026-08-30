@@ -2987,7 +2987,13 @@ def plot_fast_vs_uv_variability(df, plot_path="plots/hubble", show=False, filena
             missing.append("log_tau_fast_uv")
         if tau_uv_col is None:
             missing.append("log_tau_uv_rf or log_tau_uv")
-        raise KeyError(f"Missing required columns for fast-vs-UV diagnostic plot: {', '.join(missing)}")
+        warnings.warn(
+            "Skipping optional fast-vs-UV diagnostic plot because the "
+            f"following column(s) are unavailable: {', '.join(missing)}.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
 
     z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float) if "z" in df.columns else np.full(len(df), np.nan)
     log_tau_fast = pd.to_numeric(df[tau_fast_col], errors="coerce").to_numpy(dtype=float)

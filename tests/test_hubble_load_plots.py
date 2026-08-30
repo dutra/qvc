@@ -748,3 +748,26 @@ def test_tier2_excludes_only_joint_low_l2500_low_psf_host_region(
     )
 
     assert selected["object_id"].tolist() == ["high-l-low-host"]
+
+
+def test_fast_vs_uv_diagnostic_skips_catalog_without_fast_timescale(tmp_path):
+    frame = pd.DataFrame(
+        {
+            "z": [1.0],
+            "log_tau_uv_rf": [2.5],
+            "log_sigma_uv": [-0.5],
+        }
+    )
+
+    with pytest.warns(
+        RuntimeWarning,
+        match="Skipping optional fast-vs-UV diagnostic plot.*log_tau_fast_uv",
+    ):
+        result = hubble_plotting.plot_fast_vs_uv_variability(
+            frame,
+            plot_path=str(tmp_path),
+            show=False,
+        )
+
+    assert result is None
+    assert not (tmp_path / "diagnostics" / "fast_vs_uv_variability.pdf").exists()
