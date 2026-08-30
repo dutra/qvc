@@ -57,6 +57,7 @@ from qvc.hubble.hubble_utils import (
     compute_age_universe_with_error,
     compute_pivot_redshift,
     display_results_summary,
+    derive_f_agn_psf_2500_columns,
     extract_cosmo_results_from_samples,
     get_qvc_result_dir,
     load_agn_data,
@@ -265,6 +266,7 @@ def _compute_debiased_agn_table_mu(
     only_agn=False,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_f_agn_psf_2500_sigmoid_term=False,
     use_redshift_log_f_term=False,
 ):
     """Compute debiased AGN distance-modulus table values without making plots."""
@@ -282,6 +284,7 @@ def _compute_debiased_agn_table_mu(
         only_agn=only_agn,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     param_indices = {label: idx for idx, label in enumerate(model_labels)}
@@ -290,6 +293,7 @@ def _compute_debiased_agn_table_mu(
         df_agn,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         pivot_context=agn_pivot_context,
     )
 
@@ -300,6 +304,7 @@ def _compute_debiased_agn_table_mu(
             sample_params,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         )
         predicted_M2500 = M_model_agn(
             agn_params_arr,
@@ -307,6 +312,7 @@ def _compute_debiased_agn_table_mu(
             agn_pivot_arr,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         )
         mu_samples.append(m_obs - predicted_M2500)
 
@@ -325,6 +331,7 @@ def _compute_debiased_agn_table_mu(
         median_params,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
     )
     predicted_M2500_err = M_model_agn_err(
         agn_params_arr,
@@ -333,6 +340,7 @@ def _compute_debiased_agn_table_mu(
         agn_pivot_arr,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
     )
     cosmo = _cosmo_from_params(cosmo_model, median_params, z_pivot_agn)
     z = df_agn["z"].to_numpy(dtype=float)
@@ -360,6 +368,7 @@ def _agn_likelihood_param_labels(
     *,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_f_agn_psf_2500_sigmoid_term=False,
     use_redshift_log_f_term=False,
 ):
     allowed_labels = {
@@ -382,6 +391,7 @@ def _agn_likelihood_param_labels(
     req_params, _, _ = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
     )
     allowed_labels.update(req_params)
     if use_redshift_log_f_term:
@@ -400,6 +410,7 @@ def compute_agn_likelihood_space_reduced_chi2(
     agn_pivot_context,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_f_agn_psf_2500_sigmoid_term=False,
     use_redshift_log_f_term=False,
 ):
     """Compute AGN chi2 with the same residual and variance as the AGN likelihood."""
@@ -408,6 +419,7 @@ def compute_agn_likelihood_space_reduced_chi2(
         cosmo_model,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     n_agn_params = len(agn_likelihood_labels)
@@ -430,11 +442,13 @@ def compute_agn_likelihood_space_reduced_chi2(
         median_params,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
     )
     agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(
         df_agn_fit_selection,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         pivot_context=agn_pivot_context,
     )
     M_pred = M_model_agn(
@@ -443,6 +457,7 @@ def compute_agn_likelihood_space_reduced_chi2(
         agn_pivot_arr,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
     )
     M_pred_err, _ = M_model_agn_err(
         agn_params_arr,
@@ -452,6 +467,7 @@ def compute_agn_likelihood_space_reduced_chi2(
         check_negative=True,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
     )
 
     z = df_agn_fit_selection["z"].to_numpy(dtype=float)
@@ -626,6 +642,7 @@ def make_run_tag(
     use_planck_om_prior=False,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_f_agn_psf_2500_sigmoid_term=False,
     use_redshift_log_f_term=False,
     selection_attenuation_mode="fixed-offset",
 ):
@@ -646,6 +663,9 @@ def make_run_tag(
     planck_om_tag = "_planckom" if use_planck_om_prior else ""
     alpha_tag = "_alphaLam" if use_alpha_lambda_term else ""
     eta_sigma_tag = "_etaSigma" if use_eta_sigma_term else ""
+    fagn_sigmoid_tag = (
+        "_fagnPsf2500Sigmoid" if use_f_agn_psf_2500_sigmoid_term else ""
+    )
     logf_tag = "_logfz" if use_redshift_log_f_term else ""
     attenuation_tag = (
         "_attsel-jointpost"
@@ -655,7 +675,7 @@ def make_run_tag(
     )
     return (
         f"{cosmo_model}_{_fit_mode_label(only_sna, only_agn)}_{speed}_{n_tag}_{z_tag}"
-        f"{completeness_tag}{attenuation_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}"
+        f"{completeness_tag}{attenuation_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}{fagn_sigmoid_tag}{logf_tag}"
     )
 
 
@@ -745,6 +765,7 @@ def _load_agn_pivot_context_from_checkpoint(
     checkpoint_file,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_f_agn_psf_2500_sigmoid_term=False,
 ):
     missing = sorted(set(AGN_PIVOT_CHECKPOINT_KEYS) - set(results))
     if missing:
@@ -794,6 +815,7 @@ def _load_agn_pivot_context_from_checkpoint(
         context.as_array(
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         )
     except (TypeError, ValueError) as exc:
         raise RuntimeError(
@@ -853,6 +875,7 @@ def _validate_agn_pivot_context_for_reference(
     z_range,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_f_agn_psf_2500_sigmoid_term=False,
     require_reference_ids=True,
 ):
     if not isinstance(agn_pivot_context, AgnPivotContext):
@@ -869,6 +892,7 @@ def _validate_agn_pivot_context_for_reference(
     agn_pivot_context.as_array(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
     )
     if require_reference_ids:
         expected_ids = tuple(df_agn_reference["object_id"].astype(str).tolist())
@@ -890,6 +914,7 @@ def validate_resume_checkpoint(
     expected_cut_tier=None,
     expected_cut_configuration_json=None,
     expected_z_range_semantics=None,
+    expected_use_f_agn_psf_2500_sigmoid_term=False,
 ):
     _validate_strict_padded_checkpoint_metadata(
         results, checkpoint_file, expected_cut_configuration_json
@@ -970,6 +995,16 @@ def validate_resume_checkpoint(
             f"Resume checkpoint '{checkpoint_file}' selection attenuation mode "
             "does not match the current run."
         )
+    stored_sigmoid = bool(
+        np.asarray(
+            results.get("use_f_agn_psf_2500_sigmoid_term", False)
+        ).reshape(()).item()
+    )
+    if stored_sigmoid != bool(expected_use_f_agn_psf_2500_sigmoid_term):
+        raise RuntimeError(
+            f"Resume checkpoint '{checkpoint_file}' uses an incompatible "
+            "f_AGN_psf_2500 sigmoid model option."
+        )
 
     for key in ("dmi_max_w", "integrals_max_w"):
         value = np.asarray(results[key])
@@ -1017,6 +1052,7 @@ def _validate_resume_replot_checkpoint_params(
     expected_cut_tier=None,
     expected_cut_configuration_json=None,
     expected_z_range_semantics=None,
+    expected_use_f_agn_psf_2500_sigmoid_term=False,
 ):
     _validate_strict_padded_checkpoint_metadata(
         results, checkpoint_file, expected_cut_configuration_json
@@ -1081,6 +1117,16 @@ def _validate_resume_replot_checkpoint_params(
             f"Resume-replot checkpoint '{checkpoint_file}' selection attenuation "
             "mode does not match the current run."
         )
+    stored_sigmoid = bool(
+        np.asarray(
+            results.get("use_f_agn_psf_2500_sigmoid_term", False)
+        ).reshape(()).item()
+    )
+    if stored_sigmoid != bool(expected_use_f_agn_psf_2500_sigmoid_term):
+        raise RuntimeError(
+            f"Resume-replot checkpoint '{checkpoint_file}' uses an "
+            "incompatible f_AGN_psf_2500 sigmoid model option."
+        )
 
 
 def _remap_resume_replot_checkpoint(
@@ -1093,6 +1139,7 @@ def _remap_resume_replot_checkpoint(
     expected_cut_tier=None,
     expected_cut_configuration_json=None,
     expected_z_range_semantics=None,
+    expected_use_f_agn_psf_2500_sigmoid_term=False,
 ):
     """Return checkpoint payload remapped to the current cut AGN fit selection."""
 
@@ -1104,6 +1151,9 @@ def _remap_resume_replot_checkpoint(
         expected_cut_tier=expected_cut_tier,
         expected_cut_configuration_json=expected_cut_configuration_json,
         expected_z_range_semantics=expected_z_range_semantics,
+        expected_use_f_agn_psf_2500_sigmoid_term=(
+            expected_use_f_agn_psf_2500_sigmoid_term
+        ),
     )
     if "object_id_fit_selection" not in results:
         raise RuntimeError(
@@ -1796,6 +1846,7 @@ def _prepare_shared_agn_pivot_context(
     use_planck_om_prior,
     use_alpha_lambda_term,
     use_eta_sigma_term,
+    use_f_agn_psf_2500_sigmoid_term,
     use_redshift_log_f_term,
     disable_sigma_clip_pass,
     resume_stage,
@@ -1836,6 +1887,7 @@ def _prepare_shared_agn_pivot_context(
             use_planck_om_prior=use_planck_om_prior,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
         )
         checkpoint_paths = _build_checkpoint_paths(prefix, run_tag)
@@ -1860,6 +1912,7 @@ def _prepare_shared_agn_pivot_context(
             checkpoint_file=checkpoint_file,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         )
         _validate_agn_pivot_checkpoint_reference_provenance(
             context,
@@ -1872,6 +1925,7 @@ def _prepare_shared_agn_pivot_context(
             z_range=z_range,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
             require_reference_ids=not resume_replot_with_cuts,
         )
         loaded_contexts.append((checkpoint_file, context))
@@ -1895,6 +1949,7 @@ def _prepare_shared_agn_pivot_context(
         z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
     )
 
 
@@ -2086,6 +2141,7 @@ def _compute_direct_full_sample_completeness_summaries(
     only_agn=False,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_f_agn_psf_2500_sigmoid_term=False,
     use_redshift_log_f_term=False,
     early_de_guard=False,
     selection_attenuation_mode="fixed-offset",
@@ -2203,6 +2259,7 @@ def _compute_direct_full_sample_completeness_summaries(
             use_ceph_dist_calibration=not disable_ceph_dist_calibration,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
             early_de_guard=early_de_guard,
             selection_attenuation_mode=selection_attenuation_mode,
@@ -2413,6 +2470,7 @@ def _run_fit_stage(
     use_planck_om_prior,
     use_alpha_lambda_term,
     use_eta_sigma_term,
+    use_f_agn_psf_2500_sigmoid_term,
     use_redshift_log_f_term,
     early_de_guard=False,
     checkpoint_file_override=None,
@@ -2467,6 +2525,7 @@ def _run_fit_stage(
         use_planck_om_prior=use_planck_om_prior,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         early_de_guard=early_de_guard,
         resume_replot_with_cuts=resume_replot_with_cuts,
@@ -2481,6 +2540,7 @@ def _run_fit_stage(
         z_pivot_agn,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         sigma_sel_posterior_median=dmi_selection_sigma_posterior_median,
     )
@@ -2491,6 +2551,7 @@ def _run_fit_stage(
         max_eval=200,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     return (
@@ -2647,6 +2708,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       use_planck_om_prior=False,
                       use_alpha_lambda_term=False,
                       use_eta_sigma_term=False,
+                      use_f_agn_psf_2500_sigmoid_term=False,
                       use_redshift_log_f_term=False,
                       early_de_guard=False,
                       resume_replot_with_cuts=False,
@@ -2702,6 +2764,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             z_range=z_range,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
             require_reference_ids=False,
         )
     run_tag = make_run_tag(
@@ -2719,6 +2782,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         use_planck_om_prior=use_planck_om_prior,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         selection_attenuation_mode=selection_attenuation_mode,
     )
@@ -2733,6 +2797,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         use_planck_om_prior=use_planck_om_prior,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     ndim = len(model_labels)
@@ -2764,6 +2829,33 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     f"--fit_eta_sigma_term requires finite {required_col} for all AGN used in the fit; "
                     f"found {np.count_nonzero(bad)} non-finite rows."
                 )
+    if use_f_agn_psf_2500_sigmoid_term:
+        required_columns = (
+            "f_AGN_psf_2500",
+            "f_AGN_psf_2500_err",
+        )
+        for required_col in required_columns:
+            if required_col not in df_agn.columns:
+                raise KeyError(
+                    "--fit_f_agn_psf_2500_sigmoid_term requires "
+                    f"df_agn[{required_col!r}]."
+                )
+        f_agn = df_agn["f_AGN_psf_2500"].to_numpy(dtype=float)
+        f_agn_err = df_agn["f_AGN_psf_2500_err"].to_numpy(dtype=float)
+        invalid_fraction = ~np.isfinite(f_agn) | (f_agn < 0.0) | (f_agn > 1.0)
+        invalid_error = ~np.isfinite(f_agn_err) | (f_agn_err < 0.0)
+        if np.any(invalid_fraction):
+            raise ValueError(
+                "--fit_f_agn_psf_2500_sigmoid_term requires finite "
+                "f_AGN_psf_2500 in [0, 1] for every fitted AGN; found "
+                f"{np.count_nonzero(invalid_fraction)} invalid row(s)."
+            )
+        if np.any(invalid_error):
+            raise ValueError(
+                "--fit_f_agn_psf_2500_sigmoid_term requires finite, "
+                "nonnegative f_AGN_psf_2500_err for every fitted AGN; found "
+                f"{np.count_nonzero(invalid_error)} invalid row(s)."
+            )
 
     if df_agn_completeness is None:
         df_agn_completeness = df_agn
@@ -2803,6 +2895,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     agn_model_req_params, agn_model_req_obs, agn_model_req_errs = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
     )
     agn_fields = agn_model_req_params + agn_model_req_obs + agn_model_req_errs
     agn_fields += ('apparent_mag_2500', 'apparent_mag_2500_err', 'z', 'z_err', 'object_id')
@@ -2857,6 +2950,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     checkpoint_file=checkpoint_file,
                     use_alpha_lambda_term=use_alpha_lambda_term,
                     use_eta_sigma_term=use_eta_sigma_term,
+                    use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
                 )
                 _validate_agn_pivot_checkpoint_reference_provenance(
                     stored_pivot_context,
@@ -2876,6 +2970,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                         Z_RANGE_SEMANTICS
                         if df_agn.attrs.get("cut_configuration_json")
                         else None
+                    ),
+                    expected_use_f_agn_psf_2500_sigmoid_term=(
+                        use_f_agn_psf_2500_sigmoid_term
                     ),
                 )
                 print(
@@ -2897,6 +2994,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                         Z_RANGE_SEMANTICS
                         if df_agn.attrs.get("cut_configuration_json")
                         else None
+                    ),
+                    expected_use_f_agn_psf_2500_sigmoid_term=(
+                        use_f_agn_psf_2500_sigmoid_term
                     ),
                 )
             if not only_sna:
@@ -2965,6 +3065,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 use_ceph_dist_calibration=not disable_ceph_dist_calibration,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 early_de_guard=early_de_guard,
                 selection_attenuation_mode=selection_attenuation_mode,
@@ -3030,6 +3131,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 speed=speed,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
             )
         logZ, logZerr = results.logz[-1], results.logzerr[-1]
@@ -3130,6 +3232,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             cut_configuration_json=str(df_agn.attrs.get("cut_configuration_json", "")),
             z_range_semantics=Z_RANGE_SEMANTICS,
             selection_attenuation_mode=selection_attenuation_mode,
+            use_f_agn_psf_2500_sigmoid_term=bool(
+                use_f_agn_psf_2500_sigmoid_term
+            ),
         )
         if completeness:
             checkpoint_payload.update(
@@ -3215,6 +3320,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                use_planck_om_prior=False,
                use_alpha_lambda_term=False,
                use_eta_sigma_term=False,
+               use_f_agn_psf_2500_sigmoid_term=False,
                use_redshift_log_f_term=False,
                early_de_guard=False,
                resume_replot_with_cuts=False,
@@ -3292,6 +3398,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_planck_om_prior=use_planck_om_prior,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         selection_attenuation_mode=selection_attenuation_mode,
     )
@@ -3400,6 +3507,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             checkpoint_file=pivot_checkpoint_file,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         )
         _validate_agn_pivot_checkpoint_reference_provenance(
             stored_pivot_context,
@@ -3419,6 +3527,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             z_range=z_range,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
             require_reference_ids=not resume_replot_with_cuts,
         )
     else:
@@ -3428,6 +3537,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 z_range,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
             )
         _validate_agn_pivot_context_for_reference(
             agn_pivot_context,
@@ -3435,6 +3545,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             z_range=z_range,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
             require_reference_ids=True,
         )
     direct_completeness_params = None
@@ -3542,6 +3653,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_planck_om_prior=use_planck_om_prior,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 early_de_guard=early_de_guard,
                 checkpoint_file_override=pass1_checkpoint_file,
@@ -3578,6 +3690,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 only_agn=only_agn,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 early_de_guard=early_de_guard,
                 selection_attenuation_mode=selection_attenuation_mode,
@@ -3610,6 +3723,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 z_range=z_range,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 only_agn=only_agn,
                 agn_pivot_context=agn_pivot_context,
@@ -3689,6 +3803,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     z_range=z_range,
                     use_alpha_lambda_term=use_alpha_lambda_term,
                     use_eta_sigma_term=use_eta_sigma_term,
+                    use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
                     use_redshift_log_f_term=use_redshift_log_f_term,
                     only_agn=only_agn,
                     agn_pivot_context=agn_pivot_context,
@@ -3744,6 +3859,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                         use_planck_om_prior=use_planck_om_prior,
                         use_alpha_lambda_term=use_alpha_lambda_term,
                         use_eta_sigma_term=use_eta_sigma_term,
+                        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
                         use_redshift_log_f_term=use_redshift_log_f_term,
                     )[1]),
                     n_agn=len(expected_pass1_fit_selection),
@@ -3756,6 +3872,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                             "cut_configuration_json"
                         )
                         else None
+                    ),
+                    expected_use_f_agn_psf_2500_sigmoid_term=(
+                        use_f_agn_psf_2500_sigmoid_term
                     ),
                 )
                 pass2_warm_start_flat_samples = selected_resume_results["flat_samples"]
@@ -3872,6 +3991,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_planck_om_prior=use_planck_om_prior,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         early_de_guard=early_de_guard,
         resume_replot_with_cuts=resume_replot_with_cuts,
@@ -3929,6 +4049,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             only_agn=only_agn,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
             early_de_guard=early_de_guard,
             selection_attenuation_mode=selection_attenuation_mode,
@@ -3965,6 +4086,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             z_range=z_range,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
             only_agn=only_agn,
             agn_pivot_context=agn_pivot_context,
@@ -4028,6 +4150,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         only_agn=only_agn,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         early_de_guard=early_de_guard,
         selection_attenuation_mode=selection_attenuation_mode,
@@ -4052,6 +4175,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         agn_pivot_context=agn_pivot_context,
     )
@@ -4068,6 +4192,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         agn_pivot_context=agn_pivot_context,
     )
@@ -4087,6 +4212,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         agn_pivot_context=agn_pivot_context,
     )
@@ -4106,6 +4232,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         agn_pivot_context=agn_pivot_context,
     )
@@ -4124,6 +4251,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         agn_pivot_context=agn_pivot_context,
     )
@@ -4142,6 +4270,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         agn_pivot_context=agn_pivot_context,
     )
@@ -4177,6 +4306,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         show=False,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     plot_blr_diagnostics_summary(
@@ -4207,6 +4337,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         agn_pivot_context=agn_pivot_context,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     print("Plotting Hubble diagram...")
@@ -4235,6 +4366,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     z_range=z_range,
                     use_alpha_lambda_term=use_alpha_lambda_term,
                     use_eta_sigma_term=use_eta_sigma_term,
+                    use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
                     use_redshift_log_f_term=use_redshift_log_f_term,
                     only_agn=only_agn,
                     agn_pivot_context=agn_pivot_context)
@@ -4339,6 +4471,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 only_agn=only_agn,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 early_de_guard=early_de_guard,
                 selection_attenuation_mode=selection_attenuation_mode,
@@ -4354,6 +4487,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             only_agn=only_agn,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
         )
         make_agn_csv_table(
@@ -4385,6 +4519,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 z_range=z_range,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 only_agn=only_agn,
                 agn_pivot_context=agn_pivot_context)
@@ -4486,6 +4621,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         only_agn=only_agn,
         use_intrinsic_scatter_in_residual_sigma=False,
@@ -4522,6 +4658,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         plot_path=plot_path,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         agn_pivot_context=agn_pivot_context,
     )
@@ -4538,6 +4675,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         plot_path=plot_path,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         agn_pivot_context=agn_pivot_context,
     )
@@ -4562,6 +4700,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     plot_full_residuals(
@@ -4580,6 +4719,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     plot_full_residuals(
@@ -4599,6 +4739,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         output_tag='full_residuals_l2500_sigma_tau',
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     plot_full_residuals(
@@ -4618,6 +4759,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     plot_full_residuals_rz(
@@ -4635,6 +4777,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     plot_debias_impact_diagnostics(
@@ -4682,6 +4825,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                       only_agn=only_agn,
                       use_alpha_lambda_term=use_alpha_lambda_term,
                       use_eta_sigma_term=use_eta_sigma_term,
+                      use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
                       use_redshift_log_f_term=use_redshift_log_f_term)
 
     if completeness:
@@ -4776,6 +4920,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             only_agn=False,
             use_alpha_lambda_term=False,
             use_eta_sigma_term=False,
+            use_f_agn_psf_2500_sigmoid_term=False,
             use_redshift_log_f_term=False,
             early_de_guard=False):
 
@@ -4834,6 +4979,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         use_planck_om_prior=use_planck_om_prior,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         disable_sigma_clip_pass=disable_sigma_clip_pass,
         resume_stage=resume_stage,
@@ -4865,6 +5011,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        use_planck_om_prior=use_planck_om_prior,
                        use_alpha_lambda_term=use_alpha_lambda_term,
                        use_eta_sigma_term=use_eta_sigma_term,
+                       use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
                        use_redshift_log_f_term=use_redshift_log_f_term,
                        early_de_guard=early_de_guard,
                        agn_pivot_context=agn_pivot_context)
@@ -4901,6 +5048,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                            use_planck_om_prior=use_planck_om_prior,
                            use_alpha_lambda_term=use_alpha_lambda_term,
                            use_eta_sigma_term=use_eta_sigma_term,
+                           use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
                            use_redshift_log_f_term=use_redshift_log_f_term,
                            early_de_guard=early_de_guard,
                            agn_pivot_context=None)
@@ -4911,12 +5059,14 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                               gauss_sigma=1.5, kde_bw_scale=1.5, include_alpha_beta=False,
                               use_alpha_lambda_term=use_alpha_lambda_term,
                               use_eta_sigma_term=use_eta_sigma_term,
+                              use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
                               use_redshift_log_f_term=use_redshift_log_f_term)
             plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
                               plot_path=compare_plot_path, speed=speed,
                               gauss_sigma=1.5, kde_bw_scale=1.5, include_alpha_beta=True,
                               use_alpha_lambda_term=use_alpha_lambda_term,
                               use_eta_sigma_term=use_eta_sigma_term,
+                              use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
                               use_redshift_log_f_term=use_redshift_log_f_term)
         
         cosmo_models_result_dict[cosmo_model]['logZ'] = logZ_joint
@@ -4941,6 +5091,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                 value_fmt="{:.2f}",
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
             )
         r_joint   = extract_cosmo_results_from_samples(
@@ -4953,6 +5104,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             value_fmt="{:.2f}",
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
         )
 
@@ -4998,7 +5150,10 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                                 result_prefix=result_prefix, cosmo_models_result_dict=cosmo_models_result_dict,
                                 cosmo_models_sna_result_dict=cosmo_models_sna_result_dict,
                                 compare_r_sna=compare_r_sna,
-                                agn_pivot_context=agn_pivot_context)
+                                agn_pivot_context=agn_pivot_context,
+                                use_f_agn_psf_2500_sigmoid_term=(
+                                    use_f_agn_psf_2500_sigmoid_term
+                                ))
 
     cosmo_output_dir = get_qvc_result_dir() / "cosmo" / prefix
     cosmo_output_dir.mkdir(parents=True, exist_ok=True)
@@ -5258,6 +5413,15 @@ if __name__ == "__main__":
         help="Fit an additional linear eta_sigma term in the AGN standardization relation.",
     )
     parser.add_argument(
+        "--fit_f_agn_psf_2500_sigmoid_term",
+        action="store_true",
+        default=False,
+        help=(
+            "Fit a pivot-anchored sigmoid correction in the raw PSF AGN "
+            "fraction at 2500 Angstrom."
+        ),
+    )
+    parser.add_argument(
         "--fit_redshift_log_f_term",
         action="store_true",
         default=False,
@@ -5288,6 +5452,11 @@ if __name__ == "__main__":
     resume_by_model = normalize_resume_by_model(args.resume, args.cosmo_models)
     if args.only_sna and args.only_agn:
         raise ValueError("--only_sna and --only_agn cannot be used together.")
+    if args.use_jax and args.fit_f_agn_psf_2500_sigmoid_term:
+        raise NotImplementedError(
+            "--fit_f_agn_psf_2500_sigmoid_term is currently supported only "
+            "by the CPU/Dynesty Hubble model and cannot be used with --use_jax."
+        )
     validate_plot_mode_args(args)
     if args.selection_attenuation_mode == "joint-posterior" and (
         args.run != "single" or args.use_jax
@@ -5361,6 +5530,7 @@ if __name__ == "__main__":
             df_calibrators = pd.read_csv(args.agn_calibrators)
         else:
             raise ValueError("Unsupported file format for agn_calibrators. Use .h5 or .csv")
+        df_calibrators = derive_f_agn_psf_2500_columns(df_calibrators)
     else:
         df_calibrators = None
 
@@ -5391,6 +5561,7 @@ if __name__ == "__main__":
             use_planck_om_prior=args.use_planck_om_prior,
             use_alpha_lambda_term=args.fit_alpha_lambda_term,
             use_eta_sigma_term=args.fit_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=args.fit_f_agn_psf_2500_sigmoid_term,
             use_redshift_log_f_term=args.fit_redshift_log_f_term,
             disable_sigma_clip_pass=True,
             resume_stage="both",
@@ -5446,6 +5617,7 @@ if __name__ == "__main__":
             use_planck_om_prior=args.use_planck_om_prior,
             use_alpha_lambda_term=args.fit_alpha_lambda_term,
             use_eta_sigma_term=args.fit_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=args.fit_f_agn_psf_2500_sigmoid_term,
             use_redshift_log_f_term=args.fit_redshift_log_f_term,
             disable_sigma_clip_pass=args.disable_sigma_clip_pass,
             resume_stage=args.resume_stage,
@@ -5476,6 +5648,7 @@ if __name__ == "__main__":
                 use_planck_om_prior=args.use_planck_om_prior,
                 use_alpha_lambda_term=args.fit_alpha_lambda_term,
                 use_eta_sigma_term=args.fit_eta_sigma_term,
+                use_f_agn_psf_2500_sigmoid_term=args.fit_f_agn_psf_2500_sigmoid_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
                 early_de_guard=args.early_de_guard,
                 resume_replot_with_cuts=args.resume_replot_with_cuts,
@@ -5498,11 +5671,16 @@ if __name__ == "__main__":
         planck_om_tag = "_planckom" if args.use_planck_om_prior else ""
         alpha_tag = "_alphaLam" if args.fit_alpha_lambda_term else ""
         eta_sigma_tag = "_etaSigma" if args.fit_eta_sigma_term else ""
+        fagn_sigmoid_tag = (
+            "_fagnPsf2500Sigmoid"
+            if args.fit_f_agn_psf_2500_sigmoid_term
+            else ""
+        )
         logf_tag = "_logfz" if args.fit_redshift_log_f_term else ""
         mode_tag = _fit_mode_label(args.only_sna, args.only_agn)
         compare_path = (
             f"plots/hubble/{args.prefix}/single_compare_{mode_tag}_{args.speed}_{n_tag}_{z_tag}"
-            f"{completeness_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}"
+            f"{completeness_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}{fagn_sigmoid_tag}{logf_tag}"
         )
         os.makedirs(compare_path, exist_ok=True)
         if len(cosmo_models_dict) >= 2:
@@ -5539,6 +5717,7 @@ if __name__ == "__main__":
                 only_agn=args.only_agn,
                 use_alpha_lambda_term=args.fit_alpha_lambda_term,
                 use_eta_sigma_term=args.fit_eta_sigma_term,
+                use_f_agn_psf_2500_sigmoid_term=args.fit_f_agn_psf_2500_sigmoid_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
                 early_de_guard=args.early_de_guard)
     
