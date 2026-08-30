@@ -1,7 +1,12 @@
 """Default AGN selection-cut configuration for the QVC pipeline."""
 
+import math
+
 from qvc.hubble.cuts import (
-    AGN_SCALAR_PARAMETER_CUTS,
+    A_2500_TOTAL_MAX,
+    AGN_TIER0_ELIGIBILITY_CUTS,
+    AGN_TIER1_FIT_QUALITY_CUTS,
+    AGN_TIER2_PARAMETER_CUTS,
     ALPHA_LAMBDA_MAX,
     F_HOST_2500_MAX,
     LOG_AMP_DELTA_BLR_UPPER,
@@ -22,7 +27,55 @@ DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUT = LOG_AMP_DELTA_BLR_UPPER
 DEFAULT_LOG_AMP_DELTA_BLR_UPPER_CUTS = dict(LOG_AMP_DELTA_BLR_UPPER_BY_BAND)
 
 
-def build_agn_cuts(
+def _with_completeness_magnitude(cuts, completeness_magnitude):
+    completeness_columns = {
+        "dereddened": "m_2500_dereddened",
+        "attenuated": "m_2500_attenuated_model",
+    }
+    if completeness_magnitude not in completeness_columns:
+        raise ValueError(
+            "completeness_magnitude must be 'dereddened' or 'attenuated', "
+            f"got {completeness_magnitude!r}."
+        )
+    return [
+        (
+            completeness_columns[completeness_magnitude]
+            if column == "m_2500_dereddened"
+            else column,
+            lower,
+            upper,
+        )
+        for column, lower, upper in cuts
+    ]
+
+
+def build_tier0_cuts(*, completeness_magnitude="dereddened"):
+    return _with_completeness_magnitude(
+        AGN_TIER0_ELIGIBILITY_CUTS, completeness_magnitude
+    )
+
+
+def build_tier1_cuts():
+    cuts = list(AGN_TIER1_FIT_QUALITY_CUTS)
+    invalid = [
+        column
+        for column, lower, upper in cuts
+        if (lower is None and upper is None)
+        or any(
+            not math.isfinite(float(value))
+            for value in (lower, upper)
+            if value is not None
+        )
+    ]
+    if invalid:
+        raise ValueError(
+            "Tier-1 fit-quality thresholds must be finite and cannot be disabled: "
+            f"{invalid}. Configure finite chi-square/R-hat thresholds."
+        )
+    return cuts
+
+
+def build_tier2_cuts(
     *,
     completeness_magnitude="dereddened",
     f_host_cut=DEFAULT_F_HOST_CUT,
@@ -43,29 +96,33 @@ def build_agn_cuts(
     if reddening_ebv_cut is None:
         reddening_ebv_cut = DEFAULT_REDDENING_EBV_CUT
 
-    completeness_columns = {
-        "dereddened": "m_2500_dereddened",
-        "attenuated": "m_2500_attenuated_model",
-    }
-    if completeness_magnitude not in completeness_columns:
-        raise ValueError(
-            "completeness_magnitude must be 'dereddened' or 'attenuated', "
-            f"got {completeness_magnitude!r}."
-        )
-
     cut_overrides = {
         "wrms": (None, wrms_cut),
         "f_host_2500": (None, f_host_cut),
         "variability_chi_sq_red_g": (variability_chi_sq_red_g_cut, None),
     }
     cuts = []
-    for column, lower, upper in AGN_SCALAR_PARAMETER_CUTS:
-        if column == "m_2500_dereddened":
-            column = completeness_columns[completeness_magnitude]
-        cuts.append((column, *cut_overrides.get(column, (lower, upper))))
+    for column, lower, upper in AGN_TIER2_PARAMETER_CUTS:
+        resolved_lower, resolved_upper = cut_overrides.get(column, (lower, upper))
+        if resolved_lower is None and resolved_upper is None:
+            continue
+        cuts.append((column, resolved_lower, resolved_upper))
+    if A_2500_TOTAL_MAX is not None:
+        cuts.append(("a_2500_total", None, A_2500_TOTAL_MAX))
     if reddening_ebv_cut is not None:
         cuts.append(("reddening_ebv", None, reddening_ebv_cut))
     return cuts
+
+
+def build_agn_cuts(**kwargs):
+    """Return all staged scalar cuts in application order."""
+
+    completeness_magnitude = kwargs.get("completeness_magnitude", "dereddened")
+    return (
+        build_tier0_cuts(completeness_magnitude=completeness_magnitude)
+        + build_tier1_cuts()
+        + build_tier2_cuts(**kwargs)
+    )
 
 
 def build_dlog_amp_blr_cuts(cuts=None):

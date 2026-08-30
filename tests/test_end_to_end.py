@@ -1577,7 +1577,7 @@ def test_end_to_end(tmp_path, monkeypatch):
         spectra_fit_csv=None,
         lc_info_csv=None,
         only_load=True,
-        apply_cut=False,
+        cut_tier="none",
         plot_path=str(tmp_path / "figures"),
     )
     assert df_all.equals(df)

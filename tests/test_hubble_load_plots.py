@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 from pathlib import Path
@@ -40,6 +41,7 @@ def _minimal_agn_frame(n=10):
             "wrms": np.full(n, 0.5),
             "t_rf_length": np.full(n, 2000.0),
             "f_host_2500": np.full(n, 5e-4),
+            "f_host_2500_psf": np.full(n, 0.2),
             "frac_host_psf_2500": np.full(n, 5e-4),
             "frac_host_psf_2500_err": np.full(n, 2e-4),
             "alpha_lambda": np.full(n, -1.5),
@@ -60,6 +62,14 @@ def _minimal_agn_frame(n=10):
             "m_2500_dereddened_err": np.full(n, 0.01),
             "m_2500_attenuated_model": np.linspace(20.0, 21.0, n),
             "m_2500_attenuated_model_err": np.full(n, 0.01),
+            "sed_reduced_chi2": np.full(n, 1.0),
+            "spectroscopy_reduced_chi2": np.full(n, 1.0),
+            "joint_reduced_chi2": np.full(n, 1.0),
+            "loo_chi2_eff": np.full(n, 1.0),
+            "m_2500_dereddened_rhat": np.full(n, 1.01),
+            "m_2500_attenuated_model_rhat": np.full(n, 1.01),
+            "log_tau_uv_rf_rhat": np.full(n, 1.01),
+            "log_sigma_uv_rhat": np.full(n, 1.01),
             "SDSS_RUN2D": np.full(n, "v5_13_2"),
             "number_points_g": np.full(n, 300),
             "number_points_r": np.full(n, 300),
@@ -135,12 +145,47 @@ def _patch_load_agn_plotters(monkeypatch):
         "plot_suberlak_style_sigma_tau_fits",
         "plot_tau_sigma_vs_wu_catalog",
         "plot_tau_sigma_vs_redshift",
+        "plot_tier1_cuts_vs_redshift",
         "plot_f_host_2500_vs_l2500",
         "plot_blr_diagnostics_summary",
     )
     for name in plot_noops:
         monkeypatch.setattr(hubble_plotting, name, lambda *_args, **_kwargs: None)
     monkeypatch.setattr(hubble_utils, "plot_sigma_tau_identity_grid", lambda *_args, **_kwargs: None)
+
+
+def test_load_agn_data_makes_default_combined_tier1_diagnostic(tmp_path, monkeypatch):
+    source_path = tmp_path / "agn.h5"
+    source_path.touch()
+    frame = _minimal_agn_frame(n=4)
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *_args, **_kwargs: frame.copy(),
+    )
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda value: value)
+    _patch_load_agn_plotters(monkeypatch)
+
+    calls = []
+    monkeypatch.setattr(
+        hubble_plotting,
+        "plot_tier1_cuts_vs_redshift",
+        lambda data, **kwargs: calls.append((data.copy(), kwargs)),
+    )
+
+    hubble_utils.load_agn_data(
+        source_path,
+        magnitude_convention="dereddened",
+        spectra_fit_h5=None,
+        cut_tier="none",
+        plot_path=str(tmp_path / "plots"),
+    )
+
+    assert len(calls) == 1
+    plotted, kwargs = calls[0]
+    assert plotted["object_id"].tolist() == frame["object_id"].tolist()
+    assert kwargs["filename"] == "tier1_cuts_vs_redshift_precut.pdf"
+    assert kwargs["plot_path"] == str(tmp_path / "plots")
 
 
 def test_load_agn_data_makes_pre_and_postcut_joint_sed_and_blr_plots(tmp_path, monkeypatch):
@@ -196,6 +241,7 @@ def test_load_agn_data_makes_pre_and_postcut_joint_sed_and_blr_plots(tmp_path, m
         "plot_suberlak_style_sigma_tau_fits",
         "plot_tau_sigma_vs_wu_catalog",
         "plot_tau_sigma_vs_redshift",
+        "plot_tier1_cuts_vs_redshift",
     )
     for name in plot_noops:
         monkeypatch.setattr(hubble_plotting, name, lambda *_args, **_kwargs: None)
@@ -209,14 +255,14 @@ def test_load_agn_data_makes_pre_and_postcut_joint_sed_and_blr_plots(tmp_path, m
         magnitude_convention="dereddened",
         spectra_fit_csv=None,
         lc_info_csv=None,
-        apply_cut=True,
+        cut_tier="2",
         plot_path=str(tmp_path / "figures"),
         cut_report_path=tmp_path / "cut_summary.txt",
     )
 
     captured_by_filename = {call.get("filename"): call for call in captured_calls}
-    assert "f_host_2500_vs_l2500_precut.pdf" not in captured_by_filename
-    assert "f_host_2500_vs_l2500_postcut.pdf" not in captured_by_filename
+    assert captured_by_filename["f_host_2500_vs_l2500_precut.pdf"]["f_host_col"] == "f_host_2500_psf"
+    assert captured_by_filename["f_host_2500_vs_l2500_postcut.pdf"]["f_host_col"] == "f_host_2500_psf"
     assert "alpha_lambda_vs_l2500_precut.pdf" in captured_by_filename
     assert "alpha_lambda_vs_l2500_postcut.pdf" in captured_by_filename
     assert "blr_precut.pdf" in captured_by_filename
@@ -247,7 +293,7 @@ def test_load_agn_data_writes_sigma_tau_ls_identity_grids_to_diagnostics(tmp_pat
         magnitude_convention="dereddened",
         spectra_fit_csv=None,
         lc_info_csv=None,
-        apply_cut=True,
+        cut_tier="2",
         plot_path=str(tmp_path / "plots" / "hubble" / "prefix"),
         cut_report_path=tmp_path / "cut_summary.txt",
     )
@@ -375,7 +421,7 @@ def test_load_agn_data_run2d_filter_v5_13_2_and_drop_missing(tmp_path, monkeypat
         magnitude_convention="dereddened",
         spectra_fit_csv=None,
         lc_info_csv=None,
-        apply_cut=True,
+        cut_tier="2",
         spectra_sdss_run2d="v5_13_2",
         plot_path=str(tmp_path / "figures"),
         cut_report_path=tmp_path / "cut_summary.txt",
@@ -401,7 +447,7 @@ def test_load_agn_data_run2d_filter_26(tmp_path, monkeypatch):
         magnitude_convention="dereddened",
         spectra_fit_csv=None,
         lc_info_csv=None,
-        apply_cut=True,
+        cut_tier="2",
         spectra_sdss_run2d="26",
         plot_path=str(tmp_path / "figures"),
         cut_report_path=tmp_path / "cut_summary.txt",
@@ -410,7 +456,7 @@ def test_load_agn_data_run2d_filter_26(tmp_path, monkeypatch):
     assert filtered["object_id"].tolist() == ["b", "c"]
 
 
-def test_load_agn_data_run2d_filter_bypassed_when_no_cuts(tmp_path, monkeypatch):
+def test_load_agn_data_run2d_filter_bypassed_at_cut_tier_none(tmp_path, monkeypatch):
     source_path = tmp_path / "agn.h5"
     source_path.touch()
     df = _minimal_agn_frame(n=4)
@@ -430,7 +476,7 @@ def test_load_agn_data_run2d_filter_bypassed_when_no_cuts(tmp_path, monkeypatch)
         magnitude_convention="dereddened",
         spectra_fit_csv=None,
         lc_info_csv=None,
-        apply_cut=False,
+        cut_tier="none",
         spectra_sdss_run2d="v5_13_2",
         plot_path=str(tmp_path / "figures"),
         cut_report_path=tmp_path / "cut_summary.txt",
@@ -438,6 +484,119 @@ def test_load_agn_data_run2d_filter_bypassed_when_no_cuts(tmp_path, monkeypatch)
 
     assert filtered["object_id"].tolist() == ["a", "b", "c", "d"]
 
+
+def test_completeness_support_is_structural_at_cut_tier_none(tmp_path, monkeypatch):
+    source_path = tmp_path / "agn.h5"
+    source_path.touch()
+    frame = _minimal_agn_frame(n=4)
+    frame["object_id"] = ["bright", "lower-edge", "upper-edge", "faint"]
+    values = [18.49, 18.5, 24.0, 24.01]
+    frame["m_2500_dereddened"] = values
+    frame["m_2500_attenuated_model"] = values
+
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *_args, **_kwargs: frame.copy(),
+    )
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda value: value)
+    _patch_load_agn_plotters(monkeypatch)
+
+    enabled, _ = hubble_utils.load_agn_data(
+        source_path,
+        magnitude_convention="dereddened",
+        completeness_magnitude="dereddened",
+        enforce_completeness_support=True,
+        cut_tier="none",
+        plot_path=str(tmp_path / "enabled"),
+        cut_report_path=tmp_path / "enabled.txt",
+    )
+    disabled, _ = hubble_utils.load_agn_data(
+        source_path,
+        magnitude_convention="dereddened",
+        completeness_magnitude="dereddened",
+        enforce_completeness_support=False,
+        cut_tier="none",
+        plot_path=str(tmp_path / "disabled"),
+        cut_report_path=tmp_path / "disabled.txt",
+    )
+
+    assert enabled["object_id"].tolist() == ["lower-edge", "upper-edge"]
+    assert disabled["object_id"].tolist() == [
+        "bright", "lower-edge", "upper-edge", "faint"
+    ]
+    config = json.loads(enabled.attrs["cut_configuration_json"])
+    assert config["completeness_support_enforced"] is True
+    assert config["completeness_interpolation_policy"] == "strict-padded-v1"
+
+
+def test_tier0_applies_science_magnitude_support_before_completeness_parent(
+    tmp_path, monkeypatch
+):
+    source_path = tmp_path / "agn.h5"
+    source_path.touch()
+    frame = _minimal_agn_frame(n=7)
+    frame["object_id"] = ["map-bright-oob", "pad-bright", "lower", "upper", "pad-faint", "map-faint-oob", "middle"]
+    values = [17.9, 18.2, 18.5, 24.0, 24.3, 24.6, 21.0]
+    frame["m_2500_dereddened"] = values
+    frame["m_2500_attenuated_model"] = values
+
+    monkeypatch.setattr(hubble_utils, "read_quasars_from_hdf5_flat", lambda *_args, **_kwargs: frame.copy())
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda value: value)
+    _patch_load_agn_plotters(monkeypatch)
+
+    analysis, _all, parent = hubble_utils.load_agn_data(
+        source_path,
+        magnitude_convention="dereddened",
+        completeness_magnitude="dereddened",
+        enforce_completeness_support=True,
+        return_completeness_parent=True,
+        cut_tier="0",
+        plot_path=str(tmp_path / "figures"),
+        cut_report_path=tmp_path / "cuts.txt",
+    )
+
+    assert parent["object_id"].tolist() == ["lower", "upper", "middle"]
+    assert analysis["object_id"].tolist() == ["lower", "upper", "middle"]
+
+
+def test_load_agn_data_target_selection_is_tier0_eligibility(
+    tmp_path, monkeypatch
+):
+    source_path = tmp_path / "agn.h5"
+    source_path.touch()
+    df = _minimal_agn_frame(n=4)
+    df["object_id"] = ["var", "var-core", "var-other", "boss-var"]
+    df["SDSS_SURVEY"] = ["eBOSS", "eboss", "eboss", "boss"]
+    df["SDSS_EBOSS_TARGET0"] = [0, 0, 0, 0]
+    df["SDSS_EBOSS_TARGET1"] = [1 << 9, (1 << 9) | (1 << 10), (1 << 9) | (1 << 14), 1 << 9]
+    df["SDSS_EBOSS_TARGET2"] = [0, 0, 0, 0]
+    df["SDSS_SPECOBJ_MATCHED"] = [True, True, True, True]
+
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *_args, **_kwargs: df.copy(),
+    )
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda frame: frame)
+    _patch_load_agn_plotters(monkeypatch)
+
+    filtered, parent = hubble_utils.load_agn_data(
+        source_path,
+        magnitude_convention="dereddened",
+        spectra_fit_h5=None,
+        lc_info_csv=None,
+        cut_tier="0",
+        sdss_target_selection="eboss-var-s82-only",
+        plot_path=str(tmp_path / "figures"),
+        cut_report_path=tmp_path / "cut_summary.txt",
+    )
+
+    assert filtered["object_id"].tolist() == ["var"]
+    assert parent["object_id"].tolist() == ["var"]
+    summary = (tmp_path / "cut_summary.txt").read_text(encoding="utf-8")
+    assert "sample:sdss_target_selection" in summary
+    assert "eboss-var-s82-only" in summary
 
 def test_load_agn_data_run2d_filter_requires_sdss_run2d_column(tmp_path, monkeypatch):
     source_path = tmp_path / "agn.h5"
@@ -454,8 +613,161 @@ def test_load_agn_data_run2d_filter_requires_sdss_run2d_column(tmp_path, monkeyp
             magnitude_convention="dereddened",
             spectra_fit_csv=None,
             lc_info_csv=None,
-            apply_cut=True,
+            cut_tier="2",
             spectra_sdss_run2d="v5_13_2",
             plot_path=str(tmp_path / "figures"),
             cut_report_path=tmp_path / "cut_summary.txt",
         )
+
+
+def test_load_agn_data_cut_tiers_apply_cumulatively(tmp_path, monkeypatch):
+    source_path = tmp_path / "agn.h5"
+    source_path.touch()
+    frame = _minimal_agn_frame(n=4)
+    frame["object_id"] = ["keep", "tier0", "tier1", "tier2"]
+    frame.loc[1, ["m_2500_dereddened", "m_2500_attenuated_model"]] = 24.5
+    frame.loc[2, "joint_reduced_chi2"] = 10.0
+    frame.loc[3, "log_tau_uv_rf"] = 4.5
+
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *_args, **_kwargs: frame.copy(),
+    )
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda value: value)
+    _patch_load_agn_plotters(monkeypatch)
+
+    expected = {
+        "none": ["keep", "tier0", "tier1", "tier2"],
+        "0": ["keep", "tier1", "tier2"],
+        "1": ["keep", "tier2"],
+        "2": ["keep"],
+    }
+    for cut_tier, expected_ids in expected.items():
+        selected, _parent = hubble_utils.load_agn_data(
+            source_path,
+            magnitude_convention="dereddened",
+            spectra_fit_h5=None,
+            cut_tier=cut_tier,
+            plot_diagnostics=False,
+            plot_path=str(tmp_path / cut_tier),
+            cut_report_path=tmp_path / cut_tier / "cut_summary.txt",
+        )
+        assert selected["object_id"].tolist() == expected_ids
+        assert selected.attrs["cut_tier"] == cut_tier
+
+
+def test_load_agn_data_defers_z_range_to_fit_selection(tmp_path, monkeypatch):
+    source_path = tmp_path / "agn.h5"
+    source_path.touch()
+    frame = _minimal_agn_frame(n=4)
+    frame["object_id"] = ["below", "inside", "above", "nonfinite"]
+    frame["z"] = [0.2, 1.5, 3.5, np.nan]
+
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *_args, **_kwargs: frame.copy(),
+    )
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda value: value)
+    _patch_load_agn_plotters(monkeypatch)
+
+    selected, parent = hubble_utils.load_agn_data(
+        source_path,
+        magnitude_convention="dereddened",
+        spectra_fit_h5=None,
+        cut_tier="0",
+        z_range=(1.0, 3.16),
+        plot_diagnostics=False,
+        plot_path=str(tmp_path / "plots"),
+        cut_report_path=tmp_path / "cut_summary.txt",
+    )
+
+    assert selected["object_id"].tolist() == ["below", "inside", "above"]
+    assert parent["object_id"].tolist() == ["below", "inside", "above"]
+    assert selected.loc[
+        selected["z"].between(1.0, 3.16), "object_id"
+    ].tolist() == ["inside"]
+    assert "deferred to fit selection" in (
+        tmp_path / "cut_summary.txt"
+    ).read_text(encoding="utf-8")
+    assert '"z_range_semantics":"fit_only_v1"' in selected.attrs[
+        "cut_configuration_json"
+    ]
+
+
+def test_tier1_fails_when_a_mandatory_diagnostic_column_is_missing(
+    tmp_path, monkeypatch
+):
+    source_path = tmp_path / "agn.h5"
+    source_path.touch()
+    frame = _minimal_agn_frame(n=2).drop(columns=["joint_reduced_chi2"])
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *_args, **_kwargs: frame.copy(),
+    )
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda value: value)
+    _patch_load_agn_plotters(monkeypatch)
+
+    with pytest.raises(ValueError, match="Tier 1.*joint_reduced_chi2"):
+        hubble_utils.load_agn_data(
+            source_path,
+            magnitude_convention="dereddened",
+            spectra_fit_h5=None,
+            cut_tier="1",
+            plot_diagnostics=False,
+        )
+
+
+def test_tier2_excludes_only_joint_low_l2500_low_psf_host_region(
+    tmp_path, monkeypatch
+):
+    source_path = tmp_path / "agn.h5"
+    source_path.touch()
+    frame = _minimal_agn_frame(n=2)
+    frame["object_id"] = ["low-l-low-host", "high-l-low-host"]
+    frame["z"] = 0.7
+    frame["m_2500_dereddened"] = [21.0, 20.0]
+    frame["m_2500_attenuated_model"] = [21.0, 20.0]
+    frame["f_host_2500_psf"] = 0.05
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *_args, **_kwargs: frame.copy(),
+    )
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda value: value)
+    _patch_load_agn_plotters(monkeypatch)
+
+    selected, _parent = hubble_utils.load_agn_data(
+        source_path,
+        magnitude_convention="dereddened",
+        spectra_fit_h5=None,
+        cut_tier="2",
+        plot_diagnostics=False,
+    )
+
+    assert selected["object_id"].tolist() == ["high-l-low-host"]
+
+
+def test_fast_vs_uv_diagnostic_skips_catalog_without_fast_timescale(tmp_path):
+    frame = pd.DataFrame(
+        {
+            "z": [1.0],
+            "log_tau_uv_rf": [2.5],
+            "log_sigma_uv": [-0.5],
+        }
+    )
+
+    with pytest.warns(
+        RuntimeWarning,
+        match="Skipping optional fast-vs-UV diagnostic plot.*log_tau_fast_uv",
+    ):
+        result = hubble_plotting.plot_fast_vs_uv_variability(
+            frame,
+            plot_path=str(tmp_path),
+            show=False,
+        )
+
+    assert result is None
+    assert not (tmp_path / "diagnostics" / "fast_vs_uv_variability.pdf").exists()

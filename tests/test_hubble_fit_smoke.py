@@ -1,5 +1,6 @@
 import ast
 import inspect
+import json
 import os
 import sys
 from pathlib import Path
@@ -197,6 +198,37 @@ def test_completeness_magnitude_changes_run_tag():
     assert default_tag != attenuated_tag
 
 
+def test_plot_completeness_pre_post_cut_audit_writes_four_panel_pdf(tmp_path):
+    class SmoothCompleteness:
+        def __call__(self, magnitude, redshift):
+            magnitude = np.asarray(magnitude, dtype=float)
+            redshift = np.asarray(redshift, dtype=float)
+            return np.clip(
+                0.85 - 0.10 * (magnitude - 19.0) - 0.03 * redshift,
+                2e-4,
+                1.0,
+            )
+
+    before = pd.DataFrame(
+        {
+            hubble_fit.COMPLETENESS_MAG_COL: [18.0, 19.2, 20.5, 24.5, np.nan],
+            "z": [0.2, 0.8, 1.6, 3.8, 1.0],
+        }
+    )
+    after = before.iloc[[1, 2]].copy()
+    output = hubble_plotting.plot_completeness_pre_post_cut_audit(
+        SmoothCompleteness(),
+        np.linspace(18.5, 24.0, 16),
+        np.linspace(0.05, 3.95, 20),
+        before,
+        after,
+        plot_path=tmp_path,
+    )
+
+    expected = tmp_path / "completeness_audit_pre_post_cuts.pdf"
+    assert expected.exists()
+    assert expected.stat().st_size > 0
+    assert output is not None
 def test_completeness_magnitude_never_falls_back_to_another_source():
     attenuated_only = pd.DataFrame(
         {
@@ -1023,6 +1055,70 @@ def test_compute_direct_full_sample_completeness_summaries_freezes_fit_pivots(fa
     assert not np.allclose(naive_plot_blob[1][:-1], fit_blob[1], atol=1e-10)
 
 
+def test_completeness_redshift_support_covers_plot_sample_and_rejects_narrow_mock(
+    tmp_path,
+):
+    frame = pd.DataFrame(
+        {
+            "z": [0.2, 1.5, 3.5],
+            hubble_completeness_refactored.COMPLETENESS_MAG_COL: [20.0, 21.0, 22.0],
+            hubble_completeness_refactored.COMPLETENESS_MAG_ERR_COL: [0.1, 0.1, 0.1],
+        }
+    )
+    assert hubble_fit.resolve_completeness_redshift_support(
+        frame, (1.0, 3.16)
+    ) == (0.0, 4.5)
+
+    mock_path = tmp_path / "narrow_mock.h5"
+    with hubble_fit.h5py.File(mock_path, "w") as handle:
+        handle.create_dataset("z", data=np.linspace(1.0, 3.16, 100))
+        handle.create_dataset("apparent_mag_2500", data=np.linspace(19.0, 23.0, 100))
+        handle.attrs["mock_redshift_min"] = 1.0
+        handle.attrs["mock_redshift_max"] = 3.16
+
+    with pytest.raises(ValueError, match="does not cover the fixed map"):
+        hubble_completeness_refactored.get_completeness_function_2d(
+            frame,
+            sim_file=str(mock_path),
+            plot=False,
+            z_range=(0.2, 3.5),
+        )
+
+
+def test_strict_padded_support_is_recorded_in_checkpoint_selection_metadata():
+    frame = pd.DataFrame({"z": [0.5, 3.5]})
+    frame.attrs["cut_configuration_json"] = '{"cut_tier":"2"}'
+
+    hubble_fit.record_completeness_support_metadata(
+        (frame,),
+        magnitude_support=(18.5, 24.0),
+        redshift_support=(0.2, 3.5),
+    )
+
+    configuration = json.loads(frame.attrs["cut_configuration_json"])
+    assert configuration["completeness_magnitude_support"] == [18.5, 24.0]
+    assert configuration["completeness_redshift_support"] == [0.2, 3.5]
+    assert configuration["completeness_map_magnitude_support"] == [18.0, 24.5]
+    assert configuration["completeness_map_redshift_support"] == [0.0, 4.5]
+    assert configuration["completeness_map_n_magnitude_bins"] == 65
+    assert configuration["completeness_map_n_redshift_bins"] == 45
+    assert configuration["completeness_interpolation_policy"] == "strict-padded-v1"
+
+
+def test_strict_padded_resume_rejects_checkpoint_without_map_metadata():
+    expected_configuration = json.dumps(
+        {"completeness_interpolation_policy": "strict-padded-v1"}
+    )
+    with pytest.raises(RuntimeError, match="predates strict padded completeness metadata"):
+        hubble_fit.validate_resume_checkpoint(
+            {},
+            "legacy.h5",
+            ndim=1,
+            n_agn=0,
+            expected_cut_configuration_json=expected_configuration,
+        )
+
+
 def test_compute_direct_full_sample_completeness_summaries_optionally_returns_selected_draws(
     fake_data,
     monkeypatch,
@@ -1758,6 +1854,18 @@ def test_plot_hubble_debiased_returns_clipping_sigma_and_writes_distinct_diagnos
         residuals_df["mu_zscore"].to_numpy(dtype=float),
         np.abs(residuals_df["residuals"].to_numpy(dtype=float)) / residuals_df["clipping_sigma"].to_numpy(dtype=float),
     )
+    budget_summary = pd.read_csv(
+        tmp_path / "diagnostics" / "hubble_error_budget_summary_debiased.csv"
+    ).set_index("metric")["value"]
+    for metric in (
+        "redshift_trend_slope_mag_per_dex",
+        "redshift_trend_slope_err_mag_per_dex",
+        "redshift_trend_slope_significance_sigma",
+        "redshift_trend_delta_chi2",
+        "redshift_trend_p_value",
+    ):
+        assert metric in budget_summary.index
+        assert np.isfinite(budget_summary[metric])
 
 
 def test_plot_hubble_uses_complete_debiased_uncertainty_for_all_bins(
@@ -2235,6 +2343,34 @@ def test_weighted_bin_stats_includes_outer_edges_and_uses_histogram_convention()
     assert int(np.sum(counts)) == 5
 
 
+def test_compute_hubble_redshift_trend_recovers_weighted_slope():
+    z_pivot = 1.5
+    redshift = np.linspace(0.44, 3.16, 40)
+    x = np.log10((1.0 + redshift) / (1.0 + z_pivot))
+    expected_intercept = 0.07
+    expected_slope = -1.25
+    residuals = expected_intercept + expected_slope * x
+    sigma_sel = np.linspace(0.4, 0.9, redshift.size)
+
+    trend = hubble_plotting.compute_hubble_redshift_trend(
+        redshift,
+        residuals,
+        sigma_sel,
+        z_pivot=z_pivot,
+    )
+
+    assert trend["n_used"] == redshift.size
+    assert trend["intercept_mag"] == pytest.approx(expected_intercept)
+    assert trend["slope_mag_per_dex"] == pytest.approx(expected_slope)
+    assert trend["slope_err_mag_per_dex"] > 0.0
+    assert trend["slope_significance_sigma"] < 0.0
+    assert trend["delta_chi2"] == pytest.approx(
+        trend["slope_significance_sigma"] ** 2
+    )
+    assert 0.0 <= trend["p_value"] <= 1.0
+    assert trend["weighted_correlation"] == pytest.approx(-1.0)
+
+
 @pytest.mark.parametrize(
     "bins",
     [
@@ -2411,6 +2547,7 @@ def test_plot_hubble_residual_chi2_annotation_uses_debiased_full_and_data_errors
 
     pivot_context = _agn_pivot_context(df_agn, z_range)
     dmi_sigma = np.linspace(0.05, 0.20, len(df_agn))
+    sigma_sel = np.linspace(0.45, 0.80, len(df_agn))
     (
         residuals,
         _clipping_sigma,
@@ -2429,6 +2566,7 @@ def test_plot_hubble_residual_chi2_annotation_uses_debiased_full_and_data_errors
         dm_interp=None,
         dmi_values=np.zeros(len(df_agn), dtype=float),
         dmi_sigma=dmi_sigma,
+        dmi_selection_sigma=sigma_sel,
         z_range=z_range,
         only_agn=only_agn,
         residuals_csv_filename=None,
@@ -2480,6 +2618,9 @@ def test_plot_hubble_residual_chi2_annotation_uses_debiased_full_and_data_errors
     assert "full / data only" in annotation_text
     assert r"0.44\leq z\leq3.16" in annotation_text
     assert r"1.00<z\leq3.16" in annotation_text
+    assert "Selection-weighted" in annotation_text
+    assert r"\gamma_z=" in annotation_text
+    assert r"\Delta\chi^2=" in annotation_text
     assert (
         f"{expected_full:.2f} / {expected_data:.2f}"
         in annotation_text
@@ -3566,7 +3707,13 @@ def test_run_mcmc_pipeline_uses_explicit_parent_sample_for_completeness_map(monk
         lambda df_arg, *args, **kwargs: (
             completeness_sample_ids.append(df_arg["object_id"].tolist()),
             (
-                np.ones((2, 2)),
+                lambda magnitude, redshift: np.ones(
+                    np.broadcast_shapes(
+                        np.shape(magnitude),
+                        np.shape(redshift),
+                    ),
+                    dtype=float,
+                ),
                 np.array([19.0, 20.0]),
                 np.array([0.5, 1.0]),
                 0.5,
@@ -3603,6 +3750,13 @@ def test_run_mcmc_pipeline_uses_explicit_parent_sample_for_completeness_map(monk
 
     assert result[6].shape == (len(df_fit),)
     assert completeness_sample_ids == [df_parent["object_id"].tolist()]
+    audit_paths = list(
+        (tmp_path / "plots" / "hubble" / "unit").glob(
+            "*/completeness_audit_pre_post_cuts.pdf"
+        )
+    )
+    assert len(audit_paths) == 1
+    assert audit_paths[0].stat().st_size > 0
 
 
 def _patch_run_single_plot_stack(monkeypatch):
@@ -3840,6 +3994,7 @@ def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_c
     assert agn_chi2_calls == [expected_fit_ids]
     for plot_call in plot_hubble_calls:
         assert "agn_likelihood_space_chi2" not in plot_call["keyword_names"]
+        assert "df_agn_completeness_parent" not in plot_call["keyword_names"]
         assert (
             "agn_likelihood_space_chi2_zgt1"
             not in plot_call["keyword_names"]
@@ -4005,7 +4160,7 @@ def test_run_single_two_pass_sigma_clip_filters_outliers_and_writes_diagnostics(
     assert plot_hubble_calls[0]["sigma_clip_threshold"] == 3.0
     np.testing.assert_array_equal(
         plot_hubble_calls[1]["clipped_mask"],
-        np.array([False, True, True, False, False, True], dtype=bool),
+        np.array([False, True, True, False, False, False], dtype=bool),
     )
     assert plot_hubble_calls[1]["filename"] == "hubble_diagram_pass1_full_sample_clipped_debiased.pdf"
     assert plot_hubble_calls[1]["sigma_clip_threshold"] == 3.0
@@ -4019,19 +4174,20 @@ def test_run_single_two_pass_sigma_clip_filters_outliers_and_writes_diagnostics(
     pass1_membership_df = pd.read_csv(run_dir / "sigma_clip_membership_pass1.csv")
     pass2_membership_df = pd.read_csv(run_dir / "sigma_clip_membership_pass2.csv")
     assert set(pass1_df["object_id"]) == set(df_agn["object_id"])
-    assert pass1_df.loc[pass1_df["object_id"] == "agn_005", "was_clipped"].item()
-    assert set(pass1_df.loc[pass1_df["was_clipped"], "object_id"]) == {"agn_001", "agn_002", "agn_005"}
-    assert set(clipped_df["object_id"]) == {"agn_001", "agn_002", "agn_005"}
-    assert set(final_df["object_id"]) == {"agn_000", "agn_003", "agn_004"}
+    assert not pass1_df.loc[pass1_df["object_id"] == "agn_005", "was_clipped"].item()
+    assert not pass1_df.loc[pass1_df["object_id"] == "agn_005", "sigma_clip_eligible"].item()
+    assert set(pass1_df.loc[pass1_df["was_clipped"], "object_id"]) == {"agn_001", "agn_002"}
+    assert set(clipped_df["object_id"]) == {"agn_001", "agn_002"}
+    assert set(final_df["object_id"]) == {"agn_000", "agn_003", "agn_004", "agn_005"}
     assert final_df["was_clipped_pass1"].eq(False).all()
     assert final_df["was_clipped_pass2"].eq(False).all()
     assert final_df["is_in_pass2_sample"].eq(True).all()
     assert final_df["is_in_pass2_plot_sample"].eq(True).all()
-    assert final_df["is_in_pass2_fit_selection"].eq(True).all()
+    assert not final_df.loc[final_df["object_id"] == "agn_005", "is_in_pass2_fit_selection"].item()
     assert "mu_zscore_pass1" in final_df.columns
     assert "mu_zscore_pass2" in final_df.columns
-    assert set(pass1_membership_df.loc[pass1_membership_df["was_clipped_pass1"], "object_id"]) == {"agn_001", "agn_002", "agn_005"}
-    assert set(pass2_membership_df.loc[pass2_membership_df["is_in_pass2_sample"], "object_id"]) == {"agn_000", "agn_003", "agn_004"}
+    assert set(pass1_membership_df.loc[pass1_membership_df["was_clipped_pass1"], "object_id"]) == {"agn_001", "agn_002"}
+    assert set(pass2_membership_df.loc[pass2_membership_df["is_in_pass2_sample"], "object_id"]) == {"agn_000", "agn_003", "agn_004", "agn_005"}
     assert pass2_membership_df["is_in_pass2_plot_sample"].equals(pass2_membership_df["is_in_pass2_sample"])
     assert set(pass2_membership_df.loc[pass2_membership_df["is_in_pass2_fit_selection"], "object_id"]) == {"agn_000", "agn_003", "agn_004"}
     assert not set(pass2_membership_df.loc[pass2_membership_df["was_clipped_pass1"], "object_id"]) & set(
@@ -4079,7 +4235,9 @@ def test_run_single_two_pass_sigma_clip_filters_outliers_and_writes_diagnostics(
         "agn_000", "agn_001", "agn_002", "agn_003", "agn_004"
     }
     assert set(pass2_checkpoint["object_id_fit_selection"].astype(str)) == {"agn_000", "agn_003", "agn_004"}
-    assert set(pass2_checkpoint["object_id_plot_sample"].astype(str)) == {"agn_000", "agn_003", "agn_004"}
+    assert set(pass2_checkpoint["object_id_plot_sample"].astype(str)) == {
+        "agn_000", "agn_003", "agn_004", "agn_005"
+    }
 
 
 def test_run_single_two_pass_sigma_clip_fresh_mode_reruns_without_warm_start(monkeypatch, tmp_path):
@@ -4288,7 +4446,7 @@ def test_run_single_two_pass_sigma_clip_removes_clipped_object_ids_from_second_p
     )
 
     expected_full_ids = ["agn_000", "agn_001", "agn_002", "agn_003", "agn_004", "agn_001"]
-    expected_second_pass_ids = ["agn_000", "agn_003", "agn_004"]
+    expected_second_pass_ids = ["agn_000", "agn_003", "agn_004", "agn_001"]
     assert plot_hubble_calls[0]["object_ids"] == expected_full_ids
     assert plot_hubble_calls[0]["filename"] == "hubble_diagram_pass1_full_sample_debiased.pdf"
     assert plot_hubble_calls[0]["clipped_mask"] is None
@@ -4297,7 +4455,7 @@ def test_run_single_two_pass_sigma_clip_removes_clipped_object_ids_from_second_p
     assert plot_hubble_calls[1]["filename"] == "hubble_diagram_pass1_full_sample_clipped_debiased.pdf"
     np.testing.assert_array_equal(
         plot_hubble_calls[1]["clipped_mask"],
-        np.array([False, True, True, False, False, True], dtype=bool),
+        np.array([False, True, True, False, False, False], dtype=bool),
     )
     assert plot_hubble_calls[1]["sigma_clip_threshold"] == 3.0
     for call in plot_hubble_calls[2:]:
@@ -4515,7 +4673,9 @@ def test_run_single_two_pass_sigma_clip_keeps_out_of_range_survivor_in_stage2_pl
         prefix="unit",
     )
 
-    expected_stage2_plot_ids = ["agn_000", "agn_003", "agn_004", "agn_out_survivor"]
+    expected_stage2_plot_ids = [
+        "agn_000", "agn_003", "agn_004", "agn_out_survivor", "agn_out_clipped"
+    ]
     expected_stage2_fit_ids = ["agn_000", "agn_003", "agn_004"]
     assert pipeline_calls[0] == ["agn_000", "agn_001", "agn_002", "agn_003", "agn_004"]
     assert pipeline_calls[1] == expected_stage2_fit_ids
@@ -4543,11 +4703,13 @@ def test_run_single_two_pass_sigma_clip_keeps_out_of_range_survivor_in_stage2_pl
     assert final_df["was_clipped_pass1"].eq(False).all()
     assert final_df["is_in_pass2_plot_sample"].eq(True).all()
     assert set(final_df.loc[final_df["is_in_pass2_fit_selection"], "object_id"]) == set(expected_stage2_fit_ids)
-    assert set(final_df.loc[~final_df["is_in_pass2_fit_selection"], "object_id"]) == {"agn_out_survivor"}
+    assert set(final_df.loc[~final_df["is_in_pass2_fit_selection"], "object_id"]) == {
+        "agn_out_survivor", "agn_out_clipped"
+    }
     assert final_df.loc[final_df["object_id"] == "agn_out_survivor", "z"].item() > 3.16
     assert set(pass2_membership_df.loc[pass2_membership_df["is_in_pass2_plot_sample"], "object_id"]) == set(expected_stage2_plot_ids)
     assert set(pass2_membership_df.loc[pass2_membership_df["is_in_pass2_fit_selection"], "object_id"]) == set(expected_stage2_fit_ids)
-    assert not {"agn_001", "agn_002", "agn_out_clipped"} & set(final_df["object_id"])
+    assert not {"agn_001", "agn_002"} & set(final_df["object_id"])
 
 
 def test_run_single_resume_stage_pass2_skips_first_pass(monkeypatch, tmp_path):
@@ -4947,7 +5109,7 @@ def test_load_agn_data_residuals_csv_cut_remains_available(monkeypatch, tmp_path
     filtered_df, all_df = hubble_utils.load_agn_data(
         "dummy.h5",
         magnitude_convention="dereddened",
-        apply_cut=False,
+        cut_tier="none",
         residuals_sigma_clip=3.0,
         residuals_csv=str(residuals_path),
         lc_info_csv=None,
@@ -5000,7 +5162,32 @@ def test_hubble_fit_cli_declares_and_forwards_spectra_sdss_run2d():
     assert "spectra_sdss_run2d" in load_kwargs
 
 
-def test_hubble_fit_clis_declare_and_forward_no_cuts():
+def test_hubble_fit_clis_declare_and_forward_sdss_target_selection():
+    for source_path in (
+        Path(hubble_fit.__file__),
+        SRC / "qvc" / "hubble" / "hubble_fit_jax.py",
+    ):
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+
+        option_strings = set()
+        load_kwargs = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument":
+                option_strings.update(
+                    arg.value
+                    for arg in node.args
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                )
+            if isinstance(node.func, ast.Name) and node.func.id == "load_agn_data":
+                load_kwargs.update(kw.arg for kw in node.keywords if kw.arg is not None)
+
+        assert "--sdss-target-selection" in option_strings
+        assert "--sdss_target_selection" in option_strings
+        assert "sdss_target_selection" in load_kwargs
+
+def test_hubble_fit_clis_declare_and_forward_cut_tier():
     for source_path in (
         Path(hubble_fit.__file__),
         SRC / "qvc" / "hubble" / "hubble_fit_jax.py",
@@ -5008,6 +5195,7 @@ def test_hubble_fit_clis_declare_and_forward_no_cuts():
         tree = ast.parse(source_path.read_text(encoding="utf-8"))
         option_strings = set()
         forwarded_value = None
+        parser_choices = None
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -5017,18 +5205,20 @@ def test_hubble_fit_clis_declare_and_forward_no_cuts():
                     for arg in node.args
                     if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
                 ]
-                if "--no-cuts" in constants or "--no_cuts" in constants:
+                if "--cut-tier" in constants:
                     option_strings.update(constants)
+                    for keyword in node.keywords:
+                        if keyword.arg == "choices":
+                            parser_choices = keyword.value
             if isinstance(node.func, ast.Name) and node.func.id == "load_agn_data":
                 for keyword in node.keywords:
-                    if keyword.arg == "apply_cut":
+                    if keyword.arg == "cut_tier":
                         forwarded_value = keyword.value
 
-        assert {"--no-cuts", "--no_cuts"}.issubset(option_strings)
-        assert isinstance(forwarded_value, ast.UnaryOp)
-        assert isinstance(forwarded_value.op, ast.Not)
-        assert isinstance(forwarded_value.operand, ast.Attribute)
-        assert forwarded_value.operand.attr == "no_cuts"
+        assert "--cut-tier" in option_strings
+        assert parser_choices is not None
+        assert isinstance(forwarded_value, ast.Attribute)
+        assert forwarded_value.attr == "cut_tier"
 
 
 def test_hubble_fit_cli_declares_and_forwards_magnitude_convention():
@@ -5177,3 +5367,56 @@ def test_hubble_fit_cli_declares_and_forwards_minimal_plots():
     assert "minimal_plots" in run_single_kwargs
     assert "minimal_plots" in run_all_kwargs
     assert "plot_diagnostics" in load_kwargs
+
+
+def test_resume_checkpoint_validates_cut_and_redshift_metadata():
+    n_agn = 2
+    payload = {
+        "flat_samples": np.zeros((4, 3)),
+        "dmi_max_w": np.zeros(n_agn),
+        "dmi_posterior_sigma": np.ones(n_agn),
+        "integrals_max_w": np.zeros(n_agn),
+        "logZ": 0.0,
+        "logZerr": 0.0,
+        "cut_tier": "2",
+        "cut_configuration_json": '{"cut_tier":"2"}',
+        "z_range_semantics": hubble_fit.Z_RANGE_SEMANTICS,
+    }
+    hubble_fit.validate_resume_checkpoint(
+        payload,
+        "valid.h5",
+        3,
+        n_agn,
+        expected_cut_tier="2",
+        expected_cut_configuration_json='{"cut_tier":"2"}',
+        expected_z_range_semantics=hubble_fit.Z_RANGE_SEMANTICS,
+    )
+    with pytest.raises(RuntimeError, match="different Hubble cut"):
+        hubble_fit.validate_resume_checkpoint(
+            payload,
+            "wrong-cut.h5",
+            3,
+            n_agn,
+            expected_cut_tier="1",
+            expected_cut_configuration_json='{"cut_tier":"1"}',
+        )
+    legacy = {key: value for key, value in payload.items() if key != "z_range_semantics"}
+    with pytest.raises(RuntimeError, match="predates fit-only"):
+        hubble_fit.validate_resume_checkpoint(
+            legacy,
+            "legacy.h5",
+            3,
+            n_agn,
+            expected_z_range_semantics=hubble_fit.Z_RANGE_SEMANTICS,
+        )
+
+
+def test_run_hubble_forwards_configurable_cumulative_cut_tier():
+    runner = (ROOT / "run_hubble.xonsh").read_text(encoding="utf-8")
+
+    assert '__xonsh__.env.get("QVC_HUBBLE_CUT_TIER", "2")' in runner
+    assert 'cut_tier not in {"none", "0", "1", "2"}' in runner
+    assert "--cut-tier @(cut_tier)" in runner
+    assert "tiers are cumulative" in runner
+    assert '"QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG", "0.10"' in runner
+    assert '"QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z", "0.30"' in runner

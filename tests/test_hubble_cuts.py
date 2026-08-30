@@ -1,4 +1,6 @@
 import os
+from ast import literal_eval
+import subprocess
 import sys
 from pathlib import Path
 
@@ -13,7 +15,9 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from qvc.hubble.cuts import (  # noqa: E402
-    AGN_SCALAR_PARAMETER_CUTS,
+    AGN_TIER0_ELIGIBILITY_CUTS,
+    AGN_TIER1_FIT_QUALITY_CUTS,
+    AGN_TIER2_PARAMETER_CUTS,
     ALLOW_MISSING_SCALAR_CUT_COLUMNS,
     APPARENT_MAG_2500_ERR_MAX,
     COMPLETENESS_MAG_2500_MIN,
@@ -23,13 +27,25 @@ from qvc.hubble.cuts import (  # noqa: E402
     JAXSEDFIT_JOINT_REDUCED_CHI2_MAX,
     LIGHT_CURVE_N_POINTS_COLUMN,
     LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
-    MCMC_ESS_MIN,
-    MCMC_RHAT_MAX,
+    LOO_CHI2_EFF_MAX,
+    LIGHT_CURVE_RHAT_MAX,
+    SED_REDUCED_CHI2_MAX,
+    SPECTRAL_RHAT_MAX,
+    SPECTROSCOPY_REDUCED_CHI2_MAX,
+    T_RF_OVER_TAU_UV_RF_COLUMN,
     REL_APPARENT_MAG_2500_ERR_MAX,
     add_light_curve_point_count_column,
     light_curve_point_count_series,
+    normalize_sdss_target_selection,
+    normalize_cut_tier,
 )
-from qvc.hubble.hubble_cut_config import build_agn_cuts, build_dlog_amp_blr_cuts  # noqa: E402
+from qvc.hubble.hubble_cut_config import (  # noqa: E402
+    build_agn_cuts,
+    build_dlog_amp_blr_cuts,
+    build_tier0_cuts,
+    build_tier1_cuts,
+    build_tier2_cuts,
+)
 from qvc.hubble.hubble_utils import (  # noqa: E402
     _append_cut_report_row,
     _count_redshift_bin_removals,
@@ -40,28 +56,41 @@ from qvc.hubble.hubble_utils import (  # noqa: E402
 )
 
 
-def test_build_agn_cuts_contains_only_fiducial_profile():
+def test_build_agn_cuts_are_partitioned_in_tier_order():
     cuts = build_agn_cuts()
     cut_map = {column: (lower, upper) for column, lower, upper in cuts}
 
-    assert tuple(cuts) == AGN_SCALAR_PARAMETER_CUTS
+    assert cuts == build_tier0_cuts() + build_tier1_cuts() + build_tier2_cuts()
+    assert tuple(build_tier0_cuts()) == AGN_TIER0_ELIGIBILITY_CUTS
+    assert tuple(build_tier1_cuts()) == AGN_TIER1_FIT_QUALITY_CUTS
     assert cut_map == {
         "log_tau_uv_rf": (1.5, 4.0),
-        "fracAGN_5100_fit": (FRAC_AGN_5100_MIN, None),
+        T_RF_OVER_TAU_UV_RF_COLUMN: (5.0, None),
         "apparent_mag_2500_err": (None, APPARENT_MAG_2500_ERR_MAX),
         "m_2500_dereddened": (
             COMPLETENESS_MAG_2500_MIN,
             COMPLETENESS_MAG_2500_MAX,
         ),
+        "sed_reduced_chi2": (None, SED_REDUCED_CHI2_MAX),
+        "spectroscopy_reduced_chi2": (None, SPECTROSCOPY_REDUCED_CHI2_MAX),
         "joint_reduced_chi2": (None, JAXSEDFIT_JOINT_REDUCED_CHI2_MAX),
-        "m_2500_dereddened_rhat": (None, MCMC_RHAT_MAX),
-        "m_2500_dereddened_ess": (MCMC_ESS_MIN, None),
-        "m_2500_attenuated_model_rhat": (None, MCMC_RHAT_MAX),
-        "m_2500_attenuated_model_ess": (MCMC_ESS_MIN, None),
-        "log_tau_uv_rf_rhat": (None, MCMC_RHAT_MAX),
-        "log_sigma_uv_rhat": (None, MCMC_RHAT_MAX),
+        "loo_chi2_eff": (None, LOO_CHI2_EFF_MAX),
+        "m_2500_dereddened_rhat": (None, SPECTRAL_RHAT_MAX),
+        "m_2500_attenuated_model_rhat": (None, SPECTRAL_RHAT_MAX),
+        "log_tau_uv_rf_rhat": (None, LIGHT_CURVE_RHAT_MAX),
+        "log_sigma_uv_rhat": (None, LIGHT_CURVE_RHAT_MAX),
     }
     assert LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS == ("u",)
+    assert COMPLETENESS_MAG_2500_MIN == 18.5
+    assert COMPLETENESS_MAG_2500_MAX == 24.0
+
+
+def test_normalize_cut_tier_accepts_exact_four_modes():
+    assert [normalize_cut_tier(value) for value in ("none", 0, 1, 2)] == [
+        "none", "0", "1", "2"
+    ]
+    with np.testing.assert_raises_regex(ValueError, "Unknown cut tier"):
+        normalize_cut_tier("3")
 
 
 def test_previous_scalar_and_component_defaults_are_disabled():
@@ -74,7 +103,6 @@ def test_previous_scalar_and_component_defaults_are_disabled():
             "f_host_2500",
             "alpha_lambda",
             "variability_chi_sq_red_g",
-            "loo_chi2_eff",
             "log_sigma_uv",
         }
     )
@@ -146,16 +174,70 @@ def test_jaxsedfit_joint_reduced_chi2_cut_requires_finite_values():
     np.testing.assert_array_equal(mask, [True, False, False, False, False])
 
 
-def test_convergence_cuts_allow_missing_but_reject_bad_finite_values():
+def test_fit_quality_cuts_reject_bad_or_missing_values():
     cases = (
-        ("m_2500_dereddened_rhat", None, MCMC_RHAT_MAX),
-        ("m_2500_dereddened_ess", MCMC_ESS_MIN, None),
-        ("m_2500_attenuated_model_rhat", None, MCMC_RHAT_MAX),
-        ("m_2500_attenuated_model_ess", MCMC_ESS_MIN, None),
-        ("log_tau_uv_rf_rhat", None, MCMC_RHAT_MAX),
-        ("log_sigma_uv_rhat", None, MCMC_RHAT_MAX),
+        ("sed_reduced_chi2", SED_REDUCED_CHI2_MAX),
+        ("spectroscopy_reduced_chi2", SPECTROSCOPY_REDUCED_CHI2_MAX),
+        ("joint_reduced_chi2", JAXSEDFIT_JOINT_REDUCED_CHI2_MAX),
+        ("loo_chi2_eff", LOO_CHI2_EFF_MAX),
     )
-    assert ALLOW_MISSING_SCALAR_CUT_COLUMNS == {column for column, _, _ in cases}
+    for column, upper in cases:
+        values = [upper, np.nextafter(upper, np.inf), np.nan, np.inf, -np.inf]
+        mask = _scalar_parameter_cut_mask(
+            pd.DataFrame({column: values}), column, None, upper
+        )
+        np.testing.assert_array_equal(mask, [True, False, False, False, False])
+
+
+def test_explicit_zero_num_divergences_cut_requires_exactly_zero():
+    values = [0, 1, -1, np.nan, np.inf, -np.inf]
+    mask = _scalar_parameter_cut_mask(
+        pd.DataFrame({"num_divergences": values}),
+        "num_divergences",
+        0.0,
+        0.0,
+    )
+    np.testing.assert_array_equal(mask, [True, False, False, False, False, False])
+
+
+def _divergence_cut_from_environment(value):
+    env = os.environ.copy()
+    env.pop("QVC_CUT_NUM_DIVERGENCES_MAX", None)
+    if value is not None:
+        env["QVC_CUT_NUM_DIVERGENCES_MAX"] = value
+    script = (
+        "from qvc.hubble.cuts import NUM_DIVERGENCES_MAX, AGN_TIER1_FIT_QUALITY_CUTS; "
+        "print(repr((NUM_DIVERGENCES_MAX, [cut for cut in "
+        "AGN_TIER1_FIT_QUALITY_CUTS if cut[0] == 'num_divergences'])))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=SRC,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return literal_eval(completed.stdout.strip())
+
+
+def test_num_divergences_cut_defaults_off_and_can_be_enabled_explicitly():
+    assert _divergence_cut_from_environment(None) == (None, [])
+    assert _divergence_cut_from_environment("none") == (None, [])
+    assert _divergence_cut_from_environment("0") == (
+        0.0,
+        [("num_divergences", 0.0, 0.0)],
+    )
+
+
+def test_rhat_cuts_reject_missing_and_bad_finite_values():
+    cases = (
+        ("m_2500_dereddened_rhat", None, SPECTRAL_RHAT_MAX),
+        ("m_2500_attenuated_model_rhat", None, SPECTRAL_RHAT_MAX),
+        ("log_tau_uv_rf_rhat", None, LIGHT_CURVE_RHAT_MAX),
+        ("log_sigma_uv_rhat", None, LIGHT_CURVE_RHAT_MAX),
+    )
+    assert ALLOW_MISSING_SCALAR_CUT_COLUMNS == set()
 
     for column, lower, upper in cases:
         boundary = lower if lower is not None else upper
@@ -168,7 +250,7 @@ def test_convergence_cuts_allow_missing_but_reject_bad_finite_values():
         mask = _scalar_parameter_cut_mask(
             pd.DataFrame({column: values}), column, lower, upper
         )
-        np.testing.assert_array_equal(mask, [True, False, True, False, False])
+        np.testing.assert_array_equal(mask, [True, False, False, False, False])
 
 
 def test_current_spectra_schema_requires_fracagn_5100_fit(tmp_path):
@@ -224,7 +306,7 @@ def test_current_spectra_schema_accepts_only_joint_sedfit_backend(tmp_path):
         populate_spectra_fit(pd.DataFrame({"object_id": ["obj"]}), [csv_path])
 
 
-def test_populate_spectra_fit_preserves_all_nonconflicting_columns_and_hdf5_wins(
+def test_populate_spectra_fit_preserves_nonconflicting_columns_and_spectra_hdf5_wins(
     tmp_path,
 ):
     csv_path = tmp_path / "spectra.csv"
@@ -259,8 +341,8 @@ def test_populate_spectra_fit_preserves_all_nonconflicting_columns_and_hdf5_wins
 
     out = populate_spectra_fit(source, [csv_path])
 
-    assert out.loc[0, "z"] == 1.5
-    assert out.loc[0, "pl_slope"] == -0.8
+    assert out.loc[0, "z"] == row["z"]
+    assert out.loc[0, "pl_slope"] == row["pl_slope"]
     assert out.loc[0, "alpha_lambda"] == -0.75
     assert out.loc[0, "alpha_lambda_err"] == 0.03
     assert out.loc[0, "alpha_nu"] == -1.25
@@ -270,8 +352,10 @@ def test_populate_spectra_fit_preserves_all_nonconflicting_columns_and_hdf5_wins
     assert not any(column.endswith(("_x", "_y", "_sedfit")) for column in out.columns)
     assert "new_sed_parameter" in out.attrs["spectra_fit_columns"]
     assert "new_sed_label" in out.attrs["spectra_fit_columns"]
-    assert "z" not in out.attrs["spectra_fit_columns"]
-    assert "pl_slope" not in out.attrs["spectra_fit_columns"]
+    assert "z" in out.attrs["spectra_fit_columns"]
+    assert "pl_slope" in out.attrs["spectra_fit_columns"]
+    assert out.attrs["spectra_fit_discarded_columns"] == ()
+    assert out.attrs["light_curve_discarded_columns"] == ("pl_slope", "z")
 
 
 def test_populate_spectra_fit_derives_missing_slope_aliases_without_overwriting(
@@ -394,6 +478,7 @@ def test_append_cut_report_row_includes_zero_filled_redshift_bins_without_remove
 
     assert rows == [
         {
+            "tier": "assembly",
             "step": "agn_scalar:dummy",
             "criterion": "dummy skipped",
             "before": 5,
@@ -429,6 +514,7 @@ def test_render_cut_summary_table_shows_low_and_high_redshift_removals_after_tot
     values = [cell.strip() for cell in lines[3].strip("|").split("|")]
 
     assert headers == [
+        "tier",
         "step",
         "criterion",
         "before",
@@ -439,6 +525,7 @@ def test_render_cut_summary_table_shows_low_and_high_redshift_removals_after_tot
         "status",
     ]
     assert values == [
+        "assembly",
         "agn_scalar:dummy",
         "dummy criterion",
         "5",

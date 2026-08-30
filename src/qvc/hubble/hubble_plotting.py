@@ -19,9 +19,17 @@ from astropy.cosmology import FlatwCDM, FlatwpwaCDM, FlatLambdaCDM, Flatw0waCDM
 from astropy.cosmology.realizations import Planck18
 from astropy import units as u
 from matplotlib.lines import Line2D
-from matplotlib.ticker import FixedLocator, FormatStrFormatter, FuncFormatter, LogLocator, NullLocator
+from matplotlib.ticker import (
+    FixedLocator,
+    FormatStrFormatter,
+    FuncFormatter,
+    LogLocator,
+    NullFormatter,
+    NullLocator,
+)
 from scipy.interpolate import RegularGridInterpolator, interp1d
 from scipy.optimize import minimize_scalar
+from scipy.stats import chi2 as chi2_distribution
 from scipy.stats import gaussian_kde, kurtosis, norm, normaltest, probplot, skew, spearmanr
 from tqdm import tqdm
 
@@ -45,7 +53,11 @@ from qvc.hubble.hubble_model import (
     resolve_model_option_flags,
 )
 from qvc.hubble.hubble_likelihood import sigma_lens_from_dc, sigma_mu_from_z_err
-from qvc.hubble.cuts import LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS, light_curve_point_count_series
+from qvc.hubble.cuts import (
+    AGN_TIER1_FIT_QUALITY_CUTS,
+    LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
+    light_curve_point_count_series,
+)
 from qvc.light_curve.band_colors import BAND_COLORS as LIGHT_CURVE_BAND_COLORS
 from qvc.hubble.sigma_tau_lambda_fit import (
     SDSS_LAMBDA_PIVOT,
@@ -1330,6 +1342,125 @@ def plot_l2500_vs_eta_sigma_fiducial(
         fig,
         os.path.join(diagnostics_path, filename),
         dpi=200,
+        show=show,
+    )
+
+
+def plot_tier1_cuts_vs_redshift(
+    df,
+    plot_path="plots/hubble",
+    show=False,
+    filename="tier1_cuts_vs_redshift_precut.pdf",
+):
+    """Plot current spectra (top) and light-curve (bottom) Tier-1 cuts."""
+
+    spectra_columns = (
+        ("sed_reduced_chi2", r"SED $\chi^2_\nu$"),
+        ("spectroscopy_reduced_chi2", r"Spectroscopy $\chi^2_\nu$"),
+        ("joint_reduced_chi2", r"Joint $\chi^2_\nu$"),
+        ("m_2500_dereddened_rhat", r"$m_{2500,\rm dered}$ R-hat"),
+        ("m_2500_attenuated_model_rhat", r"$m_{2500,\rm atten}$ R-hat"),
+    )
+    light_curve_columns = (
+        ("loo_chi2_eff", r"LC LOO $\chi^2_{\rm eff}$"),
+        ("log_tau_uv_rf_rhat", r"$\log\,\tau_{\rm UV,RF}$ R-hat"),
+        ("log_sigma_uv_rhat", r"$\log\,\sigma_{\rm UV}$ R-hat"),
+    )
+    thresholds = {
+        column: upper
+        for column, lower, upper in AGN_TIER1_FIT_QUALITY_CUTS
+        if lower is None and upper is not None
+    }
+
+    fig = plt.figure(figsize=(18.5, 8.2))
+    outer = gridspec.GridSpec(2, 1, figure=fig, hspace=0.46)
+    top = outer[0].subgridspec(1, len(spectra_columns), wspace=0.34)
+    bottom = outer[1].subgridspec(1, len(light_curve_columns), wspace=0.25)
+    spectra_axes = [fig.add_subplot(top[0, index]) for index in range(len(spectra_columns))]
+    light_curve_axes = [
+        fig.add_subplot(bottom[0, index]) for index in range(len(light_curve_columns))
+    ]
+
+    z = (
+        pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
+        if "z" in df.columns
+        else np.full(len(df), np.nan, dtype=float)
+    )
+    tick_candidates = np.array(
+        [0.05, 0.1, 0.2, 0.5, 0.7, 1.0, 1.1, 1.2, 1.3, 1.5,
+         2.0, 3.0, 4.0, 5.0, 10.0, 20.0, 50.0],
+        dtype=float,
+    )
+
+    def _plot_panel(axis, column, title, color):
+        threshold = thresholds.get(column)
+        axis.set_title(title, fontsize=12, pad=7)
+        axis.set_xlabel("Redshift", fontsize=11)
+        axis.set_xlim(0.0, 5.0)
+        axis.set_yscale("log")
+
+        if column not in df.columns or threshold is None:
+            axis.set_ylim(0.5, 5.0)
+            message = "Column missing" if column not in df.columns else "Cut disabled"
+            axis.text(0.5, 0.5, message, transform=axis.transAxes,
+                      ha="center", va="center", color="0.4")
+            return
+
+        values = pd.to_numeric(df[column], errors="coerce").to_numpy(dtype=float)
+        finite = np.isfinite(z) & np.isfinite(values) & (values > 0.0)
+        passed = finite & (values <= threshold)
+        failed = finite & (values > threshold)
+        positive = values[finite]
+        if positive.size:
+            lower = min(float(np.min(positive)), float(threshold)) / 1.12
+            upper = max(float(np.max(positive)), float(threshold)) * 1.12
+        else:
+            lower, upper = float(threshold) / 2.0, float(threshold) * 2.0
+        axis.set_ylim(lower, upper)
+
+        axis.scatter(z[passed], values[passed], s=9, color=color, alpha=0.34,
+                     edgecolors="none", rasterized=True)
+        axis.scatter(z[failed], values[failed], s=14, color="#A51C30", marker="x",
+                     alpha=0.78, linewidths=0.7, rasterized=True)
+        axis.axhline(threshold, color="#A51C30", lw=1.4, ls="--", zorder=1)
+        axis.text(0.97, threshold, f"cut = {threshold:g}",
+                  transform=axis.get_yaxis_transform(), ha="right", va="bottom",
+                  fontsize=8.5, color="#A51C30")
+
+        count = int(np.count_nonzero(finite))
+        annotation = (
+            f"N = {count:,}\npass = {100.0 * np.count_nonzero(passed) / count:.1f}%"
+            if count else "No finite values"
+        )
+        axis.text(0.03, 0.96, annotation, transform=axis.transAxes,
+                  ha="left", va="top", fontsize=8.5, color="0.25",
+                  bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.72})
+
+        ticks = tick_candidates[(tick_candidates >= lower) & (tick_candidates <= upper)]
+        ticks = np.unique(np.append(ticks, float(threshold)))
+        axis.yaxis.set_major_locator(FixedLocator(ticks))
+        axis.yaxis.set_major_formatter(FuncFormatter(lambda value, _: f"{value:g}"))
+        axis.yaxis.set_minor_formatter(NullFormatter())
+        axis.grid(axis="y", which="major", color="0.86", lw=0.65, ls=":")
+        axis.tick_params(labelsize=9)
+
+    for axis, (column, title) in zip(spectra_axes, spectra_columns):
+        _plot_panel(axis, column, title, "#7A5195")
+    for axis, (column, title) in zip(light_curve_axes, light_curve_columns):
+        _plot_panel(axis, column, title, "#0072B2")
+
+    fig.text(0.012, 0.705, "Spectra Tier 1 diagnostic (log scale)", rotation=90,
+             va="center", ha="center", fontsize=12.5)
+    fig.text(0.012, 0.275, "Light-curve Tier 1 diagnostic (log scale)", rotation=90,
+             va="center", ha="center", fontsize=12.5)
+    fig.suptitle("Tier 1 cuts versus redshift (pre-cut sample)", fontsize=14, y=0.985)
+    fig.subplots_adjust(left=0.052, right=0.993, bottom=0.075, top=0.935)
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=220,
         show=show,
     )
 
@@ -2856,7 +2987,13 @@ def plot_fast_vs_uv_variability(df, plot_path="plots/hubble", show=False, filena
             missing.append("log_tau_fast_uv")
         if tau_uv_col is None:
             missing.append("log_tau_uv_rf or log_tau_uv")
-        raise KeyError(f"Missing required columns for fast-vs-UV diagnostic plot: {', '.join(missing)}")
+        warnings.warn(
+            "Skipping optional fast-vs-UV diagnostic plot because the "
+            f"following column(s) are unavailable: {', '.join(missing)}.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
 
     z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float) if "z" in df.columns else np.full(len(df), np.nan)
     log_tau_fast = pd.to_numeric(df[tau_fast_col], errors="coerce").to_numpy(dtype=float)
@@ -5280,6 +5417,104 @@ def _weighted_bin_stats(z, y, yerr, bins, *, min_count=3, center='mid', plot_pat
     return zc[keep], mean[keep], sem[keep], n[keep]
 
 
+def compute_hubble_redshift_trend(
+    redshift,
+    residuals,
+    sigma_sel,
+    *,
+    z_pivot,
+):
+    """Fit the selection-weighted mean residual trend in pivoted log(1+z).
+
+    The delta chi-squared compares a constant residual with a constant plus
+    one redshift-slope parameter. It targets coherent redshift structure
+    rather than measuring the total object-to-object scatter.
+    """
+    z = np.asarray(redshift, dtype=float)
+    r = np.asarray(residuals, dtype=float)
+    sigma = np.asarray(sigma_sel, dtype=float)
+    if z.shape != r.shape or z.shape != sigma.shape:
+        raise ValueError(
+            "redshift, residuals, and sigma_sel must have identical shapes"
+        )
+    if not np.isfinite(z_pivot) or z_pivot <= -1.0:
+        raise ValueError("z_pivot must be finite and greater than -1")
+
+    valid = (
+        np.isfinite(z)
+        & (z > -1.0)
+        & np.isfinite(r)
+        & np.isfinite(sigma)
+        & (sigma > 0.0)
+    )
+    n_used = int(np.count_nonzero(valid))
+    empty = {
+        "n_used": n_used,
+        "intercept_mag": np.nan,
+        "intercept_err_mag": np.nan,
+        "slope_mag_per_dex": np.nan,
+        "slope_err_mag_per_dex": np.nan,
+        "slope_significance_sigma": np.nan,
+        "delta_chi2": np.nan,
+        "p_value": np.nan,
+        "weighted_correlation": np.nan,
+    }
+    if n_used < 3:
+        return empty
+
+    z = z[valid]
+    r = r[valid]
+    sigma = sigma[valid]
+    x = np.log10((1.0 + z) / (1.0 + float(z_pivot)))
+    weights = 1.0 / np.square(sigma)
+    design_constant = np.ones((n_used, 1), dtype=float)
+    design_trend = np.column_stack((np.ones(n_used, dtype=float), x))
+
+    def _fit(design):
+        normal_matrix = design.T @ (weights[:, None] * design)
+        try:
+            covariance = np.linalg.inv(normal_matrix)
+        except np.linalg.LinAlgError:
+            return None
+        coefficients = covariance @ (design.T @ (weights * r))
+        fit_residuals = r - design @ coefficients
+        chi2_value = float(np.sum(weights * np.square(fit_residuals)))
+        return coefficients, covariance, chi2_value
+
+    constant_fit = _fit(design_constant)
+    trend_fit = _fit(design_trend)
+    if constant_fit is None or trend_fit is None:
+        return empty
+
+    coefficients, covariance, trend_chi2 = trend_fit
+    slope_error = float(np.sqrt(max(covariance[1, 1], 0.0)))
+    delta_chi2 = max(float(constant_fit[2] - trend_chi2), 0.0)
+    x_mean = float(np.sum(weights * x) / np.sum(weights))
+    r_mean = float(np.sum(weights * r) / np.sum(weights))
+    covariance_xr = float(np.sum(weights * (x - x_mean) * (r - r_mean)))
+    variance_x = float(np.sum(weights * np.square(x - x_mean)))
+    variance_r = float(np.sum(weights * np.square(r - r_mean)))
+    correlation_denom = np.sqrt(variance_x * variance_r)
+
+    return {
+        "n_used": n_used,
+        "intercept_mag": float(coefficients[0]),
+        "intercept_err_mag": float(np.sqrt(max(covariance[0, 0], 0.0))),
+        "slope_mag_per_dex": float(coefficients[1]),
+        "slope_err_mag_per_dex": slope_error,
+        "slope_significance_sigma": (
+            float(coefficients[1] / slope_error) if slope_error > 0.0 else np.nan
+        ),
+        "delta_chi2": delta_chi2,
+        "p_value": float(chi2_distribution.sf(delta_chi2, 1)),
+        "weighted_correlation": (
+            covariance_xr / correlation_denom
+            if correlation_denom > 0.0
+            else np.nan
+        ),
+    }
+
+
 def _interval_bin_edges(bins, lower, upper):
     """Return ``bins`` clipped to one non-empty interval."""
     bins = np.asarray(bins, dtype=float)
@@ -5322,6 +5557,7 @@ def _range_partitioned_weighted_bin_stats(
     *,
     min_count=3,
     center="mid",
+    fit_membership_mask=None,
 ):
     """Bin fit-range and out-of-range objects without mixed boundary bins.
 
@@ -5338,6 +5574,12 @@ def _range_partitioned_weighted_bin_stats(
         raise ValueError(
             "z, y, and yerr must have identical shapes for range-partitioned binning"
         )
+    if fit_membership_mask is None:
+        fit_membership = np.ones(z.shape, dtype=bool)
+    else:
+        fit_membership = np.asarray(fit_membership_mask, dtype=bool)
+        if fit_membership.shape != z.shape:
+            raise ValueError("fit_membership_mask must have the same shape as z")
     if len(z_range) != 2:
         raise ValueError("z_range must contain exactly two endpoints")
     z_lo, z_hi = map(float, z_range)
@@ -5363,7 +5605,11 @@ def _range_partitioned_weighted_bin_stats(
         )
 
     below = summarize(z < z_lo, bins[0], z_lo)
-    inside = summarize((z >= z_lo) & (z <= z_hi), z_lo, z_hi)
+    inside = summarize(
+        (z >= z_lo) & (z <= z_hi) & fit_membership,
+        z_lo,
+        z_hi,
+    )
     above = summarize(z > z_hi, z_hi, bins[-1])
     return inside, _concatenate_weighted_bin_stats((below, above))
 
@@ -5742,6 +5988,15 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     mu_pred_joint_consistent = (
         mu_cosmo_posterior_median + residuals
     )
+    fit_membership_mask = (
+        df_agn["is_fit_selection"].to_numpy(dtype=bool)
+        if "is_fit_selection" in df_agn.columns
+        else (
+            np.isfinite(z_values)
+            & (z_values >= z_range[0])
+            & (z_values <= z_range[1])
+        )
+    )
     chi2_redshift_mask = (
         np.isfinite(z_values)
         & np.isfinite(residuals)
@@ -5749,11 +6004,25 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         & np.isfinite(total_var)
         & (data_var > 0.0)
         & (total_var > 0.0)
-        & (z_values >= z_range[0])
-        & (z_values <= z_range[1])
+        & fit_membership_mask
     )
     if clipped_mask is not None:
         chi2_redshift_mask &= ~clipped_mask
+
+    redshift_trend = None
+    if debias and sigma_sel is not None:
+        trend_mask = (
+            np.isfinite(z_values)
+            & fit_membership_mask
+        )
+        if clipped_mask is not None:
+            trend_mask &= ~clipped_mask
+        redshift_trend = compute_hubble_redshift_trend(
+            z_values[trend_mask],
+            residuals[trend_mask],
+            sigma_sel[trend_mask],
+            z_pivot=z_pivot_agn,
+        )
 
     # Plot the inferred distance moduli directly.  The observed population
     # already contains its real scatter; adding a synthetic intrinsic-scatter
@@ -5781,6 +6050,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         z_range,
         min_count=5,
         center="mid",
+        fit_membership_mask=fit_membership_mask,
     )
 
     # Residual-panel bins use the same point-level fit-range partition as the
@@ -5793,6 +6063,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         z_range,
         min_count=5,
         center="mid",
+        fit_membership_mask=fit_membership_mask,
     )
 
     # Log-z bins for INSET (match inset xscale='log')
@@ -5810,6 +6081,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         binning_sigma,
         bins_log,
         z_range,
+        fit_membership_mask=fit_membership_mask,
     )
 
     if compute_only:
@@ -6243,6 +6515,20 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                         f"{chi2_data_only_zgt1:.2f}"
                     )
                 )
+            if (
+                redshift_trend is not None
+                and np.isfinite(redshift_trend["slope_mag_per_dex"])
+            ):
+                chi2_annotation_lines.append(
+                    (
+                        r"Selection-weighted $z$ trend: "
+                        rf"$\gamma_z={redshift_trend['slope_mag_per_dex']:+.2f}"
+                        rf"\pm{redshift_trend['slope_err_mag_per_dex']:.2f}$ "
+                        rf"mag dex$^{{-1}}$ "
+                        rf"$({redshift_trend['slope_significance_sigma']:+.1f}\sigma, "
+                        rf"\Delta\chi^2={redshift_trend['delta_chi2']:.1f})$"
+                    )
+                )
             ax_resid.text(
                 0.02,
                 0.08,
@@ -6469,6 +6755,14 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             {"metric": "median_var_fraction_predicted_M2500_alpha_lambda_term", "value": _median_fraction(pred_m2500_alpha_lambda_var)},
             {"metric": "median_var_fraction_predicted_M2500_eta_sigma_term", "value": _median_fraction(pred_m2500_eta_sigma_var)},
         ]
+        if redshift_trend is not None:
+            budget_rows.extend(
+                {
+                    "metric": f"redshift_trend_{metric}",
+                    "value": float(value),
+                }
+                for metric, value in redshift_trend.items()
+            )
         budget_suffix = diagnostics_suffix if diagnostics_suffix is not None else ("_debiased" if debias else "")
         budget_summary_path = os.path.join(diagnostics_path, f"hubble_error_budget_summary{budget_suffix}.csv")
         pd.DataFrame(budget_rows).to_csv(budget_summary_path, index=False)
@@ -6612,6 +6906,9 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             "residuals",
             "mu_zscore",
         ]
+        for membership_col in ("in_fit_z_range", "is_fit_selection"):
+            if membership_col in residuals_df.columns:
+                fields.insert(1, membership_col)
         sedfit_fields = [
             "fit_backend",
             "fracAGN_5100_fit",
@@ -7554,6 +7851,149 @@ def plot_completeness_vs_mag_at_redshifts(
     completeness_path = os.path.join(base_plot_path, "completeness")
     os.makedirs(completeness_path, exist_ok=True)
     _save_figure(fig, os.path.join(completeness_path, "completeness_vs_mag_at_redshifts.pdf"), dpi=300, show=show)
+
+
+def plot_completeness_pre_post_cut_audit(
+    p_detect,
+    mag_centers,
+    z_centers,
+    before_cuts,
+    after_cuts,
+    *,
+    magnitude_col=COMPLETENESS_MAG_COL,
+    plot_path="plots/hubble",
+    filename="completeness_audit_pre_post_cuts.pdf",
+    map_label=r"$C(m,z)$",
+    magnitude_label=r"$m_{2500}$",
+    show=False,
+):
+    """Plot the frozen completeness map against samples before and after cuts.
+
+    The two rows use one identical map and color normalization.  The left
+    panels show the catalog locations over the map; the right panels show the
+    completeness evaluated at each object's observed ``(m, z)``.  Counts
+    outside the finite map-center rectangle are reported rather than silently
+    hidden by the axes limits.
+    """
+
+    required = {magnitude_col, "z"}
+    for sample_name, sample in (
+        ("before cuts", before_cuts),
+        ("after cuts", after_cuts),
+    ):
+        missing = required - set(sample.columns)
+        if missing:
+            raise KeyError(
+                f"Completeness audit {sample_name} sample is missing "
+                f"{sorted(missing)}."
+            )
+
+    mag_centers = np.asarray(mag_centers, dtype=float)
+    z_centers = np.asarray(z_centers, dtype=float)
+    if (
+        mag_centers.ndim != 1
+        or z_centers.ndim != 1
+        or len(mag_centers) < 2
+        or len(z_centers) < 2
+        or np.any(~np.isfinite(mag_centers))
+        or np.any(~np.isfinite(z_centers))
+    ):
+        raise ValueError("Completeness audit requires finite one-dimensional grids.")
+
+    mesh_mag, mesh_z = np.meshgrid(mag_centers, z_centers, indexing="ij")
+    mesh_completeness = np.asarray(p_detect(mesh_mag, mesh_z), dtype=float)
+    if mesh_completeness.shape != mesh_mag.shape:
+        raise ValueError(
+            "Completeness map returned an incompatible audit-grid shape: "
+            f"{mesh_completeness.shape}, expected {mesh_mag.shape}."
+        )
+
+    dm = float(np.median(np.diff(mag_centers)))
+    dz = float(np.median(np.diff(z_centers)))
+    mag_edges = np.concatenate(
+        ([mag_centers[0] - 0.5 * dm], mag_centers + 0.5 * dm)
+    )
+    z_edges = np.concatenate(([z_centers[0] - 0.5 * dz], z_centers + 0.5 * dz))
+    norm = colors.LogNorm(vmin=1e-5, vmax=1.0, clip=True)
+
+    fig, axes = plt.subplots(2, 2, figsize=(14.5, 10), constrained_layout=True)
+    samples = (("Before Hubble-quality cuts", before_cuts),
+               ("After Hubble-quality cuts", after_cuts))
+    image = None
+    for row, (sample_label, sample) in enumerate(samples):
+        mag = pd.to_numeric(sample[magnitude_col], errors="coerce").to_numpy(dtype=float)
+        redshift = pd.to_numeric(sample["z"], errors="coerce").to_numpy(dtype=float)
+        finite = np.isfinite(mag) & np.isfinite(redshift)
+        completeness = np.full(len(sample), np.nan, dtype=float)
+        if np.any(finite):
+            completeness[finite] = np.asarray(
+                p_detect(mag[finite], redshift[finite]), dtype=float
+            )
+        finite_value = finite & np.isfinite(completeness)
+        outside = finite & (
+            (mag < mag_edges[0])
+            | (mag > mag_edges[-1])
+            | (redshift < z_edges[0])
+            | (redshift > z_edges[-1])
+        )
+        below_floor = finite_value & (completeness < norm.vmin)
+
+        ax_map = axes[row, 0]
+        image = ax_map.pcolormesh(
+            mag_edges,
+            z_edges,
+            np.clip(mesh_completeness.T, norm.vmin, norm.vmax),
+            shading="auto",
+            cmap="viridis",
+            norm=norm,
+            rasterized=True,
+        )
+        ax_map.scatter(
+            mag[finite], redshift[finite], s=5, color="white", alpha=0.32,
+            linewidths=0, rasterized=True,
+        )
+        ax_map.set_xlim(mag_edges[0], mag_edges[-1])
+        ax_map.set_ylim(z_edges[0], z_edges[-1])
+        ax_map.set_xlabel(magnitude_label)
+        ax_map.set_ylabel("z")
+        ax_map.set_title(f"{sample_label}: {np.count_nonzero(finite):,} finite objects")
+        ax_map.text(
+            0.02, 0.02,
+            f"outside grid: {np.count_nonzero(outside):,}\n"
+            f"nonfinite: {len(sample) - np.count_nonzero(finite):,}",
+            transform=ax_map.transAxes, ha="left", va="bottom", fontsize=10,
+            color="white", bbox={"facecolor": "black", "alpha": 0.45, "pad": 3},
+        )
+
+        ax_value = axes[row, 1]
+        if np.any(finite_value):
+            ax_value.scatter(
+                redshift[finite_value],
+                np.clip(completeness[finite_value], norm.vmin, norm.vmax),
+                c=np.clip(completeness[finite_value], norm.vmin, norm.vmax),
+                cmap="viridis", norm=norm, s=8, alpha=0.38, linewidths=0,
+                rasterized=True,
+            )
+            minimum = float(np.min(completeness[finite_value]))
+            minimum_text = f"{minimum:.3g}"
+        else:
+            minimum_text = "n/a"
+        ax_value.set_yscale("log")
+        ax_value.set_ylim(norm.vmin, 1.05)
+        ax_value.set_xlim(z_edges[0], z_edges[-1])
+        ax_value.set_xlabel("z")
+        ax_value.set_ylabel(f"{map_label} at observed $(m,z)$")
+        ax_value.set_title(
+            f"{sample_label}: minimum={minimum_text}; "
+            f"below $10^{{-5}}$={np.count_nonzero(below_floor):,}"
+        )
+
+    if image is not None:
+        colorbar = fig.colorbar(image, ax=axes[:, 0], pad=0.015)
+        colorbar.set_label(map_label)
+    fig.suptitle("Completeness audit before and after Hubble-quality cuts", fontsize=17)
+    output_path = os.path.join(plot_path or "plots/hubble", filename)
+    return _save_figure(fig, output_path, dpi=250, show=show)
 
 
 def _residual_axis_label(residual_label):
@@ -10281,7 +10721,12 @@ def plot_predicted_L2500_vs_sigmahat(
     )
 
     if show_residuals and ax_res is not None:
-        good_in = good & d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
+        fit_membership = (
+            d["is_fit_selection"].to_numpy(dtype=bool)
+            if "is_fit_selection" in d.columns
+            else d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
+        )
+        good_in = good & fit_membership
         good_in_plot = good_plot & d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
         good_out_plot = good_plot & ~d["z"].between(z_range[0], z_range[1]).to_numpy(dtype=bool)
         if np.any(good_in_plot):
@@ -11086,7 +11531,7 @@ def plot_dmi_vs_z(z, dmi, outdir=None, title_suffix="", plot_path=None):
 def _hard_limit_m50_per_object(completeness2d, mag_centers, z, plot_path=None):
     """
     Robust m50(z) (hard limit) for plotting:
-    - use the completeness model's redshift extrapolation,
+    - use the completeness model's constant redshift-edge values,
     - find the first crossing of C=0.5 and linearly interpolate.
     """
     mgrid = np.asarray(mag_centers)

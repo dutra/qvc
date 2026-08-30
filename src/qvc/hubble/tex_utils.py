@@ -153,6 +153,9 @@ def make_agn_csv_table(
             for output_col, input_col in AGN_TABLE_PLAIN_COLUMNS.items()
         }
     )
+    for membership_col in ("in_fit_z_range", "is_fit_selection"):
+        if membership_col in df.columns:
+            plain_df[membership_col] = df[membership_col].to_numpy(dtype=bool)
     plain_path = os.path.join(write_path, "agn_table.csv")
     plain_df.to_csv(plain_path, index=False)
     return df

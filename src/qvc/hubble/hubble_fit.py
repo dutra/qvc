@@ -3,6 +3,8 @@ import multiprocessing
 import traceback
 
 import argparse
+import h5py
+import json
 from functools import partial
 from pathlib import Path
 
@@ -33,7 +35,22 @@ z_pivot_sna = 0.0
 z_pivot_agn = 1.5
 DEFAULT_COMPLETENESS_SIM_FILE = None
 DEFAULT_COMPLETENESS_FOOTPRINT_AREA_DEG2 = 5.0
+Z_RANGE_SEMANTICS = "fit_only_v1"
 
+from qvc.hubble.cuts import (
+    COMPLETENESS_MAP_MAG_EDGE_MAX,
+    COMPLETENESS_MAP_MAG_EDGE_MIN,
+    COMPLETENESS_MAP_Z_EDGE_MAX,
+    COMPLETENESS_MAP_Z_EDGE_MIN,
+    COMPLETENESS_MAG_2500_MAX,
+    COMPLETENESS_MAG_2500_MIN,
+    COMPLETENESS_N_MAG_BINS,
+    COMPLETENESS_N_Z_BINS,
+    CUT_TIER_CHOICES,
+    SDSS_TARGET_SELECTION_CHOICES,
+    normalize_cut_tier,
+    normalize_sdss_target_selection,
+)
 from qvc.hubble.hubble_utils import (
     compare_models_by_log_evidence_all,
     compute_alpha_ox,
@@ -56,8 +73,14 @@ from qvc.hubble.hubble_utils import (
     write_results_tex_variables,
 )
 from qvc.hubble.hubble_likelihood import (
+    JOINT_ATTENUATED_MAG_DRAWS_COL,
+    JOINT_DEREDDENED_MAG_DRAWS_COL,
+    JOINT_POSTERIOR_VALID_COUNT_COL,
+    SELECTION_ATTENUATION_MODES,
+    _joint_attenuation_draw_arrays,
     log_likelihood,
     log_likelihood_nearbylcs,
+    normalize_selection_attenuation_mode,
     sigma_lens_from_dc,
     sigma_mu_from_z_err,
 )
@@ -66,6 +89,7 @@ from qvc.hubble.hubble_plotting import (
     get_hubble_posterior_sample_indices,
     plot_blr_diagnostics_summary,
     plot_blr_line_lags_vs_l2500,
+    plot_completeness_pre_post_cut_audit,
     plot_completeness_diagnostics,
     plot_completeness_vs_mag_at_redshifts,
     plot_cosmo_corner,
@@ -104,6 +128,10 @@ from qvc.hubble.hubble_model import (
     resolve_model_option_flags,
 )
 from qvc.hubble.hubble_completeness_refactored import (
+    COMPLETENESS_SMOOTH_SIGMA_MAG_ENV,
+    COMPLETENESS_SMOOTH_SIGMA_Z_ENV,
+    DEFAULT_COMPLETENESS_SMOOTH_SIGMA_MAG,
+    DEFAULT_COMPLETENESS_SMOOTH_SIGMA_Z,
     COMPLETENESS_FHOST_COL,
     COMPLETENESS_MAG_COL,
     COMPLETENESS_MAG_ERR_COL,
@@ -595,6 +623,7 @@ def make_run_tag(
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
+    selection_attenuation_mode="fixed-offset",
 ):
     speed = normalize_speed(speed)
     zmin, zmax = z_range
@@ -614,10 +643,31 @@ def make_run_tag(
     alpha_tag = "_alphaLam" if use_alpha_lambda_term else ""
     eta_sigma_tag = "_etaSigma" if use_eta_sigma_term else ""
     logf_tag = "_logfz" if use_redshift_log_f_term else ""
+    attenuation_tag = (
+        "_attsel-jointpost"
+        if normalize_selection_attenuation_mode(selection_attenuation_mode)
+        == "joint-posterior"
+        else ""
+    )
     return (
         f"{cosmo_model}_{_fit_mode_label(only_sna, only_agn)}_{speed}_{n_tag}_{z_tag}"
-        f"{completeness_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}"
+        f"{completeness_tag}{attenuation_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}"
     )
+
+
+def validate_selection_attenuation_configuration(
+    df_agn, *, selection_attenuation_mode, completeness,
+    completeness_magnitude, only_sna=False,
+):
+    mode = normalize_selection_attenuation_mode(selection_attenuation_mode)
+    if mode == "fixed-offset":
+        return mode
+    if not completeness or only_sna:
+        raise ValueError("joint-posterior attenuation selection requires active AGN completeness.")
+    if completeness_magnitude != "attenuated":
+        raise ValueError("joint-posterior attenuation selection requires --completeness_magnitude attenuated.")
+    _joint_attenuation_draw_arrays(df_agn, df_agn["apparent_mag_2500"])
+    return mode
 
 
 def _agn_pivot_checkpoint_payload(agn_pivot_context):
@@ -650,6 +700,17 @@ def _checkpoint_string_tuple(value, *, field_name, checkpoint_file):
         else str(item)
         for item in arr.tolist()
     )
+
+
+def _checkpoint_scalar_string(value, *, field_name, checkpoint_file):
+    values = _checkpoint_string_tuple(
+        value, field_name=field_name, checkpoint_file=checkpoint_file
+    )
+    if len(values) != 1:
+        raise RuntimeError(
+            f"Checkpoint '{checkpoint_file}' field {field_name!r} must be scalar."
+        )
+    return values[0]
 
 
 def _checkpoint_reference_object_id_tuple(
@@ -815,7 +876,20 @@ def _validate_agn_pivot_context_for_reference(
     return agn_pivot_context
 
 
-def validate_resume_checkpoint(results, checkpoint_file, ndim, n_agn):
+def validate_resume_checkpoint(
+    results,
+    checkpoint_file,
+    ndim,
+    n_agn,
+    *,
+    expected_selection_attenuation_mode="fixed-offset",
+    expected_cut_tier=None,
+    expected_cut_configuration_json=None,
+    expected_z_range_semantics=None,
+):
+    _validate_strict_padded_checkpoint_metadata(
+        results, checkpoint_file, expected_cut_configuration_json
+    )
     required_keys = {
         "flat_samples",
         "dmi_max_w",
@@ -844,6 +918,53 @@ def validate_resume_checkpoint(results, checkpoint_file, ndim, n_agn):
             f"flat_samples has {flat_samples.shape[1]} columns, but the current model expects {ndim}. "
             "This usually happens when resuming with a different cosmology model or code version. "
             "Delete the checkpoint or use a fresh resume path."
+        )
+    if expected_cut_tier is not None:
+        if "cut_tier" not in results or "cut_configuration_json" not in results:
+            raise RuntimeError(
+                f"Resume checkpoint '{checkpoint_file}' predates tiered cut metadata. "
+                "Start a fresh run."
+            )
+        stored_cut_tier = _checkpoint_scalar_string(
+            results["cut_tier"], field_name="cut_tier", checkpoint_file=checkpoint_file
+        )
+        stored_cut_configuration = _checkpoint_scalar_string(
+            results["cut_configuration_json"],
+            field_name="cut_configuration_json",
+            checkpoint_file=checkpoint_file,
+        )
+        if stored_cut_tier != str(expected_cut_tier) or stored_cut_configuration != str(expected_cut_configuration_json):
+            raise RuntimeError(
+                f"Resume checkpoint '{checkpoint_file}' uses a different Hubble cut tier or threshold configuration."
+            )
+    if expected_z_range_semantics is not None:
+        if "z_range_semantics" not in results:
+            raise RuntimeError(
+                f"Resume checkpoint '{checkpoint_file}' predates fit-only "
+                "--z_range semantics. Start a fresh run."
+            )
+        stored_semantics = _checkpoint_scalar_string(
+            results["z_range_semantics"],
+            field_name="z_range_semantics",
+            checkpoint_file=checkpoint_file,
+        )
+        if stored_semantics != str(expected_z_range_semantics):
+            raise RuntimeError(
+                f"Resume checkpoint '{checkpoint_file}' uses incompatible "
+                f"--z_range semantics {stored_semantics!r}; expected "
+                f"{expected_z_range_semantics!r}."
+            )
+    stored_attenuation_mode = _checkpoint_scalar_string(
+        results.get("selection_attenuation_mode", "fixed-offset"),
+        field_name="selection_attenuation_mode",
+        checkpoint_file=checkpoint_file,
+    )
+    if stored_attenuation_mode != normalize_selection_attenuation_mode(
+        expected_selection_attenuation_mode
+    ):
+        raise RuntimeError(
+            f"Resume checkpoint '{checkpoint_file}' selection attenuation mode "
+            "does not match the current run."
         )
 
     for key in ("dmi_max_w", "integrals_max_w"):
@@ -883,7 +1004,19 @@ def validate_resume_checkpoint(results, checkpoint_file, ndim, n_agn):
         )
 
 
-def _validate_resume_replot_checkpoint_params(results, checkpoint_file, ndim):
+def _validate_resume_replot_checkpoint_params(
+    results,
+    checkpoint_file,
+    ndim,
+    *,
+    expected_selection_attenuation_mode="fixed-offset",
+    expected_cut_tier=None,
+    expected_cut_configuration_json=None,
+    expected_z_range_semantics=None,
+):
+    _validate_strict_padded_checkpoint_metadata(
+        results, checkpoint_file, expected_cut_configuration_json
+    )
     if "flat_samples" not in results:
         raise RuntimeError(
             f"Resume-replot checkpoint '{checkpoint_file}' is missing required dataset 'flat_samples'."
@@ -899,12 +1032,75 @@ def _validate_resume_replot_checkpoint_params(results, checkpoint_file, ndim):
             f"Resume-replot checkpoint '{checkpoint_file}' was created for a different parameterization: "
             f"flat_samples has {flat_samples.shape[1]} columns, but the current model expects {ndim}."
         )
+    if expected_cut_tier is not None:
+        if "cut_tier" not in results or "cut_configuration_json" not in results:
+            raise RuntimeError(
+                f"Resume-replot checkpoint '{checkpoint_file}' predates tiered cut metadata."
+            )
+        stored_cut_tier = _checkpoint_scalar_string(
+            results["cut_tier"], field_name="cut_tier", checkpoint_file=checkpoint_file
+        )
+        stored_config = _checkpoint_scalar_string(
+            results["cut_configuration_json"],
+            field_name="cut_configuration_json",
+            checkpoint_file=checkpoint_file,
+        )
+        if stored_cut_tier != str(expected_cut_tier) or stored_config != str(expected_cut_configuration_json):
+            raise RuntimeError(
+                f"Resume-replot checkpoint '{checkpoint_file}' uses a different Hubble cut configuration."
+            )
+    if expected_z_range_semantics is not None:
+        if "z_range_semantics" not in results:
+            raise RuntimeError(
+                f"Resume-replot checkpoint '{checkpoint_file}' predates "
+                "fit-only --z_range semantics and cannot be reused."
+            )
+        stored_semantics = _checkpoint_scalar_string(
+            results["z_range_semantics"],
+            field_name="z_range_semantics",
+            checkpoint_file=checkpoint_file,
+        )
+        if stored_semantics != str(expected_z_range_semantics):
+            raise RuntimeError(
+                f"Resume-replot checkpoint '{checkpoint_file}' uses "
+                f"incompatible --z_range semantics {stored_semantics!r}."
+            )
+    stored_attenuation_mode = _checkpoint_scalar_string(
+        results.get("selection_attenuation_mode", "fixed-offset"),
+        field_name="selection_attenuation_mode",
+        checkpoint_file=checkpoint_file,
+    )
+    if stored_attenuation_mode != normalize_selection_attenuation_mode(
+        expected_selection_attenuation_mode
+    ):
+        raise RuntimeError(
+            f"Resume-replot checkpoint '{checkpoint_file}' selection attenuation "
+            "mode does not match the current run."
+        )
 
 
-def _remap_resume_replot_checkpoint(results, checkpoint_file, df_agn_fit_selection, ndim):
+def _remap_resume_replot_checkpoint(
+    results,
+    checkpoint_file,
+    df_agn_fit_selection,
+    ndim,
+    *,
+    expected_selection_attenuation_mode="fixed-offset",
+    expected_cut_tier=None,
+    expected_cut_configuration_json=None,
+    expected_z_range_semantics=None,
+):
     """Return checkpoint payload remapped to the current cut AGN fit selection."""
 
-    _validate_resume_replot_checkpoint_params(results, checkpoint_file, ndim)
+    _validate_resume_replot_checkpoint_params(
+        results,
+        checkpoint_file,
+        ndim,
+        expected_selection_attenuation_mode=expected_selection_attenuation_mode,
+        expected_cut_tier=expected_cut_tier,
+        expected_cut_configuration_json=expected_cut_configuration_json,
+        expected_z_range_semantics=expected_z_range_semantics,
+    )
     if "object_id_fit_selection" not in results:
         raise RuntimeError(
             f"Resume-replot checkpoint '{checkpoint_file}' is missing required dataset "
@@ -1369,6 +1565,171 @@ def estimate_sky_box_area_deg2(df_agn_all):
     return area_deg2
 
 
+def resolve_completeness_redshift_support(df_agn, z_range):
+    """Validate plot/fit coverage and return the fixed completeness map edges."""
+
+    if "z" not in df_agn:
+        raise KeyError("Completeness redshift support requires a 'z' column.")
+    values = pd.to_numeric(df_agn["z"], errors="coerce").to_numpy(dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size == 0:
+        raise ValueError("Completeness redshift support requires at least one finite z.")
+    dz = (COMPLETENESS_MAP_Z_EDGE_MAX - COMPLETENESS_MAP_Z_EDGE_MIN) / COMPLETENESS_N_Z_BINS
+    center_lo = COMPLETENESS_MAP_Z_EDGE_MIN + 0.5 * dz
+    center_hi = COMPLETENESS_MAP_Z_EDGE_MAX - 0.5 * dz
+    requested = np.concatenate((values, np.asarray(z_range, dtype=float)))
+    outside = (requested < center_lo) | (requested > center_hi)
+    if np.any(outside):
+        raise ValueError(
+            "Plot and fit redshifts must lie inside the strict completeness "
+            f"interpolation range [{center_lo}, {center_hi}]; got "
+            f"[{np.min(requested):.6g}, {np.max(requested):.6g}]."
+        )
+    return COMPLETENESS_MAP_Z_EDGE_MIN, COMPLETENESS_MAP_Z_EDGE_MAX
+
+
+def record_completeness_support_metadata(frames, *, magnitude_support, redshift_support):
+    """Persist strict padded-map support in selection/checkpoint metadata."""
+
+    magnitude_support = [float(value) for value in magnitude_support]
+    redshift_support = [float(value) for value in redshift_support]
+    for frame in frames:
+        if frame is None:
+            continue
+        raw = frame.attrs.get("cut_configuration_json", "{}")
+        configuration = json.loads(raw) if raw else {}
+        configuration.update(
+            {
+                "completeness_magnitude_support": magnitude_support,
+                "completeness_redshift_support": redshift_support,
+                "completeness_map_magnitude_support": [
+                    COMPLETENESS_MAP_MAG_EDGE_MIN, COMPLETENESS_MAP_MAG_EDGE_MAX
+                ],
+                "completeness_map_redshift_support": [
+                    COMPLETENESS_MAP_Z_EDGE_MIN, COMPLETENESS_MAP_Z_EDGE_MAX
+                ],
+                "completeness_map_n_magnitude_bins": COMPLETENESS_N_MAG_BINS,
+                "completeness_map_n_redshift_bins": COMPLETENESS_N_Z_BINS,
+                "completeness_smooth_sigma_mag": float(os.environ.get(
+                    COMPLETENESS_SMOOTH_SIGMA_MAG_ENV, DEFAULT_COMPLETENESS_SMOOTH_SIGMA_MAG
+                )),
+                "completeness_smooth_sigma_z": float(os.environ.get(
+                    COMPLETENESS_SMOOTH_SIGMA_Z_ENV, DEFAULT_COMPLETENESS_SMOOTH_SIGMA_Z
+                )),
+                "completeness_interpolation_policy": "strict-padded-v1",
+            }
+        )
+        frame.attrs["cut_configuration_json"] = json.dumps(
+            configuration, sort_keys=True, separators=(",", ":")
+        )
+
+
+def completeness_checkpoint_metadata(completeness_sim_file):
+    """Return immutable fixed-grid and mock provenance for new checkpoints."""
+
+    provenance = {"path": None}
+    if completeness_sim_file is not None:
+        resolved = Path(completeness_sim_file).expanduser().resolve()
+        provenance = {"path": str(resolved), "exists": resolved.is_file()}
+        if resolved.is_file():
+            provenance["size_bytes"] = int(resolved.stat().st_size)
+            with h5py.File(resolved, "r") as handle:
+                for key in (
+                    "lf_model",
+                    "mock_redshift_min",
+                    "mock_redshift_max",
+                    "requested_redshift_min",
+                    "requested_redshift_max",
+                    "mock_count_scale",
+                    "area_deg2",
+                    "seed",
+                ):
+                    if key in handle.attrs:
+                        value = handle.attrs[key]
+                        if isinstance(value, bytes):
+                            value = value.decode("utf-8")
+                        elif isinstance(value, np.generic):
+                            value = value.item()
+                        provenance[key] = value
+                provenance["datasets"] = sorted(handle.keys())
+
+    return {
+        "completeness_interpolation_policy": "strict-padded-v1",
+        "completeness_map_magnitude_support": np.asarray(
+            [COMPLETENESS_MAP_MAG_EDGE_MIN, COMPLETENESS_MAP_MAG_EDGE_MAX],
+            dtype=float,
+        ),
+        "completeness_map_redshift_support": np.asarray(
+            [COMPLETENESS_MAP_Z_EDGE_MIN, COMPLETENESS_MAP_Z_EDGE_MAX],
+            dtype=float,
+        ),
+        "completeness_map_n_magnitude_bins": int(COMPLETENESS_N_MAG_BINS),
+        "completeness_map_n_redshift_bins": int(COMPLETENESS_N_Z_BINS),
+        "completeness_selection_magnitude_support": np.asarray(
+            [COMPLETENESS_MAG_2500_MIN, COMPLETENESS_MAG_2500_MAX], dtype=float
+        ),
+        "completeness_smooth_sigma_mag": float(
+            os.environ.get(
+                COMPLETENESS_SMOOTH_SIGMA_MAG_ENV,
+                DEFAULT_COMPLETENESS_SMOOTH_SIGMA_MAG,
+            )
+        ),
+        "completeness_smooth_sigma_z": float(
+            os.environ.get(
+                COMPLETENESS_SMOOTH_SIGMA_Z_ENV,
+                DEFAULT_COMPLETENESS_SMOOTH_SIGMA_Z,
+            )
+        ),
+        "completeness_mock_provenance_json": json.dumps(
+            provenance, sort_keys=True, separators=(",", ":")
+        ),
+    }
+
+
+def _validate_strict_padded_checkpoint_metadata(
+    results, checkpoint_file, expected_cut_configuration_json
+):
+    """Reject completeness checkpoints from older map/interpolation policies."""
+
+    if not expected_cut_configuration_json:
+        return
+    expected_configuration = json.loads(str(expected_cut_configuration_json))
+    if expected_configuration.get("completeness_interpolation_policy") != "strict-padded-v1":
+        return
+    expected = completeness_checkpoint_metadata(None)
+    required = set(expected)
+    missing = sorted(required - set(results))
+    if missing:
+        raise RuntimeError(
+            f"Resume checkpoint '{checkpoint_file}' predates strict padded "
+            f"completeness metadata; missing {missing}. Start a fresh run."
+        )
+    for key in required - {"completeness_mock_provenance_json"}:
+        stored = np.asarray(results[key])
+        wanted = np.asarray(expected[key])
+        if stored.dtype.kind in {"S", "U", "O"} or wanted.dtype.kind in {"S", "U", "O"}:
+            matches = _checkpoint_scalar_string(
+                results[key], field_name=key, checkpoint_file=checkpoint_file
+            ) == str(expected[key])
+        else:
+            matches = stored.shape == wanted.shape and np.allclose(stored, wanted)
+        if not matches:
+            raise RuntimeError(
+                f"Resume checkpoint '{checkpoint_file}' has incompatible {key}."
+            )
+    provenance = _checkpoint_scalar_string(
+        results["completeness_mock_provenance_json"],
+        field_name="completeness_mock_provenance_json",
+        checkpoint_file=checkpoint_file,
+    )
+    try:
+        json.loads(provenance)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            f"Resume checkpoint '{checkpoint_file}' has invalid completeness mock provenance."
+        ) from exc
+
+
 def _select_agn_fit_selection(
     df_agn,
     *,
@@ -1376,13 +1737,16 @@ def _select_agn_fit_selection(
     N,
     uniform_redshift_distribution,
 ):
+    source_attrs = dict(df_agn.attrs)
     if uniform_redshift_distribution:
-        return select_agn_subset_uniform_with_replacement(
+        selected = select_agn_subset_uniform_with_replacement(
             df_agn,
             z_range=z_range,
             N=N,
             z_uniform_min=float(z_range[0]),
         )
+        selected.attrs.update(source_attrs)
+        return selected
     df_selection = df_agn[
         df_agn["z"].between(z_range[0], z_range[1], inclusive="both")
     ].copy()
@@ -1392,7 +1756,22 @@ def _select_agn_fit_selection(
         random_state=42,
         label="in-range AGN objects",
     )
+    df_selection.attrs.update(source_attrs)
     return df_selection
+
+
+def _annotate_agn_fit_membership(df_plot, df_fit_selection, z_range):
+    """Return a plotting frame with explicit redshift/likelihood membership."""
+
+    annotated = df_plot.copy()
+    annotated["in_fit_z_range"] = annotated["z"].between(
+        z_range[0], z_range[1], inclusive="both"
+    ).to_numpy(dtype=bool)
+    annotated["is_fit_selection"] = annotated.index.isin(
+        pd.Index(df_fit_selection.index)
+    )
+    annotated.attrs.update(df_plot.attrs)
+    return annotated
 
 
 def _prepare_shared_agn_pivot_context(
@@ -1524,10 +1903,10 @@ def _build_completeness_params(
     completeness_sim_file,
     plot_path,
     plot=False,
+    completeness_z_range=None,
 ):
     if not completeness:
         return None
-
     missing_magnitude_columns = {
         COMPLETENESS_MAG_COL,
         COMPLETENESS_MAG_ERR_COL,
@@ -1577,6 +1956,7 @@ def _build_completeness_params(
             plot=plot,
             plot_path=plot_path,
             df_agn_fhost_population=df_agn_all,
+            z_range=completeness_z_range,
         )
     if completeness_mode == "3d_fhost":
         return get_completeness_function_3d_fhost(
@@ -1585,14 +1965,46 @@ def _build_completeness_params(
             plot=plot,
             plot_path=plot_path,
             df_agn_fhost_population=df_agn_all,
+            z_range=completeness_z_range,
         )
     return get_completeness_function_2d(
         df_agn_completeness,
         sim_file=completeness_sim_file,
         plot=plot,
         plot_path=plot_path,
+        z_range=completeness_z_range,
     )
 
+
+def _plot_completeness_cut_audit(
+    completeness_params,
+    before_cuts,
+    after_cuts,
+    *,
+    plot_path,
+    completeness_mode,
+    completeness_magnitude,
+):
+    """Render one pre/post-cut audit for each active completeness map."""
+
+    magnitude_label = (
+        r"attenuated $m_{2500}$"
+        if completeness_magnitude == "attenuated"
+        else r"dereddened $m_{2500}$"
+    )
+    map_label = r"$C(m,z)$"
+
+    plot_completeness_pre_post_cut_audit(
+        completeness_params[0],
+        completeness_params[1],
+        completeness_params[2],
+        before_cuts,
+        after_cuts,
+        magnitude_col=COMPLETENESS_MAG_COL,
+        plot_path=plot_path,
+        map_label=map_label,
+        magnitude_label=magnitude_label,
+    )
 
 def _map_fit_values_to_plot_sample(
     df_plot,
@@ -1672,13 +2084,13 @@ def _compute_direct_full_sample_completeness_summaries(
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
     early_de_guard=False,
+    selection_attenuation_mode="fixed-offset",
     dmi_draw_indices=None,
 ):
     """Replay completeness for the full plotting sample.
 
-    The completeness model linearly extrapolates redshifts outside its
-    interpolation centers from the outermost grid cells, while the Hubble fit
-    selection remains unchanged.
+    The fixed padded completeness model must cover every plotting coordinate,
+    while the Hubble fit selection remains unchanged.
 
     The historical three-value summary return is unchanged when
     ``dmi_draw_indices`` is omitted.  When indices are supplied, the fourth
@@ -1789,6 +2201,7 @@ def _compute_direct_full_sample_completeness_summaries(
             use_eta_sigma_term=use_eta_sigma_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
             early_de_guard=early_de_guard,
+            selection_attenuation_mode=selection_attenuation_mode,
             only_sna=False,
             only_agn=only_agn,
             use_full_cov=use_full_cov,
@@ -1805,6 +2218,17 @@ def _compute_direct_full_sample_completeness_summaries(
         - np.percentile(dmi_draws, 16, axis=0)
     )
     dmi_selection_sigma_full_direct = np.median(sigma_sel_draws, axis=0)
+    for value_name, values in (
+        ("dmi_posterior_median", dmi_posterior_median_full_direct),
+        ("dmi_posterior_sigma", dmi_posterior_sigma_full_direct),
+        ("dmi_selection_sigma", dmi_selection_sigma_full_direct),
+    ):
+        if np.any(~np.isfinite(values)):
+            bad = np.flatnonzero(~np.isfinite(values))[:10].tolist()
+            raise RuntimeError(
+                "Full plotting-sample completeness replay produced nonfinite "
+                f"{value_name} values at row(s) {bad}."
+            )
     summaries = (
         dmi_posterior_median_full_direct,
         dmi_posterior_sigma_full_direct,
@@ -1823,6 +2247,7 @@ def _build_sigma_clip_diagnostics(
     residuals_err,
     *,
     sigma_clip_threshold,
+    eligible_mask=None,
 ):
     residuals = np.asarray(residuals, dtype=float)
     residuals_err = np.asarray(residuals_err, dtype=float)
@@ -1839,13 +2264,27 @@ def _build_sigma_clip_diagnostics(
 
     with np.errstate(divide="ignore", invalid="ignore"):
         mu_zscore = np.abs(residuals) / residuals_err
-    keep_mask = np.isfinite(mu_zscore) & (mu_zscore < float(sigma_clip_threshold))
+    if eligible_mask is None:
+        eligible = np.ones(len(df_agn_diagnostics), dtype=bool)
+    else:
+        eligible = np.asarray(eligible_mask, dtype=bool)
+        if eligible.shape != (len(df_agn_diagnostics),):
+            raise ValueError(
+                "Sigma-clip eligible_mask must match the diagnostics sample."
+            )
+    passes_threshold = np.isfinite(mu_zscore) & (
+        mu_zscore < float(sigma_clip_threshold)
+    )
+    # Redshift-excluded rows are diagnostic/display-only.  They must never be
+    # removed by a fit-stage clipping decision.
+    keep_mask = ~eligible | passes_threshold
 
     diagnostics_df = df_agn_diagnostics.copy()
     diagnostics_df["residuals"] = residuals
     diagnostics_df["residuals_err"] = residuals_err
     diagnostics_df["mu_zscore"] = mu_zscore
-    diagnostics_df["was_clipped"] = ~keep_mask
+    diagnostics_df["sigma_clip_eligible"] = eligible
+    diagnostics_df["was_clipped"] = eligible & ~passes_threshold
     preferred_columns = [
         "object_id",
         "sdss_name",
@@ -1855,6 +2294,7 @@ def _build_sigma_clip_diagnostics(
         "residuals",
         "residuals_err",
         "mu_zscore",
+        "sigma_clip_eligible",
         "was_clipped",
     ]
     remaining_columns = [
@@ -1961,6 +2401,7 @@ def _run_fit_stage(
     prefix,
     completeness_sim_file,
     completeness_mode,
+    selection_attenuation_mode,
     compare_sigma_only,
     minimal_plots=False,
     disable_ceph_dist_calibration,
@@ -1975,6 +2416,7 @@ def _run_fit_stage(
     warm_start_flat_samples=None,
     logZ_is_approximate=False,
     df_agn_completeness=None,
+    completeness_z_range=None,
 ):
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
     (
@@ -2009,6 +2451,7 @@ def _run_fit_stage(
         checkpoint_file_override=checkpoint_file_override,
         completeness_sim_file=completeness_sim_file,
         completeness_mode=completeness_mode,
+        selection_attenuation_mode=selection_attenuation_mode,
         completeness_magnitude=df_agn_fit_selection.attrs.get(
             "completeness_magnitude",
             "dereddened",
@@ -2026,6 +2469,7 @@ def _run_fit_stage(
         warm_start_flat_samples=warm_start_flat_samples,
         logZ_is_approximate=logZ_is_approximate,
         df_agn_completeness=df_agn_completeness,
+        completeness_z_range=completeness_z_range,
     )
     display_results_summary(
         flat_samples,
@@ -2060,8 +2504,19 @@ def _run_fit_stage(
     )
 
 
-def generate_fresh_completeness_sim_file(plot_path, *, area_deg2, seed=123):
+def generate_fresh_completeness_sim_file(
+    plot_path,
+    *,
+    area_deg2,
+    seed=123,
+    z_range=(0.44, 3.16),
+    completeness_magnitude="dereddened",
+):
     """Generate a fresh Shen-LF mock catalog for completeness-map construction."""
+    del completeness_magnitude
+    z_range = tuple(float(value) for value in z_range)
+    if len(z_range) != 2 or z_range[0] < 0.0 or z_range[0] >= z_range[1]:
+        raise ValueError("Completeness mock z_range must be increasing and non-negative.")
     completeness_dir = Path(plot_path) / "completeness"
     completeness_dir.mkdir(parents=True, exist_ok=True)
     output_path = completeness_dir / "mock_completeness_catalog_fresh.h5"
@@ -2108,6 +2563,18 @@ def generate_fresh_completeness_sim_file(plot_path, *, area_deg2, seed=123):
         alpha_nu_parent_mean=alpha_nu_parent_mean,
         alpha_nu_parent_sigma=alpha_nu_parent_sigma,
     )
+    finite_z = np.asarray(z_all, dtype=float)
+    finite_z = finite_z[np.isfinite(finite_z)]
+    with h5py.File(output_path, "a") as handle:
+        handle.attrs["lf_model"] = "shen"
+        handle.attrs["mock_redshift_min"] = float(np.min(finite_z))
+        handle.attrs["mock_redshift_max"] = float(np.max(finite_z))
+        handle.attrs["requested_redshift_min"] = z_range[0]
+        handle.attrs["requested_redshift_max"] = z_range[1]
+        handle.attrs["completeness_map_magnitude_min"] = COMPLETENESS_MAP_MAG_EDGE_MIN
+        handle.attrs["completeness_map_magnitude_max"] = COMPLETENESS_MAP_MAG_EDGE_MAX
+        handle.attrs["completeness_map_redshift_min"] = COMPLETENESS_MAP_Z_EDGE_MIN
+        handle.attrs["completeness_map_redshift_max"] = COMPLETENESS_MAP_Z_EDGE_MAX
     print(
         f"Generated fresh completeness mock catalog: {output_path} "
         f"(area_deg2={float(area_deg2):.1f}, p_keep={thinning_probability:.4g})"
@@ -2127,6 +2594,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
                       completeness_mode="2d",
                       completeness_magnitude="dereddened",
+                      selection_attenuation_mode="fixed-offset",
                       N=None,
                       compare_sigma_only=False,
                       minimal_plots=False,
@@ -2141,10 +2609,18 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       warm_start_flat_samples=None,
                       logZ_is_approximate=False,
                       df_agn_completeness=None,
+                      completeness_z_range=None,
                       ):
     validate_completeness_mode(completeness_mode)
     completeness_magnitude = normalize_completeness_magnitude(
         df_agn.attrs.get("completeness_magnitude", completeness_magnitude)
+    )
+    selection_attenuation_mode = validate_selection_attenuation_configuration(
+        df_agn,
+        selection_attenuation_mode=selection_attenuation_mode,
+        completeness=completeness,
+        completeness_magnitude=completeness_magnitude,
+        only_sna=only_sna,
     )
     if completeness and COMPLETENESS_MAG_COL not in df_agn.columns:
         df_agn = prepare_completeness_magnitude_columns(
@@ -2166,6 +2642,10 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             completeness_magnitude,
         )
     speed = normalize_speed(speed)
+    if completeness_z_range is None and completeness and df_agn_completeness is not None:
+        completeness_z_range = resolve_completeness_redshift_support(
+            df_agn_completeness, z_range
+        )
     _fit_mode_label(only_sna, only_agn)
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
     if only_sna:
@@ -2196,6 +2676,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        selection_attenuation_mode=selection_attenuation_mode,
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -2249,6 +2730,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             completeness_sim_file = generate_fresh_completeness_sim_file(
                 plot_path,
                 area_deg2=completeness_area_deg2,
+                z_range=completeness_z_range,
+                completeness_magnitude=completeness_magnitude,
             )
         print(f"Building {completeness_mode} completeness map using mock catalog: {completeness_sim_file}")
         completeness_params = _build_completeness_params(
@@ -2259,7 +2742,17 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             completeness_sim_file=completeness_sim_file,
             plot_path=plot_path,
             plot=not (compare_sigma_only or minimal_plots),
+            completeness_z_range=completeness_z_range,
         )
+        if not compare_sigma_only:
+            _plot_completeness_cut_audit(
+                completeness_params,
+                df_agn_all,
+                df_agn_completeness,
+                plot_path=plot_path,
+                completeness_mode="2d",
+                completeness_magnitude=completeness_magnitude,
+            )
     else:
         completeness_params = None
 
@@ -2271,6 +2764,12 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     agn_fields += ('apparent_mag_2500', 'apparent_mag_2500_err', 'z', 'z_err', 'object_id')
     if completeness:
         agn_fields += (COMPLETENESS_MAG_COL, COMPLETENESS_MAG_ERR_COL)
+    if selection_attenuation_mode == "joint-posterior":
+        agn_fields += (
+            JOINT_DEREDDENED_MAG_DRAWS_COL,
+            JOINT_ATTENUATED_MAG_DRAWS_COL,
+            JOINT_POSTERIOR_VALID_COUNT_COL,
+        )
     if COMPLETENESS_FHOST_COL in df_agn.columns:
         agn_fields += (COMPLETENESS_FHOST_COL,)
     if 'alpha_lambda' in df_agn.columns:
@@ -2326,6 +2825,14 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     checkpoint_file,
                     df_agn,
                     ndim,
+                    expected_selection_attenuation_mode=selection_attenuation_mode,
+                    expected_cut_tier=df_agn.attrs.get("cut_tier"),
+                    expected_cut_configuration_json=df_agn.attrs.get("cut_configuration_json"),
+                    expected_z_range_semantics=(
+                        Z_RANGE_SEMANTICS
+                        if df_agn.attrs.get("cut_configuration_json")
+                        else None
+                    ),
                 )
                 print(
                     "Resume-replot with cuts: loaded posterior samples and remapped "
@@ -2337,6 +2844,16 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     checkpoint_file=checkpoint_file,
                     ndim=ndim,
                     n_agn=len(agn_data["z"]),
+                    expected_selection_attenuation_mode=selection_attenuation_mode,
+                    expected_cut_tier=df_agn.attrs.get("cut_tier"),
+                    expected_cut_configuration_json=df_agn.attrs.get(
+                        "cut_configuration_json"
+                    ),
+                    expected_z_range_semantics=(
+                        Z_RANGE_SEMANTICS
+                        if df_agn.attrs.get("cut_configuration_json")
+                        else None
+                    ),
                 )
             if not only_sna:
                 if stored_pivot_context != agn_pivot_context:
@@ -2349,14 +2866,15 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 raise RuntimeError(
                     f"Failed to resume/replot from checkpoint '{checkpoint_file}' with the current AGN cuts. "
                     "The checkpoint must match the current parameterization and include object_id_fit_selection "
-                    "metadata covering every current AGN."
+                    f"metadata covering every current AGN. Cause: {exc}"
                 ) from exc
             else:
                 raise RuntimeError(
                     f"Failed to resume from checkpoint '{checkpoint_file}'. "
                     "The checkpoint appears incompatible with the current run configuration "
                     "(for example: different cosmology model, different selected AGN sample, "
-                    "or an older file format). Start a fresh run or remove the stale checkpoint."
+                    "or an older file format). Start a fresh run or remove the stale checkpoint. "
+                    f"Cause: {exc}"
                 ) from exc
         flat_samples = r["flat_samples"]
         dmi_max_w = r["dmi_max_w"]
@@ -2405,6 +2923,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 use_eta_sigma_term=use_eta_sigma_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 early_de_guard=early_de_guard,
+                selection_attenuation_mode=selection_attenuation_mode,
             )
             ptform_kwargs = dict(priors=priors, model_labels=model_labels)
             loglike_func = (
@@ -2563,7 +3082,15 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             logZerr=logZerr,
             logZ_is_approximate=bool(logZ_is_approximate),
             integrals_max_w=integrals_max_w,
+            cut_tier=str(df_agn.attrs.get("cut_tier", "")),
+            cut_configuration_json=str(df_agn.attrs.get("cut_configuration_json", "")),
+            z_range_semantics=Z_RANGE_SEMANTICS,
+            selection_attenuation_mode=selection_attenuation_mode,
         )
+        if completeness:
+            checkpoint_payload.update(
+                completeness_checkpoint_metadata(completeness_sim_file)
+            )
         if not only_sna:
             checkpoint_payload.update(
                 _agn_pivot_checkpoint_payload(agn_pivot_context)
@@ -2635,6 +3162,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
                completeness_mode="2d",
                completeness_magnitude="dereddened",
+               selection_attenuation_mode="fixed-offset",
                compare_sigma_only=False,
                minimal_plots=False,
                disable_ceph_dist_calibration=False,
@@ -2645,7 +3173,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                use_redshift_log_f_term=False,
                early_de_guard=False,
                resume_replot_with_cuts=False,
-               agn_pivot_context=None):
+               agn_pivot_context=None,
+               df_agn_completeness_parent=None):
     validate_completeness_mode(completeness_mode)
     completeness_magnitude = normalize_completeness_magnitude(
         completeness_magnitude
@@ -2658,6 +3187,36 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         df_agn_all,
         completeness_magnitude,
     )
+    selection_attenuation_mode = validate_selection_attenuation_configuration(
+        df_agn,
+        selection_attenuation_mode=selection_attenuation_mode,
+        completeness=completeness,
+        completeness_magnitude=completeness_magnitude,
+        only_sna=only_sna,
+    )
+    if df_agn_completeness_parent is None:
+        df_agn_completeness_parent = df_agn.copy()
+    else:
+        df_agn_completeness_parent = prepare_completeness_magnitude_columns(
+            df_agn_completeness_parent,
+            completeness_magnitude,
+        )
+    completeness_z_range = (
+        resolve_completeness_redshift_support(
+            df_agn_completeness_parent, z_range
+        )
+        if completeness
+        else None
+    )
+    if completeness:
+        record_completeness_support_metadata(
+            (df_agn, df_agn_all, df_agn_completeness_parent),
+            magnitude_support=(
+                COMPLETENESS_MAG_2500_MIN,
+                COMPLETENESS_MAG_2500_MAX,
+            ),
+            redshift_support=completeness_z_range,
+        )
     speed = normalize_speed(speed)
     _fit_mode_label(only_sna, only_agn)
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
@@ -2678,6 +3237,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        selection_attenuation_mode=selection_attenuation_mode,
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -2697,6 +3257,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             completeness_sim_file = generate_fresh_completeness_sim_file(
                 plot_path,
                 area_deg2=completeness_area_deg2,
+                z_range=completeness_z_range,
+                completeness_magnitude=completeness_magnitude,
             )
         else:
             print(f"Completeness enabled with mock catalog file: {completeness_sim_file}")
@@ -2831,6 +3393,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 completeness_sim_file=completeness_sim_file,
                 plot_path=plot_path,
                 plot=False,
+                completeness_z_range=completeness_z_range,
             )
         return direct_completeness_params
 
@@ -2914,6 +3477,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 prefix=prefix,
                 completeness_sim_file=completeness_sim_file,
                 completeness_mode=completeness_mode,
+                selection_attenuation_mode=selection_attenuation_mode,
                 compare_sigma_only=compare_sigma_only,
                 minimal_plots=minimal_plots,
                 disable_ceph_dist_calibration=disable_ceph_dist_calibration,
@@ -2925,7 +3489,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 early_de_guard=early_de_guard,
                 checkpoint_file_override=pass1_checkpoint_file,
                 resume_replot_with_cuts=False,
-                df_agn_completeness=df_agn_full_sample_preclip,
+                df_agn_completeness=df_agn_completeness_parent,
+                completeness_z_range=completeness_z_range,
             )
             posterior_sample_indices_pass1 = (
                 get_hubble_posterior_sample_indices(
@@ -2958,6 +3523,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_eta_sigma_term=use_eta_sigma_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 early_de_guard=early_de_guard,
+                selection_attenuation_mode=selection_attenuation_mode,
                 dmi_draw_indices=posterior_sample_indices_pass1,
             )
             pass1_residuals_full, pass1_clipping_sigma_full, _, _, _ = plot_hubble(
@@ -2996,6 +3562,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 pass1_residuals_full,
                 pass1_clipping_sigma_full,
                 sigma_clip_threshold=sigma_clip_threshold,
+                eligible_mask=df_agn_full_sample_preclip["z"].between(
+                    z_range[0], z_range[1], inclusive="both"
+                ).to_numpy(dtype=bool),
             )
             df_agn_pass2_plot_sample = df_agn_full_sample_preclip.loc[keep_mask_full].copy()
             df_agn_pass2_fit_selection = _select_agn_fit_selection(
@@ -3121,6 +3690,16 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                         use_redshift_log_f_term=use_redshift_log_f_term,
                     )[1]),
                     n_agn=len(expected_pass1_fit_selection),
+                    expected_selection_attenuation_mode=selection_attenuation_mode,
+                    expected_cut_tier=expected_pass1_fit_selection.attrs.get("cut_tier"),
+                    expected_cut_configuration_json=expected_pass1_fit_selection.attrs.get("cut_configuration_json"),
+                    expected_z_range_semantics=(
+                        Z_RANGE_SEMANTICS
+                        if expected_pass1_fit_selection.attrs.get(
+                            "cut_configuration_json"
+                        )
+                        else None
+                    ),
                 )
                 pass2_warm_start_flat_samples = selected_resume_results["flat_samples"]
             _write_sigma_clip_diagnostics(
@@ -3157,6 +3736,17 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             print("Running warm-start second Hubble-fit pass on the clipped AGN sample.")
         else:
             print("Running fresh second Hubble-fit pass on the clipped AGN sample.")
+
+    df_agn_pass2_plot_sample = _annotate_agn_fit_membership(
+        df_agn_pass2_plot_sample,
+        df_agn_pass2_fit_selection,
+        z_range,
+    )
+    df_agn_full_sample_preclip = _annotate_agn_fit_membership(
+        df_agn_full_sample_preclip,
+        df_agn_pass2_fit_selection,
+        z_range,
+    )
 
     if uniform_redshift_distribution:
         if not (compare_sigma_only or minimal_plots):
@@ -3217,6 +3807,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         checkpoint_file_override=pass2_checkpoint_file if apply_two_pass_sigma_clip else single_checkpoint_file,
         completeness_sim_file=completeness_sim_file,
         completeness_mode=completeness_mode,
+        selection_attenuation_mode=selection_attenuation_mode,
         compare_sigma_only=compare_sigma_only,
         minimal_plots=minimal_plots,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
@@ -3229,7 +3820,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         resume_replot_with_cuts=resume_replot_with_cuts,
         warm_start_flat_samples=pass2_warm_start_flat_samples if warm_start_pass2 else None,
         logZ_is_approximate=warm_start_pass2,
-        df_agn_completeness=df_agn_full_sample_preclip,
+        df_agn_completeness=df_agn_completeness_parent,
+        completeness_z_range=completeness_z_range,
     )
     if apply_two_pass_sigma_clip:
         _write_stage_checkpoint(
@@ -3282,6 +3874,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             use_eta_sigma_term=use_eta_sigma_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
             early_de_guard=early_de_guard,
+            selection_attenuation_mode=selection_attenuation_mode,
             dmi_draw_indices=posterior_sample_indices,
         )
         (
@@ -3320,7 +3913,10 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             agn_pivot_context=agn_pivot_context,
         )
         print(
-            "minimal_plots=True: retained hubble_diagram_debiased.pdf and "
+            "minimal_plots=True: retained the raw and debiased Hubble diagrams, "
+            "debiased-residual diagnostic, Dynesty corner plot, redshift "
+            "histogram, completeness pre/post-cut audit, two predicted-L2500 "
+            "band plots, and "
             "hubble_plot_residuals.csv; skipped other figures."
         )
         return (
@@ -3377,6 +3973,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_eta_sigma_term=use_eta_sigma_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         early_de_guard=early_de_guard,
+        selection_attenuation_mode=selection_attenuation_mode,
         dmi_draw_indices=posterior_sample_indices,
     )
     dmi_posterior_median_full = dmi_posterior_median_full_direct
@@ -3531,7 +4128,14 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         show=False,
     )
 
-    chisq_red_L2500, _ = reduced_chi_squared(L_residuals_debiased, L_pred_std_debiased, n_params=len(model_labels)-1)
+    fit_stat_mask = df_agn_pass2_plot_sample["is_fit_selection"].to_numpy(
+        dtype=bool
+    )
+    chisq_red_L2500, _ = reduced_chi_squared(
+        np.asarray(L_residuals_debiased)[fit_stat_mask],
+        np.asarray(L_pred_std_debiased)[fit_stat_mask],
+        n_params=len(model_labels) - 1,
+    )
     df_agn_agn_likelihood_chi2_selection = df_agn_pass2_fit_selection
     if resume_replot_with_cuts:
         df_agn_agn_likelihood_chi2_selection = df_agn_pass2_plot_sample[
@@ -3584,6 +4188,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             debiased_residuals,
             debiased_clipping_sigma,
             sigma_clip_threshold=sigma_clip_threshold,
+            eligible_mask=df_agn_pass2_plot_sample["z"].between(
+                z_range[0], z_range[1], inclusive="both"
+            ).to_numpy(dtype=bool),
         )
         final_diagnostics_df = final_diagnostics_df.rename(
             columns={
@@ -3600,8 +4207,10 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             ].to_numpy(dtype=bool)
         final_diagnostics_df["is_in_pass2_sample"] = True
         final_diagnostics_df["is_in_pass2_plot_sample"] = True
-        final_diagnostics_df["is_in_pass2_fit_selection"] = final_diagnostics_df["z"].between(
-            z_range[0], z_range[1]
+        final_diagnostics_df["is_in_pass2_fit_selection"] = (
+            final_diagnostics_df.index.isin(
+                pd.Index(df_agn_pass2_fit_selection.index)
+            )
         )
         _write_sigma_clip_diagnostics(
             final_diagnostics_df,
@@ -3675,6 +4284,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 use_eta_sigma_term=use_eta_sigma_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 early_de_guard=early_de_guard,
+                selection_attenuation_mode=selection_attenuation_mode,
             )
         mu_table, mu_err_table = _compute_debiased_agn_table_mu(
             flat_samples,
@@ -3725,9 +4335,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
 
     n_agn_params = sum(label != "M0_sn" for label in model_labels)
     hubble_chi2_mask = (
-        df_agn_pass2_plot_sample["z"]
-        .between(z_range[0], z_range[1])
-        .to_numpy(dtype=bool)
+        df_agn_pass2_plot_sample["is_fit_selection"].to_numpy(dtype=bool)
         & np.isfinite(debiased_residuals)
         & np.isfinite(mu_pred_std_debiased)
         & np.isfinite(mu_pred_std_debiased_with_scatter)
@@ -3876,7 +4484,11 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_redshift_log_f_term=use_redshift_log_f_term,
         agn_pivot_context=agn_pivot_context,
     )
-    chisq_red_M2500_debiased, _ = reduced_chi_squared(M2500_residuals_debiased, M2500_std_debiased, n_params=len(model_labels)-1)
+    chisq_red_M2500_debiased, _ = reduced_chi_squared(
+        np.asarray(M2500_residuals_debiased)[fit_stat_mask],
+        np.asarray(M2500_std_debiased)[fit_stat_mask],
+        n_params=len(model_labels) - 1,
+    )
     print("Plotting debiased residuals...")
     plot_full_residuals(
         df_agn_pass2_plot_sample,
@@ -4025,6 +4637,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 plot=True,
                 plot_path=plot_path,
                 df_agn_fhost_population=df_agn_all,
+                z_range=completeness_z_range,
             )
         elif completeness_mode == "3d_fhost":
             print("Plotting host-aware 3D completeness diagnostics...")
@@ -4034,11 +4647,13 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 plot=True,
                 plot_path=plot_path,
                 df_agn_fhost_population=df_agn_all,
+                z_range=completeness_z_range,
             )
         else:
             print("Plotting completeness vs magnitude at redshifts...")
             p_detect, mag_centers, z_centers, dm, dz, completeness_scatter = get_completeness_function_2d(
-                df_agn_completeness_plot_sample, sim_file=completeness_sim_file, plot=True, plot_path=plot_path
+                df_agn_completeness_plot_sample, sim_file=completeness_sim_file,
+                plot=True, plot_path=plot_path, z_range=completeness_z_range
             )
             plot_completeness_vs_mag_at_redshifts(
                 p_detect, mag_centers, z_centers, plot_path=plot_path
@@ -4416,14 +5031,29 @@ if __name__ == "__main__":
     parser.add_argument("--N", type=int, default=None, help="Number of AGNs to run (default: all)")
     parser.add_argument("--only_sna", action="store_true", default=False, help="Run SNIa-only fit (default: False)")
     parser.add_argument("--only_agn", action="store_true", default=False, help="Run AGN-only fit with the Supernova likelihood and M0_sn disabled (default: False)")
-    parser.add_argument(
+    spectra_group = parser.add_mutually_exclusive_group(required=True)
+    spectra_group.add_argument(
         "--spectra_fit_csv",
         type=str,
         nargs="+",
-        required=True,
         help=(
             "Path(s) to CSV output from fit_spectra_jaxsedfit_joint.py. "
             "Legacy spectral-fit formats are not supported."
+        ),
+    )
+    spectra_group.add_argument(
+        "--spectra_fit_h5",
+        type=str,
+        nargs="+",
+        help="Path(s) to versioned JAXSEDFit joint spectral HDF5 catalogs.",
+    )
+    parser.add_argument(
+        "--allow-legacy-v3-host-capture-metadata",
+        action="store_true",
+        default=False,
+        help=(
+            "Allow a spectra v3 catalog to omit the historical host-capture "
+            "model and FWHM attributes, assuming the standard SDSS values."
         ),
     )
     parser.add_argument(
@@ -4444,12 +5074,24 @@ if __name__ == "__main__":
         help="Optional SDSS_RUN2D filter for spectra-matched AGN rows. Applies only when cuts are enabled.",
     )
     parser.add_argument(
-        "--no-cuts",
-        "--no_cuts",
-        dest="no_cuts",
-        action="store_true",
-        default=False,
-        help="Disable all AGN data cuts (default: False).",
+        "--sdss-target-selection",
+        "--sdss_target_selection",
+        dest="sdss_target_selection",
+        type=normalize_sdss_target_selection,
+        choices=SDSS_TARGET_SELECTION_CHOICES,
+        default="all",
+        help=(
+            "Tier-0 SDSS targeting population to fit. It is bypassed only by "
+            "--cut-tier none."
+        ),
+    )
+    parser.add_argument(
+        "--cut-tier",
+        dest="cut_tier",
+        type=normalize_cut_tier,
+        choices=CUT_TIER_CHOICES,
+        default="2",
+        help="Maximum AGN cut tier: none, 0 (eligibility), 1 (fit quality), or 2 (science parameters).",
     )
     parser.add_argument("--skip_plots", action="store_true", default=False, help="Skip plotting steps (default: False)")
     parser.add_argument(
@@ -4528,6 +5170,15 @@ if __name__ == "__main__":
         help="Correct log_sigma_uv using f_host_2500, propagate f_host_2500_err into log_sigma_uv_std_psd, and save diagnostics plots.",
     )
     parser.add_argument(
+        "--selection-attenuation-mode",
+        choices=SELECTION_ATTENUATION_MODES,
+        default="fixed-offset",
+        help=(
+            "Selection attenuation treatment. 'joint-posterior' marginalizes "
+            "the simple 2D completeness integral over paired spectra-v3 draws."
+        ),
+    )
+    parser.add_argument(
         "--fit_alpha_lambda_term",
         action="store_true",
         default=False,
@@ -4571,6 +5222,13 @@ if __name__ == "__main__":
     if args.only_sna and args.only_agn:
         raise ValueError("--only_sna and --only_agn cannot be used together.")
     validate_plot_mode_args(args)
+    if args.selection_attenuation_mode == "joint-posterior" and (
+        args.run != "single" or args.use_jax
+    ):
+        raise NotImplementedError(
+            "joint-posterior selection attenuation currently supports only "
+            "the default non-JAX single Hubble run."
+        )
 
     if args.disable_full_covariance:
         print("Warning: Running without full covariance may lead to underestimated uncertainties.")
@@ -4597,18 +5255,30 @@ if __name__ == "__main__":
     df_pantheon, _sna_LogdetCov, _sna_L, _sna_Lower = load_pantheon_data()
     agn_plot_path = f"plots/hubble/{args.prefix}"
     cut_report_path = Path(agn_plot_path) / "cut_summary.txt"
-    df_agn, df_agn_all = load_agn_data(args.agn_data_filepath, populate_sdss=args.force_populate_fields, 
-                           apply_cut=not args.no_cuts,
+    loaded_agn = load_agn_data(args.agn_data_filepath, populate_sdss=args.force_populate_fields,
+                           cut_tier=args.cut_tier,
                            residuals_sigma_clip=args.residuals_sigma_clip, residuals_csv=args.residuals_csv,
                            exclude_object_ids_csv=args.exclude_object_ids_csv,
                            spectra_fit_csv=args.spectra_fit_csv,
+                           spectra_fit_h5=args.spectra_fit_h5,
+                           allow_legacy_v3_host_capture_metadata=(
+                               args.allow_legacy_v3_host_capture_metadata
+                           ),
+                           sdss_target_selection=args.sdss_target_selection,
                            magnitude_convention=args.magnitude_convention,
                            completeness_magnitude=args.completeness_magnitude,
                            spectra_sdss_run2d=args.spectra_sdss_run2d,
                            correct_sigma_uv_host=args.correct_sigma_uv_host,
+                           enforce_completeness_support=not args.disable_completeness,
+                           return_completeness_parent=not args.disable_completeness,
                            z_range=tuple(args.z_range), plot_path=agn_plot_path,
                            cut_report_path=cut_report_path,
                            plot_diagnostics=not args.minimal_plots)
+    if args.disable_completeness:
+        df_agn, df_agn_all = loaded_agn
+        df_agn_completeness_parent = df_agn.copy()
+    else:
+        df_agn, df_agn_all, df_agn_completeness_parent = loaded_agn
     effective_N = args.N
     if args.agn_calibrators:
         if args.agn_calibrators.endswith('.h5'):
@@ -4680,6 +5350,7 @@ if __name__ == "__main__":
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
                 early_de_guard=args.early_de_guard,
                 agn_pivot_context=agn_pivot_context,
+                df_agn_completeness_parent=df_agn_completeness_parent,
             )
     elif args.run == "single": # default
         cosmo_models_dict = {k: {} for k in args.cosmo_models}
@@ -4722,6 +5393,7 @@ if __name__ == "__main__":
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
                 completeness_magnitude=args.completeness_magnitude,
+                selection_attenuation_mode=args.selection_attenuation_mode,
                 compare_sigma_only=args.compare_sigma_only,
                 minimal_plots=args.minimal_plots,
                 disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
