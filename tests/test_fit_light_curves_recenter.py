@@ -812,6 +812,66 @@ def test_carma21_numpyro_model_trace_materializes_likelihood_and_uv_outputs():
         assert np.all(np.isfinite(np.asarray(sites[key]["value"])))
 
 
+@pytest.mark.parametrize("fraction_mode", ("empirical", "logit-normal"))
+def test_shared_latent_model_uses_joint_psf_fraction_draws(fraction_mode):
+    obj = {
+        "object_id": "shared-latent-fraction-smoke",
+        "z": 1.0,
+        "X": (
+            np.array([0.0, 5.0, 10.0, 15.0]),
+            np.array([0, 1, 0, 1], dtype=np.int32),
+        ),
+        "y": np.array([0.0, 0.02, -0.01, 0.01]),
+        "yerr": np.full(4, 0.03),
+        "survey_idx": np.zeros(4, dtype=np.int32),
+        "mags_means": np.array([20.0, 20.0]),
+        "bands": ["g", "r"],
+        "survey_names": ("sdss", "ps1", "ztf"),
+        "psf_agn_fraction_bands": ("u", "g", "r", "i", "z"),
+        "psf_agn_fraction_draws": np.array(
+            [
+                [0.8, 0.7, 0.6, 0.5, 0.4],
+                [0.7, 0.6, 0.5, 0.4, 0.3],
+                [0.6, 0.5, 0.4, 0.3, 0.2],
+            ]
+        ),
+        "psf_agn_fraction_valid_count": 3,
+    }
+    model = build_single_object_model_mag_flux_linearized(
+        obj,
+        np.array([2000.0, 3000.0]),
+        log_jitter_mean=np.full((2, 3), np.log(0.03)),
+        shared_latent=True,
+        psf_fraction_mode=fraction_mode,
+    )
+
+    sites = fit_lc.trace(
+        fit_lc.seed(model, jax.random.PRNGKey(0))
+    ).get_trace()
+
+    assert "loglike" in sites
+    assert np.all(np.isfinite(np.asarray(sites["loglike"]["fn"].log_factor)))
+    if fraction_mode == "empirical":
+        responsibilities = np.asarray(
+            sites["psf_agn_fraction_responsibility"]["value"]
+        )
+        assert responsibilities.shape == (3,)
+        np.testing.assert_allclose(responsibilities.sum(), 1.0)
+    else:
+        fractions = np.asarray(sites["psf_agn_fraction"]["value"])
+        assert fractions.shape == (2,)
+        assert np.all((fractions > 0.0) & (fractions < 1.0))
+
+
+def test_psf_fraction_mode_defaults_to_median():
+    assert fit_lc.DEFAULT_PSF_FRACTION_MODE == "median"
+    assert set(fit_lc.PSF_FRACTION_MODES) == {
+        "empirical",
+        "logit-normal",
+        "median",
+    }
+
+
 @pytest.mark.parametrize(
     ("shared_latent", "drw_parameterization"),
     [(False, False), (True, False), (False, True)],

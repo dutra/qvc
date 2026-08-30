@@ -20,7 +20,6 @@ import argparse
 from collections.abc import Iterable, Mapping
 
 import numpy as np
-import pandas as pd
 from tqdm import tqdm
 
 from qvc.hubble.hubble_utils import resolve_qvc_data_path
@@ -66,45 +65,47 @@ def relative_fluxerr_to_magerr(flux, fluxerr):
     return (2.5 / np.log(10.0)) * fluxerr / np.clip(flux, 1e-300, None)
 
 
-def load_spectra_psf_fractions(spectra_fit_h5s) -> dict[str, dict]:
-    """Load only the HDF5 spectra columns needed for constant-flux correction."""
+def load_spectra_psf_fractions(
+    spectra_fit_h5s,
+    *,
+    include_fraction_draws: bool = False,
+) -> dict[str, dict]:
+    """Load scalar PSF fractions and, optionally, their compact joint draws."""
 
     if not spectra_fit_h5s:
         return {}
 
-    frames = []
+    rows = {}
     for h5_path in spectra_fit_h5s:
         resolved = resolve_qvc_data_path(h5_path)
-        frame = read_spectra_catalog_hdf5(
+        catalog = read_spectra_catalog_hdf5(
             resolved,
-            include_fraction_draws=False,
-        ).frame
-        usecols = [
-            col
-            for col in frame.columns
-            if col == "object_id" or col.startswith("f_AGN_psf_")
-        ]
-        if "object_id" not in usecols:
+            include_fraction_draws=include_fraction_draws,
+        )
+        frame = catalog.frame
+        if "object_id" not in frame.columns:
             raise ValueError(f"Spectra HDF5 {resolved} is missing required column 'object_id'.")
-        if not any(col.startswith("f_AGN_psf_") for col in usecols):
+        fraction_columns = [
+            column for column in frame.columns if column.startswith("f_AGN_psf_")
+        ]
+        if not fraction_columns:
             raise ValueError(
                 f"Spectra HDF5 {resolved} is missing required per-band columns "
                 "'f_AGN_psf_<band>'."
             )
-        frames.append(frame.loc[:, usecols].copy())
-
-    if not frames:
-        return {}
-
-    merged = frames[0]
-    if len(frames) > 1:
-        merged = pd.concat(frames, ignore_index=True, sort=False)
-    merged["object_id_key"] = merged["object_id"].map(normalize_object_id)
-    merged = merged.drop_duplicates("object_id_key", keep="last")
-    return {
-        row["object_id_key"]: row.drop(labels=["object_id_key"]).to_dict()
-        for _, row in merged.iterrows()
-    }
+        for row_index, (_, row) in enumerate(frame.iterrows()):
+            object_id = normalize_object_id(row["object_id"])
+            value = row.to_dict()
+            if include_fraction_draws:
+                valid_count = int(catalog.valid_count[row_index])
+                value["psf_agn_fraction_draws"] = np.asarray(
+                    catalog.fraction_draws[row_index, :valid_count],
+                    dtype=np.float32,
+                )
+                value["psf_agn_fraction_valid_count"] = valid_count
+                value["psf_agn_fraction_bands"] = catalog.bands
+            rows[object_id] = value
+    return rows
 
 
 def get_bandpass_agn_fraction(source: Mapping[str, object], band: str) -> tuple[float, float, str | None]:
@@ -390,6 +391,37 @@ def apply_constant_flux_correction_to_objects(
         raise ValueError(" ".join(msg_parts))
 
     return corrected_objs, summary
+
+
+def attach_spectra_psf_fractions_to_objects(
+    objs,
+    *,
+    spectra_fit_h5s,
+):
+    """Attach scalar fractions and correlated draws without altering photometry."""
+
+    spectra_rows = load_spectra_psf_fractions(
+        spectra_fit_h5s,
+        include_fraction_draws=True,
+    )
+    attached = []
+    missing = []
+    for obj in objs:
+        object_id = normalize_object_id(obj.get("object_id"))
+        spectra_row = spectra_rows.get(object_id)
+        if spectra_row is None:
+            missing.append(object_id)
+            continue
+        merged = dict(obj)
+        merged.update(spectra_row)
+        attached.append(merged)
+    if missing:
+        preview = ", ".join(missing[:10])
+        raise ValueError(
+            f"No spectral PSF-fraction draws for {len(missing)} light-curve "
+            f"object(s): {preview}"
+        )
+    return attached
 
 
 def print_constant_flux_correction_summary(summary):
