@@ -51,30 +51,72 @@ os.environ["XLA_FLAGS"] = f"--xla_force_host_platform_device_count={num_cores}"
 os.environ["JAX_PLATFORM_NAME"] = "cpu"
 
 from qvc.hubble.hubble_utils import match_radec, resolve_qvc_data_path
-from jaxqsofit import (
-    BALConfig,
-    ContinuumConfig,
-    FitConfig,
-    HostConfig,
-    InferenceConfig,
-    JAXQSOFit,
-    LineConfig,
-    Observation,
-    OutputConfig,
-    PreprocessingConfig,
-    PSFPhotometryData,
-    PriorConfig,
-    SpectroscopyData,
-)
-from jaxqsofit.custom_components import normalize_custom_line_components
-from jaxqsofit.model import (
-    _broad_line_mask,
-    _evaluate_custom_line_component_jax,
-    _extract_line_table_from_prior_config,
-    _many_gauss_lnlam,
-    build_tied_line_meta_from_linelist,
-    reconstruct_posterior_components,
-)
+try:
+    from jaxqsofit import (
+        BALConfig,
+        ContinuumConfig,
+        FitConfig,
+        HostConfig,
+        InferenceConfig,
+        JAXQSOFit,
+        LineConfig,
+        Observation,
+        OutputConfig,
+        PreprocessingConfig,
+        PSFPhotometryData,
+        PriorConfig,
+        SpectroscopyData,
+    )
+    from jaxqsofit.custom_components import normalize_custom_line_components
+    from jaxqsofit.model import (
+        _broad_line_mask,
+        _evaluate_custom_line_component_jax,
+        _extract_line_table_from_prior_config,
+        _many_gauss_lnlam,
+        build_tied_line_meta_from_linelist,
+        reconstruct_posterior_components,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name != "jaxqsofit":
+        raise
+
+    from jaxsedfit.spectral_config import (
+        BALConfig,
+        ContinuumConfig,
+        FitConfig,
+        HostConfig,
+        InferenceConfig,
+        LineConfig,
+        Observation,
+        OutputConfig,
+        PreprocessingConfig,
+        PSFPhotometryData,
+        PriorConfig,
+        SpectroscopyData,
+    )
+    from jaxsedfit.spectral_custom_components import normalize_custom_line_components
+    from jaxsedfit.spectral_model import (
+        _broad_line_mask,
+        _evaluate_custom_line_component_jax,
+        _extract_line_table_from_prior_config,
+        _many_gauss_lnlam,
+        build_tied_line_meta_from_linelist,
+        reconstruct_posterior_components,
+    )
+
+    class JAXQSOFit:
+        """Fail clearly if the retired standalone spectral workflow is invoked."""
+
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+            raise RuntimeError(
+                "The standalone jaxqsofit backend is not installed; use "
+                "fit_spectra_jaxsedfit_joint instead."
+            )
+
+        @classmethod
+        def load_from_samples(cls, *args, **kwargs):
+            return cls(*args, **kwargs)
 
 
 COSMO = FlatLambdaCDM(H0=70, Om0=0.3)
