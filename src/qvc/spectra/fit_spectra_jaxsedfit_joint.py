@@ -84,6 +84,9 @@ HOST_CAPTURE_BUNDLE_ATTR = "qvc_host_capture_model"
 HOST_CAPTURE_BUNDLE_MARKER = "static_sdss_psf_fwhm"
 HOST_CAPTURE_PSF_FWHM_ATTR = "qvc_f_host_2500_psf_fwhm_arcsec"
 HOST_CAPTURE_QVC_FWHM_ATTR = "qvc_sdss_psf_fwhm_arcsec"
+TOTAL_CAPTURE_PHOTOMETRY_METHODS = frozenset(
+    {"profile", "auto", "model", "cmodel", "petrosian"}
+)
 
 
 class IncompatibleHostCaptureResumeError(RuntimeError):
@@ -149,8 +152,9 @@ def _host_capture_resume_message(path, detail):
     return (
         f"Cannot resume spectral posterior bundle {path}: {detail}. "
         "This run requires static SDSS ugriz PSF FWHMs and JAXSEDFit's fitted "
-        "host-capture scale, without QVC missing-PSF fraction parameters. Run "
-        "fresh spectral inference when the saved model contract differs."
+        "host-capture scale, without independent missing-spatial-scale capture "
+        "fractions. Run fresh spectral inference when the saved model contract "
+        "differs."
     )
 
 
@@ -806,8 +810,9 @@ def load_saved_sed_photometry(
 
     Required columns are an object identifier, ``filter_name``, ``flux_mjy``,
     and ``flux_err_mjy``. CSV, Parquet, Feather, ECSV, and FITS tables are
-    supported. Optional ``is_upper_limit``, ``psf_fwhm_arcsec``, and
-    ``photometry_method`` columns are preserved.
+    supported. Optional ``is_upper_limit``, ``psf_fwhm_arcsec``,
+    ``aperture_diameter_arcsec``, and ``photometry_method`` columns are
+    preserved.
     """
     path = Path(path)
     suffix = path.suffix.lower()
@@ -845,7 +850,14 @@ def load_saved_sed_photometry(
     phot = phot.copy()
     phot["source_id"] = phot["source_id"].map(legacy.normalize_object_id)
     phot["filter_name"] = phot["filter_name"].astype(str).str.strip()
-    for col in ("flux_mjy", "flux_err_mjy"):
+    for col in (
+        "flux_mjy",
+        "flux_err_mjy",
+        "psf_fwhm_arcsec",
+        "aperture_diameter_arcsec",
+    ):
+        if col not in phot:
+            continue
         phot[col] = pd.to_numeric(phot[col], errors="coerce")
     if "is_upper_limit" not in phot:
         phot["is_upper_limit"] = False
@@ -874,6 +886,46 @@ def load_saved_sed_photometry(
             "must be finite and strictly positive."
         )
     return phot.loc[good].copy()
+
+
+def validate_host_capture_spatial_metadata(phot):
+    """Reject partial-flux measurements lacking a usable spatial scale."""
+    methods = phot.get(
+        "photometry_method", pd.Series("catalog", index=phot.index)
+    ).fillna("catalog")
+    methods = methods.astype(str).str.strip().str.lower()
+    psf_fwhm = pd.to_numeric(
+        phot.get("psf_fwhm_arcsec", pd.Series(np.nan, index=phot.index)),
+        errors="coerce",
+    )
+    aperture_diameter = pd.to_numeric(
+        phot.get(
+            "aperture_diameter_arcsec", pd.Series(np.nan, index=phot.index)
+        ),
+        errors="coerce",
+    )
+    has_spatial_scale = (np.isfinite(psf_fwhm) & (psf_fwhm > 0.0)) | (
+        np.isfinite(aperture_diameter) & (aperture_diameter > 0.0)
+    )
+    missing = ~methods.isin(TOTAL_CAPTURE_PHOTOMETRY_METHODS) & ~has_spatial_scale
+    if not bool(missing.any()):
+        return
+
+    columns = [
+        name
+        for name in ("catalog", "filter_name", "photometry_method")
+        if name in phot
+    ]
+    offenders = phot.loc[missing, columns].copy()
+    offenders["psf_fwhm_arcsec"] = psf_fwhm.loc[missing]
+    offenders["aperture_diameter_arcsec"] = aperture_diameter.loc[missing]
+    raise ValueError(
+        "Host-capture modeling requires every non-total photometry measurement "
+        "to provide a finite positive psf_fwhm_arcsec or "
+        "aperture_diameter_arcsec; offending rows: "
+        f"{offenders.to_dict(orient='records')[:10]}. Regenerate the saved SED "
+        "table with complete spatial metadata."
+    )
 
 
 def load_sdss_psf_photometry_overrides(path):
@@ -1048,6 +1100,7 @@ def build_joint_config(
     phot = add_qvc_psf_photometry(rec, phot)
     if len(phot) == 0:
         raise RuntimeError("No usable broadband photometry is available.")
+    validate_host_capture_spatial_metadata(phot)
 
     filter_names = phot["filter_name"].astype(str).tolist()
     spec_flux_mjy = flambda_1e17_to_mjy(lam, flux)
@@ -1066,6 +1119,12 @@ def build_joint_config(
     psf_fwhm = [
         None if not np.isfinite(legacy.safe_float(value)) else float(value)
         for value in phot.get("psf_fwhm_arcsec", pd.Series(np.nan, index=phot.index))
+    ]
+    aperture_diameter = [
+        None if not np.isfinite(legacy.safe_float(value)) else float(value)
+        for value in phot.get(
+            "aperture_diameter_arcsec", pd.Series(np.nan, index=phot.index)
+        )
     ]
     method_values = phot.get(
         "photometry_method", pd.Series("catalog", index=phot.index)
@@ -1091,6 +1150,7 @@ def build_joint_config(
             errors=phot["flux_err_mjy"].astype(float).tolist(),
             is_upper_limit=phot["is_upper_limit"].astype(bool).tolist(),
             psf_fwhm_arcsec=psf_fwhm,
+            aperture_diameter_arcsec=aperture_diameter,
             photometry_method=methods,
         ),
         filters=FilterSet(curves=load_filter_curves(filter_names)),
@@ -2058,8 +2118,8 @@ def annotate_posterior_bundle(path, args, rec, *, event_type="fit", source_path=
         if missing_path in handle:
             raise ValueError(
                 "New posterior bundle unexpectedly contains "
-                "missing_psf_host_capture_fraction samples despite static "
-                "PSF FWHMs."
+                "missing_psf_host_capture_fraction samples for photometry "
+                "without complete spatial metadata."
             )
         if scale_path not in handle:
             raise ValueError(
@@ -2128,7 +2188,8 @@ def validate_resume_host_capture_fitter(fitter, path):
         raise IncompatibleHostCaptureResumeError(
             _host_capture_resume_message(
                 path,
-                "posterior unexpectedly contains missing-PSF host-capture fractions",
+                "posterior contains independent host-capture fractions for "
+                "measurements without spatial metadata",
             )
         )
     scales = np.asarray(samples.get("log_host_capture_scale_arcsec", []))
@@ -2218,7 +2279,9 @@ def preflight_resume_host_capture_bundles(records, args):
                     )
                 fraction_path = "samples/missing_psf_host_capture_fraction"
                 if fraction_path in handle:
-                    raise ValueError("unexpected missing-PSF host-capture samples")
+                    raise ValueError(
+                        "unexpected missing-spatial-scale host-capture samples"
+                    )
                 if "samples/log_host_capture_scale_arcsec" not in handle:
                     raise ValueError("missing fitted host-capture scale samples")
                 if unannotated_accepted:

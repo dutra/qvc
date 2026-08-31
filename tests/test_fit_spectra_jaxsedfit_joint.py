@@ -92,6 +92,44 @@ def test_saved_sed_loader_normalizes_object_id_and_upper_limits(tmp_path):
     assert result["is_upper_limit"].tolist() == [True]
 
 
+def test_saved_sed_loader_preserves_numeric_aperture_diameter(tmp_path):
+    path = tmp_path / "sed.csv"
+    pd.DataFrame(
+        {
+            "object_id": [1452887],
+            "filter_name": ["J_ukidss"],
+            "flux_mjy": [0.5],
+            "flux_err_mjy": [0.1],
+            "psf_fwhm_arcsec": [""],
+            "aperture_diameter_arcsec": ["2.0"],
+            "photometry_method": ["aperture"],
+        }
+    ).to_csv(path, index=False)
+
+    result = load_saved_sed_photometry(path)
+
+    assert result["aperture_diameter_arcsec"].tolist() == [2.0]
+    assert np.isnan(result["psf_fwhm_arcsec"].item())
+
+
+def test_host_capture_spatial_metadata_rejects_partial_flux_without_scale():
+    phot = pd.DataFrame(
+        {
+            "catalog": ["ukidss_las_dr9", "allwise"],
+            "filter_name": ["J_ukidss", "W1"],
+            "photometry_method": ["aperture", "profile"],
+            "psf_fwhm_arcsec": [np.nan, np.nan],
+            "aperture_diameter_arcsec": [np.nan, np.nan],
+        }
+    )
+
+    with pytest.raises(ValueError, match="J_ukidss.*Regenerate"):
+        joint.validate_host_capture_spatial_metadata(phot)
+
+    phot.loc[0, "aperture_diameter_arcsec"] = 2.0
+    joint.validate_host_capture_spatial_metadata(phot)
+
+
 def _sdss_override_frame(object_id="1452887"):
     return pd.DataFrame(
         {
@@ -301,6 +339,39 @@ def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
     assert config.photometry.psf_fwhm_arcsec == [
         joint.SDSS_STATIC_PSF_FWHM_ARCSEC[band] for band in "ugriz"
     ]
+    assert config.photometry.aperture_diameter_arcsec == [None] * 5
+
+    nir_phot = pd.DataFrame(
+        {
+            "source_id": [record["object_id"]],
+            "catalog": ["ukidss_las_dr9"],
+            "filter_name": ["J_ukidss"],
+            "flux_mjy": [0.2],
+            "flux_err_mjy": [0.02],
+            "is_upper_limit": [False],
+            "psf_fwhm_arcsec": [np.nan],
+            "aperture_diameter_arcsec": [2.0],
+            "photometry_method": ["aperture"],
+        }
+    )
+    config_with_aperture, _ = joint.build_joint_config(
+        record,
+        nir_phot,
+        lam=np.array([3000.0, 4000.0, 5000.0]),
+        flux=np.array([1.0, 1.1, 1.2]),
+        err=np.array([0.1, 0.1, 0.1]),
+        resolving_power=2000.0,
+        args=args,
+        aperture_diameter_arcsec=2.0,
+    )
+    aperture_by_filter = dict(
+        zip(
+            config_with_aperture.photometry.filter_names,
+            config_with_aperture.photometry.aperture_diameter_arcsec,
+            strict=True,
+        )
+    )
+    assert aperture_by_filter["J_ukidss"] == pytest.approx(2.0)
 
     args.fit_bal = False
     config_without_bal, _ = joint.build_joint_config(
@@ -1370,6 +1441,34 @@ def test_resume_preflight_rejects_old_and_accepts_main_bundle(tmp_path):
         )
         handle.create_dataset("samples/log_host_capture_scale_arcsec", data=np.ones(2))
     joint.preflight_resume_host_capture_bundles([rec], args)
+
+
+def test_resume_validation_rejects_missing_spatial_scale_capture_fractions(
+    tmp_path,
+):
+    filter_names = [f"{band}_sdss" for band in "ugriz"]
+    fitter = SimpleNamespace(
+        config=SimpleNamespace(
+            likelihood=SimpleNamespace(use_host_capture_model=True),
+            photometry=SimpleNamespace(
+                filter_names=filter_names,
+                photometry_method=["psf"] * 5,
+                psf_fwhm_arcsec=[
+                    joint.SDSS_STATIC_PSF_FWHM_ARCSEC[band] for band in "ugriz"
+                ],
+            ),
+        ),
+        samples={
+            "log_host_capture_scale_arcsec": np.zeros(4),
+            "missing_psf_host_capture_fraction": np.full((4, 1), 0.5),
+        },
+    )
+
+    with pytest.raises(
+        joint.IncompatibleHostCaptureResumeError,
+        match="without spatial metadata",
+    ):
+        joint.validate_resume_host_capture_fitter(fitter, tmp_path / "samples.h5")
 
 
 def test_resume_bal_validation_requires_saved_bal_components(tmp_path):
