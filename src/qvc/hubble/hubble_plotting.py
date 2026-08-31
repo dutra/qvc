@@ -2981,6 +2981,158 @@ def plot_eta_tau_sigma_vs_redshift(
     )
 
 
+def plot_eta_sigma_vs_redshift_colored_by_kl(
+    df,
+    plot_path="plots/hubble",
+    show=False,
+    filename="eta_sigma_vs_redshift_colored_by_kl.pdf",
+    *,
+    kl_color_limits=None,
+    sample_label=None,
+):
+    """Plot eta_sigma versus redshift, colored by its approximate KL divergence."""
+    required = {"z", "eta_sigma", "eta_sigma_kl"}
+    if not required.issubset(df.columns):
+        missing = ", ".join(sorted(required - set(df.columns)))
+        raise KeyError(f"Missing required columns for eta_sigma KL plot: {missing}")
+
+    z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
+    eta_sigma = pd.to_numeric(df["eta_sigma"], errors="coerce").to_numpy(dtype=float)
+    eta_sigma_kl = pd.to_numeric(df["eta_sigma_kl"], errors="coerce").to_numpy(dtype=float)
+    if "eta_sigma_err" in df.columns:
+        eta_sigma_err = pd.to_numeric(
+            df["eta_sigma_err"], errors="coerce"
+        ).to_numpy(dtype=float)
+    else:
+        eta_sigma_err = np.full(len(df), np.nan, dtype=float)
+
+    mask = np.isfinite(z) & np.isfinite(eta_sigma) & np.isfinite(eta_sigma_kl)
+    if not np.any(mask):
+        raise ValueError("No finite z, eta_sigma, and eta_sigma_kl rows to plot.")
+    z = z[mask]
+    eta_sigma = eta_sigma[mask]
+    eta_sigma_kl = eta_sigma_kl[mask]
+    eta_sigma_err = eta_sigma_err[mask]
+
+    if kl_color_limits is None:
+        kl_vmin, kl_vmax = np.nanpercentile(eta_sigma_kl, [1.0, 99.0])
+    else:
+        if len(kl_color_limits) != 2:
+            raise ValueError("kl_color_limits must contain exactly (vmin, vmax).")
+        kl_vmin, kl_vmax = map(float, kl_color_limits)
+    if not np.isfinite(kl_vmin) or not np.isfinite(kl_vmax):
+        raise ValueError("KL color limits must be finite.")
+    if kl_vmax <= kl_vmin:
+        padding = max(0.05 * abs(kl_vmin), 0.05)
+        kl_vmin -= padding
+        kl_vmax += padding
+
+    fig, ax = plt.subplots(figsize=(8.0, 5.2), constrained_layout=True)
+    finite_err = np.isfinite(eta_sigma_err) & (eta_sigma_err >= 0.0)
+    if np.any(finite_err):
+        ax.errorbar(
+            z[finite_err],
+            eta_sigma[finite_err],
+            yerr=eta_sigma_err[finite_err],
+            fmt="none",
+            ecolor="0.55",
+            elinewidth=0.45,
+            alpha=0.10,
+            rasterized=True,
+            zorder=1,
+        )
+
+    # Draw high-KL points last so the most data-informative fits remain visible.
+    order = np.argsort(eta_sigma_kl)
+    kl_norm = colors.Normalize(vmin=kl_vmin, vmax=kl_vmax, clip=False)
+    points = ax.scatter(
+        z[order],
+        eta_sigma[order],
+        c=eta_sigma_kl[order],
+        cmap="viridis",
+        norm=kl_norm,
+        s=17,
+        linewidths=0,
+        alpha=0.82,
+        rasterized=True,
+        zorder=2,
+    )
+
+    edges = np.linspace(np.min(z), np.max(z), 13)
+    if np.unique(edges).size > 1:
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        bin_id = np.digitize(z, edges[1:-1])
+        median = np.array(
+            [
+                np.median(eta_sigma[bin_id == index])
+                if np.count_nonzero(bin_id == index) >= 10
+                else np.nan
+                for index in range(len(centers))
+            ]
+        )
+        if np.any(np.isfinite(median)):
+            ax.plot(centers, median, color="white", linewidth=3.2, zorder=3)
+            ax.plot(
+                centers,
+                median,
+                color="black",
+                linewidth=1.35,
+                marker="o",
+                markersize=3.5,
+                label="Binned median",
+                zorder=4,
+            )
+
+    prior_mean = None
+    if "eta_prior_profile" in df.columns:
+        profiles = {
+            str(value).strip().lower()
+            for value in df.loc[mask, "eta_prior_profile"]
+            if pd.notna(value)
+        }
+        if profiles == {"modified"}:
+            prior_mean = -1.0
+        elif profiles == {"default"}:
+            prior_mean = -0.5
+    if prior_mean is not None:
+        ax.axhline(
+            prior_mean,
+            color="tab:red",
+            linestyle="--",
+            linewidth=1.1,
+            label=rf"Prior location (${prior_mean:g}$)",
+            zorder=0,
+        )
+
+    ax.set_xlabel("Redshift")
+    ax.set_ylabel(r"$\eta_\sigma$")
+    ax.set_title(r"Wavelength-dependence slope versus redshift")
+    ax.grid(alpha=0.18, linewidth=0.6)
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(handles, labels, frameon=False, loc="upper right")
+    cbar = fig.colorbar(points, ax=ax, extend="both", pad=0.02)
+    cbar.set_label(r"Approximate $D_{\mathrm{KL}}(q\,\Vert\,p)$ for $\eta_\sigma$")
+    if sample_label:
+        ax.text(
+            0.015,
+            0.02,
+            f"{sample_label}: N = {len(z):,}",
+            transform=ax.transAxes,
+            fontsize=9,
+            ha="left",
+            va="bottom",
+        )
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=300,
+        show=show,
+    )
+
+
 def plot_fast_vs_uv_variability(df, plot_path="plots/hubble", show=False, filename="fast_vs_uv_variability.pdf"):
     """Plot fast-vs-UV variability timescales and amplitudes on log-log axes."""
     tau_fast_col = "log_tau_fast_uv" if "log_tau_fast_uv" in df.columns else None

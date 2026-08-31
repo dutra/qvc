@@ -1234,6 +1234,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         plot_blr_lag_vs_amp_by_band,
         plot_blr_lag_vs_redshift_by_band,
         plot_bpl_psd_vs_uv_variability,
+        plot_eta_sigma_vs_redshift_colored_by_kl,
         plot_eta_tau_sigma_vs_redshift,
         plot_fast_vs_uv_variability,
         plot_f_host_2500_vs_redshift,
@@ -1279,6 +1280,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         plot_blr_lag_vs_amp_by_band = _skip_diagnostic_plot
         plot_blr_lag_vs_redshift_by_band = _skip_diagnostic_plot
         plot_bpl_psd_vs_uv_variability = _skip_diagnostic_plot
+        plot_eta_sigma_vs_redshift_colored_by_kl = _skip_diagnostic_plot
         plot_eta_tau_sigma_vs_redshift = _skip_diagnostic_plot
         plot_fast_vs_uv_variability = _skip_diagnostic_plot
         plot_f_host_2500_vs_redshift = _skip_diagnostic_plot
@@ -1860,6 +1862,17 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                 f"and 'log_sigma_uv_std_psd'. Missing: {missing_cols}"
             )
 
+    eta_sigma_kl_color_limits = None
+    if "eta_sigma_kl" in df.columns:
+        eta_sigma_kl_values = pd.to_numeric(
+            df["eta_sigma_kl"], errors="coerce"
+        ).to_numpy(dtype=float)
+        finite_eta_sigma_kl = eta_sigma_kl_values[np.isfinite(eta_sigma_kl_values)]
+        if finite_eta_sigma_kl.size:
+            eta_sigma_kl_color_limits = tuple(
+                np.nanpercentile(finite_eta_sigma_kl, [1.0, 99.0])
+            )
+
     plot_tier1_cuts_vs_redshift(
         df,
         plot_path=plot_path,
@@ -1969,6 +1982,15 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             plot_path=plot_path,
             show=False,
             filename="eta_tau_sigma_vs_redshift_precut.pdf",
+        )
+    if {"z", "eta_sigma", "eta_sigma_kl"}.issubset(df.columns):
+        plot_eta_sigma_vs_redshift_colored_by_kl(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="eta_sigma_vs_redshift_colored_by_kl_precut.pdf",
+            kl_color_limits=eta_sigma_kl_color_limits,
+            sample_label="Pre-cut sample",
         )
     if {"z", "linear_trend"}.issubset(df.columns):
         plot_linear_trend_vs_redshift(
@@ -2735,6 +2757,15 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             plot_path=plot_path,
             show=False,
             filename="eta_tau_sigma_vs_redshift_postcut.pdf",
+        )
+    if {"z", "eta_sigma", "eta_sigma_kl"}.issubset(df.columns):
+        plot_eta_sigma_vs_redshift_colored_by_kl(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="eta_sigma_vs_redshift_colored_by_kl_postcut.pdf",
+            kl_color_limits=eta_sigma_kl_color_limits,
+            sample_label="Post-cut sample",
         )
     if {"z", "linear_trend"}.issubset(df.columns):
         plot_linear_trend_vs_redshift(

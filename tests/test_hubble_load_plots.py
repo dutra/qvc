@@ -191,10 +191,17 @@ def test_load_agn_data_makes_default_combined_tier1_diagnostic(tmp_path, monkeyp
 def test_load_agn_data_makes_pre_and_postcut_joint_sed_and_blr_plots(tmp_path, monkeypatch):
     source_path = tmp_path / "agn.h5"
     source_path.touch()
+    frame = _minimal_agn_frame()
+    frame["eta_sigma"] = np.linspace(-0.9, -0.6, len(frame))
+    frame["eta_sigma_err"] = np.full(len(frame), 0.2)
+    frame["eta_sigma_kl"] = np.linspace(0.0, 1.0, len(frame))
+    frame["eta_tau"] = np.full(len(frame), 0.3)
+    frame["eta_prior_profile"] = "modified"
+    frame["a_2500_total"] = np.zeros(len(frame))
     monkeypatch.setattr(
         hubble_utils,
         "read_quasars_from_hdf5_flat",
-        lambda *_args, **_kwargs: _minimal_agn_frame(),
+        lambda *_args, **_kwargs: frame.copy(),
     )
     monkeypatch.setattr(hubble_utils, "populate_xray", lambda df: df)
 
@@ -249,6 +256,11 @@ def test_load_agn_data_makes_pre_and_postcut_joint_sed_and_blr_plots(tmp_path, m
     monkeypatch.setattr(hubble_plotting, "plot_alpha_lambda_vs_l2500", capture_plot)
     monkeypatch.setattr(hubble_plotting, "plot_blr_diagnostics_summary", capture_plot)
     monkeypatch.setattr(hubble_plotting, "plot_sigma_tau_vs_lambda_broken_pl_fit", capture_plot)
+    monkeypatch.setattr(
+        hubble_plotting,
+        "plot_eta_sigma_vs_redshift_colored_by_kl",
+        capture_plot,
+    )
 
     hubble_utils.load_agn_data(
         source_path,
@@ -268,6 +280,16 @@ def test_load_agn_data_makes_pre_and_postcut_joint_sed_and_blr_plots(tmp_path, m
     assert "blr_precut.pdf" in captured_by_filename
     assert "blr_postcut.pdf" in captured_by_filename
     assert "sigma_tau_vs_lambda_broken_pl_fit_postcut.pdf" in captured_by_filename
+    precut_eta = captured_by_filename[
+        "eta_sigma_vs_redshift_colored_by_kl_precut.pdf"
+    ]
+    postcut_eta = captured_by_filename[
+        "eta_sigma_vs_redshift_colored_by_kl_postcut.pdf"
+    ]
+    assert precut_eta["sample_label"] == "Pre-cut sample"
+    assert postcut_eta["sample_label"] == "Post-cut sample"
+    assert precut_eta["kl_color_limits"] == pytest.approx((0.01, 0.99))
+    assert postcut_eta["kl_color_limits"] == pytest.approx((0.01, 0.99))
 
 
 def test_load_agn_data_writes_sigma_tau_ls_identity_grids_to_diagnostics(tmp_path, monkeypatch):
