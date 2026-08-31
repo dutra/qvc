@@ -92,7 +92,7 @@ def _make_raw_public(n_band):
 def test_modified_eta_prior_profile_has_requested_sigma_prior():
     prior = eta_sigma_prior("modified")
 
-    assert float(prior.base_dist.loc) == pytest.approx(-0.8)
+    assert float(prior.base_dist.loc) == pytest.approx(-0.86)
     assert float(prior.base_dist.scale) == pytest.approx(0.3)
 
 
@@ -125,9 +125,9 @@ def test_modified_eta_prior_profile_fixes_eta_tau(shared_latent):
     ).get_trace()
 
     assert sites["eta_tau"]["type"] == "deterministic"
-    assert float(sites["eta_tau"]["value"]) == pytest.approx(0.5)
+    assert float(sites["eta_tau"]["value"]) == pytest.approx(0.58)
     eta_sigma_dist = sites["eta_sigma"]["fn"]
-    assert float(eta_sigma_dist.base_dist.loc) == pytest.approx(-0.8)
+    assert float(eta_sigma_dist.base_dist.loc) == pytest.approx(-0.86)
     assert float(eta_sigma_dist.base_dist.scale) == pytest.approx(0.3)
 
 

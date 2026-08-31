@@ -2943,7 +2943,8 @@ def tau_shift_to_uv(eta_tau, lambda_center_rf, lambda_uv=2500.0):
 
 DEFAULT_ETA_PRIOR_PROFILE = "default"
 ETA_PRIOR_PROFILES = (DEFAULT_ETA_PRIOR_PROFILE, "modified")
-MODIFIED_ETA_TAU_VALUE = 0.5
+MODIFIED_ETA_SIGMA_LOC = -0.86
+MODIFIED_ETA_TAU_VALUE = 0.58
 
 
 def _validate_eta_prior_profile(eta_prior_profile):
@@ -2958,7 +2959,7 @@ def eta_sigma_prior(eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE):
     """Wavelength-scaling prior for the stationary continuum RMS."""
 
     _validate_eta_prior_profile(eta_prior_profile)
-    loc = -0.8 if eta_prior_profile == "modified" else -0.5
+    loc = MODIFIED_ETA_SIGMA_LOC if eta_prior_profile == "modified" else -0.5
     return dist.TruncatedNormal(loc, 0.3, low=-1.5, high=0.25)
 
 
@@ -5471,7 +5472,7 @@ def main():
         help=(
             "Wavelength-scaling prior profile. 'default' preserves the existing "
             "eta_sigma and model-specific eta_tau behavior; 'modified' uses "
-            "eta_sigma ~ TruncatedNormal(-0.8, 0.3) and fixes eta_tau=0.5."
+            "eta_sigma ~ TruncatedNormal(-0.86, 0.3) and fixes eta_tau=0.58."
         ),
     )
     parser.add_argument(
