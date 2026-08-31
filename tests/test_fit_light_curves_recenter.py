@@ -106,6 +106,23 @@ def test_modified_eta_prior_profile_has_requested_normal_priors():
     assert float(tau_prior.scale) == pytest.approx(0.5)
 
 
+def test_default_eta_prior_profile_has_widened_truncated_normal_priors():
+    sigma_prior = eta_sigma_prior("default")
+    tau_prior = eta_tau_prior("default")
+
+    assert type(sigma_prior).__name__.endswith("TruncatedDistribution")
+    assert float(sigma_prior.base_dist.loc) == pytest.approx(-0.5)
+    assert float(sigma_prior.base_dist.scale) == pytest.approx(0.5)
+    assert float(sigma_prior.low) == pytest.approx(-1.5)
+    assert float(sigma_prior.high) == pytest.approx(0.25)
+
+    assert type(tau_prior).__name__.endswith("TruncatedDistribution")
+    assert float(tau_prior.base_dist.loc) == pytest.approx(0.2)
+    assert float(tau_prior.base_dist.scale) == pytest.approx(0.5)
+    assert float(tau_prior.low) == pytest.approx(-0.5)
+    assert float(tau_prior.high) == pytest.approx(1.25)
+
+
 @pytest.mark.parametrize("shared_latent", (False, True))
 def test_modified_eta_prior_profile_omits_shared_eta_tau(shared_latent):
     obj = {

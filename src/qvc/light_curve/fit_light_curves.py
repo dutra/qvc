@@ -2968,7 +2968,7 @@ def eta_sigma_prior(eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE):
     _validate_eta_prior_profile(eta_prior_profile)
     if eta_prior_profile == "modified":
         return dist.Normal(MODIFIED_ETA_SIGMA_LOC, MODIFIED_ETA_PRIOR_SCALE)
-    return dist.TruncatedNormal(-0.5, 0.3, low=-1.5, high=0.25)
+    return dist.TruncatedNormal(-0.5, 0.5, low=-1.5, high=0.25)
 
 
 def eta_tau_prior(eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE):
@@ -2977,7 +2977,7 @@ def eta_tau_prior(eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE):
     _validate_eta_prior_profile(eta_prior_profile)
     if eta_prior_profile == "modified":
         return dist.Normal(MODIFIED_ETA_TAU_LOC, MODIFIED_ETA_PRIOR_SCALE)
-    return dist.TruncatedNormal(0.2, 0.35, low=-0.5, high=1.25)
+    return dist.TruncatedNormal(0.2, 0.5, low=-0.5, high=1.25)
 
 
 def eta_tau_is_sampled(
