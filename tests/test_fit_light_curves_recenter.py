@@ -36,6 +36,7 @@ from qvc.light_curve.fit_light_curves import (
     compute_g_band_residual_drift_diagnostics,
     compute_g_band_raw_drift_diagnostics,
     eta_sigma_prior,
+    eta_tau_prior,
     TAU_FAST_TO_SLOW_PRIOR_RATIO,
     log_tau_fast_center0_prior,
     log_tau_fast_separation_raw_prior,
@@ -89,15 +90,20 @@ def _make_raw_public(n_band):
     }
 
 
-def test_modified_eta_prior_profile_has_requested_sigma_prior():
-    prior = eta_sigma_prior("modified")
+def test_modified_eta_prior_profile_has_requested_normal_priors():
+    sigma_prior = eta_sigma_prior("modified")
+    tau_prior = eta_tau_prior("modified")
 
-    assert float(prior.base_dist.loc) == pytest.approx(-0.86)
-    assert float(prior.base_dist.scale) == pytest.approx(0.3)
+    assert isinstance(sigma_prior, fit_lc.dist.Normal)
+    assert float(sigma_prior.loc) == pytest.approx(-1.0)
+    assert float(sigma_prior.scale) == pytest.approx(0.5)
+    assert isinstance(tau_prior, fit_lc.dist.Normal)
+    assert float(tau_prior.loc) == pytest.approx(0.5)
+    assert float(tau_prior.scale) == pytest.approx(0.5)
 
 
 @pytest.mark.parametrize("shared_latent", (False, True))
-def test_modified_eta_prior_profile_fixes_eta_tau(shared_latent):
+def test_modified_eta_prior_profile_samples_eta_tau(shared_latent):
     obj = {
         "object_id": "modified-eta-prior-smoke",
         "z": 1.0,
@@ -124,11 +130,15 @@ def test_modified_eta_prior_profile_fixes_eta_tau(shared_latent):
         fit_lc.seed(model, jax.random.PRNGKey(0))
     ).get_trace()
 
-    assert sites["eta_tau"]["type"] == "deterministic"
-    assert float(sites["eta_tau"]["value"]) == pytest.approx(0.58)
+    assert sites["eta_tau"]["type"] == "sample"
+    eta_tau_dist = sites["eta_tau"]["fn"]
+    assert isinstance(eta_tau_dist, fit_lc.dist.Normal)
+    assert float(eta_tau_dist.loc) == pytest.approx(0.5)
+    assert float(eta_tau_dist.scale) == pytest.approx(0.5)
     eta_sigma_dist = sites["eta_sigma"]["fn"]
-    assert float(eta_sigma_dist.base_dist.loc) == pytest.approx(-0.86)
-    assert float(eta_sigma_dist.base_dist.scale) == pytest.approx(0.3)
+    assert isinstance(eta_sigma_dist, fit_lc.dist.Normal)
+    assert float(eta_sigma_dist.loc) == pytest.approx(-1.0)
+    assert float(eta_sigma_dist.scale) == pytest.approx(0.5)
 
 
 def _make_object(z=1.6):
@@ -1602,7 +1612,9 @@ def test_compute_parameter_kls_returns_expected_keys():
     )
 
     assert "eta_sigma_kl" in modified_kls
-    assert "eta_tau_kl" not in modified_kls
+    assert "eta_tau_kl" in modified_kls
+    assert np.isfinite(modified_kls["eta_sigma_kl"])
+    assert np.isfinite(modified_kls["eta_tau_kl"])
 
 
 def test_compute_parameter_kls_includes_band_slope_offset_terms():

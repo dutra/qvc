@@ -2943,8 +2943,9 @@ def tau_shift_to_uv(eta_tau, lambda_center_rf, lambda_uv=2500.0):
 
 DEFAULT_ETA_PRIOR_PROFILE = "default"
 ETA_PRIOR_PROFILES = (DEFAULT_ETA_PRIOR_PROFILE, "modified")
-MODIFIED_ETA_SIGMA_LOC = -0.86
-MODIFIED_ETA_TAU_VALUE = 0.58
+MODIFIED_ETA_SIGMA_LOC = -1.0
+MODIFIED_ETA_TAU_LOC = 0.5
+MODIFIED_ETA_PRIOR_SCALE = 0.5
 
 
 def _validate_eta_prior_profile(eta_prior_profile):
@@ -2959,13 +2960,17 @@ def eta_sigma_prior(eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE):
     """Wavelength-scaling prior for the stationary continuum RMS."""
 
     _validate_eta_prior_profile(eta_prior_profile)
-    loc = MODIFIED_ETA_SIGMA_LOC if eta_prior_profile == "modified" else -0.5
-    return dist.TruncatedNormal(loc, 0.3, low=-1.5, high=0.25)
+    if eta_prior_profile == "modified":
+        return dist.Normal(MODIFIED_ETA_SIGMA_LOC, MODIFIED_ETA_PRIOR_SCALE)
+    return dist.TruncatedNormal(-0.5, 0.3, low=-1.5, high=0.25)
 
 
-def eta_tau_prior():
-    """Default wavelength-scaling prior for the DRW-style timescale."""
+def eta_tau_prior(eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE):
+    """Wavelength-scaling prior for the DRW-style timescale."""
 
+    _validate_eta_prior_profile(eta_prior_profile)
+    if eta_prior_profile == "modified":
+        return dist.Normal(MODIFIED_ETA_TAU_LOC, MODIFIED_ETA_PRIOR_SCALE)
     return dist.TruncatedNormal(0.2, 0.35, low=-0.5, high=1.25)
 
 
@@ -2977,7 +2982,7 @@ def eta_tau_is_sampled(
     """Whether eta_tau is stochastic for the selected model and prior profile."""
 
     _validate_eta_prior_profile(eta_prior_profile)
-    return eta_prior_profile == DEFAULT_ETA_PRIOR_PROFILE and not shared_latent
+    return eta_prior_profile == "modified" or not shared_latent
 
 
 def log_sigma_center0_prior(eta_sigma, lambda_center_rf):
@@ -3472,7 +3477,7 @@ def compute_parameter_kls(
     ):
         kls["eta_tau_kl"] = kl_from_samples(
             eta_tau,
-            lambda x: _dist_log_prob_array(eta_tau_prior(), x),
+            lambda x: _dist_log_prob_array(eta_tau_prior(eta_prior_profile), x),
         )
 
     if sigma_center0_key in flat_samples:
@@ -4409,15 +4414,13 @@ def build_single_object_model_mag_flux_linearized(
             "eta_sigma",
             eta_sigma_prior(eta_prior_profile),
         )
-        if eta_prior_profile == "modified":
-            eta_tau = numpyro.deterministic(
-                "eta_tau",
-                jnp.asarray(MODIFIED_ETA_TAU_VALUE),
-            )
-        elif shared_latent:
+        if shared_latent and eta_prior_profile == DEFAULT_ETA_PRIOR_PROFILE:
             eta_tau = numpyro.deterministic("eta_tau", jnp.asarray(0.0))
         else:
-            eta_tau = numpyro.sample("eta_tau", eta_tau_prior())
+            eta_tau = numpyro.sample(
+                "eta_tau",
+                eta_tau_prior(eta_prior_profile),
+            )
 
         tau_center_prior_fn = (
             log_tau_drw_center0_prior
@@ -5472,7 +5475,7 @@ def main():
         help=(
             "Wavelength-scaling prior profile. 'default' preserves the existing "
             "eta_sigma and model-specific eta_tau behavior; 'modified' uses "
-            "eta_sigma ~ TruncatedNormal(-0.86, 0.3) and fixes eta_tau=0.58."
+            "eta_sigma ~ Normal(-1.0, 0.5) and eta_tau ~ Normal(0.5, 0.5)."
         ),
     )
     parser.add_argument(
