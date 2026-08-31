@@ -107,7 +107,7 @@ from qvc.hubble.hubble_plotting import (
     plot_completeness_diagnostics,
     plot_cosmo_corner,
     plot_delta_m_flux_recal_vs_redshift,
-    plot_full_residuals,
+    plot_full_residuals_debiased_partial_controls,
     plot_hubble,
     plot_L2500_vs_sigma_tau_separate,
     plot_catalog_quantity_vs_sigma_tau_separate,
@@ -1357,23 +1357,6 @@ def run_single_jax(
         n_params=len(model_labels) - 1,
     )
     print(f"Reduced chi-squared (debiased) M2500: {chisq_red_L2500:.3f}")
-    plot_full_residuals(
-        df_agn_plot,
-        L_residuals_debiased,
-        L_pred_std_debiased,
-        flat_samples,
-        cosmo_model,
-        z_pivot_agn,
-        debias=True,
-        dm_interp=dm_interp,
-        dmi_values=dmi_posterior_median_full,
-        show=False,
-        plot_path=plot_path,
-        z_range=z_range,
-        residual_label="L2500_sigma_tau_residuals",
-        output_tag="full_residuals_l2500_sigma_tau",
-    )
-
     r = plot_hubble(
         flat_samples,
         df_agn_plot,
@@ -1405,6 +1388,13 @@ def run_single_jax(
         mu_pred_std_debiased,
         mu_pred_std_debiased_with_scatter,
     ) = r
+    plot_full_residuals_debiased_partial_controls(
+        df_agn_plot,
+        debiased_residuals,
+        plot_path=plot_path,
+        z_range=z_range,
+        show=False,
+    )
     n_agn_params = sum(label != "M0_sn" for label in model_labels)
     hubble_chi2_mask = (
         df_agn_plot["is_fit_selection"].to_numpy(dtype=bool)

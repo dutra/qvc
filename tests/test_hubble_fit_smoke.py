@@ -1627,8 +1627,6 @@ def test_run_single_threads_direct_full_sample_debias_arrays_to_plots(monkeypatc
     l2500_calls = []
     m2500_calls = []
     blr_calls = []
-    full_residual_calls = []
-    full_residual_rz_calls = []
 
     monkeypatch.chdir(tmp_path)
     _patch_run_single_plot_stack(monkeypatch)
@@ -1680,12 +1678,6 @@ def test_run_single_threads_direct_full_sample_debias_arrays_to_plots(monkeypatc
     def fake_plot_blr_line_lags_vs_l2500(*args, **kwargs):
         blr_calls.append(kwargs)
 
-    def fake_plot_full_residuals(*args, **kwargs):
-        full_residual_calls.append(kwargs)
-
-    def fake_plot_full_residuals_rz(*args, **kwargs):
-        full_residual_rz_calls.append(kwargs)
-
     def fake_direct_completeness_summaries(
         *args,
         dmi_draw_indices=None,
@@ -1721,8 +1713,6 @@ def test_run_single_threads_direct_full_sample_debias_arrays_to_plots(monkeypatc
     monkeypatch.setattr(hubble_fit, "plot_predicted_L2500_vs_sigmahat", fake_plot_predicted_L2500_vs_sigmahat)
     monkeypatch.setattr(hubble_fit, "plot_predicted_vs_actual_M2500", fake_plot_predicted_vs_actual_M2500)
     monkeypatch.setattr(hubble_fit, "plot_blr_line_lags_vs_l2500", fake_plot_blr_line_lags_vs_l2500)
-    monkeypatch.setattr(hubble_fit, "plot_full_residuals", fake_plot_full_residuals)
-    monkeypatch.setattr(hubble_fit, "plot_full_residuals_rz", fake_plot_full_residuals_rz)
 
     hubble_fit.run_single(
         df_agn=df_agn,
@@ -1786,8 +1776,6 @@ def test_run_single_threads_direct_full_sample_debias_arrays_to_plots(monkeypatc
     np.testing.assert_allclose(debiased_m2500_call["dmi_selection_sigma"], direct_sigma_sel)
 
     np.testing.assert_allclose(blr_calls[0]["dmi_values"], direct_dmi)
-    assert all(np.allclose(call["dmi_values"], direct_dmi) for call in full_residual_calls)
-    np.testing.assert_allclose(full_residual_rz_calls[0]["dmi_values"], direct_dmi)
 
 
 def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
@@ -3095,8 +3083,6 @@ def test_run_single_calls_agn_table_only_for_joint_flatw0wa(monkeypatch, tmp_pat
     )
     monkeypatch.setattr(hubble_fit, "plot_hubble_residual_normality", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_predicted_vs_actual_M2500", lambda *args, **kwargs: (np.zeros(len(df_agn)), np.ones(len(df_agn)), None, None))
-    monkeypatch.setattr(hubble_fit, "plot_full_residuals", lambda *args, **kwargs: None)
-    monkeypatch.setattr(hubble_fit, "plot_full_residuals_rz", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_debias_impact_diagnostics", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_redshift_bin_residual_summary", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_fast_vs_uv_variability", lambda *args, **kwargs: None)
@@ -3993,9 +3979,7 @@ def _patch_run_single_plot_stack(monkeypatch):
     monkeypatch.setattr(hubble_fit, "plot_hubble_residual_normality", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_hubble_residual_tail_diagnostics", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_predicted_vs_actual_M2500", lambda *args, **kwargs: (np.zeros(len(args[1])), np.ones(len(args[1])), None, None))
-    monkeypatch.setattr(hubble_fit, "plot_full_residuals", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_full_residuals_debiased_partial_controls", lambda *args, **kwargs: None)
-    monkeypatch.setattr(hubble_fit, "plot_full_residuals_rz", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_parameter_residual_diagnostics", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_debias_impact_diagnostics", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_redshift_bin_residual_summary", lambda *args, **kwargs: None)
@@ -4567,8 +4551,6 @@ def test_run_single_two_pass_sigma_clip_removes_clipped_object_ids_from_second_p
     plot_hubble_calls = []
     l2500_calls = []
     m2500_calls = []
-    full_residual_calls = []
-    full_residual_rz_calls = []
     blr_calls = []
     blr_pdf_calls = []
     debias_impact_calls = []
@@ -4641,8 +4623,6 @@ def test_run_single_two_pass_sigma_clip_removes_clipped_object_ids_from_second_p
         "plot_predicted_vs_actual_M2500",
         lambda *args, **kwargs: (m2500_calls.append(args[1]["object_id"].tolist()), (np.zeros(len(args[1])), np.ones(len(args[1])), None, None))[1],
     )
-    monkeypatch.setattr(hubble_fit, "plot_full_residuals", lambda *args, **kwargs: full_residual_calls.append(args[0]["object_id"].tolist()))
-    monkeypatch.setattr(hubble_fit, "plot_full_residuals_rz", lambda *args, **kwargs: full_residual_rz_calls.append(args[0]["object_id"].tolist()))
     monkeypatch.setattr(hubble_fit, "plot_debias_impact_diagnostics", lambda *args, **kwargs: debias_impact_calls.append(args[0]["object_id"].tolist()))
     monkeypatch.setattr(hubble_fit, "plot_residuals_vs_alphaOX", lambda *args, **kwargs: alphaox_calls.append(args[0]["object_id"].tolist()))
 
@@ -4682,10 +4662,6 @@ def test_run_single_two_pass_sigma_clip_removes_clipped_object_ids_from_second_p
     for call_ids in l2500_calls:
         assert call_ids == expected_second_pass_ids
     for call_ids in m2500_calls:
-        assert call_ids == expected_second_pass_ids
-    for call_ids in full_residual_calls:
-        assert call_ids == expected_second_pass_ids
-    for call_ids in full_residual_rz_calls:
         assert call_ids == expected_second_pass_ids
     assert blr_calls[0] == expected_second_pass_ids
     assert blr_pdf_calls[0] == expected_second_pass_ids
@@ -4798,8 +4774,6 @@ def test_run_single_two_pass_sigma_clip_keeps_out_of_range_survivor_in_stage2_pl
     plot_hubble_calls = []
     l2500_calls = []
     m2500_calls = []
-    full_residual_calls = []
-    full_residual_rz_calls = []
     blr_calls = []
     blr_pdf_calls = []
     debias_impact_calls = []
@@ -4869,8 +4843,6 @@ def test_run_single_two_pass_sigma_clip_keeps_out_of_range_survivor_in_stage2_pl
         "plot_predicted_vs_actual_M2500",
         lambda *args, **kwargs: (m2500_calls.append(args[1]["object_id"].tolist()), (np.zeros(len(args[1])), np.ones(len(args[1])), None, None))[1],
     )
-    monkeypatch.setattr(hubble_fit, "plot_full_residuals", lambda *args, **kwargs: full_residual_calls.append(args[0]["object_id"].tolist()))
-    monkeypatch.setattr(hubble_fit, "plot_full_residuals_rz", lambda *args, **kwargs: full_residual_rz_calls.append(args[0]["object_id"].tolist()))
     monkeypatch.setattr(hubble_fit, "plot_debias_impact_diagnostics", lambda *args, **kwargs: debias_impact_calls.append(args[0]["object_id"].tolist()))
     monkeypatch.setattr(hubble_fit, "plot_residuals_vs_alphaOX", lambda *args, **kwargs: alphaox_calls.append(args[0]["object_id"].tolist()))
 
@@ -4905,10 +4877,6 @@ def test_run_single_two_pass_sigma_clip_keeps_out_of_range_survivor_in_stage2_pl
     for call_ids in l2500_calls:
         assert call_ids == expected_stage2_plot_ids
     for call_ids in m2500_calls:
-        assert call_ids == expected_stage2_plot_ids
-    for call_ids in full_residual_calls:
-        assert call_ids == expected_stage2_plot_ids
-    for call_ids in full_residual_rz_calls:
         assert call_ids == expected_stage2_plot_ids
     assert blr_calls[0] == expected_stage2_plot_ids
     assert blr_pdf_calls[0] == expected_stage2_plot_ids
@@ -5161,9 +5129,7 @@ def test_run_single_disable_sigma_clip_pass_skips_two_pass_branch(monkeypatch, t
     plot_hubble_calls = []
     l2500_calls = []
     m2500_calls = []
-    full_residual_calls = []
     partial_control_calls = []
-    full_residual_rz_calls = []
     blr_calls = []
     blr_pdf_calls = []
     debias_impact_calls = []
@@ -5224,13 +5190,11 @@ def test_run_single_disable_sigma_clip_pass_skips_two_pass_branch(monkeypatch, t
         "plot_predicted_vs_actual_M2500",
         lambda *args, **kwargs: (m2500_calls.append(kwargs), (np.zeros(len(args[1])), np.ones(len(args[1])), None, None))[1],
     )
-    monkeypatch.setattr(hubble_fit, "plot_full_residuals", lambda *args, **kwargs: full_residual_calls.append(kwargs))
     monkeypatch.setattr(
         hubble_fit,
         "plot_full_residuals_debiased_partial_controls",
         lambda *args, **kwargs: partial_control_calls.append((args, kwargs)),
     )
-    monkeypatch.setattr(hubble_fit, "plot_full_residuals_rz", lambda *args, **kwargs: full_residual_rz_calls.append(kwargs))
     monkeypatch.setattr(hubble_fit, "plot_debias_impact_diagnostics", lambda *args, **kwargs: debias_impact_calls.append(kwargs))
     monkeypatch.setattr(hubble_fit, "plot_residuals_vs_alphaOX", lambda *args, **kwargs: alphaox_calls.append(kwargs))
     monkeypatch.setattr(
@@ -5273,15 +5237,11 @@ def test_run_single_disable_sigma_clip_pass_skips_two_pass_branch(monkeypatch, t
         assert "clipped_mask" not in kwargs
     for kwargs in m2500_calls:
         assert "clipped_mask" not in kwargs
-    for kwargs in full_residual_calls:
-        assert "clipped_mask" not in kwargs
     assert len(partial_control_calls) == 1
     partial_args, partial_kwargs = partial_control_calls[0]
     assert partial_args[0]["object_id"].tolist() == df_agn["object_id"].tolist()
     np.testing.assert_allclose(partial_args[1], 0.5)
     assert partial_kwargs["z_range"] == (0.44, 3.16)
-    for kwargs in full_residual_rz_calls:
-        assert "clipped_mask" not in kwargs
     for kwargs in blr_calls:
         assert "clipped_mask" not in kwargs
     for kwargs in blr_pdf_calls:
