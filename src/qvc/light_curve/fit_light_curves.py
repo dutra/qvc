@@ -2951,14 +2951,10 @@ DEFAULT_ETA_PRIOR_PROFILE = "default"
 ETA_PRIOR_PROFILES = (
     DEFAULT_ETA_PRIOR_PROFILE,
     "modified",
-    "modified_narrow",
 )
-MODIFIED_ETA_SIGMA_LOC = -1.0
+MODIFIED_ETA_SIGMA_LOC = -0.8
 MODIFIED_ETA_TAU_LOC = 0.5
 MODIFIED_ETA_PRIOR_SCALE = 0.5
-MODIFIED_NARROW_ETA_SIGMA_LOC = -0.8
-MODIFIED_NARROW_ETA_TAU_LOC = 0.5
-MODIFIED_NARROW_ETA_PRIOR_SCALE = 0.3
 
 
 def _validate_eta_prior_profile(eta_prior_profile):
@@ -2975,11 +2971,6 @@ def eta_sigma_prior(eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE):
     _validate_eta_prior_profile(eta_prior_profile)
     if eta_prior_profile == "modified":
         return dist.Normal(MODIFIED_ETA_SIGMA_LOC, MODIFIED_ETA_PRIOR_SCALE)
-    if eta_prior_profile == "modified_narrow":
-        return dist.Normal(
-            MODIFIED_NARROW_ETA_SIGMA_LOC,
-            MODIFIED_NARROW_ETA_PRIOR_SCALE,
-        )
     return dist.TruncatedNormal(-0.5, 0.5, low=-1.5, high=0.25)
 
 
@@ -2989,11 +2980,6 @@ def eta_tau_prior(eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE):
     _validate_eta_prior_profile(eta_prior_profile)
     if eta_prior_profile == "modified":
         return dist.Normal(MODIFIED_ETA_TAU_LOC, MODIFIED_ETA_PRIOR_SCALE)
-    if eta_prior_profile == "modified_narrow":
-        return dist.Normal(
-            MODIFIED_NARROW_ETA_TAU_LOC,
-            MODIFIED_NARROW_ETA_PRIOR_SCALE,
-        )
     return dist.TruncatedNormal(0.2, 0.5, low=-0.5, high=1.25)
 
 
@@ -5590,9 +5576,7 @@ def main():
         help=(
             "Wavelength-scaling prior profile. 'default' preserves the existing "
             "eta_sigma and model-specific eta_tau behavior; 'modified' uses "
-            "eta_sigma ~ Normal(-1.0, 0.5) and eta_tau ~ Normal(0.5, 0.5) "
-            "while 'modified_narrow' uses eta_sigma ~ Normal(-0.8, 0.3) "
-            "and eta_tau ~ Normal(0.5, 0.3) "
+            "eta_sigma ~ Normal(-0.8, 0.5) and eta_tau ~ Normal(0.5, 0.5) "
             "for variants with wavelength-dependent drivers. shared_latent_blr "
             "has one wavelength-independent driver and does not use eta_tau."
         ),

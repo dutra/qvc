@@ -317,8 +317,7 @@ def test_main_stops_before_writing_when_exclusions_remove_every_object(monkeypat
         sfitlc.main()
 
 
-@pytest.mark.parametrize("profile", ("modified", "modified_narrow"))
-def test_eta_prior_profile_is_forwarded_to_light_curve_fitter(monkeypatch, profile):
+def test_eta_prior_profile_is_forwarded_to_light_curve_fitter(monkeypatch):
     monkeypatch.setattr(
         sys,
         "argv",
@@ -327,13 +326,13 @@ def test_eta_prior_profile_is_forwarded_to_light_curve_fitter(monkeypatch, profi
             "--fit",
             "stone",
             "--eta_prior_profile",
-            profile,
+            "modified",
         ],
     )
 
     args = parse_args()
 
-    assert args.extra_fit_flags == ("--eta_prior_profile", profile)
+    assert args.extra_fit_flags == ("--eta_prior_profile", "modified")
 
 
 @pytest.mark.parametrize(
