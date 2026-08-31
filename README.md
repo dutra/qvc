@@ -126,15 +126,22 @@ lag and unit-RMS Erlang response. The same model can be selected from the main
 entry point with `--model_variant shared_latent_blr`. `--disk_order` controls
 the disk-response width (default 3); `--erlang_order` controls the delayed
 response width (default 3). No emission-line, Fe, or diffuse-continuum
-wavelength template is imposed.
+wavelength template is imposed. The shared driver is wavelength-independent,
+so this variant has no `eta_tau`; `--eta_prior_profile modified` changes only
+its `eta_sigma` prior.
+
+For this variant, `log_tau_uv_rf` is the exact rest-frame integral-correlation
+timescale of a synthetic continuum-only disk response evaluated at 2500 A.
+It excludes every delayed/BLR component. `log_tau_driver_rf` is the intrinsic
+shared-driver integral timescale, `log10((tau_fast + tau_slow)/(1 + z))`, with
+the individual pole diagnostics retained as `log_tau_driver_fast_rf` and
+`log_tau_driver_slow_rf`.
 
 For output compatibility with the other light-curve models,
 `log_tau_band_<band>_RF` is the rest-frame effective timescale of that band's
 complete disk-plus-delayed light curve. It is the exact integral of the
 normalized autocorrelation function, not a fitted response centroid. The same
-value is also written as `log_tau_effective_<band>_RF`. The underlying shared
-driver poles remain available separately as `log_tau_driver_slow_rf` and
-`log_tau_driver_fast_rf`.
+value is also written as `log_tau_effective_<band>_RF`.
 
 Seeing-dependent photometric contamination can be enabled with
 `--enable_seeing_dependence` for any GP choice, including

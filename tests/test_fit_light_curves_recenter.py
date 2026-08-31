@@ -60,6 +60,9 @@ from qvc.light_curve.fit_light_curves import (
 from qvc.light_curve.multiband_model_dho_blr_erlang import (
     make_multiband_dho_blr_flux_linearized_erlang_model,
 )
+from qvc.light_curve.multiband_model_shared_latent_blr import (
+    continuum_effective_timescale,
+)
 from qvc.light_curve.multiband_fit_plotting import (
     _corner_plot_labels,
     _trace_plot_labels,
@@ -69,6 +72,7 @@ from qvc.light_curve import multiband_fit_utils
 from qvc.light_curve import fit_light_curves as fit_lc
 from qvc.light_curve.multiband_fit_utils import lambda_pivot, log_single_pl, process_samples
 from qvc.light_curve.posterior_draws import (
+    LIGHT_CURVE_POSTERIOR_DRAW_FORMAT,
     LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY,
 )
 
@@ -103,7 +107,7 @@ def test_modified_eta_prior_profile_has_requested_normal_priors():
 
 
 @pytest.mark.parametrize("shared_latent", (False, True))
-def test_modified_eta_prior_profile_samples_eta_tau(shared_latent):
+def test_modified_eta_prior_profile_omits_shared_eta_tau(shared_latent):
     obj = {
         "object_id": "modified-eta-prior-smoke",
         "z": 1.0,
@@ -130,11 +134,14 @@ def test_modified_eta_prior_profile_samples_eta_tau(shared_latent):
         fit_lc.seed(model, jax.random.PRNGKey(0))
     ).get_trace()
 
-    assert sites["eta_tau"]["type"] == "sample"
-    eta_tau_dist = sites["eta_tau"]["fn"]
-    assert isinstance(eta_tau_dist, fit_lc.dist.Normal)
-    assert float(eta_tau_dist.loc) == pytest.approx(0.5)
-    assert float(eta_tau_dist.scale) == pytest.approx(0.5)
+    if shared_latent:
+        assert "eta_tau" not in sites
+    else:
+        assert sites["eta_tau"]["type"] == "sample"
+        eta_tau_dist = sites["eta_tau"]["fn"]
+        assert isinstance(eta_tau_dist, fit_lc.dist.Normal)
+        assert float(eta_tau_dist.loc) == pytest.approx(0.5)
+        assert float(eta_tau_dist.scale) == pytest.approx(0.5)
     eta_sigma_dist = sites["eta_sigma"]["fn"]
     assert isinstance(eta_sigma_dist, fit_lc.dist.Normal)
     assert float(eta_sigma_dist.loc) == pytest.approx(-1.0)
@@ -830,6 +837,29 @@ def test_prediction_params_expand_drw_q_without_legacy_fast_uv_coordinate():
     )
 
 
+def test_shared_prediction_uses_2500_disk_response_and_removes_legacy_eta_tau():
+    raw = _make_raw_public(2)
+    blue_center = add_model_prediction_params(
+        raw,
+        jnp.array([1800.0, 2200.0]),
+        model_variant="shared_latent_blr",
+        disk_order=3,
+    )
+    red_center = add_model_prediction_params(
+        raw,
+        jnp.array([3200.0, 4000.0]),
+        model_variant="shared_latent_blr",
+        disk_order=3,
+    )
+
+    assert "eta_tau" not in blue_center
+    assert np.ndim(np.asarray(blue_center["tau_fast_driver"])) == 0
+    assert np.ndim(np.asarray(blue_center["tau_slow_driver"])) == 0
+    # The same driver has a longer synthetic 2500 A response when 2500 A is
+    # farther to the red of the fitted wavelength center.
+    assert float(blue_center["log_tau_uv"]) > float(red_center["log_tau_uv"])
+
+
 def test_carma21_numpyro_model_trace_materializes_likelihood_and_uv_outputs():
     obj = {
         "object_id": "carma21-smoke",
@@ -1473,7 +1503,9 @@ def test_process_samples_stores_shared_latent_effective_band_timescales():
         "log_tau_uv": np.log(tau_slow),
         "log_tau_fast_uv": np.log(tau_fast),
         "eta_sigma": np.zeros(3),
-        "eta_tau": np.zeros(3),
+        "tau_fast_driver": tau_fast,
+        "tau_slow_driver": tau_slow,
+        "lag0": np.asarray([2.0, 3.0, 4.0]),
     }
     for index, band in enumerate(bands):
         samples[f"tau_fast_{band}"] = tau_fast
@@ -1492,8 +1524,35 @@ def test_process_samples_stores_shared_latent_effective_band_timescales():
         erlang_order=3,
     )
 
-    assert result["log_tau_driver_slow_rf"] == result["log_tau_uv_rf"]
-    assert result["log_tau_driver_fast_rf"] == result["log_tau_fast_uv_rf"]
+    expected_driver = np.log10(tau_fast + tau_slow) - np.log10(1.0 + z)
+    assert result["log_tau_driver_rf"] == pytest.approx(np.median(expected_driver))
+    assert "eta_tau" not in result
+    assert "log_tau_fast_uv_rf" not in result
+    assert (
+        result[LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY]["format"]
+        == LIGHT_CURVE_POSTERIOR_DRAW_FORMAT
+    )
+    lambda_center_rf = np.exp(
+        np.mean(np.log([lambda_pivot[band] / (1.0 + z) for band in bands]))
+    )
+    lag_2500 = samples["lag0"] * (2500.0 / lambda_center_rf) ** (4.0 / 3.0)
+    expected_tau_uv_rf = np.asarray(
+        [
+            np.log10(
+                float(
+                    continuum_effective_timescale(tf, ts, lag, disk_order=3)
+                )
+            )
+            - np.log10(1.0 + z)
+            for tf, ts, lag in zip(tau_fast, tau_slow, lag_2500)
+        ]
+    )
+    payload = result[LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY]
+    np.testing.assert_allclose(
+        payload["log_tau_uv_rf"][: payload["valid_count"]],
+        expected_tau_uv_rf,
+        rtol=2e-6,
+    )
     for band in bands:
         assert np.isfinite(result[f"log_tau_band_{band}_RF"])
         assert result[f"log_tau_band_{band}_RF"] == result[f"log_tau_effective_{band}_RF"]
@@ -1615,6 +1674,25 @@ def test_compute_parameter_kls_returns_expected_keys():
     assert "eta_tau_kl" in modified_kls
     assert np.isfinite(modified_kls["eta_sigma_kl"])
     assert np.isfinite(modified_kls["eta_tau_kl"])
+
+    shared_samples = dict(flat_samples)
+    shared_samples.pop("eta_tau")
+    shared_kls = compute_parameter_kls(
+        shared_samples,
+        bands=bands,
+        survey_names=("sdss", "ps1", "ztf"),
+        t_ref=np.array([0.0, 10.0, 20.0], dtype=float),
+        z=z,
+        lambda_center_rf=lambda_center_rf,
+        log_jitter_mean=np.asarray([np.log(0.03), np.log(0.03)]),
+        disable_lag_bc=False,
+        n_blr_terms=2,
+        eta_prior_profile="modified",
+        model_variant="shared_latent_blr",
+    )
+    assert "eta_tau_kl" not in shared_kls
+    assert np.isfinite(shared_kls["log_tau_slow_center0_kl"])
+    assert np.isfinite(shared_kls["log_tau_fast_center0_kl"])
 
 
 def test_compute_parameter_kls_includes_band_slope_offset_terms():

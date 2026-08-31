@@ -9,7 +9,12 @@ import numpy as np
 
 
 LIGHT_CURVE_POSTERIOR_DRAW_GROUP = "light_curve_posterior_draws"
-LIGHT_CURVE_POSTERIOR_DRAW_FORMAT = "qvc_light_curve_posterior_draws_v1"
+LIGHT_CURVE_POSTERIOR_DRAW_FORMAT_V1 = "qvc_light_curve_posterior_draws_v1"
+LIGHT_CURVE_POSTERIOR_DRAW_FORMAT = "qvc_light_curve_posterior_draws_v2"
+LIGHT_CURVE_POSTERIOR_DRAW_FORMATS = (
+    LIGHT_CURVE_POSTERIOR_DRAW_FORMAT_V1,
+    LIGHT_CURVE_POSTERIOR_DRAW_FORMAT,
+)
 LIGHT_CURVE_POSTERIOR_DRAW_COUNT = 64
 LIGHT_CURVE_POSTERIOR_DRAW_SELECTION = (
     "sha256_seed_object_id_uniform_without_replacement_v1"
@@ -52,9 +57,12 @@ def compact_log_sigma_tau_posterior_draws(
     redshift,
     object_id,
     selection_seed=0,
+    payload_format=LIGHT_CURVE_POSTERIOR_DRAW_FORMAT,
 ):
     """Return one fixed-width paired base-10/rest-frame draw payload."""
 
+    if payload_format not in LIGHT_CURVE_POSTERIOR_DRAW_FORMATS:
+        raise ValueError(f"Unsupported posterior draw format: {payload_format!r}.")
     sigma_raw = np.asarray(log_sigma_uv, dtype=float).reshape(-1)
     tau_raw = np.asarray(log_tau_uv, dtype=float).reshape(-1)
     if sigma_raw.shape != tau_raw.shape:
@@ -102,6 +110,7 @@ def compact_log_sigma_tau_posterior_draws(
         "finite_source_draw_count": np.int32(len(finite_indices)),
         "source_draw_count": np.int32(len(sigma_raw)),
         "selection_seed": int(selection_seed),
+        "format": payload_format,
     }
 
 
@@ -120,6 +129,7 @@ def stack_light_curve_posterior_draw_payloads(payloads):
         "source_draw_count": np.zeros(n_rows, dtype=np.int32),
     }
     seeds = set()
+    formats = set()
     for row_index, payload in enumerate(payloads):
         if payload is None:
             continue
@@ -138,11 +148,17 @@ def stack_light_curve_posterior_draw_payloads(payloads):
         ):
             stacked[name][row_index] = payload[name]
         seeds.add(int(payload.get("selection_seed", 0)))
+        formats.add(payload.get("format", LIGHT_CURVE_POSTERIOR_DRAW_FORMAT_V1))
     if len(seeds) > 1:
         raise ValueError(
             f"Light-curve posterior payloads use mixed selection seeds: {seeds}."
         )
     stacked["selection_seed"] = seeds.pop() if seeds else 0
+    if len(formats) > 1:
+        raise ValueError(
+            f"Light-curve posterior payloads use mixed formats: {formats}."
+        )
+    stacked["format"] = formats.pop() if formats else LIGHT_CURVE_POSTERIOR_DRAW_FORMAT
     return stacked
 
 
@@ -150,7 +166,10 @@ def write_light_curve_posterior_draw_group(hdf, payload):
     """Write a stacked compact draw payload into an open HDF5 file."""
 
     group = hdf.create_group(LIGHT_CURVE_POSTERIOR_DRAW_GROUP)
-    group.attrs["format"] = LIGHT_CURVE_POSTERIOR_DRAW_FORMAT
+    payload_format = payload.get("format", LIGHT_CURVE_POSTERIOR_DRAW_FORMAT)
+    if payload_format not in LIGHT_CURVE_POSTERIOR_DRAW_FORMATS:
+        raise ValueError(f"Unsupported posterior draw format: {payload_format!r}.")
+    group.attrs["format"] = payload_format
     group.attrs["draw_count"] = LIGHT_CURVE_POSTERIOR_DRAW_COUNT
     group.attrs["draw_selection"] = LIGHT_CURVE_POSTERIOR_DRAW_SELECTION
     group.attrs["selection_seed"] = int(payload["selection_seed"])
@@ -163,7 +182,9 @@ def write_light_curve_posterior_draw_group(hdf, payload):
         "saved_log_sigma_uv_divided_by_ln10"
     )
     group.attrs["log_tau_uv_rf_definition"] = (
-        "saved_log_tau_uv_divided_by_ln10_minus_log10_1_plus_z"
+        "continuum_only_disk_convolved_integral_timescale_at_rest_2500A"
+        if payload_format == LIGHT_CURVE_POSTERIOR_DRAW_FORMAT
+        else "legacy_saved_log_tau_uv_divided_by_ln10_minus_log10_1_plus_z"
     )
     for name in ("log_sigma_uv", "log_tau_uv_rf"):
         group.create_dataset(
@@ -204,6 +225,13 @@ def read_light_curve_posterior_draw_group(hdf):
         raise ValueError(
             f"{LIGHT_CURVE_POSTERIOR_DRAW_GROUP!r} must be an HDF5 group."
         )
+    payload_format = group.attrs.get("format", LIGHT_CURVE_POSTERIOR_DRAW_FORMAT_V1)
+    if isinstance(payload_format, bytes):
+        payload_format = payload_format.decode("utf-8")
+    if payload_format not in LIGHT_CURVE_POSTERIOR_DRAW_FORMATS:
+        raise ValueError(
+            f"Unsupported light-curve posterior draw format: {payload_format!r}."
+        )
     required = (
         "log_sigma_uv",
         "log_tau_uv_rf",
@@ -219,6 +247,7 @@ def read_light_curve_posterior_draw_group(hdf):
         )
     payload = {name: np.asarray(group[name][...]) for name in required}
     payload["selection_seed"] = int(group.attrs.get("selection_seed", 0))
+    payload["format"] = payload_format
     n_rows = len(payload["valid_count"])
     expected = (n_rows, LIGHT_CURVE_POSTERIOR_DRAW_COUNT)
     for name in ("log_sigma_uv", "log_tau_uv_rf", "posterior_index"):

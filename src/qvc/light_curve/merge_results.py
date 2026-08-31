@@ -27,6 +27,7 @@ from qvc.light_curve.multiband_generate_lc import (
 from qvc.light_curve.posterior_draws import (
     LIGHT_CURVE_POSTERIOR_DRAW_COUNT,
     LIGHT_CURVE_POSTERIOR_DRAW_FORMAT,
+    LIGHT_CURVE_POSTERIOR_DRAW_FORMAT_V1,
     LIGHT_CURVE_POSTERIOR_DRAW_GROUP,
     LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY,
     compact_log_sigma_tau_posterior_draws,
@@ -167,6 +168,9 @@ def _load_h5_shard(path, expected_n):
                         row[LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY][
                             "selection_seed"
                         ] = embedded_draws["selection_seed"]
+                        row[LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY][
+                            "format"
+                        ] = embedded_draws["format"]
                     rows.append(row)
 
             return {"path": path, "ok": True, "skip": False, "rows": rows}
@@ -332,6 +336,7 @@ def collect_light_curve_posterior_draws(
     finite_source_draw_count = np.zeros(n_rows, dtype=np.int32)
     source_draw_count = np.zeros(n_rows, dtype=np.int32)
     missing = []
+    payload_formats = set()
 
     for row_index, row in enumerate(quasars):
         object_id = _row_text(row, "object_id")
@@ -356,6 +361,9 @@ def collect_light_curve_posterior_draws(
                 "finite_source_draw_count"
             ]
             source_draw_count[row_index] = embedded["source_draw_count"]
+            payload_formats.add(
+                embedded.get("format", LIGHT_CURVE_POSTERIOR_DRAW_FORMAT_V1)
+            )
             continue
 
         sample_path = _resolve_object_sample_path(row, samples_dir)
@@ -383,6 +391,15 @@ def collect_light_curve_posterior_draws(
                 )
             sigma_raw = np.asarray(hdf["log_sigma_uv"][...], dtype=float).reshape(-1)
             tau_raw = np.asarray(hdf["log_tau_uv"][...], dtype=float).reshape(-1)
+            tau_definition = hdf.attrs.get("log_tau_uv_definition", "")
+            if isinstance(tau_definition, bytes):
+                tau_definition = tau_definition.decode("utf-8")
+            payload_format = (
+                LIGHT_CURVE_POSTERIOR_DRAW_FORMAT
+                if tau_definition
+                == "continuum_only_disk_convolved_integral_timescale_at_rest_2500A_observer_frame_natural_log"
+                else LIGHT_CURVE_POSTERIOR_DRAW_FORMAT_V1
+            )
 
         compact = compact_log_sigma_tau_posterior_draws(
             sigma_raw,
@@ -390,7 +407,9 @@ def collect_light_curve_posterior_draws(
             redshift=redshift,
             object_id=object_id,
             selection_seed=selection_seed,
+            payload_format=payload_format,
         )
+        payload_formats.add(payload_format)
         log_sigma_uv[row_index] = compact["log_sigma_uv"]
         log_tau_uv_rf[row_index] = compact["log_tau_uv_rf"]
         posterior_index[row_index] = compact["posterior_index"]
@@ -408,6 +427,12 @@ def collect_light_curve_posterior_draws(
             "--allow-missing-posterior-draws for a legacy/partial merge."
         )
 
+    if len(payload_formats) > 1:
+        raise ValueError(
+            "Cannot merge legacy and redefined light-curve posterior draw "
+            f"semantics in one catalog: {payload_formats}."
+        )
+
     return {
         "log_sigma_uv": log_sigma_uv,
         "log_tau_uv_rf": log_tau_uv_rf,
@@ -416,6 +441,11 @@ def collect_light_curve_posterior_draws(
         "finite_source_draw_count": finite_source_draw_count,
         "source_draw_count": source_draw_count,
         "selection_seed": int(selection_seed),
+        "format": (
+            payload_formats.pop()
+            if payload_formats
+            else LIGHT_CURVE_POSTERIOR_DRAW_FORMAT
+        ),
         "missing_count": len(missing),
     }
 

@@ -268,7 +268,13 @@ def test_write_quasars_to_h5_flat_writes_posterior_draw_group(tmp_path):
 
     with h5py.File(output, "r") as handle:
         group = handle[merge_results.LIGHT_CURVE_POSTERIOR_DRAW_GROUP]
-        assert group.attrs["format"] == merge_results.LIGHT_CURVE_POSTERIOR_DRAW_FORMAT
+        # A raw sample file without the new definition attribute is legacy v1;
+        # merging must preserve that semantic label rather than silently
+        # relabeling its old log_tau_uv draws as the new 2500 A definition.
+        assert (
+            group.attrs["format"]
+            == merge_results.LIGHT_CURVE_POSTERIOR_DRAW_FORMAT_V1
+        )
         assert group.attrs["draw_count"] == 64
         assert group.attrs["selection_seed"] == 9
         assert group["log_sigma_uv"].shape == (1, 64)

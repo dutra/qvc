@@ -1,10 +1,15 @@
 import numpy as np
+from types import SimpleNamespace
 import jax
 import jax.numpy as jnp
 from numpyro.handlers import seed, trace
 from scipy.linalg import expm
 
-from qvc.light_curve.multiband_model_shared_latent_blr import SharedLatentDiskBLRQS
+from qvc.light_curve.multiband_model_shared_latent_blr import (
+    SharedLatentDiskBLRQS,
+    SharedLatentDiskBLRRelativeFluxModel,
+    continuum_effective_timescale,
+)
 from qvc.light_curve.fit_light_curves import build_single_object_model_mag_flux_linearized
 
 
@@ -62,6 +67,40 @@ def test_shared_latent_kernel_has_one_driver_pair():
     assert float(kernel.evaluate((0.0, 0), (10.0, 1))) != 0.0
 
 
+def test_shared_model_kernel_driver_is_independent_of_band_arrays_and_order():
+    model = SimpleNamespace(disk_order=3, blr_order=2)
+    params = {
+        "tau_fast_driver": 15.0,
+        "tau_slow_driver": 180.0,
+        # Deliberately inconsistent legacy arrays: the shared driver must not
+        # consume either their values or their first-band identity.
+        "tau_fast_band": jnp.array([1.0, 999.0]),
+        "tau_slow_band": jnp.array([2.0, 888.0]),
+        "lag_disk": jnp.array([2.0, 4.0]),
+        "lag_blr": jnp.array([30.0, 70.0]),
+        "amp_cont_relflux": jnp.array([0.10, 0.08]),
+        "amp_blr_relflux": jnp.array([0.03, 0.02]),
+    }
+    kernel = SharedLatentDiskBLRRelativeFluxModel._build_kernel(model, params)
+    reversed_params = {
+        **params,
+        "tau_fast_band": params["tau_fast_band"][::-1],
+        "tau_slow_band": params["tau_slow_band"][::-1],
+        "lag_disk": params["lag_disk"][::-1],
+        "lag_blr": params["lag_blr"][::-1],
+        "amp_cont_relflux": params["amp_cont_relflux"][::-1],
+        "amp_blr_relflux": params["amp_blr_relflux"][::-1],
+    }
+    reversed_kernel = SharedLatentDiskBLRRelativeFluxModel._build_kernel(
+        model, reversed_params
+    )
+
+    np.testing.assert_allclose(kernel.tau_fast, [15.0])
+    np.testing.assert_allclose(kernel.tau_slow, [180.0])
+    np.testing.assert_allclose(reversed_kernel.tau_fast, kernel.tau_fast)
+    np.testing.assert_allclose(reversed_kernel.tau_slow, kernel.tau_slow)
+
+
 def test_effective_timescale_matches_integrated_autocorrelation():
     kernel = _kernel()
     tau_effective = np.asarray(kernel.effective_timescales())
@@ -76,6 +115,53 @@ def test_effective_timescale_matches_integrated_autocorrelation():
         )
         numeric = np.trapezoid(covariance, lags) / covariance[0]
         np.testing.assert_allclose(tau_effective[band], numeric, rtol=2e-4)
+
+
+def test_continuum_timescale_matches_numerical_covariance_and_excludes_blr():
+    kernel = _kernel()
+    exact = np.asarray(kernel.continuum_effective_timescales())
+    A = np.asarray(kernel.design_matrix())
+    P = np.asarray(kernel.stationary_covariance())
+    slices, size = kernel._chain_slices()
+    endpoints = np.asarray([chain_slice.stop - 1 for chain_slice in slices])
+    stds = np.sqrt(np.diag(P)[endpoints])
+    lags = np.linspace(0.0, 4000.0, 20001)
+
+    for band in range(2):
+        h = np.zeros(size)
+        h[2 + (band + 1) * kernel.disk_order - 1] = 1.0 / stds[band]
+        covariance = np.asarray([h @ expm(A * lag) @ P @ h for lag in lags])
+        numeric = np.trapezoid(covariance, lags) / covariance[0]
+        np.testing.assert_allclose(exact[band], numeric, rtol=2e-4)
+
+    changed_blr = SharedLatentDiskBLRQS(
+        tau_fast=kernel.tau_fast,
+        tau_slow=kernel.tau_slow,
+        lag_disk=kernel.lag_disk,
+        lag_blr=jnp.array([300.0, 700.0]),
+        amp_cont=kernel.amp_cont,
+        amp_blr=jnp.array([0.3, 0.5]),
+        disk_order=kernel.disk_order,
+        blr_order=kernel.blr_order,
+    )
+    np.testing.assert_allclose(
+        changed_blr.continuum_effective_timescales(), exact, rtol=2e-6
+    )
+    assert not np.allclose(
+        changed_blr.effective_timescales(), kernel.effective_timescales()
+    )
+
+
+def test_synthetic_continuum_timescale_changes_with_disk_response():
+    base = float(continuum_effective_timescale(15.0, 180.0, 2.0, disk_order=3))
+    longer_lag = float(
+        continuum_effective_timescale(15.0, 180.0, 8.0, disk_order=3)
+    )
+    higher_order = float(
+        continuum_effective_timescale(15.0, 180.0, 2.0, disk_order=5)
+    )
+    assert longer_lag > base
+    assert not np.isclose(higher_order, base)
 
 
 def test_shared_latent_fit_uses_convolved_disk_wavelength_law():
@@ -104,4 +190,6 @@ def test_shared_latent_fit_uses_convolved_disk_wavelength_law():
     expected_ratio = np.asarray((lam_rf / lam_rf[0]) ** (4.0 / 3.0))
 
     np.testing.assert_allclose(lag_disk / lag_disk[0], expected_ratio, rtol=2e-6)
-    assert float(sites["eta_tau"]["value"]) == 0.0
+    assert "eta_tau" not in sites
+    assert np.ndim(np.asarray(sites["tau_fast_driver"]["value"])) == 0
+    assert np.ndim(np.asarray(sites["tau_slow_driver"]["value"])) == 0

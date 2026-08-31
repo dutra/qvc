@@ -264,6 +264,45 @@ class SharedLatentDiskBLRQS(qs.Quasisep):
         )(h)
         return integrated / _safe_pos(variance)
 
+    def continuum_effective_timescales(self):
+        """Return exact integral timescales for the disk continua alone."""
+
+        A = self.design_matrix()
+        Pinf = self.stationary_covariance()
+        slices, size = self._chain_slices()
+        endpoints = jnp.asarray([chain_slice.stop - 1 for chain_slice in slices])
+        stds = jnp.sqrt(_safe_pos(Pinf[endpoints, endpoints]))
+        B = int(jnp.asarray(self.lag_disk).shape[0])
+
+        def disk_observation(band):
+            endpoint = 2 + (band + 1) * int(self.disk_order) - 1
+            h = jnp.zeros(size, dtype=jnp.asarray(self.tau_fast).dtype)
+            return h.at[endpoint].set(1.0 / stds[band])
+
+        h = jax.vmap(disk_observation)(jnp.arange(B, dtype=jnp.int32))
+        variance = jnp.einsum("bi,ij,bj->b", h, Pinf, h)
+        integrated = jax.vmap(
+            lambda hb: -hb @ jnp.linalg.solve(A, Pinf @ hb)
+        )(h)
+        return integrated / _safe_pos(variance)
+
+
+def continuum_effective_timescale(tau_fast, tau_slow, lag_disk, *, disk_order):
+    """Exact integral timescale for one continuum-only Erlang response."""
+
+    lag_disk = jnp.atleast_1d(jnp.asarray(lag_disk, dtype=float))
+    kernel = SharedLatentDiskBLRQS(
+        tau_fast=jnp.atleast_1d(jnp.asarray(tau_fast, dtype=float)),
+        tau_slow=jnp.atleast_1d(jnp.asarray(tau_slow, dtype=float)),
+        lag_disk=lag_disk,
+        lag_blr=jnp.ones_like(lag_disk),
+        amp_cont=jnp.ones_like(lag_disk),
+        amp_blr=jnp.zeros_like(lag_disk),
+        disk_order=int(disk_order),
+        blr_order=1,
+    )
+    return kernel.continuum_effective_timescales()[0]
+
 
 class SharedLatentDiskBLRRelativeFluxModel(ContiBLRRelativeFlux_SHO_Model):
     """Relative-flux likelihood for the shared latent response kernel."""
@@ -278,8 +317,8 @@ class SharedLatentDiskBLRRelativeFluxModel(ContiBLRRelativeFlux_SHO_Model):
 
     def _build_kernel(self, params):
         return SharedLatentDiskBLRQS(
-            tau_fast=jnp.atleast_1d(params["tau_fast_band"])[0:1],
-            tau_slow=jnp.atleast_1d(params["tau_slow_band"])[0:1],
+            tau_fast=jnp.atleast_1d(params["tau_fast_driver"]),
+            tau_slow=jnp.atleast_1d(params["tau_slow_driver"]),
             lag_disk=jnp.asarray(params["lag_disk"]),
             lag_blr=jnp.asarray(params["lag_blr"]),
             amp_cont=jnp.asarray(params["amp_cont_relflux"]),
@@ -347,6 +386,7 @@ def make_multiband_shared_latent_blr_model(
 __all__ = [
     "DEFAULT_DISK_ORDER",
     "SharedLatentDiskBLRQS",
+    "continuum_effective_timescale",
     "SharedLatentDiskBLRRelativeFluxModel",
     "make_multiband_shared_latent_blr_model",
 ]

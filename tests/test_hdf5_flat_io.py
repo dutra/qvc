@@ -273,6 +273,10 @@ def test_save_quasar_list_hdf5_embeds_compact_sigma_tau_draws(
     )
     with h5py.File(output, "r") as handle:
         group = handle[LIGHT_CURVE_POSTERIOR_DRAW_GROUP]
+        assert group.attrs["format"] == "qvc_light_curve_posterior_draws_v2"
+        assert group.attrs["log_tau_uv_rf_definition"] == (
+            "continuum_only_disk_convolved_integral_timescale_at_rest_2500A"
+        )
         assert group["log_sigma_uv"].shape == (1, 64)
         assert group["log_tau_uv_rf"].shape == (1, 64)
         assert group["valid_count"][0] == 64
