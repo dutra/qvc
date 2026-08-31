@@ -5,6 +5,8 @@ from datetime import datetime as real_datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+import h5py
+import pandas as pd
 import pytest
 
 import hpc_scripts.sfitlc as sfitlc
@@ -68,6 +70,7 @@ def test_fit_job_name_places_run_stamp_first():
         _args(),
         "data/input.csv",
         None,
+        object_ids_path=Path("/tmp/probe_chisq_object_ids.txt"),
     )
 
     assert "#SBATCH --job-name=aug06_0320pm_lcfit_deep_run_abc1234_chisq\n" in script
@@ -99,6 +102,10 @@ def test_sbatch_runs_each_chunk_object_in_a_fresh_process():
         _args(),
         "data/input.csv",
         "results/data/spectra.h5",
+        object_ids_path=Path("/tmp/probe_chisq_object_ids.txt"),
+        exclusion_paths=[Path("/tmp/previous.h5")],
+        original_object_count=5,
+        excluded_object_count=2,
     )
 
     assert 'export N="3"' in script
@@ -108,6 +115,8 @@ def test_sbatch_runs_each_chunk_object_in_a_fresh_process():
     assert 'export SUFFIX="job${TASK_ID}_obj${OBJECT_INDEX}"' in script
     assert '--filter_object_id "$OBJECT_ID"' in script
     assert "--filter_object_id $IDS" not in script
+    assert 'export OBJECT_ID_FILE="/tmp/probe_chisq_object_ids.txt"' in script
+    assert 'pd.read_csv(os.environ["FILTER_CSV"])' not in script
     assert "--subtract_psf_constant_flux" in script
     assert "--spectra_fit_h5" in script
     assert "results/data/spectra.h5" in script
@@ -119,6 +128,11 @@ def test_sbatch_runs_each_chunk_object_in_a_fresh_process():
     ).group(1)
     submission = decode_record(encoded)
     assert submission["resolved"]["job"]["object_count"] == 3
+    assert submission["resolved"]["job"]["original_object_count"] == 5
+    assert submission["resolved"]["job"]["excluded_object_count"] == 2
+    assert submission["resolved"]["inputs"]["exclude_object_ids"] == [
+        "/tmp/previous.h5"
+    ]
     assert submission["resolved"]["resources"]["memory"] == "12G"
     assert "--spectra_fit_h5" in submission["resolved"]["fit_flags"]
     assert "--svi_lr" in submission["resolved"]["fit_flags"]
@@ -174,6 +188,133 @@ def test_non_chisq_jobs_do_not_require_a_spectra_fit_h5(monkeypatch):
     assert args.stone_linear_mode == "both"
     assert args.svi_steps == 4000
     assert args.svi_lr == pytest.approx(1e-3)
+    assert args.exclude_object_ids == []
+
+
+def test_parse_args_accepts_multiple_exclusion_files(monkeypatch):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "sfitlc.py",
+            "--fit",
+            "stone",
+            "--exclude-object-ids",
+            "previous.csv",
+            "previous.h5",
+            "--num-jobs",
+            "1",
+        ],
+    )
+
+    args = parse_args()
+
+    assert args.exclude_object_ids == ["previous.csv", "previous.h5"]
+    assert args.num_jobs == 1
+
+
+def test_load_exclusion_object_ids_unions_csv_and_hdf5_layouts(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr(sfitlc, "REPO_ROOT", tmp_path)
+    pd.DataFrame(
+        {"object_id": [" 101 ", "102.0", None, "", "101"]}
+    ).to_csv(tmp_path / "exclude.csv", index=False)
+    with h5py.File(tmp_path / "flat.h5", "w") as handle:
+        handle.create_dataset("object_id", data=[b"103", b"104", b"103"])
+    with h5py.File(tmp_path / "spectra.hdf5", "w") as handle:
+        catalog = handle.create_group("catalog")
+        catalog.create_dataset("object_id", data=[b"104", b"105"])
+
+    object_ids, paths = sfitlc.load_exclusion_object_ids(
+        ["exclude.csv", "flat.h5", "spectra.hdf5"]
+    )
+
+    assert object_ids == {"101", "102", "103", "104", "105"}
+    assert paths == [
+        (tmp_path / "exclude.csv").resolve(),
+        (tmp_path / "flat.h5").resolve(),
+        (tmp_path / "spectra.hdf5").resolve(),
+    ]
+
+
+@pytest.mark.parametrize("filename", ["missing.csv", "missing.h5"])
+def test_load_exclusion_object_ids_rejects_missing_files(
+    tmp_path,
+    monkeypatch,
+    filename,
+):
+    monkeypatch.setattr(sfitlc, "REPO_ROOT", tmp_path)
+
+    with pytest.raises(FileNotFoundError, match="exclusion file not found"):
+        sfitlc.load_exclusion_object_ids([filename])
+
+
+def test_load_exclusion_object_ids_rejects_invalid_inputs(tmp_path, monkeypatch):
+    monkeypatch.setattr(sfitlc, "REPO_ROOT", tmp_path)
+    pd.DataFrame({"wrong": ["101"]}).to_csv(tmp_path / "wrong.csv", index=False)
+    (tmp_path / "wrong.txt").write_text("101\n", encoding="utf-8")
+    with h5py.File(tmp_path / "wrong.h5", "w") as handle:
+        handle.create_dataset("wrong", data=[b"101"])
+
+    with pytest.raises(ValueError, match="missing required column 'object_id'"):
+        sfitlc.load_object_ids_from_file("wrong.csv")
+    with pytest.raises(ValueError, match="expected .csv, .h5, or .hdf5"):
+        sfitlc.load_object_ids_from_file("wrong.txt")
+    with pytest.raises(ValueError, match="missing dataset '/object_id'"):
+        sfitlc.load_object_ids_from_file("wrong.h5")
+
+
+@pytest.mark.parametrize("fit", ["chisq", "stone", "macleod", "samelength"])
+def test_exclusions_apply_to_every_fit_mode_in_source_order(monkeypatch, fit):
+    monkeypatch.setattr(sfitlc, "load_chisq_ids", lambda _path: ["1", "2", "3", "2"])
+    monkeypatch.setattr(sfitlc, "load_stone_ids", lambda: ["1", "2", "3", "2"])
+    monkeypatch.setattr(sfitlc, "load_macleod_ids", lambda: ["1", "2", "3", "2"])
+
+    jobs = build_job_configs(fit, "input.csv")
+    filtered = [sfitlc.exclude_job_object_ids(job, {"2"}) for job in jobs]
+
+    assert all(job.object_ids == ["1", "3"] for job, _count in filtered)
+    assert all(count == 2 for _job, count in filtered)
+
+
+def test_nonmatching_exclusions_leave_job_unchanged():
+    original = JobConfig(description="stone", object_ids=["1", "2", "1"])
+
+    filtered, excluded_count = sfitlc.exclude_job_object_ids(original, {"999"})
+
+    assert filtered.object_ids == original.object_ids
+    assert excluded_count == 0
+
+
+def test_main_stops_before_writing_when_exclusions_remove_every_object(monkeypatch):
+    args = _args(
+        fit="stone",
+        chisq_csv=None,
+        spectra_fit_h5=None,
+        stone_linear_mode="linear",
+        description=None,
+        exclude_object_ids=["previous.csv"],
+        num_jobs=-1,
+    )
+    monkeypatch.setattr(sfitlc, "parse_args", lambda: args)
+    monkeypatch.setattr(sfitlc, "get_git_short_hash", lambda: "abc1234")
+    monkeypatch.setattr(sfitlc, "make_run_stamp", lambda: "aug31_1200pm")
+    monkeypatch.setattr(
+        sfitlc,
+        "load_exclusion_object_ids",
+        lambda _paths: ({"1"}, [Path("/tmp/previous.csv")]),
+    )
+    monkeypatch.setattr(sfitlc, "load_stone_ids", lambda: ["1"])
+
+    def fail_if_called(*_args, **_kwargs):
+        pytest.fail("job files must not be written for an empty filtered sample")
+
+    monkeypatch.setattr(sfitlc, "write_job_script", fail_if_called)
+
+    with pytest.raises(ValueError, match="No object_ids remain for stone"):
+        sfitlc.main()
 
 
 @pytest.mark.parametrize("profile", ("modified", "modified_narrow"))

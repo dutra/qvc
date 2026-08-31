@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+import h5py
 import pandas as pd
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +57,16 @@ def parse_args():
         type=str,
         default=None,
         help="Spectra-fit HDF5 catalog used for PSF constant-flux subtraction in --fit chisq jobs.",
+    )
+    parser.add_argument(
+        "--exclude-object-ids",
+        nargs="+",
+        default=[],
+        metavar="PATH",
+        help=(
+            "One or more CSV/HDF5 files whose object_id values should be "
+            "excluded from every submitted sample."
+        ),
     )
     parser.add_argument("--num-jobs", type=int, default=-1, help="-1 means submit all chunks after skip.")
     parser.add_argument("--skip", type=int, default=0, help="Number of chunks to skip.")
@@ -135,6 +146,121 @@ def load_chisq_ids(chisq_csv: str) -> list[str]:
     if "object_id" not in df.columns:
         raise KeyError(f"{chisq_csv} is missing an 'object_id' column.")
     return df["object_id"].astype(str).tolist()
+
+
+def normalize_object_id(value) -> str:
+    """Normalize an object ID for membership comparisons."""
+
+    if value is None or pd.isna(value):
+        return ""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    text = str(value).strip()
+    if not text:
+        return ""
+    return text[:-2] if text.endswith(".0") else text
+
+
+def resolve_object_id_list_path(path: str | os.PathLike[str]) -> Path:
+    resolved = Path(path).expanduser()
+    if not resolved.is_absolute():
+        resolved = REPO_ROOT / resolved
+    resolved = resolved.resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(f"Object-ID exclusion file not found: {resolved}")
+    return resolved
+
+
+def load_object_ids_from_file(path: str | os.PathLike[str]) -> list[str]:
+    """Load normalized object IDs from a supported CSV or HDF5 file."""
+
+    resolved = resolve_object_id_list_path(path)
+    suffix = resolved.suffix.lower()
+    if suffix == ".csv":
+        frame = pd.read_csv(
+            resolved,
+            dtype={"object_id": "string"},
+            low_memory=False,
+        )
+        if "object_id" not in frame.columns:
+            raise ValueError(
+                f"Object-ID exclusion CSV {resolved} is missing required "
+                "column 'object_id'."
+            )
+        values = frame["object_id"].tolist()
+    elif suffix in {".h5", ".hdf5"}:
+        with h5py.File(resolved, "r") as handle:
+            if "object_id" in handle and isinstance(handle["object_id"], h5py.Dataset):
+                dataset = handle["object_id"]
+            elif (
+                "catalog" in handle
+                and isinstance(handle["catalog"], h5py.Group)
+                and "object_id" in handle["catalog"]
+                and isinstance(handle["catalog/object_id"], h5py.Dataset)
+            ):
+                dataset = handle["catalog/object_id"]
+            else:
+                raise ValueError(
+                    f"Object-ID exclusion HDF5 {resolved} is missing dataset "
+                    "'/object_id' or '/catalog/object_id'."
+                )
+            if dataset.ndim != 1:
+                raise ValueError(
+                    f"Object-ID dataset in {resolved} must be one-dimensional; "
+                    f"got shape {dataset.shape}."
+                )
+            values = dataset[...].tolist()
+    else:
+        raise ValueError(
+            f"Unsupported object-ID exclusion file {resolved}; expected .csv, "
+            ".h5, or .hdf5."
+        )
+
+    object_ids = []
+    seen = set()
+    for value in values:
+        object_id = normalize_object_id(value)
+        if object_id and object_id not in seen:
+            object_ids.append(object_id)
+            seen.add(object_id)
+    return object_ids
+
+
+def load_exclusion_object_ids(
+    paths: list[str] | tuple[str, ...],
+) -> tuple[set[str], list[Path]]:
+    """Return the union of exclusions and their resolved input paths."""
+
+    exclusion_ids = set()
+    resolved_paths = []
+    for path in paths:
+        resolved = resolve_object_id_list_path(path)
+        exclusion_ids.update(load_object_ids_from_file(resolved))
+        resolved_paths.append(resolved)
+    return exclusion_ids, resolved_paths
+
+
+def exclude_job_object_ids(
+    job: JobConfig,
+    exclusion_ids: set[str],
+) -> tuple[JobConfig, int]:
+    """Filter a job without changing the source ordering of retained IDs."""
+
+    retained = [
+        object_id
+        for object_id in job.object_ids
+        if normalize_object_id(object_id) not in exclusion_ids
+    ]
+    excluded_count = len(job.object_ids) - len(retained)
+    return (
+        JobConfig(
+            description=job.description,
+            object_ids=retained,
+            extra_flags=job.extra_flags,
+            use_psf_constant_flux=job.use_psf_constant_flux,
+        ),
+        excluded_count,
+    )
 
 
 def load_stone_ids() -> list[str]:
@@ -302,14 +428,19 @@ def build_sbatch_script(
     chisq_csv: str,
     spectra_fit_h5: str | None,
     object_ids_path: Path | None = None,
+    *,
+    exclusion_paths: tuple[Path, ...] | list[Path] = (),
+    original_object_count: int | None = None,
+    excluded_object_count: int = 0,
 ) -> str:
     log_dir = LOG_ROOT / prefix
     log_pattern = log_dir / f"{prefix}-%A_%a-%j.txt"
     job_name = build_fit_job_name(prefix)
-    if args.fit != "chisq" and object_ids_path is None:
-        raise ValueError(f"object_ids_path is required for fit mode {args.fit!r}.")
-    filter_csv = str(REPO_ROOT / chisq_csv) if chisq_csv is not None else ""
-    object_id_file = str(object_ids_path) if object_ids_path is not None else ""
+    if object_ids_path is None:
+        raise ValueError("object_ids_path is required for every fit mode.")
+    object_id_file = str(object_ids_path)
+    if original_object_count is None:
+        original_object_count = len(job.object_ids) + excluded_object_count
     base_flags = [
         "--plot",
         "--disable_trace_plot",
@@ -357,6 +488,8 @@ def build_sbatch_script(
                 "description": job.description,
                 "prefix": prefix,
                 "object_count": len(job.object_ids),
+                "original_object_count": original_object_count,
+                "excluded_object_count": excluded_object_count,
                 "extra_flags": job.extra_flags,
                 "use_psf_constant_flux": job.use_psf_constant_flux,
             },
@@ -364,6 +497,7 @@ def build_sbatch_script(
                 "chisq_csv": chisq_csv,
                 "spectra_fit_h5": spectra_fit_h5,
                 "object_ids_path": object_id_file,
+                "exclude_object_ids": [str(path) for path in exclusion_paths],
             },
             "resources": {
                 "cpus_per_task": args.ncores,
@@ -394,8 +528,6 @@ export NUM_CORES="{args.ncores}"
 export N="{args.N}"
 export SKIP="{args.skip}"
 export TASK_FALLBACK="{args.skip}"
-export FIT_MODE="{args.fit}"
-export FILTER_CSV="{filter_csv}"
 export OBJECT_ID_FILE="{object_id_file}"
 export START=""
 export END=""
@@ -420,19 +552,13 @@ echo "Slice rows: [$START:$END)"
 IDS=$(
 python - <<'PY'
 import os
-import pandas as pd
 from itertools import islice
 
-fit_mode = os.environ["FIT_MODE"]
 start = int(os.environ["START"])
 end = int(os.environ["END"])
 
-if fit_mode == "chisq":
-    df = pd.read_csv(os.environ["FILTER_CSV"])
-    ids = df["object_id"].astype(str).tolist()[start:end]
-else:
-    with open(os.environ["OBJECT_ID_FILE"], encoding="utf-8") as fh:
-        ids = [line.strip() for line in islice(fh, start, end) if line.strip()]
+with open(os.environ["OBJECT_ID_FILE"], encoding="utf-8") as fh:
+    ids = [line.strip() for line in islice(fh, start, end) if line.strip()]
 
 print(" ".join(ids))
 PY
@@ -743,19 +869,41 @@ def main():
     )
     chisq_csv = args.chisq_csv
     spectra_fit_h5 = args.spectra_fit_h5
+    exclusion_ids, exclusion_paths = load_exclusion_object_ids(
+        args.exclude_object_ids
+    )
+    print(
+        f"Loaded {len(exclusion_ids)} unique exclusion object_ids from "
+        f"{len(exclusion_paths)} file(s)."
+    )
     samelength_merge_job_ids = []
 
-    for job in build_job_configs(
+    for unfiltered_job in build_job_configs(
         args.fit,
         chisq_csv,
         stone_linear_mode=args.stone_linear_mode,
     ):
+        original_object_count = len(unfiltered_job.object_ids)
+        job, excluded_object_count = exclude_job_object_ids(
+            unfiltered_job,
+            exclusion_ids,
+        )
         total_objects = len(job.object_ids)
+        print(
+            f"Object selection for {job.description}: "
+            f"original={original_object_count}, "
+            f"excluded={excluded_object_count}, remaining={total_objects}"
+        )
+        if total_objects == 0:
+            raise ValueError(
+                f"No object_ids remain for {job.description} after exclusions."
+            )
         _, task_start, task_end = validate_chunking(total_objects, args.N, args.skip, args.num_jobs)
         prefix = build_run_prefix(job.description, run_stamp, git_hash, args.resume, args.description)
-        object_ids_path = None
-        if args.fit != "chisq":
-            object_ids_path = write_object_ids_file(build_object_ids_path(prefix, job), job.object_ids)
+        object_ids_path = write_object_ids_file(
+            build_object_ids_path(prefix, job),
+            job.object_ids,
+        )
         sbatch_script = build_sbatch_script(
             prefix,
             job,
@@ -763,6 +911,9 @@ def main():
             chisq_csv,
             spectra_fit_h5,
             object_ids_path=object_ids_path,
+            exclusion_paths=exclusion_paths,
+            original_object_count=original_object_count,
+            excluded_object_count=excluded_object_count,
         )
         merge_sbatch_script = build_merge_sbatch_script(
             prefix,
