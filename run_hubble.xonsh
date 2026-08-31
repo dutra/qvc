@@ -18,6 +18,16 @@ $SHEN_PUBTOOLS_PATH = __xonsh__.env.get(
 # Sweep values fastest, quick, standard.  The environment overrides make this
 # runner suitable for isolated, reproducible cut-search members.
 speed = __xonsh__.env.get("QVC_HUBBLE_SPEED", "quick")
+minimal_plots_value = str(
+    __xonsh__.env.get("QVC_HUBBLE_MINIMAL_PLOTS", "false")
+).strip().lower()
+if minimal_plots_value not in {"0", "1", "false", "true", "no", "yes"}:
+    raise ValueError(
+        "QVC_HUBBLE_MINIMAL_PLOTS must be a boolean value; "
+        f"got {minimal_plots_value!r}."
+    )
+minimal_plots = minimal_plots_value in {"1", "true", "yes"}
+minimal_plot_args = ["--minimal-plots"] if minimal_plots else []
 magnitude_convention = __xonsh__.env.get("QVC_HUBBLE_MAGNITUDE_CONVENTION", "dereddened")
 completeness_magnitude = __xonsh__.env.get(
     "QVC_HUBBLE_COMPLETENESS_MAGNITUDE", "attenuated"
@@ -107,6 +117,7 @@ for name, value in cut_thresholds.items():
 
 python -m qvc.hubble.hubble_fit \
     @(resume_args) \
+    @(minimal_plot_args) \
     --cosmo_models Flatw0waCDM \
     --run single \
     --speed @(speed) \
