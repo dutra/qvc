@@ -106,6 +106,18 @@ def test_modified_eta_prior_profile_has_requested_normal_priors():
     assert float(tau_prior.scale) == pytest.approx(0.5)
 
 
+def test_modified_narrow_eta_prior_profile_has_requested_normal_priors():
+    sigma_prior = eta_sigma_prior("modified_narrow")
+    tau_prior = eta_tau_prior("modified_narrow")
+
+    assert isinstance(sigma_prior, fit_lc.dist.Normal)
+    assert float(sigma_prior.loc) == pytest.approx(-0.8)
+    assert float(sigma_prior.scale) == pytest.approx(0.3)
+    assert isinstance(tau_prior, fit_lc.dist.Normal)
+    assert float(tau_prior.loc) == pytest.approx(0.5)
+    assert float(tau_prior.scale) == pytest.approx(0.3)
+
+
 def test_default_eta_prior_profile_has_widened_truncated_normal_priors():
     sigma_prior = eta_sigma_prior("default")
     tau_prior = eta_tau_prior("default")
@@ -124,7 +136,13 @@ def test_default_eta_prior_profile_has_widened_truncated_normal_priors():
 
 
 @pytest.mark.parametrize("shared_latent", (False, True))
-def test_modified_eta_prior_profile_omits_shared_eta_tau(shared_latent):
+@pytest.mark.parametrize(
+    ("eta_profile", "sigma_loc", "prior_scale"),
+    (("modified", -1.0, 0.5), ("modified_narrow", -0.8, 0.3)),
+)
+def test_normal_eta_prior_profiles_omit_shared_eta_tau(
+    shared_latent, eta_profile, sigma_loc, prior_scale
+):
     obj = {
         "object_id": "modified-eta-prior-smoke",
         "z": 1.0,
@@ -144,7 +162,7 @@ def test_modified_eta_prior_profile_omits_shared_eta_tau(shared_latent):
         np.array([2000.0, 3000.0]),
         log_jitter_mean=np.full((2, 3), np.log(0.03)),
         shared_latent=shared_latent,
-        eta_prior_profile="modified",
+        eta_prior_profile=eta_profile,
     )
 
     sites = fit_lc.trace(
@@ -158,11 +176,11 @@ def test_modified_eta_prior_profile_omits_shared_eta_tau(shared_latent):
         eta_tau_dist = sites["eta_tau"]["fn"]
         assert isinstance(eta_tau_dist, fit_lc.dist.Normal)
         assert float(eta_tau_dist.loc) == pytest.approx(0.5)
-        assert float(eta_tau_dist.scale) == pytest.approx(0.5)
+        assert float(eta_tau_dist.scale) == pytest.approx(prior_scale)
     eta_sigma_dist = sites["eta_sigma"]["fn"]
     assert isinstance(eta_sigma_dist, fit_lc.dist.Normal)
-    assert float(eta_sigma_dist.loc) == pytest.approx(-1.0)
-    assert float(eta_sigma_dist.scale) == pytest.approx(0.5)
+    assert float(eta_sigma_dist.loc) == pytest.approx(sigma_loc)
+    assert float(eta_sigma_dist.scale) == pytest.approx(prior_scale)
 
 
 def _make_object(z=1.6):

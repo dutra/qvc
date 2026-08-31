@@ -176,7 +176,8 @@ def test_non_chisq_jobs_do_not_require_a_spectra_fit_h5(monkeypatch):
     assert args.svi_lr == pytest.approx(1e-3)
 
 
-def test_eta_prior_profile_is_forwarded_to_light_curve_fitter(monkeypatch):
+@pytest.mark.parametrize("profile", ("modified", "modified_narrow"))
+def test_eta_prior_profile_is_forwarded_to_light_curve_fitter(monkeypatch, profile):
     monkeypatch.setattr(
         sys,
         "argv",
@@ -185,13 +186,13 @@ def test_eta_prior_profile_is_forwarded_to_light_curve_fitter(monkeypatch):
             "--fit",
             "stone",
             "--eta_prior_profile",
-            "modified",
+            profile,
         ],
     )
 
     args = parse_args()
 
-    assert args.extra_fit_flags == ("--eta_prior_profile", "modified")
+    assert args.extra_fit_flags == ("--eta_prior_profile", profile)
 
 
 @pytest.mark.parametrize(
