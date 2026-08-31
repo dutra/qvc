@@ -292,6 +292,17 @@ The `hpc_scripts` folder contains Slurm/Yale-HPC-oriented helpers. Treat these a
     --chisq-csv data/jul14_master_input_file_chisqgt20_nested_N8000.csv \
     --description nested_N8000
   ```
+  Add `--fit-bal` to enable JAXSEDFit's built-in N V, Si IV, and C IV BAL
+  absorption components in the default `fit_spectra_jaxsedfit_joint.py`
+  backend. It can be combined with `--resume` for posterior bundles produced
+  by a BAL-enabled run; the saved JAXSEDFit configuration is validated before
+  reuse.
+  ```bash
+  xonsh hpc_scripts/sfitspectra.xsh \
+    --chisq-csv data/jul14_master_input_file_chisqgt20_nested_N8000.csv \
+    --description nested_N8000_BAL \
+    --fit-bal
+  ```
   To retry only tasks whose latest attempt ended unsuccessfully, pass the full
   original job name:
   ```bash

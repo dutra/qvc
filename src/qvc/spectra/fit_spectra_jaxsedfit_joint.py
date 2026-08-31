@@ -90,6 +90,10 @@ class IncompatibleHostCaptureResumeError(RuntimeError):
     """Raised when a resume bundle uses a different host-capture model."""
 
 
+class IncompatibleBALResumeError(RuntimeError):
+    """Raised when BAL fitting is requested for a non-BAL resume bundle."""
+
+
 def _fits_table_scalar(hdul, column_name):
     """Return the first scalar found for a column in a spectrum FITS file."""
     for hdu in hdul[1:]:
@@ -1038,6 +1042,7 @@ def build_joint_config(
         SpectroscopyData,
     )
     from jaxsedfit.filters import load_filter_curves
+    from jaxsedfit.spectral_defaults import build_default_bal_components
 
     del JAXSEDFit  # imported here as an early API/version check
     phot = add_qvc_psf_photometry(rec, phot)
@@ -1066,6 +1071,11 @@ def build_joint_config(
         "photometry_method", pd.Series("catalog", index=phot.index)
     )
     methods = [None if pd.isna(value) else str(value) for value in method_values]
+    bal_components = (
+        build_default_bal_components(spec_flux_mjy[spec_good])
+        if args.fit_bal
+        else None
+    )
     config = FitConfig(
         observation=Observation(
             object_id=joint_saved_name(rec),
@@ -1109,6 +1119,7 @@ def build_joint_config(
             fit_feii=args.fit_fe,
             fit_balmer_continuum=args.fit_bc,
             line_flux_scale_mjy=args.line_flux_scale_mjy,
+            custom_components=bal_components,
         ),
         likelihood=LikelihoodConfig(
             use_host_capture_model=True,
@@ -2129,6 +2140,27 @@ def validate_resume_host_capture_fitter(fitter, path):
         )
 
 
+def validate_resume_bal_fitter(fitter, path):
+    """Require the built-in BAL components in a requested BAL resume bundle."""
+    agn = getattr(getattr(fitter, "config", None), "agn", None)
+    components = tuple(getattr(agn, "custom_components", ()) or ())
+    bal_names = {
+        str(getattr(component, "name", ""))
+        for component in components
+        if str(
+            (getattr(component, "metadata", {}) or {}).get("component_type", "")
+        )
+        == "bal_absorption"
+    }
+    expected = {"bal_nv", "bal_siiv", "bal_civ"}
+    if not expected.issubset(bal_names):
+        missing = sorted(expected - bal_names)
+        raise IncompatibleBALResumeError(
+            f"Resume bundle {path} was requested with --fit-bal but its saved "
+            f"JAXSEDFit configuration lacks BAL components: {missing}."
+        )
+
+
 def preflight_resume_host_capture_bundles(records, args):
     """Reject missing, old, or mixed-model resume bundles before workers start."""
     failures = []
@@ -2644,6 +2676,8 @@ def _complete_resumed_fit(rec, args, source_path, fitter):
     )
     fitter.predictive = None
     validate_resume_host_capture_fitter(fitter, source_path)
+    if bool(getattr(args, "fit_bal", False)):
+        validate_resume_bal_fitter(fitter, source_path)
     config = fitter.config
     saved_name = str(config.observation.object_id)
     expected_name = joint_saved_name(rec)
@@ -2813,7 +2847,11 @@ def run_hybrid_fit(rec, args):
 
     try:
         return _run_resumed_fit(rec, args, source_path)
-    except (IncompatibleHostCaptureResumeError, M2500ReconstructionError):
+    except (
+        IncompatibleHostCaptureResumeError,
+        IncompatibleBALResumeError,
+        M2500ReconstructionError,
+    ):
         raise
     except Exception as exc:
         resume_error = f"{type(exc).__name__}: {exc}"
@@ -3152,6 +3190,14 @@ def parse_args(argv=None):
         ),
     )
     parser.set_defaults(fit_lines=True, fit_fe=True, fit_bc=True, save_fig=True, save_jaxsedfit_samples=True)
+    parser.add_argument(
+        "--fit-bal",
+        action="store_true",
+        help=(
+            "Fit the built-in JAXSEDFit N V, Si IV, and C IV broad-absorption "
+            "components."
+        ),
+    )
     parser.add_argument("--no-fit-lines", dest="fit_lines", action="store_false")
     parser.add_argument("--no-fit-fe", dest="fit_fe", action="store_false")
     parser.add_argument("--no-fit-bc", dest="fit_bc", action="store_false")
