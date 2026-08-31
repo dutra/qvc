@@ -109,6 +109,7 @@ from qvc.hubble.hubble_plotting import (
     plot_dynesty,
     plot_fast_vs_uv_variability,
     plot_full_residuals,
+    plot_full_residuals_debiased_partial_controls,
     plot_full_residuals_rz,
     plot_hubble,
     plot_hubble_residual_normality,
@@ -4339,12 +4340,19 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             only_agn=only_agn,
             agn_pivot_context=agn_pivot_context,
         )
+        plot_full_residuals_debiased_partial_controls(
+            df_agn_pass2_plot_sample,
+            debiased_residuals,
+            plot_path=plot_path,
+            z_range=z_range,
+            show=False,
+        )
         print(
             "minimal_plots=True: retained the raw and debiased Hubble diagrams, "
-            "debiased-residual diagnostic, Dynesty corner plot, redshift "
+            "debiased partial-control residual atlas, Dynesty corner plot, redshift "
             "histogram, completeness pre/post-cut audit, two predicted-L2500 "
             "band plots, and "
-            "hubble_plot_residuals.csv; skipped other figures."
+            "the Hubble and partial-control residual CSVs; skipped other figures."
         )
         return (
             flat_samples,
@@ -4951,6 +4959,13 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         n_params=len(model_labels) - 1,
     )
     print("Plotting debiased residuals...")
+    plot_full_residuals_debiased_partial_controls(
+        df_agn_pass2_plot_sample,
+        debiased_residuals,
+        plot_path=plot_path,
+        z_range=z_range,
+        show=False,
+    )
     plot_full_residuals(
         df_agn_pass2_plot_sample,
         debiased_residuals,

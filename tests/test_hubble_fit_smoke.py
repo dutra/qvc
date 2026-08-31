@@ -3321,6 +3321,7 @@ def test_run_single_minimal_plots_keeps_only_debiased_hubble_plot(monkeypatch, t
     flat_samples = np.tile(theta[None, :], (8, 1))
     pipeline_kwargs = []
     hubble_calls = []
+    partial_control_calls = []
     expensive_calls = []
 
     monkeypatch.chdir(tmp_path)
@@ -3366,6 +3367,11 @@ def test_run_single_minimal_plots_keeps_only_debiased_hubble_plot(monkeypatch, t
 
     monkeypatch.setattr(hubble_fit, "run_mcmc_pipeline", fake_run_mcmc_pipeline)
     monkeypatch.setattr(hubble_fit, "plot_hubble", fake_plot_hubble)
+    monkeypatch.setattr(
+        hubble_fit,
+        "plot_full_residuals_debiased_partial_controls",
+        lambda *args, **kwargs: partial_control_calls.append((args, kwargs)),
+    )
     monkeypatch.setattr(
         hubble_fit,
         "compute_agn_likelihood_space_reduced_chi2",
@@ -3427,6 +3433,11 @@ def test_run_single_minimal_plots_keeps_only_debiased_hubble_plot(monkeypatch, t
     assert hubble_calls[0]["dmi_posterior_draws"].object_ids == tuple(
         df_agn["object_id"].astype(str)
     )
+    assert len(partial_control_calls) == 1
+    partial_args, partial_kwargs = partial_control_calls[0]
+    assert partial_args[0]["object_id"].tolist() == df_agn["object_id"].tolist()
+    np.testing.assert_array_equal(partial_args[1], np.arange(len(df_agn)))
+    assert partial_kwargs["z_range"] == (0.44, 3.16)
     assert expensive_calls == []
     assert result[5].tolist() == list(range(len(df_agn)))
 
@@ -3983,6 +3994,7 @@ def _patch_run_single_plot_stack(monkeypatch):
     monkeypatch.setattr(hubble_fit, "plot_hubble_residual_tail_diagnostics", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_predicted_vs_actual_M2500", lambda *args, **kwargs: (np.zeros(len(args[1])), np.ones(len(args[1])), None, None))
     monkeypatch.setattr(hubble_fit, "plot_full_residuals", lambda *args, **kwargs: None)
+    monkeypatch.setattr(hubble_fit, "plot_full_residuals_debiased_partial_controls", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_full_residuals_rz", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_parameter_residual_diagnostics", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "plot_debias_impact_diagnostics", lambda *args, **kwargs: None)
@@ -5150,6 +5162,7 @@ def test_run_single_disable_sigma_clip_pass_skips_two_pass_branch(monkeypatch, t
     l2500_calls = []
     m2500_calls = []
     full_residual_calls = []
+    partial_control_calls = []
     full_residual_rz_calls = []
     blr_calls = []
     blr_pdf_calls = []
@@ -5212,6 +5225,11 @@ def test_run_single_disable_sigma_clip_pass_skips_two_pass_branch(monkeypatch, t
         lambda *args, **kwargs: (m2500_calls.append(kwargs), (np.zeros(len(args[1])), np.ones(len(args[1])), None, None))[1],
     )
     monkeypatch.setattr(hubble_fit, "plot_full_residuals", lambda *args, **kwargs: full_residual_calls.append(kwargs))
+    monkeypatch.setattr(
+        hubble_fit,
+        "plot_full_residuals_debiased_partial_controls",
+        lambda *args, **kwargs: partial_control_calls.append((args, kwargs)),
+    )
     monkeypatch.setattr(hubble_fit, "plot_full_residuals_rz", lambda *args, **kwargs: full_residual_rz_calls.append(kwargs))
     monkeypatch.setattr(hubble_fit, "plot_debias_impact_diagnostics", lambda *args, **kwargs: debias_impact_calls.append(kwargs))
     monkeypatch.setattr(hubble_fit, "plot_residuals_vs_alphaOX", lambda *args, **kwargs: alphaox_calls.append(kwargs))
@@ -5257,6 +5275,11 @@ def test_run_single_disable_sigma_clip_pass_skips_two_pass_branch(monkeypatch, t
         assert "clipped_mask" not in kwargs
     for kwargs in full_residual_calls:
         assert "clipped_mask" not in kwargs
+    assert len(partial_control_calls) == 1
+    partial_args, partial_kwargs = partial_control_calls[0]
+    assert partial_args[0]["object_id"].tolist() == df_agn["object_id"].tolist()
+    np.testing.assert_allclose(partial_args[1], 0.5)
+    assert partial_kwargs["z_range"] == (0.44, 3.16)
     for kwargs in full_residual_rz_calls:
         assert "clipped_mask" not in kwargs
     for kwargs in blr_calls:

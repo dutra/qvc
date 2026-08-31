@@ -2,6 +2,7 @@ import numpy as np
 import os
 import math
 import re
+import textwrap
 import warnings
 from ast import literal_eval
 from dataclasses import dataclass
@@ -8970,6 +8971,494 @@ def plot_full_residuals_rz(
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
+
+
+_PARTIAL_CONTROL_PRIORITY_FIELDS = (
+    "m_2500_dereddened",
+    "m_2500_attenuated_model",
+    "a_2500_total",
+    "a_2500_internal",
+    "a_2500_galaxy",
+    "ebv_agn",
+    "ebv_gal",
+    "log_ebv_agn",
+    "log_ebv_gal",
+    "alpha_nu_attenuated_1450_2500",
+    "alpha_nu_intrinsic_1450_2500",
+    "delta_alpha_nu",
+    "uv_slope",
+)
+_PARTIAL_CONTROL_EXCLUDED_SUFFIXES = (
+    "_err",
+    "_err_lower",
+    "_err_upper",
+    "_std",
+    "_rhat",
+)
+
+
+def _partial_control_add_derived_fields(frame):
+    """Add the derived scalar quantities shown in the partial-control atlas."""
+    if {
+        "alpha_nu_attenuated_1450_2500",
+        "alpha_nu_intrinsic_1450_2500",
+    }.issubset(frame.columns):
+        frame["delta_alpha_nu"] = (
+            pd.to_numeric(
+                frame["alpha_nu_attenuated_1450_2500"], errors="coerce"
+            )
+            - pd.to_numeric(
+                frame["alpha_nu_intrinsic_1450_2500"], errors="coerce"
+            )
+        )
+    if "ebv_wu" in frame.columns:
+        frame["log_ebv_wu"] = np.log10(
+            np.abs(pd.to_numeric(frame["ebv_wu"], errors="coerce")) + 1e-10
+        )
+    if "log_sigma_uv_uncorrected" in frame.columns:
+        frame["log_sigma_uv_diluted"] = pd.to_numeric(
+            frame["log_sigma_uv_uncorrected"], errors="coerce"
+        )
+    if {"log_tau_uv_rf", "log_tau_fast_uv", "z"}.issubset(frame.columns):
+        tau = np.power(
+            10.0, pd.to_numeric(frame["log_tau_uv_rf"], errors="coerce")
+        )
+        tau_fast_rf = np.power(
+            10.0,
+            pd.to_numeric(frame["log_tau_fast_uv"], errors="coerce")
+            - np.log10(
+                1.0 + pd.to_numeric(frame["z"], errors="coerce")
+            ),
+        )
+        delta = tau - tau_fast_rf
+        frame["log_delta_tau_uv_fast_rf"] = np.where(
+            delta > 0.0, np.log10(delta), np.nan
+        )
+
+
+def _partial_control_parameter_groups(frame, *, min_points):
+    """Return fitted predictors followed by scalar spectra-H5 parameters."""
+    fitted_predictors = [
+        field
+        for field in ("log_sigma_uv", "log_tau_uv_rf")
+        if field in frame.columns
+    ]
+    spectra_fields = set(frame.attrs.get("spectra_fit_columns", ()))
+    if "delta_alpha_nu" in frame.columns:
+        spectra_fields.add("delta_alpha_nu")
+    excluded = {
+        "object_id",
+        "sdss_name",
+        "z",
+        *fitted_predictors,
+    }
+    sed_fields = []
+    for field in spectra_fields:
+        if field in excluded or field not in frame.columns:
+            continue
+        if field.startswith("SDSS_") or field.endswith(
+            _PARTIAL_CONTROL_EXCLUDED_SUFFIXES
+        ):
+            continue
+        series = frame[field]
+        if not isinstance(series, pd.Series) or not (
+            pd.api.types.is_numeric_dtype(series.dtype)
+            or pd.api.types.is_bool_dtype(series.dtype)
+        ):
+            continue
+        values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float)
+        finite = values[np.isfinite(values)]
+        if finite.size < int(min_points) or np.unique(finite).size < 2:
+            continue
+        sed_fields.append(field)
+
+    sed_unique = sorted(set(sed_fields))
+    sed_ordered = [
+        field for field in _PARTIAL_CONTROL_PRIORITY_FIELDS if field in sed_unique
+    ]
+    sed_ordered.extend(
+        field for field in sed_unique if field not in sed_ordered
+    )
+    return [
+        ("Hubble-fit predictors", fitted_predictors),
+        ("SED / spectral-fit parameters", sed_ordered),
+    ]
+
+
+def _partial_control_residualize(values, controls):
+    values = np.asarray(values, dtype=float)
+    controls = np.asarray(controls, dtype=float)
+    result = np.full(values.shape, np.nan, dtype=float)
+    finite = np.isfinite(values) & np.all(np.isfinite(controls), axis=1)
+    if np.count_nonzero(finite) <= controls.shape[1]:
+        return result
+    coefficients = np.linalg.lstsq(
+        controls[finite], values[finite], rcond=None
+    )[0]
+    result[finite] = values[finite] - controls[finite] @ coefficients
+    return result
+
+
+def _partial_control_binned_trend(x, y, z, *, bins=14, min_count=8):
+    finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+    x, y, z = x[finite], y[finite], z[finite]
+    if x.size < max(3 * int(min_count), 10) or np.unique(x).size < 3:
+        return (np.array([]),) * 5
+    edges = np.unique(np.quantile(x, np.linspace(0.0, 1.0, int(bins) + 1)))
+    centers, medians, lower, upper, mean_z = [], [], [], [], []
+    for bin_index, (left, right) in enumerate(zip(edges[:-1], edges[1:])):
+        use = (x >= left) & (
+            (x <= right) if bin_index == len(edges) - 2 else (x < right)
+        )
+        if np.count_nonzero(use) < int(min_count):
+            continue
+        centers.append(np.median(x[use]))
+        medians.append(np.median(y[use]))
+        lower.append(np.quantile(y[use], 0.16))
+        upper.append(np.quantile(y[use], 0.84))
+        mean_z.append(np.mean(z[use]))
+    return tuple(
+        np.asarray(value)
+        for value in (centers, medians, lower, upper, mean_z)
+    )
+
+
+def plot_full_residuals_debiased_partial_controls(
+    df_agn,
+    residuals,
+    *,
+    plot_path="plots/hubble",
+    z_range=(0.44, 3.16),
+    show=False,
+    redshift_bin_width=0.3,
+    panels_per_page=20,
+    min_points=10,
+    trend_bins=14,
+):
+    """Plot post-cut Hubble residual associations after shared controls.
+
+    Each fitted predictor is residualized against redshift-bin fixed effects
+    and the other fitted predictor. Each spectra-H5 parameter is residualized
+    against the same redshift effects and both fitted predictors. The Hubble
+    residual is residualized against the identical controls in each panel.
+    """
+    if "z" not in df_agn.columns:
+        raise ValueError("df_agn must contain a 'z' column.")
+    if int(min_points) < 3:
+        raise ValueError("min_points must be at least 3.")
+    if int(panels_per_page) < 1:
+        raise ValueError("panels_per_page must be positive.")
+    if not np.isfinite(redshift_bin_width) or redshift_bin_width <= 0.0:
+        raise ValueError("redshift_bin_width must be positive.")
+
+    residuals = np.asarray(residuals, dtype=float)
+    if residuals.ndim != 1 or residuals.size != len(df_agn):
+        raise ValueError(
+            f"residuals length {residuals.size} does not match dataframe "
+            f"length {len(df_agn)}."
+        )
+    z_min, z_max = map(float, z_range)
+    if not (np.isfinite(z_min) and np.isfinite(z_max) and z_min < z_max):
+        raise ValueError("z_range must contain two finite, increasing values.")
+
+    source_attrs = dict(df_agn.attrs)
+    table = df_agn.copy().reset_index(drop=True)
+    table.attrs.update(source_attrs)
+    table["residuals"] = residuals
+    z_all = pd.to_numeric(table["z"], errors="coerce").to_numpy(dtype=float)
+    fit_selection = (
+        table["is_fit_selection"].fillna(False).to_numpy(dtype=bool)
+        if "is_fit_selection" in table.columns
+        else np.ones(len(table), dtype=bool)
+    )
+    postcut = (
+        fit_selection
+        & np.isfinite(z_all)
+        & np.isfinite(residuals)
+        & (z_all >= z_min)
+        & (z_all <= z_max)
+    )
+    table = table.loc[postcut].copy().reset_index(drop=True)
+    table.attrs.update(source_attrs)
+    if len(table) < int(min_points):
+        raise ValueError(
+            "Too few finite post-cut residuals for partial-control "
+            f"diagnostics: {len(table)} < {int(min_points)}."
+        )
+    _partial_control_add_derived_fields(table)
+
+    groups = _partial_control_parameter_groups(table, min_points=min_points)
+    fields = [field for _, section_fields in groups for field in section_fields]
+    if not fields:
+        raise ValueError("No eligible fitted or spectra-H5 parameters found.")
+
+    z = pd.to_numeric(table["z"], errors="coerce").to_numpy(dtype=float)
+    redshift_edges = np.arange(
+        z_min, z_max + float(redshift_bin_width), float(redshift_bin_width)
+    )
+    if redshift_edges[-1] < z_max:
+        redshift_edges = np.append(redshift_edges, z_max)
+    else:
+        redshift_edges[-1] = z_max
+    z_bin = pd.cut(
+        table["z"], redshift_edges, right=True, include_lowest=True
+    )
+    z_dummies = pd.get_dummies(z_bin, drop_first=True, dtype=float).to_numpy()
+    y = table["residuals"].to_numpy(dtype=float)
+
+    partials = {}
+    for field in fields:
+        if field == "log_sigma_uv":
+            continuous = [name for name in ("log_tau_uv_rf",) if name in table]
+            control_label = r"$z$ bins + $\log\tau_{\rm UV,rf}$"
+        elif field == "log_tau_uv_rf":
+            continuous = [name for name in ("log_sigma_uv",) if name in table]
+            control_label = r"$z$ bins + $\log\sigma_{\rm UV}$"
+        else:
+            continuous = [
+                name
+                for name in ("log_sigma_uv", "log_tau_uv_rf")
+                if name in table
+            ]
+            control_label = (
+                r"$z$ bins + $\log\sigma_{\rm UV}$ + $\log\tau_{\rm UV,rf}$"
+                if len(continuous) == 2
+                else "$z$ bins" + " + " + " + ".join(continuous)
+            )
+        continuous_values = np.column_stack(
+            [
+                pd.to_numeric(table[name], errors="coerce").to_numpy(float)
+                for name in continuous
+            ]
+        ) if continuous else np.empty((len(table), 0), dtype=float)
+        controls = np.column_stack(
+            [np.ones(len(table)), continuous_values, z_dummies]
+        )
+        x = pd.to_numeric(table[field], errors="coerce").to_numpy(float)
+        common = np.isfinite(x) & np.isfinite(y) & np.all(
+            np.isfinite(controls), axis=1
+        )
+        partials[field] = (
+            _partial_control_residualize(np.where(common, x, np.nan), controls),
+            _partial_control_residualize(np.where(common, y, np.nan), controls),
+            control_label,
+        )
+
+    output_dir = plot_path or "plots/hubble"
+    os.makedirs(output_dir, exist_ok=True)
+    pdf_path = os.path.join(
+        output_dir, "full_residuals_debiased_partial_controls.pdf"
+    )
+    table_path = os.path.join(output_dir, "partial_control_residuals.csv")
+    index_path = os.path.join(
+        output_dir, "partial_control_parameter_index.csv"
+    )
+    color_norm = mpl.colors.Normalize(vmin=z_min, vmax=z_max)
+    color_map = mpl.colormaps["viridis"]
+    index_rows = []
+    absolute_page = 0
+
+    with PdfPages(pdf_path) as pdf:
+        for section, section_fields in groups:
+            if not section_fields:
+                continue
+            section_pages = int(math.ceil(len(section_fields) / panels_per_page))
+            for section_page, start in enumerate(
+                range(0, len(section_fields), panels_per_page), start=1
+            ):
+                absolute_page += 1
+                page_fields = section_fields[start : start + panels_per_page]
+                compact = len(page_fields) <= 2
+                n_columns = 2 if compact else 4
+                n_rows = int(math.ceil(len(page_fields) / n_columns))
+                fig, axes_grid = plt.subplots(
+                    n_rows,
+                    n_columns,
+                    figsize=(
+                        (8.0 * n_columns, 6.4)
+                        if compact
+                        else (5.0 * n_columns, 3.3 * n_rows)
+                    ),
+                    sharey="row",
+                    squeeze=False,
+                )
+                axes = axes_grid.ravel()
+                for panel_index, (ax, field) in enumerate(
+                    zip(axes, page_fields)
+                ):
+                    x_partial, r_partial, control_label = partials[field]
+                    finite = (
+                        np.isfinite(x_partial)
+                        & np.isfinite(r_partial)
+                        & np.isfinite(z)
+                    )
+                    xf, rf, zf = x_partial[finite], r_partial[finite], z[finite]
+                    ax.scatter(
+                        xf,
+                        rf,
+                        c=zf,
+                        cmap=color_map,
+                        norm=color_norm,
+                        s=10,
+                        alpha=0.43,
+                        linewidths=0,
+                        rasterized=True,
+                        zorder=2,
+                    )
+                    xb, rb, rlo, rhi, zb = _partial_control_binned_trend(
+                        xf,
+                        rf,
+                        zf,
+                        bins=trend_bins,
+                        min_count=max(3, min_points // 2),
+                    )
+                    if xb.size:
+                        ax.fill_between(
+                            xb,
+                            rlo,
+                            rhi,
+                            color="#64748B",
+                            alpha=0.10,
+                            linewidth=0,
+                            zorder=3,
+                        )
+                        ax.plot(xb, rb, color="white", lw=4.2, zorder=4)
+                        ax.plot(xb, rb, color="#111827", lw=2.0, zorder=5)
+                        ax.scatter(
+                            xb,
+                            rb,
+                            c=zb,
+                            cmap=color_map,
+                            norm=color_norm,
+                            s=38,
+                            edgecolors="#111827",
+                            linewidths=0.65,
+                            zorder=6,
+                        )
+                    if xf.size >= 3 and np.nanmax(xf) > np.nanmin(xf):
+                        x_low, x_high = np.quantile(xf, [0.01, 0.99])
+                        padding = 0.05 * (x_high - x_low)
+                        ax.set_xlim(x_low - padding, x_high + padding)
+                    ax.axhline(
+                        0.0, color="#64748B", lw=0.8, ls=(0, (3, 3)), zorder=1
+                    )
+                    ax.set_ylim(*_FULL_RESIDUAL_YLIM)
+                    ax.set_title(
+                        textwrap.fill(field, 34),
+                        fontsize=9.5,
+                        fontweight="bold",
+                        pad=5,
+                    )
+                    ax.set_xlabel(f"{field} residual after controls", fontsize=8.2)
+                    if panel_index % n_columns == 0:
+                        ax.set_ylabel(r"Hubble $R$ residual after controls [mag]")
+                    else:
+                        ax.tick_params(labelleft=False)
+                    ax.text(
+                        0.97,
+                        0.04,
+                        f"Controls: {control_label}",
+                        transform=ax.transAxes,
+                        ha="right",
+                        va="bottom",
+                        fontsize=7.2,
+                        color="#334155",
+                        bbox={
+                            "boxstyle": "round,pad=0.25",
+                            "facecolor": "white",
+                            "edgecolor": "#CBD5E1",
+                            "alpha": 0.86,
+                        },
+                        zorder=8,
+                    )
+                    ax.grid(True, color="#E2E8F0", lw=0.55, alpha=0.7, zorder=0)
+                    ax.spines[["top", "right"]].set_visible(False)
+                for ax in axes[len(page_fields) :]:
+                    ax.axis("off")
+
+                fig.suptitle(
+                    f"{section} — partial-regression Hubble residuals",
+                    fontsize=17,
+                    fontweight="bold",
+                    y=0.992,
+                )
+                if section.startswith("Hubble-fit"):
+                    explanation = (
+                        r"For each fitted predictor, both $X$ and $R$ are "
+                        r"residualized against redshift-bin fixed effects and "
+                        r"the other fitted predictor."
+                    )
+                else:
+                    explanation = (
+                        r"For each SED field, both $X$ and $R$ are residualized "
+                        r"against redshift-bin fixed effects, $\log\sigma_{\rm UV}$, "
+                        r"and $\log\tau_{\rm UV,rf}$."
+                    )
+                fig.text(
+                    0.5,
+                    0.865 if compact else 0.950,
+                    explanation
+                    + "\n"
+                    + r"A non-flat black trend indicates an association beyond "
+                    + r"the listed controls; color shows remaining redshift structure."
+                    + "\n"
+                    + f"Section page {section_page}/{section_pages}; "
+                    + f"{len(table):,} post-cut quasars.",
+                    ha="center",
+                    va="center",
+                    fontsize=11.2,
+                    linespacing=1.3,
+                    color="#334155",
+                )
+                layout_top = 0.76 if compact else 0.895
+                fig.tight_layout(
+                    rect=(0.025, 0.02, 0.93, layout_top),
+                    h_pad=1.55,
+                    w_pad=1.1,
+                )
+                colorbar_ax = fig.add_axes([0.95, 0.12, 0.012, 0.76])
+                colorbar = fig.colorbar(
+                    mpl.cm.ScalarMappable(norm=color_norm, cmap=color_map),
+                    cax=colorbar_ax,
+                )
+                colorbar.set_label("Redshift  $z$", fontsize=10)
+                pdf.savefig(fig, dpi=180)
+                if show:
+                    plt.show()
+                plt.close(fig)
+                index_rows.extend(
+                    {
+                        "pdf_page": absolute_page,
+                        "section": section,
+                        "section_page": section_page,
+                        "panel": panel + 1,
+                        "field": field,
+                        "controls": partials[field][2],
+                    }
+                    for panel, field in enumerate(page_fields)
+                )
+
+    export = {
+        "object_id": (
+            table["object_id"].to_numpy()
+            if "object_id" in table
+            else table.index.to_numpy()
+        ),
+        "z": z,
+        "residuals": y,
+        "z_control_bin": z_bin.astype(str).to_numpy(),
+    }
+    for field in fields:
+        export[field] = pd.to_numeric(table[field], errors="coerce").to_numpy()
+        export[f"{field}_partial"] = partials[field][0]
+        export[f"R_partial_for_{field}"] = partials[field][1]
+    pd.DataFrame(export).to_csv(table_path, index=False)
+    pd.DataFrame(index_rows).to_csv(index_path, index=False)
+    return {
+        "pdf": pdf_path,
+        "residuals_csv": table_path,
+        "parameter_index_csv": index_path,
+    }
 
 
 def plot_parameter_residual_diagnostics(
