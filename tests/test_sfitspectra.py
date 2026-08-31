@@ -236,6 +236,7 @@ def test_sfitspectra_accepts_cli_overrides_and_builds_timestamped_spectrafit_job
     assert 'parser.add_argument(\n    "--description",' in source
     assert 'parser.add_argument(\n    "--chisq-csv",' in source
     assert 'parser.add_argument(\n    "--fit-script",' in source
+    assert 'parser.add_argument(\n    "--fit-bal",' in source
     assert "fit_script = cli_args.fit_script" in source
     assert 'parser.add_argument(\n    "--sed-photometry-path",' not in source
     assert 'datetime.now().strftime("%b%d_%I%M%p").lower()' in source
@@ -288,6 +289,45 @@ def test_sfitspectra_fresh_run_uses_explicit_csv_and_description(tmp_path, path_
     assert provenance["resolved"]["wrapper_args"]["description"] == "Nested N8000"
     assert provenance["resolved"]["description"] == "Nested_N8000"
     assert len(_sbatch_calls(calls_path)) == 1
+
+
+def test_sfitspectra_forwards_fit_bal_to_joint_backend(tmp_path):
+    root, script_path, csv_path, _, env = _fresh_workspace(tmp_path)
+    (root / "results/data/jaxqsofit/old_BAL/all").mkdir(parents=True)
+
+    result = _run_fresh(
+        root,
+        script_path,
+        env,
+        "--chisq-csv", str(csv_path),
+        "--description", "BAL",
+        "--fit-bal",
+        "--resume", "old_BAL",
+    )
+
+    assert result.returncode == 0, result.stderr
+    generated = next((root / "hpc_scripts/submit/jaxqsofit").glob("submit_*.sbatch"))
+    source = generated.read_text(encoding="utf-8")
+    assert 'export FIT_BAL="1"' in source
+    assert 'cmd.append("--fit-bal")' in source
+    assert 'export RESUME_RUN_NAME="old_BAL"' in source
+
+
+def test_sfitspectra_rejects_fit_bal_with_standalone_backend(tmp_path):
+    root, script_path, csv_path, _, env = _fresh_workspace(tmp_path)
+
+    result = _run_fresh(
+        root,
+        script_path,
+        env,
+        "--chisq-csv", str(csv_path),
+        "--description", "BAL",
+        "--fit-script", "fit_spectra.py",
+        "--fit-bal",
+    )
+
+    assert result.returncode != 0
+    assert "--fit-bal is supported only" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -489,6 +529,7 @@ def test_sfitspectra_retry_requires_original_artifacts_and_sufficient_cpus(tmp_p
         ("--chisq-csv", "data/new.csv"),
         ("--resume", ""),
         ("--fit-script", "fit_spectra.py"),
+        ("--fit-bal",),
     ],
 )
 def test_sfitspectra_retry_rejects_fresh_run_options(tmp_path, fresh_args):

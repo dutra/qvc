@@ -333,6 +333,14 @@ parser.add_argument(
     help="Spectrum-fitting backend to run.",
 )
 parser.add_argument(
+    "--fit-bal",
+    action="store_true",
+    help=(
+        "Enable JAXSEDFit's built-in BAL absorption components. Supported only "
+        "with fit_spectra_jaxsedfit_joint.py."
+    ),
+)
+parser.add_argument(
     "--resume",
     metavar="OLD_RUN_NAME",
     default="",
@@ -353,7 +361,13 @@ parser.add_argument(
 cli_args = parser.parse_args()
 
 retry_job_name = cli_args.retry.strip()
-fresh_run_options = ("--chisq-csv", "--description", "--fit-script", "--resume")
+fresh_run_options = (
+    "--chisq-csv",
+    "--description",
+    "--fit-script",
+    "--fit-bal",
+    "--resume",
+)
 fresh_run_option_was_explicit = any(
     arg == option or arg.startswith(f"{option}=")
     for arg in sys.argv[1:]
@@ -375,6 +389,8 @@ if cli_args.description is None:
 
 fit_script = cli_args.fit_script
 resume_run_name = cli_args.resume.strip()
+if cli_args.fit_bal and fit_script != "fit_spectra_jaxsedfit_joint.py":
+    parser.error("--fit-bal is supported only with fit_spectra_jaxsedfit_joint.py")
 if resume_run_name and fit_script != "fit_spectra_jaxsedfit_joint.py":
     parser.error("--resume is supported only with fit_spectra_jaxsedfit_joint.py")
 if resume_run_name:
@@ -619,6 +635,7 @@ set -euo pipefail
 export PREFIX="{prefix}"
 export FIT_SCRIPT="{fit_script}"
 export FIT_MODULE="{fit_module}"
+export FIT_BAL="{int(cli_args.fit_bal)}"
 export SED_PHOTOMETRY_PATH="{sed_photometry_path}"
 export OUTPUT_DIR="{output_dir}"
 export OBJECT_IDS_FILE="{object_ids_file}"
@@ -651,6 +668,7 @@ echo "JOB_NAME={job_name}"
 echo "PREFIX=$PREFIX"
 echo "FIT_SCRIPT=$FIT_SCRIPT"
 echo "FIT_MODULE=$FIT_MODULE"
+echo "FIT_BAL=$FIT_BAL"
 echo "SED_PHOTOMETRY_PATH=$SED_PHOTOMETRY_PATH"
 echo "OBJECT_IDS_FILE=$OBJECT_IDS_FILE"
 echo "OUTPUT_DIR=$OUTPUT_DIR"
@@ -667,6 +685,7 @@ from itertools import islice
 prefix = os.environ["PREFIX"]
 fit_script = os.environ["FIT_SCRIPT"]
 fit_module = os.environ["FIT_MODULE"]
+fit_bal = os.environ["FIT_BAL"] == "1"
 sed_photometry_path = os.environ["SED_PHOTOMETRY_PATH"]
 output_dir = os.environ["OUTPUT_DIR"]
 object_ids_file = os.environ["OBJECT_IDS_FILE"]
@@ -728,6 +747,8 @@ elif fit_script == "fit_spectra_jaxsedfit_joint.py":
         "--sed-photometry-path", sed_photometry_path,
         "--progress",
     ])
+    if fit_bal:
+        cmd.append("--fit-bal")
     if resume_dir:
         cmd.extend([
             "--resume", resume_dir,

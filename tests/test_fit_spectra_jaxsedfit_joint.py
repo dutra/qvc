@@ -233,6 +233,7 @@ def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
         fit_lines=True,
         fit_fe=False,
         fit_bc=True,
+        fit_bal=True,
         line_flux_scale_mjy=0.2,
         photometry_systematics=0.08,
         spectrum_systematics=0.06,
@@ -272,6 +273,15 @@ def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
     assert config.agn.tied_lines is True
     assert config.agn.fit_feii is False
     assert config.agn.fit_balmer_continuum is True
+    assert [component.name for component in config.agn.custom_components] == [
+        "bal_nv",
+        "bal_siiv",
+        "bal_civ",
+    ]
+    assert all(
+        component.metadata["component_type"] == "bal_absorption"
+        for component in config.agn.custom_components
+    )
     assert config.agn.line_flux_scale_mjy == pytest.approx(0.2)
     assert config.inference.plot_init is True
     assert config.likelihood.spectrum_systematics_width == pytest.approx(0.06)
@@ -291,6 +301,19 @@ def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
     assert config.photometry.psf_fwhm_arcsec == [
         joint.SDSS_STATIC_PSF_FWHM_ARCSEC[band] for band in "ugriz"
     ]
+
+    args.fit_bal = False
+    config_without_bal, _ = joint.build_joint_config(
+        record,
+        pd.DataFrame(),
+        lam=np.array([3000.0, 4000.0, 5000.0]),
+        flux=np.array([1.0, 1.1, 1.2]),
+        err=np.array([0.1, 0.1, 0.1]),
+        resolving_power=2000.0,
+        args=args,
+        aperture_diameter_arcsec=2.0,
+    )
+    assert config_without_bal.agn.custom_components == ()
 
 
 def test_dereddened_m2500_uses_intrinsic_disk_and_both_attenuation_terms():
@@ -1349,6 +1372,30 @@ def test_resume_preflight_rejects_old_and_accepts_main_bundle(tmp_path):
     joint.preflight_resume_host_capture_bundles([rec], args)
 
 
+def test_resume_bal_validation_requires_saved_bal_components(tmp_path):
+    path = tmp_path / "bal_samples.h5"
+    fitter = SimpleNamespace(
+        config=SimpleNamespace(
+            agn=SimpleNamespace(custom_components=())
+        )
+    )
+
+    with pytest.raises(
+        joint.IncompatibleBALResumeError,
+        match="lacks BAL components",
+    ):
+        joint.validate_resume_bal_fitter(fitter, path)
+
+    fitter.config.agn.custom_components = tuple(
+        SimpleNamespace(
+            name=name,
+            metadata={"component_type": "bal_absorption"},
+        )
+        for name in ("bal_nv", "bal_siiv", "bal_civ")
+    )
+    joint.validate_resume_bal_fitter(fitter, path)
+
+
 def test_resume_preflight_rejects_shared_group_bundle(tmp_path):
     args = _hybrid_args(tmp_path)
     rec = _run_record()
@@ -1539,6 +1586,37 @@ def test_parse_args_rejects_no_deredden_for_mandatory_v3_colors(tmp_path):
                 "--no-deredden",
             ]
         )
+
+
+def test_parse_args_fit_bal_is_opt_in(tmp_path):
+    common = [
+        "--mode", "fit",
+        str(tmp_path / "out.h5"),
+        "--sed-photometry-path", str(tmp_path / "phot.csv"),
+        "--filter_object_id", "1",
+    ]
+
+    assert joint.parse_args(common).fit_bal is False
+    assert joint.parse_args([*common, "--fit-bal"]).fit_bal is True
+
+
+def test_parse_args_accepts_fit_bal_with_resume(tmp_path):
+    resume_dir = tmp_path / "old" / "all"
+    resume_dir.mkdir(parents=True)
+
+    args = joint.parse_args(
+        [
+            "--mode", "fit",
+            str(tmp_path / "out.h5"),
+            "--sed-photometry-path", str(tmp_path / "phot.csv"),
+            "--filter_object_id", "1",
+            "--fit-bal",
+            "--resume", str(resume_dir),
+        ]
+    )
+
+    assert args.fit_bal is True
+    assert args.resume == str(resume_dir)
 
 
 def test_parse_args_rejects_removed_no_host_capture_baseline_flag(tmp_path):
