@@ -746,6 +746,7 @@ elif fit_script == "fit_spectra_jaxsedfit_joint.py":
     cmd.extend([
         "--sed-photometry-path", sed_photometry_path,
         "--progress",
+        "--no-catalog-progress",
     ])
     if fit_bal:
         cmd.append("--fit-bal")

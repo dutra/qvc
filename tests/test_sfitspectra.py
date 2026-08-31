@@ -226,6 +226,7 @@ def test_sfitspectra_uses_backend_specific_arguments():
     assert 'elif fit_script == "fit_spectra_jaxsedfit_joint.py":' in source
     assert '"--sed-photometry-path", sed_photometry_path' in source
     assert '"--progress"' in source
+    assert '"--no-catalog-progress"' in source
     assert "SED photometry input not found" in source
     assert 'out_suffix = ".h5" if fit_script == "fit_spectra_jaxsedfit_joint.py" else ".csv"' in source
 
