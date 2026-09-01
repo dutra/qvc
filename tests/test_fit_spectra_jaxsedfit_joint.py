@@ -910,18 +910,37 @@ def test_release_jaxsedfit_memory_discards_fit_state_and_clears_jax_cache(
     assert fit_result._state is None
 
 
-def test_plot_init_saves_each_stage_without_showing(tmp_path):
+def test_plot_init_saves_each_stage_without_showing(tmp_path, monkeypatch):
     calls = []
+    spectrum_calls = []
+    monkeypatch.setattr(
+        plt,
+        "show",
+        lambda: pytest.fail("MAP initialization plotting called plt.show()"),
+    )
 
     class FakeFitter:
         def plot_sed(self, *, output_path=None, show=False, title=None):
             calls.append(
                 {"output_path": output_path, "show": show, "title": title}
             )
+            if show:
+                plt.show()
             figure = plt.figure()
             if output_path is not None:
                 figure.savefig(output_path)
             return figure
+
+        def plot_spectrum(self, *, show_plot, plot_residual):
+            spectrum_calls.append(
+                {
+                    "show_plot": show_plot,
+                    "plot_residual": plot_residual,
+                }
+            )
+            if show_plot:
+                plt.show()
+            return plt.figure()
 
         def fit(self, *, progress_bar):
             assert progress_bar is True
@@ -931,12 +950,9 @@ def test_plot_init_saves_each_stage_without_showing(tmp_path):
             )
             self.plot_sed(
                 show=True,
-                title="Stage 2 smooth spectral-feature MAP initialization",
+                title="Stage 2 full MAP initialization",
             )
-            self.plot_sed(
-                show=True,
-                title="Stage 3 full MAP initialization",
-            )
+            self.plot_sed(show=True, title="Future MAP diagnostic")
             return "fit-result"
 
     fitter = FakeFitter()
@@ -947,13 +963,34 @@ def test_plot_init_saves_each_stage_without_showing(tmp_path):
 
     assert result == "fit-result"
     assert [call["show"] for call in calls] == [False, False, False]
-    assert [Path(call["output_path"]).name for call in calls] == [
+    assert [
+        Path(call["output_path"]).name if call["output_path"] is not None else None
+        for call in calls
+    ] == [
         "z0.304_013453.20-001842.3_joint_init_stage1.png",
         "z0.304_013453.20-001842.3_joint_init_stage2.png",
-        "z0.304_013453.20-001842.3_joint_init_stage3.png",
+        None,
     ]
-    assert all(Path(call["output_path"]).is_file() for call in calls)
+    assert all(Path(call["output_path"]).is_file() for call in calls[:2])
+    assert spectrum_calls == [
+        {"show_plot": False, "plot_residual": False},
+        {"show_plot": False, "plot_residual": False},
+    ]
+    assert (
+        tmp_path
+        / "z0.304_013453.20-001842.3_joint_init_stage1_spectrum.png"
+    ).is_file()
+    assert (
+        tmp_path
+        / "z0.304_013453.20-001842.3_joint_init_stage2_spectrum.png"
+    ).is_file()
     assert fitter.plot_sed.__func__ is FakeFitter.plot_sed
+
+
+def test_run_fit_sed_spectra_enables_saved_map_plots():
+    source = (REPO_ROOT / "run_fit_sed_spectra.xsh").read_text(encoding="utf-8")
+
+    assert "--plot-init" in source
 
 
 def _run_record():

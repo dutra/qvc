@@ -2427,6 +2427,11 @@ def initialization_figure_path(fig_dir, rec, stage):
     return Path(fig_dir) / f"{joint_saved_name(rec)}_init_{stage}.png"
 
 
+def initialization_spectrum_figure_path(fig_dir, rec, stage):
+    """Return the spectrum-decomposition path for one MAP stage."""
+    return Path(fig_dir) / f"{joint_saved_name(rec)}_init_{stage}_spectrum.png"
+
+
 def fit_with_saved_initialization_plots(fitter, rec, args):
     """Run the fit while saving initialization plots without GUI windows."""
     if not bool(getattr(args, "plot_init", False)):
@@ -2435,6 +2440,7 @@ def fit_with_saved_initialization_plots(fitter, rec, args):
     title_stages = {
         "Stage 1 continuum/host MAP initialization": "stage1",
         "Stage 2 smooth spectral-feature MAP initialization": "stage2",
+        "Stage 2 full MAP initialization": "stage2",
         "Stage 3 full MAP initialization": "stage3",
         "Full MAP initialization": "map",
     }
@@ -2442,18 +2448,51 @@ def fit_with_saved_initialization_plots(fitter, rec, args):
 
     def save_instead_of_showing(*call_args, **call_kwargs):
         stage = title_stages.get(str(call_kwargs.get("title", "")))
+        # JAXSEDFit requests interactive display for its internal MAP
+        # diagnostics. The batch runner must never honor that request: even an
+        # unfamiliar future stage title remains non-interactive.
+        call_kwargs["show"] = False
         if stage is None:
             return original_plot_sed(*call_args, **call_kwargs)
         output_path = initialization_figure_path(args.fig_dir, rec, stage)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         call_kwargs["output_path"] = output_path
-        call_kwargs["show"] = False
         figure = original_plot_sed(*call_args, **call_kwargs)
         if not output_path.is_file():
             raise FileNotFoundError(
                 f"Initialization figure was not written: {output_path}"
             )
         print(f"Saved initialization plot: {output_path}")
+
+        from matplotlib import pyplot as plt
+
+        spectrum_output_path = initialization_spectrum_figure_path(
+            args.fig_dir,
+            rec,
+            stage,
+        )
+        spectrum_figure = fitter.plot_spectrum(
+            show_plot=False,
+            plot_residual=False,
+        )
+        if spectrum_figure is None:
+            raise RuntimeError(
+                f"JAXSEDFit did not return the {stage} MAP spectrum figure."
+            )
+        try:
+            spectrum_figure.savefig(
+                spectrum_output_path,
+                dpi=150,
+                bbox_inches="tight",
+            )
+        finally:
+            plt.close(spectrum_figure)
+        if not spectrum_output_path.is_file():
+            raise FileNotFoundError(
+                "Initialization spectrum figure was not written: "
+                f"{spectrum_output_path}"
+            )
+        print(f"Saved initialization spectrum plot: {spectrum_output_path}")
         return figure
 
     fitter.plot_sed = save_instead_of_showing

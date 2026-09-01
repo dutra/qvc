@@ -49,6 +49,7 @@ start = perf_counter()
 python -m qvc.spectra.fit_spectra_jaxsedfit_joint \
     --mode fit \
     --fit-bal \
+    --plot-init \
     --cache-dir "data/spectra_cache_all" \
     --verbose \
     --optax-steps 4000 \
