@@ -21,12 +21,12 @@ repo_dir = Path("/home/id255/project_pi_pn38/id255/qvc")
 python_bin = hpc_home / ".conda/envs/jaxcpu2/bin/python"
 output_root = repo_dir / "results/hubble_validation"
 
-campaign = "fixed_truth_n2000_production"
+speed = "quick"
 num_agns = 2000
 num_runs = 64
+campaign = f"fixed_truth_nagns{num_agns}_nruns{num_runs}_{speed}"
 seed_start = 0
 master_seed = 20260901
-speed = "production"
 calibration_size = 200000
 arms = ["all", "selected_uncorrected", "selected_oracle", "selected_estimated"]
 
@@ -57,7 +57,7 @@ partition = "day"
 time_limit = "02:00:00"
 cpus_per_task = 8
 memory = "32G"
-max_concurrent = 10
+max_concurrent = 9999
 
 # Dependent plotting-job resources.
 plot_partition = partition

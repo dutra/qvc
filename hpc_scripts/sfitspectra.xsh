@@ -27,7 +27,7 @@ from qvc.provenance import (
 # 1. Define your job settings here
 # ==========================================
 partition = "day"
-time_limit = "2:00:00"
+time_limit = "3:00:00"
 
 # Number of object_ids per array task
 chunk_size = 1
@@ -727,7 +727,7 @@ cmd = [
     out_catalog,
     "--cache-dir", cache_dir,
     "--verbose",
-    "--optax-steps", "4000",
+    "--optax-steps", "5000",
     "--optax-lr", "0.005",
     "--nuts-warmup", "500",
     "--nuts-samples", "500",
