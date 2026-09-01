@@ -2103,7 +2103,7 @@ def posterior_bundle_path(directory, rec):
 
 def sed_figure_path(fig_dir, rec):
     """Return the shared fresh/resumed SED figure path."""
-    return Path(fig_dir) / f"{joint_saved_name(rec)}.png"
+    return Path(fig_dir) / f"{joint_saved_name(rec)}.pdf"
 
 
 def verify_new_posterior_bundle(path):
@@ -2517,7 +2517,7 @@ def save_spectrum_figure(fitter, rec, fig_dir):
 
     fig_path = (
         Path(fig_dir)
-        / f"z{float(rec['z']):.3f}_{rec['sdss_name']}_spectrum.png"
+        / f"z{float(rec['z']):.3f}_{rec['sdss_name']}_spectrum.pdf"
     )
     fig_path.parent.mkdir(parents=True, exist_ok=True)
     fig = fitter.plot_spectrum(show_plot=False, plot_residual=False)
@@ -2533,12 +2533,12 @@ def save_spectrum_figure(fitter, rec, fig_dir):
 
 def initialization_figure_path(fig_dir, rec, stage):
     """Return the stable output path for one Optax initialization stage."""
-    return Path(fig_dir) / f"{joint_saved_name(rec)}_init_{stage}.png"
+    return Path(fig_dir) / f"{joint_saved_name(rec)}_init_{stage}.pdf"
 
 
 def initialization_spectrum_figure_path(fig_dir, rec, stage):
     """Return the spectrum-decomposition path for one MAP stage."""
-    return Path(fig_dir) / f"{joint_saved_name(rec)}_init_{stage}_spectrum.png"
+    return Path(fig_dir) / f"{joint_saved_name(rec)}_init_{stage}_spectrum.pdf"
 
 
 def fit_with_saved_initialization_plots(fitter, rec, args):
@@ -3051,7 +3051,7 @@ def _remove_incomplete_resumed_outputs(rec, args):
         posterior_bundle_path(args.output_dir, rec),
         sed_figure_path(args.fig_dir, rec),
         Path(args.fig_dir)
-        / f"z{float(rec['z']):.3f}_{rec['sdss_name']}_spectrum.png",
+        / f"z{float(rec['z']):.3f}_{rec['sdss_name']}_spectrum.pdf",
     ]
     for path in paths:
         path.unlink(missing_ok=True)

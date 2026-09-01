@@ -902,7 +902,7 @@ def test_save_spectrum_figure_uses_separate_spectrum_filename(tmp_path):
 
     assert fitter.show_plot is False
     assert fitter.plot_residual is False
-    assert path == tmp_path / "z0.300_205105.02-003302.7_spectrum.png"
+    assert path == tmp_path / "z0.300_205105.02-003302.7_spectrum.pdf"
     assert path.is_file()
 
 
@@ -1026,8 +1026,8 @@ def test_plot_init_saves_each_stage_without_showing(tmp_path, monkeypatch):
         Path(call["output_path"]).name if call["output_path"] is not None else None
         for call in calls
     ] == [
-        "z0.304_013453.20-001842.3_joint_init_stage1.png",
-        "z0.304_013453.20-001842.3_joint_init_stage2.png",
+        "z0.304_013453.20-001842.3_joint_init_stage1.pdf",
+        "z0.304_013453.20-001842.3_joint_init_stage2.pdf",
         None,
     ]
     assert all(Path(call["output_path"]).is_file() for call in calls[:2])
@@ -1037,11 +1037,11 @@ def test_plot_init_saves_each_stage_without_showing(tmp_path, monkeypatch):
     ]
     assert (
         tmp_path
-        / "z0.304_013453.20-001842.3_joint_init_stage1_spectrum.png"
+        / "z0.304_013453.20-001842.3_joint_init_stage1_spectrum.pdf"
     ).is_file()
     assert (
         tmp_path
-        / "z0.304_013453.20-001842.3_joint_init_stage2_spectrum.png"
+        / "z0.304_013453.20-001842.3_joint_init_stage2_spectrum.pdf"
     ).is_file()
     assert fitter.plot_sed.__func__ is FakeFitter.plot_sed
 
@@ -2362,7 +2362,7 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
     monkeypatch.setattr(
         joint,
         "save_spectrum_figure",
-        lambda fitter, record, fig_dir: Path(fig_dir) / "spectrum.png",
+        lambda fitter, record, fig_dir: Path(fig_dir) / "spectrum.pdf",
     )
 
     result = joint.run_hybrid_fit(rec, args)
