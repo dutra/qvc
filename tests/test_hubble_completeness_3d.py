@@ -569,6 +569,9 @@ def test_completeness_2d_plot_smoothing_is_display_only(tmp_path):
     np.testing.assert_allclose(z_centers_plot, z_centers)
     np.testing.assert_allclose(comp_with_plot(mag_grid, z_grid), comp_no_plot(mag_grid, z_grid))
     assert (tmp_path / "completeness" / "completeness_map.pdf").exists()
+    assert (
+        tmp_path / "completeness" / "completeness_map_with_log_contours.pdf"
+    ).exists()
 
 
 def test_fit_fhost_2500_model_monotonic_and_bounded():

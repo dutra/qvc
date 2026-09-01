@@ -1177,9 +1177,10 @@ def get_completeness_function_2d(
         os.makedirs(plot_dir, exist_ok=True)
         # Plot completeness map
         C_plot = gaussian_filter(C, sigma=(1, 1), mode="nearest")
+        log_C_plot = np.log10(np.clip(C_plot, 1e-12, None))
         plt.figure(figsize=(7, 5))
         im = plt.imshow(
-            np.log10(np.clip(C_plot.T, 1e-12, None)), origin="lower", aspect="auto",
+            log_C_plot.T, origin="lower", aspect="auto",
             extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]], cmap="viridis",
             vmin=-4, vmax=0
         )
@@ -1193,6 +1194,37 @@ def get_completeness_function_2d(
         plt.tight_layout()
         plt.savefig(os.path.join(plot_dir, "completeness_map.pdf"), dpi=600)
         plt.close()
+
+        # Plot the same map with automatically located log-completeness contours.
+        fig, ax = plt.subplots(figsize=(7, 5))
+        displayed_log_C = np.clip(log_C_plot, -4.0, 0.0)
+        im = ax.imshow(
+            displayed_log_C.T,
+            origin="lower",
+            aspect="auto",
+            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
+            cmap="viridis",
+            vmin=-4,
+            vmax=0,
+        )
+        contours = ax.contour(
+            mag_centers,
+            z_centers,
+            displayed_log_C.T,
+            colors="white",
+            linewidths=1.3,
+        )
+        ax.clabel(contours, inline=True, fmt="%.1f", fontsize=7)
+        ax.set_ylabel(r"$z$")
+        ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
+        cbar = fig.colorbar(im, ax=ax)
+        cbar.set_label(r"Completeness $\log\,p(I{=}1\,|\,m,z)$")
+        fig.tight_layout()
+        fig.savefig(
+            os.path.join(plot_dir, "completeness_map_with_log_contours.pdf"),
+            dpi=600,
+        )
+        plt.close(fig)
         # Plot H_obs
         plt.figure(figsize=(7, 5))
         im = plt.imshow(
