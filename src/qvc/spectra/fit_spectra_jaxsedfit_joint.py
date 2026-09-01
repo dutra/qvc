@@ -80,6 +80,7 @@ SDSS_STATIC_PSF_FWHM_ARCSEC = {
 }
 SDSS_LEGACY_FIBER_DIAMETER_ARCSEC = 3.0
 SDSS_BOSS_FIBER_DIAMETER_ARCSEC = 2.0
+BAL_MIN_REDSHIFT_EXCLUSIVE = 1.5
 HOST_CAPTURE_BUNDLE_ATTR = "qvc_host_capture_model"
 HOST_CAPTURE_BUNDLE_MARKER = "static_sdss_psf_fwhm"
 HOST_CAPTURE_PSF_FWHM_ATTR = "qvc_f_host_2500_psf_fwhm_arcsec"
@@ -94,7 +95,17 @@ class IncompatibleHostCaptureResumeError(RuntimeError):
 
 
 class IncompatibleBALResumeError(RuntimeError):
-    """Raised when BAL fitting is requested for a non-BAL resume bundle."""
+    """Raised when a resume bundle disagrees with the active BAL policy."""
+
+
+def bal_enabled_for_redshift(args, redshift):
+    """Return whether BAL components are enabled for one fitted object."""
+    z = legacy.safe_float(redshift)
+    return (
+        bool(getattr(args, "fit_bal", True))
+        and np.isfinite(z)
+        and z > BAL_MIN_REDSHIFT_EXCLUSIVE
+    )
 
 
 def _fits_table_scalar(hdul, column_name):
@@ -1132,7 +1143,7 @@ def build_joint_config(
     methods = [None if pd.isna(value) else str(value) for value in method_values]
     bal_components = (
         build_default_bal_components(spec_flux_mjy[spec_good])
-        if args.fit_bal
+        if bal_enabled_for_redshift(args, rec["z"])
         else None
     )
     config = FitConfig(
@@ -2201,8 +2212,8 @@ def validate_resume_host_capture_fitter(fitter, path):
         )
 
 
-def validate_resume_bal_fitter(fitter, path):
-    """Require the built-in BAL components in a requested BAL resume bundle."""
+def validate_resume_bal_fitter(fitter, path, *, expected_enabled=True):
+    """Require a resume bundle to match the current redshift-aware BAL policy."""
     agn = getattr(getattr(fitter, "config", None), "agn", None)
     components = tuple(getattr(agn, "custom_components", ()) or ())
     bal_names = {
@@ -2214,11 +2225,18 @@ def validate_resume_bal_fitter(fitter, path):
         == "bal_absorption"
     }
     expected = {"bal_nv", "bal_siiv", "bal_civ"}
-    if not expected.issubset(bal_names):
+    if expected_enabled and not expected.issubset(bal_names):
         missing = sorted(expected - bal_names)
         raise IncompatibleBALResumeError(
-            f"Resume bundle {path} was requested with --fit-bal but its saved "
+            f"Resume bundle {path} requires BAL fitting under the current "
+            f"z > {BAL_MIN_REDSHIFT_EXCLUSIVE:g} policy but its saved "
             f"JAXSEDFit configuration lacks BAL components: {missing}."
+        )
+    if not expected_enabled and bal_names:
+        raise IncompatibleBALResumeError(
+            f"Resume bundle {path} contains BAL components {sorted(bal_names)} "
+            "but BAL fitting is disabled by --no-bal or by the current "
+            f"z > {BAL_MIN_REDSHIFT_EXCLUSIVE:g} policy."
         )
 
 
@@ -2778,8 +2796,11 @@ def _complete_resumed_fit(rec, args, source_path, fitter):
     )
     fitter.predictive = None
     validate_resume_host_capture_fitter(fitter, source_path)
-    if bool(getattr(args, "fit_bal", False)):
-        validate_resume_bal_fitter(fitter, source_path)
+    validate_resume_bal_fitter(
+        fitter,
+        source_path,
+        expected_enabled=bal_enabled_for_redshift(args, rec["z"]),
+    )
     config = fitter.config
     saved_name = str(config.observation.object_id)
     expected_name = joint_saved_name(rec)
@@ -3291,13 +3312,28 @@ def parse_args(argv=None):
             "summary table for every object."
         ),
     )
-    parser.set_defaults(fit_lines=True, fit_fe=True, fit_bc=True, save_fig=True, save_jaxsedfit_samples=True)
+    parser.set_defaults(
+        fit_lines=True,
+        fit_fe=True,
+        fit_bc=True,
+        fit_bal=True,
+        save_fig=True,
+        save_jaxsedfit_samples=True,
+    )
     parser.add_argument(
         "--fit-bal",
+        dest="fit_bal",
         action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--no-bal",
+        dest="fit_bal",
+        action="store_false",
         help=(
-            "Fit the built-in JAXSEDFit N V, Si IV, and C IV broad-absorption "
-            "components."
+            "Disable BAL fitting. By default, the built-in N V, Si IV, and "
+            f"C IV BAL components are fitted only for objects with z > "
+            f"{BAL_MIN_REDSHIFT_EXCLUSIVE:g}."
         ),
     )
     parser.add_argument("--no-fit-lines", dest="fit_lines", action="store_false")

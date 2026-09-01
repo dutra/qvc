@@ -257,7 +257,7 @@ def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
     record = {
         **_record_with_ugriz(),
         "sdss_name": "000000.00+000000.0",
-        "z": 1.0,
+        "z": 2.0,
         "ra": 0.0,
         "dec": 0.0,
         "mjd": 55000.0,
@@ -373,6 +373,20 @@ def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
     )
     assert aperture_by_filter["J_ukidss"] == pytest.approx(2.0)
 
+    record["z"] = joint.BAL_MIN_REDSHIFT_EXCLUSIVE
+    config_at_threshold, _ = joint.build_joint_config(
+        record,
+        pd.DataFrame(),
+        lam=np.array([4000.0, 5000.0, 6000.0]),
+        flux=np.array([1.0, 1.1, 1.2]),
+        err=np.array([0.1, 0.1, 0.1]),
+        resolving_power=2000.0,
+        args=args,
+        aperture_diameter_arcsec=2.0,
+    )
+    assert config_at_threshold.agn.custom_components == ()
+
+    record["z"] = 2.0
     args.fit_bal = False
     config_without_bal, _ = joint.build_joint_config(
         record,
@@ -1531,6 +1545,23 @@ def test_resume_bal_validation_requires_saved_bal_components(tmp_path):
     )
     joint.validate_resume_bal_fitter(fitter, path)
 
+    with pytest.raises(
+        joint.IncompatibleBALResumeError,
+        match="BAL fitting is disabled",
+    ):
+        joint.validate_resume_bal_fitter(
+            fitter,
+            path,
+            expected_enabled=False,
+        )
+
+    fitter.config.agn.custom_components = ()
+    joint.validate_resume_bal_fitter(
+        fitter,
+        path,
+        expected_enabled=False,
+    )
+
 
 def test_resume_preflight_rejects_shared_group_bundle(tmp_path):
     args = _hybrid_args(tmp_path)
@@ -1724,7 +1755,7 @@ def test_parse_args_rejects_no_deredden_for_mandatory_v3_colors(tmp_path):
         )
 
 
-def test_parse_args_fit_bal_is_opt_in(tmp_path):
+def test_parse_args_bal_is_default_and_no_bal_is_opt_out(tmp_path):
     common = [
         "--mode", "fit",
         str(tmp_path / "out.h5"),
@@ -1732,7 +1763,9 @@ def test_parse_args_fit_bal_is_opt_in(tmp_path):
         "--filter_object_id", "1",
     ]
 
-    assert joint.parse_args(common).fit_bal is False
+    assert joint.parse_args(common).fit_bal is True
+    assert joint.parse_args([*common, "--no-bal"]).fit_bal is False
+    # Retain the old opt-in spelling as a hidden compatibility alias.
     assert joint.parse_args([*common, "--fit-bal"]).fit_bal is True
 
 
