@@ -94,7 +94,7 @@ warnings.filterwarnings(
 )
 
 _FULL_RESIDUAL_YLIM = (-0.5, 0.5)
-_OUT_OF_RANGE_AGN_COLOR = "#354B5B"
+_OUT_OF_RANGE_AGN_COLOR = "tab:green"
 _OUT_OF_RANGE_AGN_MARKER_COLOR = mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.65)
 _OUT_OF_RANGE_AGN_ERROR_COLOR = mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.3)
 _COSMO_CORNER_LEGEND_FONTSIZE = 40
