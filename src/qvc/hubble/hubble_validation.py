@@ -15,6 +15,8 @@ from scipy.special import expit
 
 from qvc.hubble.completeness_mock_catalog import mock_lf_grid_per_zbin
 from qvc.hubble.cuts import (
+    COMPLETENESS_MAG_2500_MAX,
+    COMPLETENESS_MAG_2500_MIN,
     COMPLETENESS_MAP_Z_EDGE_MAX,
     COMPLETENESS_MAP_Z_EDGE_MIN,
 )
@@ -96,7 +98,12 @@ class AnalyticSigmoidCompleteness:
 
     magnitude_support_mode = "hard-cut"
 
-    def __init__(self, m50: float, width: float, magnitude_support=(10.0, 35.0)):
+    def __init__(
+        self,
+        m50: float,
+        width: float,
+        magnitude_support=(COMPLETENESS_MAG_2500_MIN, COMPLETENESS_MAG_2500_MAX),
+    ):
         self.m50 = float(m50)
         self.width = float(width)
         self.magnitude_support = tuple(float(value) for value in magnitude_support)
@@ -108,7 +115,11 @@ class AnalyticSigmoidCompleteness:
     def __call__(self, magnitude, redshift=None):
         del redshift
         magnitude = np.asarray(magnitude, dtype=float)
-        return expit(-(magnitude - self.m50) / self.width)
+        probability = expit(-(magnitude - self.m50) / self.width)
+        inside = (magnitude >= self.magnitude_support[0]) & (
+            magnitude <= self.magnitude_support[1]
+        )
+        return np.where(inside, probability, 0.0)
 
     @property
     def grid(self):
@@ -130,12 +141,23 @@ def analytic_completeness_params(m50: float, width: float):
     )
 
 
-def sigmoid_detection_probability(magnitude, m50: float, width: float):
-    """Evaluate the injected detection probability stably."""
+def sigmoid_detection_probability(
+    magnitude,
+    m50: float,
+    width: float,
+    magnitude_support=(COMPLETENESS_MAG_2500_MIN, COMPLETENESS_MAG_2500_MAX),
+):
+    """Evaluate the hard-supported injected detection probability stably."""
 
     if not np.isfinite(width) or width <= 0.0:
         raise ValueError("Selection width must be finite and positive.")
-    return expit(-(np.asarray(magnitude, dtype=float) - float(m50)) / float(width))
+    support = np.asarray(magnitude_support, dtype=float)
+    if support.shape != (2,) or not np.all(np.isfinite(support)) or support[0] >= support[1]:
+        raise ValueError("magnitude_support must contain two finite increasing values.")
+    magnitude = np.asarray(magnitude, dtype=float)
+    probability = expit(-(magnitude - float(m50)) / float(width))
+    inside = (magnitude >= support[0]) & (magnitude <= support[1])
+    return np.where(inside, probability, 0.0)
 
 
 def derive_seed_ledger(master_seed: int, realization: int) -> dict[str, int]:
@@ -245,7 +267,7 @@ def inject_catalog_observables(
             "completeness_magnitude": "dereddened",
             "completeness_magnitude_source": "m_2500_dereddened",
             "completeness_magnitude_err_source": "m_2500_dereddened_err",
-            "completeness_magnitude_support_mode": "tails",
+            "completeness_magnitude_support_mode": "hard-cut",
         }
     )
     return frame

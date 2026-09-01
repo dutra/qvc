@@ -16,6 +16,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from qvc.hubble import hubble_validation
+from qvc.hubble.cuts import COMPLETENESS_MAG_2500_MAX, COMPLETENESS_MAG_2500_MIN
 from qvc.hubble.hubble_model import get_model_params
 from qvc.hubble.hubble_validation import (
     ARM_NAMES,
@@ -99,6 +100,7 @@ def test_injected_catalog_scatter_terms_and_schema_are_consistent():
     assert np.all(frame["log_sigma_uv_std_psd"] == 0.0)
     assert np.all(frame["log_tau_uv_rf_std_psd"] == 0.0)
     assert frame["object_id"].is_unique
+    assert frame.attrs["completeness_magnitude_support_mode"] == "hard-cut"
 
 
 def test_sigmoid_selection_reuses_recorded_uniforms():
@@ -122,6 +124,33 @@ def test_sigmoid_selection_reuses_recorded_uniforms():
     assert selected["object_id"].tolist() == annotated.loc[expected, "object_id"].tolist()
 
 
+def test_sigmoid_selection_is_zero_outside_hard_magnitude_support():
+    truth = ValidationTruth()
+    cosmology = FlatLambdaCDM(H0=truth.h0, Om0=truth.om0)
+    magnitude = np.array(
+        [COMPLETENESS_MAG_2500_MIN - 0.01, 23.0, COMPLETENESS_MAG_2500_MAX + 0.01]
+    )
+    redshift = np.ones(magnitude.size)
+    absolute = magnitude - cosmology.distmod(redshift).value
+    frame = inject_catalog_observables(
+        redshift,
+        absolute,
+        truth=truth,
+        rng=np.random.default_rng(31),
+        cosmology=cosmology,
+    )
+    # Remove injected magnitude scatter so this test targets the support bounds.
+    frame["apparent_mag_2500"] = magnitude
+    annotated, _ = apply_sigmoid_selection(
+        frame, m50=23.0, width=0.3, rng=np.random.default_rng(32)
+    )
+    np.testing.assert_array_equal(
+        annotated["injected_detection_probability"].to_numpy()[[0, 2]],
+        np.zeros(2),
+    )
+    assert annotated["injected_detection_probability"].iloc[1] == pytest.approx(0.5)
+
+
 def test_matched_catalogs_have_exact_sizes_and_selected_ids(monkeypatch):
     truth = ValidationTruth()
     cosmology = FlatLambdaCDM(H0=truth.h0, Om0=truth.om0)
@@ -132,7 +161,7 @@ def test_matched_catalogs_have_exact_sizes_and_selected_ids(monkeypatch):
         start = counter["value"]
         counter["value"] += 60
         redshift = np.linspace(0.2, 3.8, 60)
-        absolute = np.linspace(-26.0, -20.0, 60) + 0.0 * start
+        absolute = 21.0 - cosmology.distmod(redshift).value + 0.0 * start
         return redshift, absolute
 
     monkeypatch.setattr(hubble_validation, "sample_lf_chunk", fake_sample)
@@ -157,7 +186,14 @@ def test_matched_catalogs_have_exact_sizes_and_selected_ids(monkeypatch):
 def test_analytic_oracle_and_fixed_h0_are_exact():
     model, magnitude_grid, _, _, _ = analytic_completeness_params(23.0, 0.3)
     np.testing.assert_allclose(model(np.array([23.0])), 0.5, rtol=0.0, atol=1e-15)
-    assert magnitude_grid[0] <= 10.0 and magnitude_grid[-1] >= 35.0
+    np.testing.assert_allclose(
+        magnitude_grid[[0, -1]],
+        [COMPLETENESS_MAG_2500_MIN, COMPLETENESS_MAG_2500_MAX],
+    )
+    np.testing.assert_array_equal(
+        model(np.array([COMPLETENESS_MAG_2500_MIN - 0.01, COMPLETENESS_MAG_2500_MAX + 0.01])),
+        np.zeros(2),
+    )
     priors, labels, _ = get_model_params(
         "Flatw0waCDM", only_agn=True, fixed_h0=70.0
     )

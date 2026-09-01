@@ -25,6 +25,10 @@ if str(SRC) not in sys.path:
 from qvc.hubble.completeness_mock_catalog import build_completeness_lf
 from qvc.hubble.hubble_fit import run_mcmc_pipeline
 from qvc.hubble.hubble_model import build_agn_pivot_context
+from qvc.hubble.cuts import (
+    COMPLETENESS_MAG_2500_MAX,
+    COMPLETENESS_MAG_2500_MIN,
+)
 from qvc.hubble.hubble_utils import load_chains
 from qvc.hubble.hubble_validation import (
     ARM_NAMES,
@@ -161,7 +165,7 @@ def _configuration(args, truth: ValidationTruth) -> dict:
     if not args.campaign.strip() or campaign_path.is_absolute() or ".." in campaign_path.parts:
         raise ValueError("campaign must be a relative path below output-root.")
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "truth": asdict(truth),
         "n_runs": int(args.n_runs),
         "seed_start": int(args.seed_start),
@@ -180,6 +184,11 @@ def _configuration(args, truth: ValidationTruth) -> dict:
             "speed": str(args.speed),
             "minimal_plots": True,
             "sigma_clipping": False,
+            "completeness_magnitude_support_mode": "hard-cut",
+            "completeness_magnitude_support": [
+                float(COMPLETENESS_MAG_2500_MIN),
+                float(COMPLETENESS_MAG_2500_MAX),
+            ],
         },
         "arms": list(args.arms),
     }
@@ -264,7 +273,7 @@ def _restore_catalog(path: Path, metadata: dict) -> pd.DataFrame:
             "completeness_magnitude": "dereddened",
             "completeness_magnitude_source": "m_2500_dereddened",
             "completeness_magnitude_err_source": "m_2500_dereddened_err",
-            "completeness_magnitude_support_mode": "tails",
+            "completeness_magnitude_support_mode": "hard-cut",
             **metadata,
         }
     )
