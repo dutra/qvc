@@ -1,6 +1,8 @@
 import json
 import os
+from datetime import datetime
 from pathlib import Path
+import re
 import runpy
 import shutil
 import stat
@@ -10,6 +12,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "hpc_scripts/shubble_validation.xsh"
+PREFIX_PATTERN = re.compile(r"^[a-z]{3}\d{2}_\d{4}(?:am|pm)_$")
 
 
 def test_bouchet_resource_and_campaign_defaults():
@@ -19,6 +22,13 @@ def test_bouchet_resource_and_campaign_defaults():
     assert values["time_limit"] == "02:00:00"
     assert values["num_agns"] == 2000
     assert values["num_runs"] == 64
+
+
+def test_submission_prefix_uses_requested_local_timestamp_format():
+    values = runpy.run_path(str(SCRIPT))
+    prefix = values["submission_prefix"]()
+    assert PREFIX_PATTERN.fullmatch(prefix)
+    assert values["submission_prefix"](datetime(2026, 9, 1, 17, 52)) == "sep01_0552pm_"
 
 
 def _write_executable(path, source):
@@ -106,12 +116,23 @@ def test_hubble_validation_submission_dry_run_writes_valid_scripts_without_submi
     assert not (tmp_path / "results/test_campaign").exists()
 
     submit_dir = repo / "hpc_scripts/submit/hubble_validation"
-    fit_script = submit_dir / "test_campaign_fits.sbatch"
-    plot_script = submit_dir / "test_campaign_plot.sbatch"
+    fit_scripts = list(submit_dir.glob("*_test_campaign_fits.sbatch"))
+    plot_scripts = list(submit_dir.glob("*_test_campaign_plot.sbatch"))
+    assert len(fit_scripts) == len(plot_scripts) == 1
+    fit_script = fit_scripts[0]
+    plot_script = plot_scripts[0]
+    prefix = fit_script.name.removesuffix("test_campaign_fits.sbatch")
+    assert PREFIX_PATTERN.fullmatch(prefix)
+    assert plot_script.name == f"{prefix}test_campaign_plot.sbatch"
     assert fit_script.is_file() and plot_script.is_file()
     assert subprocess.run(["bash", "-n", str(fit_script)]).returncode == 0
     assert subprocess.run(["bash", "-n", str(plot_script)]).returncode == 0
     fit_text = fit_script.read_text()
+    plot_text = plot_script.read_text()
+    assert f"#SBATCH --job-name={prefix}hval_test_campaign" in fit_text
+    assert f"#SBATCH --job-name={prefix}hval_plot_test_campaign" in plot_text
+    assert f"logs/hubble_validation/{prefix}test_campaign" in fit_text
+    assert f"logs/hubble_validation/{prefix}test_campaign" in plot_text
     assert "#SBATCH --array=0-2%2" in fit_text
     assert "REALIZATION=$((5 + TASK_ID))" in fit_text
     assert "--num-agns 123" in fit_text
@@ -164,23 +185,34 @@ print(f"{value};bouchet")
     assert len(initialization) == 1
     assert "--initialize-only" in initialization[0]
     assert "--resume" in initialization[0]
-    fit_text = (
-        repo / "hpc_scripts/submit/hubble_validation/test_campaign_fits.sbatch"
-    ).read_text()
+    submit_dir = repo / "hpc_scripts/submit/hubble_validation"
+    fit_scripts = list(submit_dir.glob("*_test_campaign_fits.sbatch"))
+    assert len(fit_scripts) == 1
+    fit_script = fit_scripts[0]
+    prefix = fit_script.name.removesuffix("test_campaign_fits.sbatch")
+    assert PREFIX_PATTERN.fullmatch(prefix)
+    fit_text = fit_script.read_text()
     assert "--resume --retry-failed" in fit_text
 
     calls = json.loads(sbatch_calls.read_text())
     assert len(calls) == 2
     assert calls[0][0] == "--parsable"
     assert calls[1][0:2] == ["--parsable", "--dependency=afterany:1001"]
-    assert calls[0][-1].endswith("test_campaign_fits.sbatch")
-    assert calls[1][-1].endswith("test_campaign_plot.sbatch")
+    assert calls[0][-1].endswith(f"{prefix}test_campaign_fits.sbatch")
+    assert calls[1][-1].endswith(f"{prefix}test_campaign_plot.sbatch")
 
-    metadata = json.loads(
-        (output_root / "test_campaign/hpc_submission.json").read_text()
-    )
+    metadata_files = list((output_root / "test_campaign").glob("*_hpc_submission.json"))
+    assert len(metadata_files) == 1
+    assert metadata_files[0].name == f"{prefix}hpc_submission.json"
+    metadata = json.loads(metadata_files[0].read_text())
     assert metadata["job_ids"] == {"fit_array": "1001", "plot": "1002"}
     assert metadata["plot_dependency"] == "afterany:1001"
     assert metadata["settings"]["num_agns"] == 123
     assert metadata["settings"]["arms"] == ["all", "selected_oracle"]
     assert metadata["settings"]["retry_failed"] is True
+    assert metadata["settings"]["submission_prefix"] == prefix
+    assert metadata["settings"]["artifact_name"] == f"{prefix}test_campaign"
+    assert metadata["settings"]["job_names"] == {
+        "fit": f"{prefix}hval_test_campaign",
+        "plot": f"{prefix}hval_plot_test_campaign",
+    }

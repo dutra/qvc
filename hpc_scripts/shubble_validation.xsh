@@ -125,6 +125,13 @@ def slurm_name(value):
     return normalized[:80]
 
 
+def submission_prefix(now=None):
+    """Return a local-time prefix such as ``sep01_0552pm_``."""
+
+    current = datetime.now().astimezone() if now is None else now
+    return current.strftime("%b%d_%I%M%p_").lower()
+
+
 def runner_arguments(args):
     return [
         "--campaign", args.campaign,
@@ -203,7 +210,7 @@ def build_fit_script(args, runner, log_dir, job_name):
     )
     max_running = min(args.max_concurrent, args.num_runs)
     return f"""#!/usr/bin/env bash
-#SBATCH --job-name=hval_{job_name}
+#SBATCH --job-name={job_name}
 #SBATCH --output={log_dir}/fit_%A_%a.out
 #SBATCH --error={log_dir}/fit_%A_%a.err
 #SBATCH --nodes=1
@@ -244,7 +251,7 @@ echo "Finished $(date --iso-8601=seconds)"
 def build_plot_script(args, plotter, campaign_dir, log_dir, job_name):
     plot_command = bash_command([args.python_bin, plotter, campaign_dir])
     return f"""#!/usr/bin/env bash
-#SBATCH --job-name=hval_plot_{job_name}
+#SBATCH --job-name={job_name}
 #SBATCH --output={log_dir}/plot_%j.out
 #SBATCH --error={log_dir}/plot_%j.err
 #SBATCH --nodes=1
@@ -307,12 +314,15 @@ def write_metadata(path, payload):
 def main(argv=None):
     args = parse_args(argv)
     runner, plotter = validate_settings(args)
-    job_name = slurm_name(args.campaign)
+    prefix = submission_prefix()
+    artifact_name = slurm_name(f"{prefix}{args.campaign}")
+    fit_job_name = slurm_name(f"{prefix}hval_{args.campaign}")
+    plot_job_name = slurm_name(f"{prefix}hval_plot_{args.campaign}")
     submit_dir = args.repo_dir / "hpc_scripts/submit/hubble_validation"
-    log_dir = args.repo_dir / "hpc_scripts/logs/hubble_validation" / args.campaign
+    log_dir = args.repo_dir / "hpc_scripts/logs/hubble_validation" / artifact_name
     campaign_dir = args.output_root / args.campaign
-    fit_script = submit_dir / f"{job_name}_fits.sbatch"
-    plot_script = submit_dir / f"{job_name}_plot.sbatch"
+    fit_script = submit_dir / f"{artifact_name}_fits.sbatch"
+    plot_script = submit_dir / f"{artifact_name}_plot.sbatch"
 
     if not args.dry_run:
         init_command = [
@@ -336,10 +346,13 @@ def main(argv=None):
         subprocess.run(init_command, cwd=args.repo_dir, env=init_env, check=True)
 
     log_dir.mkdir(parents=True, exist_ok=True)
-    write_executable(fit_script, build_fit_script(args, runner, log_dir, job_name))
+    write_executable(
+        fit_script,
+        build_fit_script(args, runner, log_dir, fit_job_name),
+    )
     write_executable(
         plot_script,
-        build_plot_script(args, plotter, campaign_dir, log_dir, job_name),
+        build_plot_script(args, plotter, campaign_dir, log_dir, plot_job_name),
     )
     for path in (fit_script, plot_script):
         subprocess.run(["bash", "-n", str(path)], check=True)
@@ -349,6 +362,9 @@ def main(argv=None):
     settings = {
         "campaign": args.campaign,
         "campaign_dir": str(campaign_dir),
+        "submission_prefix": prefix,
+        "artifact_name": artifact_name,
+        "job_names": {"fit": fit_job_name, "plot": plot_job_name},
         "hpc_home": str(hpc_home),
         "python_bin": str(args.python_bin),
         "repo_dir": str(args.repo_dir),
@@ -377,7 +393,7 @@ def main(argv=None):
     }
 
     if args.dry_run:
-        preview_path = submit_dir / f"{job_name}_submission_preview.json"
+        preview_path = submit_dir / f"{artifact_name}_submission_preview.json"
         write_metadata(
             preview_path,
             {
@@ -389,7 +405,7 @@ def main(argv=None):
         print(f"Dry run only; no campaign was initialized and no jobs were submitted: {preview_path}")
         return 0
 
-    metadata_path = campaign_dir / "hpc_submission.json"
+    metadata_path = campaign_dir / f"{prefix}hpc_submission.json"
     metadata = {
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "dry_run": False,
