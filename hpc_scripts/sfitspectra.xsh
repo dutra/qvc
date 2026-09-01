@@ -27,10 +27,10 @@ from qvc.provenance import (
 # 1. Define your job settings here
 # ==========================================
 partition = "day"
-time_limit = "8:00:00"
+time_limit = "2:00:00"
 
 # Number of object_ids per array task
-chunk_size = 4
+chunk_size = 1
 
 # Number of CPUs used by fit_spectra.py
 nproc = 1
@@ -44,7 +44,8 @@ fit_script = "fit_spectra_jaxsedfit_joint.py"
 sed_photometry_path = "data/jul14_master_input_file_chisqgt20_bandwagon_photometry.csv"
 
 # Optional exclusion file
-exclude_csv = None #"results/data/jaxqsofit/jaxqsofit_apr20c_chisq20_apr18h.csv"
+#exclude_csv = "results/data/jaxqsofit/aug28_0111pm_spectrafit_f6a63a3_chisqgt20_N8000_nested_fhostpsf_delayedburst_galexauto_successful_object_ids.csv"
+exclude_csv = None
 
 # Direct path to Python inside the Conda env
 python_bin = "/home/id255/.conda/envs/jaxcpu2/bin/python"
@@ -727,9 +728,9 @@ cmd = [
     "--cache-dir", cache_dir,
     "--verbose",
     "--optax-steps", "4000",
-    "--optax-lr", "0.001",
+    "--optax-lr", "0.005",
     "--nuts-warmup", "500",
-    "--nuts-samples", "250",
+    "--nuts-samples", "500",
     "--nuts-chains", "1",
     "--output-dir", real_output_dir,
     "--fig-dir", fig_dir,
@@ -746,7 +747,7 @@ elif fit_script == "fit_spectra_jaxsedfit_joint.py":
     cmd.extend([
         "--sed-photometry-path", sed_photometry_path,
         "--progress",
-        "--no-catalog-progress",
+        #"--no-catalog-progress",
     ])
     if fit_bal:
         cmd.append("--fit-bal")
