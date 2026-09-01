@@ -296,7 +296,7 @@ def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
     config, used_phot = joint.build_joint_config(
         record,
         pd.DataFrame(),
-        lam=np.array([3000.0, 4000.0, 5000.0]),
+        lam=np.array([9000.0, 10500.0, 12000.0]),
         flux=np.array([1.0, 1.1, 1.2]),
         err=np.array([0.1, 0.1, 0.1]),
         resolving_power=2000.0,
@@ -399,6 +399,51 @@ def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
         aperture_diameter_arcsec=2.0,
     )
     assert config_without_bal.agn.custom_components == ()
+
+    config_with_invalid_blue_edge, _ = joint.build_joint_config(
+        record,
+        pd.DataFrame(),
+        lam=np.array([9000.0, 9600.0, 12000.0]),
+        flux=np.array([1.0, 1.1, 1.2]),
+        err=np.array([np.nan, 0.1, 0.1]),
+        resolving_power=2000.0,
+        args=args,
+        aperture_diameter_arcsec=2.0,
+    )
+    assert config_with_invalid_blue_edge.agn.fit_balmer_continuum is False
+
+
+def test_balmer_continuum_coverage_gate_uses_inclusive_valid_boundaries():
+    args = SimpleNamespace(fit_bc=True)
+
+    assert joint.balmer_continuum_enabled_for_coverage(
+        args,
+        np.array([3000.0, 3500.0, 4000.0]),
+    )
+    assert not joint.balmer_continuum_enabled_for_coverage(
+        args,
+        np.array([3000.01, 3500.0, 4000.0]),
+    )
+    assert not joint.balmer_continuum_enabled_for_coverage(
+        args,
+        np.array([3000.0, 3500.0, 3999.99]),
+    )
+
+
+def test_balmer_continuum_coverage_ignores_invalid_and_masked_pixels():
+    args = SimpleNamespace(fit_bc=True)
+    wavelength = np.array([2990.0, 3200.0, 3900.0, 4100.0, np.nan])
+
+    assert not joint.balmer_continuum_enabled_for_coverage(
+        args,
+        wavelength,
+        valid_mask=np.array([False, True, True, False, True]),
+    )
+    args.fit_bc = False
+    assert not joint.balmer_continuum_enabled_for_coverage(
+        args,
+        np.array([3000.0, 4000.0]),
+    )
 
 
 def test_dereddened_m2500_uses_intrinsic_disk_and_both_attenuation_terms():
@@ -1561,6 +1606,86 @@ def test_resume_bal_validation_requires_saved_bal_components(tmp_path):
         path,
         expected_enabled=False,
     )
+
+
+@pytest.mark.parametrize(
+    ("wave_obs", "saved_enabled"),
+    [
+        ([6000.0, 7000.0, 8000.0], True),
+        ([6200.0, 7000.0, 8000.0], False),
+        ([6000.0, 7000.0, 7800.0], False),
+    ],
+)
+def test_resume_balmer_continuum_validation_accepts_matching_policy(
+    tmp_path,
+    wave_obs,
+    saved_enabled,
+):
+    fitter = SimpleNamespace(
+        config=SimpleNamespace(
+            agn=SimpleNamespace(fit_balmer_continuum=saved_enabled),
+            spectroscopy=SimpleNamespace(
+                wave_obs=wave_obs,
+                mask=[True] * len(wave_obs),
+            ),
+        )
+    )
+
+    joint.validate_resume_balmer_continuum_fitter(
+        fitter,
+        tmp_path / "samples.h5",
+        SimpleNamespace(fit_bc=True),
+        redshift=1.0,
+    )
+
+
+@pytest.mark.parametrize("saved_enabled", [False, True])
+def test_resume_balmer_continuum_validation_rejects_mismatch(
+    tmp_path,
+    saved_enabled,
+):
+    wave_obs = (
+        [6000.0, 7000.0, 8000.0]
+        if not saved_enabled
+        else [6200.0, 7000.0, 7800.0]
+    )
+    fitter = SimpleNamespace(
+        config=SimpleNamespace(
+            agn=SimpleNamespace(fit_balmer_continuum=saved_enabled),
+            spectroscopy=SimpleNamespace(wave_obs=wave_obs, mask=[True] * 3),
+        )
+    )
+
+    with pytest.raises(
+        joint.IncompatibleBalmerContinuumResumeError,
+        match="current coverage policy requires",
+    ):
+        joint.validate_resume_balmer_continuum_fitter(
+            fitter,
+            tmp_path / "samples.h5",
+            SimpleNamespace(fit_bc=True),
+            redshift=1.0,
+        )
+
+
+def test_resume_balmer_continuum_no_fit_option_always_wins(tmp_path):
+    fitter = SimpleNamespace(
+        config=SimpleNamespace(
+            agn=SimpleNamespace(fit_balmer_continuum=True),
+            spectroscopy=SimpleNamespace(
+                wave_obs=[6000.0, 8000.0],
+                mask=[True, True],
+            ),
+        )
+    )
+
+    with pytest.raises(joint.IncompatibleBalmerContinuumResumeError):
+        joint.validate_resume_balmer_continuum_fitter(
+            fitter,
+            tmp_path / "samples.h5",
+            SimpleNamespace(fit_bc=False),
+            redshift=1.0,
+        )
 
 
 def test_resume_preflight_rejects_shared_group_bundle(tmp_path):

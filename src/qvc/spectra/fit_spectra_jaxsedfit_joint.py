@@ -81,6 +81,8 @@ SDSS_STATIC_PSF_FWHM_ARCSEC = {
 SDSS_LEGACY_FIBER_DIAMETER_ARCSEC = 3.0
 SDSS_BOSS_FIBER_DIAMETER_ARCSEC = 2.0
 BAL_MIN_REDSHIFT_EXCLUSIVE = 1.5
+BALMER_CONTINUUM_BLUE_COVERAGE_ANGSTROM = 3000.0
+BALMER_CONTINUUM_RED_COVERAGE_ANGSTROM = 4000.0
 HOST_CAPTURE_BUNDLE_ATTR = "qvc_host_capture_model"
 HOST_CAPTURE_BUNDLE_MARKER = "static_sdss_psf_fwhm"
 HOST_CAPTURE_PSF_FWHM_ATTR = "qvc_f_host_2500_psf_fwhm_arcsec"
@@ -98,6 +100,10 @@ class IncompatibleBALResumeError(RuntimeError):
     """Raised when a resume bundle disagrees with the active BAL policy."""
 
 
+class IncompatibleBalmerContinuumResumeError(RuntimeError):
+    """Raised when a resume bundle disagrees with the active BC policy."""
+
+
 def bal_enabled_for_redshift(args, redshift):
     """Return whether BAL components are enabled for one fitted object."""
     z = legacy.safe_float(redshift)
@@ -105,6 +111,25 @@ def bal_enabled_for_redshift(args, redshift):
         bool(getattr(args, "fit_bal", True))
         and np.isfinite(z)
         and z > BAL_MIN_REDSHIFT_EXCLUSIVE
+    )
+
+
+def balmer_continuum_enabled_for_coverage(args, wavelength_rest, valid_mask=None):
+    """Return whether retained valid pixels bracket the Balmer edge."""
+    if not bool(getattr(args, "fit_bc", True)):
+        return False
+    wavelength_rest = np.asarray(wavelength_rest, dtype=float)
+    valid = np.isfinite(wavelength_rest)
+    if valid_mask is not None:
+        valid_mask = np.asarray(valid_mask, dtype=bool)
+        if valid_mask.shape != wavelength_rest.shape:
+            raise ValueError("Balmer-continuum coverage mask must match wavelengths.")
+        valid &= valid_mask
+    retained = wavelength_rest[valid]
+    return bool(
+        retained.size
+        and np.min(retained) <= BALMER_CONTINUUM_BLUE_COVERAGE_ANGSTROM
+        and np.max(retained) >= BALMER_CONTINUUM_RED_COVERAGE_ANGSTROM
     )
 
 
@@ -1126,6 +1151,11 @@ def build_joint_config(
     )
     if not np.any(spec_good):
         raise RuntimeError("No spectral pixels remain inside the rest wavelength range.")
+    fit_balmer_continuum = balmer_continuum_enabled_for_coverage(
+        args,
+        wave_rf,
+        spec_good,
+    )
 
     psf_fwhm = [
         None if not np.isfinite(legacy.safe_float(value)) else float(value)
@@ -1188,7 +1218,7 @@ def build_joint_config(
             tied_lines=args.fit_lines,
             use_smart_line_priors=True,
             fit_feii=args.fit_fe,
-            fit_balmer_continuum=args.fit_bc,
+            fit_balmer_continuum=fit_balmer_continuum,
             line_flux_scale_mjy=args.line_flux_scale_mjy,
             custom_components=bal_components,
         ),
@@ -2240,6 +2270,67 @@ def validate_resume_bal_fitter(fitter, path, *, expected_enabled=True):
         )
 
 
+def validate_resume_balmer_continuum_fitter(
+    fitter,
+    path,
+    args,
+    *,
+    redshift,
+):
+    """Require a resume bundle to match the current spectral-coverage BC policy."""
+    config = getattr(fitter, "config", None)
+    spectroscopy = getattr(config, "spectroscopy", None)
+    if spectroscopy is None:
+        spectra = []
+    elif isinstance(spectroscopy, (list, tuple)):
+        spectra = list(spectroscopy)
+    else:
+        spectra = [spectroscopy]
+
+    retained_rest = []
+    z = legacy.safe_float(redshift)
+    if np.isfinite(z) and z > -1.0:
+        for spectrum in spectra:
+            wave_obs = np.asarray(getattr(spectrum, "wave_obs", ()), dtype=float)
+            if wave_obs.size == 0:
+                continue
+            mask = getattr(spectrum, "mask", None)
+            if mask is None:
+                valid = np.ones(wave_obs.shape, dtype=bool)
+            else:
+                valid = np.asarray(mask, dtype=bool)
+                if valid.shape != wave_obs.shape:
+                    raise IncompatibleBalmerContinuumResumeError(
+                        f"Resume bundle {path} has a spectroscopy mask whose shape "
+                        "does not match its wavelength grid."
+                    )
+            valid &= np.isfinite(wave_obs)
+            retained_rest.append(wave_obs[valid] / (1.0 + z))
+
+    wavelength_rest = (
+        np.concatenate(retained_rest) if retained_rest else np.asarray([], dtype=float)
+    )
+    expected_enabled = balmer_continuum_enabled_for_coverage(
+        args,
+        wavelength_rest,
+    )
+    agn = getattr(config, "agn", None)
+    saved_enabled = bool(getattr(agn, "fit_balmer_continuum", False))
+    if saved_enabled != expected_enabled:
+        if wavelength_rest.size:
+            coverage = (
+                f"{np.min(wavelength_rest):.1f}--{np.max(wavelength_rest):.1f} Angstrom"
+            )
+        else:
+            coverage = "no retained valid rest-frame pixels"
+        raise IncompatibleBalmerContinuumResumeError(
+            f"Resume bundle {path} has fit_balmer_continuum={saved_enabled}, but "
+            f"the current coverage policy requires {expected_enabled} for {coverage}. "
+            "BC requires retained rest-frame coverage at or below 3000 Angstrom "
+            "and at or above 4000 Angstrom, and --no-fit-bc always disables it."
+        )
+
+
 def preflight_resume_host_capture_bundles(records, args):
     """Reject missing, old, or mixed-model resume bundles before workers start."""
     failures = []
@@ -2800,6 +2891,12 @@ def _complete_resumed_fit(rec, args, source_path, fitter):
         fitter,
         source_path,
         expected_enabled=bal_enabled_for_redshift(args, rec["z"]),
+    )
+    validate_resume_balmer_continuum_fitter(
+        fitter,
+        source_path,
+        args,
+        redshift=rec["z"],
     )
     config = fitter.config
     saved_name = str(config.observation.object_id)
