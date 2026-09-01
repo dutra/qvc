@@ -4,6 +4,7 @@ data/
 *.sh
 *.log
 *.xsh
+!hpc_scripts/shubble_validation.xsh
 *.err
 *.txt
 *.tex

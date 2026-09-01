@@ -1237,6 +1237,7 @@ def get_model_params(
     only_agn=False,
     use_planck_h0_prior=False,
     use_planck_om_prior=False,
+    fixed_h0=None,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_redshift_log_f_term=False,
@@ -1245,6 +1246,12 @@ def get_model_params(
 ):
     if only_sna and only_agn:
         raise ValueError("only_sna and only_agn cannot both be True.")
+    if fixed_h0 is not None:
+        fixed_h0 = float(fixed_h0)
+        if not np.isfinite(fixed_h0) or fixed_h0 <= 0.0:
+            raise ValueError("fixed_h0 must be a finite positive value.")
+        if use_planck_h0_prior:
+            raise ValueError("fixed_h0 and use_planck_h0_prior are mutually exclusive.")
     if (
         use_f_agn_psf_2500_sigmoid_term
         and use_f_agn_psf_2500_flux_fraction_term
@@ -1306,6 +1313,10 @@ def get_model_params(
         priors.pop(AGN_LOGF_Z_PARAM)
     if only_agn:
         priors.pop("M0_sn")
+    if fixed_h0 is not None:
+        # Retain H0 in the model vector/checkpoint schema for compatibility,
+        # while making its prior transform exactly constant.
+        priors["H0"] = (fixed_h0, fixed_h0)
 
     # Select cosmological parameters based on model
     if cosmo_model == 'FlatLambdaCDM':

@@ -664,6 +664,7 @@ def make_run_tag(
     disable_ceph_dist_calibration=False,
     use_planck_h0_prior=False,
     use_planck_om_prior=False,
+    fixed_h0=None,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
@@ -686,6 +687,7 @@ def make_run_tag(
     )
     ceph_tag = "_nocephdist_planckh0" if disable_ceph_dist_calibration else ""
     planck_h0_tag = "_planckh0" if use_planck_h0_prior and not disable_ceph_dist_calibration else ""
+    fixed_h0_tag = "" if fixed_h0 is None else f"_fixedh0-{float(fixed_h0):g}"
     planck_om_tag = "_planckom" if use_planck_om_prior else ""
     alpha_tag = "_alphaLam" if use_alpha_lambda_term else ""
     eta_sigma_tag = "_etaSigma" if use_eta_sigma_term else ""
@@ -715,7 +717,7 @@ def make_run_tag(
     return (
         f"{cosmo_model}_{_fit_mode_label(only_sna, only_agn)}_{speed}_{n_tag}_{z_tag}"
         f"{completeness_tag}{attenuation_tag}{light_curve_uncertainty_tag}"
-        f"{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}"
+        f"{ceph_tag}{planck_h0_tag}{fixed_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}"
         f"{fagn_sigmoid_tag}{fagn_flux_fraction_tag}{logf_tag}"
     )
 
@@ -2846,6 +2848,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       prefix="default",
                       checkpoint_file_override=None,
                       completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
+                      completeness_params_override=None,
                       completeness_mode="2d",
                       completeness_magnitude="dereddened",
                       selection_attenuation_mode="fixed-offset",
@@ -2856,6 +2859,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       disable_ceph_dist_calibration=False,
                       use_planck_h0_prior=False,
                       use_planck_om_prior=False,
+                      fixed_h0=None,
+                      rng_seed=None,
                       use_alpha_lambda_term=False,
                       use_eta_sigma_term=False,
                       use_f_agn_psf_2500_sigmoid_term=False,
@@ -2912,6 +2917,15 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         )
     _fit_mode_label(only_sna, only_agn)
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
+    if fixed_h0 is not None and use_planck_h0_prior:
+        raise ValueError(
+            "fixed_h0 cannot be combined with the Planck H0 prior or "
+            "distance-calibration mode."
+        )
+    if completeness_params_override is not None and not completeness:
+        raise ValueError(
+            "completeness_params_override requires completeness=True."
+        )
     if only_sna:
         if agn_pivot_context is not None:
             raise ValueError("SNe-only runs must not receive AGN pivot metadata.")
@@ -2939,6 +2953,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        fixed_h0=fixed_h0,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
@@ -2956,6 +2971,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         only_agn=only_agn,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        fixed_h0=fixed_h0,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
@@ -3048,26 +3064,37 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         df_agn_completeness = df_agn
 
     if completeness and not resume_replot_with_cuts:
-        if completeness_sim_file is None:
-            completeness_area_deg2 = estimate_sky_box_area_deg2(df_agn_all)
-            completeness_sim_file = generate_fresh_completeness_sim_file(
-                plot_path,
-                area_deg2=completeness_area_deg2,
-                z_range=completeness_z_range,
-                completeness_magnitude=completeness_magnitude,
+        if completeness_params_override is not None:
+            if not isinstance(completeness_params_override, (tuple, list)) or len(
+                completeness_params_override
+            ) < 5:
+                raise ValueError(
+                    "completeness_params_override must be a completeness tuple "
+                    "with at least (model, mag_grid, z_grid, dm, dz)."
+                )
+            completeness_params = tuple(completeness_params_override)
+            print("Using caller-supplied completeness model.")
+        else:
+            if completeness_sim_file is None:
+                completeness_area_deg2 = estimate_sky_box_area_deg2(df_agn_all)
+                completeness_sim_file = generate_fresh_completeness_sim_file(
+                    plot_path,
+                    area_deg2=completeness_area_deg2,
+                    z_range=completeness_z_range,
+                    completeness_magnitude=completeness_magnitude,
+                )
+            print(f"Building {completeness_mode} completeness map using mock catalog: {completeness_sim_file}")
+            completeness_params = _build_completeness_params(
+                df_agn_completeness,
+                df_agn_all,
+                completeness=completeness,
+                completeness_mode=completeness_mode,
+                completeness_sim_file=completeness_sim_file,
+                plot_path=plot_path,
+                plot=not (compare_sigma_only or minimal_plots),
+                completeness_z_range=completeness_z_range,
             )
-        print(f"Building {completeness_mode} completeness map using mock catalog: {completeness_sim_file}")
-        completeness_params = _build_completeness_params(
-            df_agn_completeness,
-            df_agn_all,
-            completeness=completeness,
-            completeness_mode=completeness_mode,
-            completeness_sim_file=completeness_sim_file,
-            plot_path=plot_path,
-            plot=not (compare_sigma_only or minimal_plots),
-            completeness_z_range=completeness_z_range,
-        )
-        if not compare_sigma_only:
+        if not (compare_sigma_only or minimal_plots):
             _plot_completeness_cut_audit(
                 completeness_params,
                 df_agn_all,
@@ -3269,6 +3296,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 use_full_cov=use_full_cov,
                 use_planck_h0_prior=use_planck_h0_prior,
                 use_planck_om_prior=use_planck_om_prior,
+                fixed_h0=fixed_h0,
                 use_ceph_dist_calibration=not disable_ceph_dist_calibration,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
@@ -3296,6 +3324,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 sample='rwalk',
                 pool=pool,
                 queue_size=num_cores,
+                rstate=np.random.default_rng(rng_seed),
                 blob=True
             )
             warm_start = warm_start_flat_samples is not None
@@ -3357,7 +3386,14 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
 
         # Keep equal-weight resampling
         idx = np.arange(weights.size)
-        flat_idx = dyfunc.resample_equal(idx, weights)          # (nsamp,)
+        if rng_seed is None:
+            flat_idx = dyfunc.resample_equal(idx, weights)
+        else:
+            flat_idx = dyfunc.resample_equal(
+                idx,
+                weights,
+                rstate=np.random.default_rng(int(rng_seed) + 1),
+            )
         flat_samples = samples[flat_idx]
         flat_blobs   = blobs[flat_idx]
 
@@ -3428,6 +3464,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
 
         checkpoint_payload = dict(
             flat_samples=flat_samples,
+            model_labels=np.asarray(model_labels, dtype=str),
+            fixed_h0=np.nan if fixed_h0 is None else float(fixed_h0),
+            rng_seed=-1 if rng_seed is None else int(rng_seed),
             dmi_max_w=dmi_max_w,
             dmi_posterior_median=dmi_posterior_median,
             dmi_posterior_sigma=dmi_posterior_sigma,

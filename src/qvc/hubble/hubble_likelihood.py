@@ -768,6 +768,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
                    agn_calibrators_data=None,
                    use_planck_h0_prior=False,
                    use_planck_om_prior=False,
+                   fixed_h0=None,
                    use_ceph_dist_calibration=True,
                    use_alpha_lambda_term=False,
                    use_eta_sigma_term=False,
@@ -800,6 +801,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         only_agn=only_agn,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        fixed_h0=fixed_h0,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
@@ -816,7 +818,10 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     for key, (low, high) in model_priors.items():
         if low > high:
             raise ValueError(f"For key {key} prior: Low {low} > high {high}")
-        if not (low < params[key] < high):
+        if low == high:
+            if not np.isclose(params[key], low, rtol=0.0, atol=1e-12):
+                return -np.inf, empty_blob(N_obj)
+        elif not (low < params[key] < high):
             return -np.inf, empty_blob(N_obj)
 
     # Cosmology (you can ignore if your background is non-parametric; here it's kept for AGN and/or SN-vs-cosmo fits)
@@ -1034,6 +1039,7 @@ def log_likelihood_nearbylcs(
     agn_pivot_context,
     use_planck_h0_prior=False,
     use_planck_om_prior=False,
+    fixed_h0=None,
     use_ceph_dist_calibration=True,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
@@ -1072,6 +1078,7 @@ def log_likelihood_nearbylcs(
         only_agn=only_agn,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        fixed_h0=fixed_h0,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
@@ -1088,7 +1095,10 @@ def log_likelihood_nearbylcs(
     for key, (low, high) in model_priors.items():
         if low > high:
             raise ValueError(f"For key {key} prior: Low {low} > high {high}")
-        if not (low < params[key] < high):
+        if low == high:
+            if not np.isclose(params[key], low, rtol=0.0, atol=1e-12):
+                return -np.inf, empty_blob(N_obj)
+        elif not (low < params[key] < high):
             return -np.inf, empty_blob(N_obj)
 
     # ---- Cosmology ----
