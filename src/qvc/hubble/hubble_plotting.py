@@ -21,10 +21,12 @@ from astropy.cosmology.realizations import Planck18
 from astropy import units as u
 from matplotlib.lines import Line2D
 from matplotlib.ticker import (
+    AutoMinorLocator,
     FixedLocator,
     FormatStrFormatter,
     FuncFormatter,
     LogLocator,
+    MultipleLocator,
     NullFormatter,
     NullLocator,
 )
@@ -3571,6 +3573,319 @@ def plot_bpl_psd_vs_uv_variability(
         fig,
         os.path.join(diagnostics_path, filename),
         dpi=200,
+        show=show,
+    )
+
+
+def plot_psd_uv_recovery_comparison(
+    df,
+    plot_path="plots/hubble",
+    show=False,
+    filename="sigma_tau_psd_free_vs_fixed.pdf",
+):
+    """Compare valid free-slope BPL and fixed-slope DRW PSD fits to the UV fit."""
+
+    required = {
+        "log_sigma_uv",
+        "log_sigma_uv_err",
+        "log_tau_uv_rf",
+        "log_tau_uv_rf_err",
+        "log_sigma_ls",
+        "log_sigma_ls_err",
+        "log_tau_ls",
+        "log_tau_ls_err",
+        "alpha_high_ls",
+        "psd_ls_valid",
+        "log_sigma_ls_fixed",
+        "log_sigma_ls_fixed_err",
+        "log_tau_ls_fixed",
+        "log_tau_ls_fixed_err",
+        "psd_ls_fixed_valid",
+    }
+    if not required.issubset(df.columns):
+        missing = ", ".join(sorted(required - set(df.columns)))
+        raise KeyError(f"Missing required columns for PSD-vs-UV recovery plot: {missing}")
+
+    def _numeric(column):
+        return pd.to_numeric(df[column], errors="coerce").to_numpy(dtype=float)
+
+    log_sigma_uv = _numeric("log_sigma_uv")
+    log_sigma_uv_err = _numeric("log_sigma_uv_err")
+    log_tau_uv_rf = _numeric("log_tau_uv_rf")
+    log_tau_uv_rf_err = _numeric("log_tau_uv_rf_err")
+
+    slope = -_numeric("alpha_high_ls")
+    slope_err = (
+        _numeric("alpha_high_ls_err")
+        if "alpha_high_ls_err" in df.columns
+        else np.zeros(len(df), dtype=float)
+    )
+    valid_slope = np.isfinite(slope) & (slope > 1.0)
+    log_rms_factor = np.full(len(df), np.nan, dtype=float)
+    normalization_err = np.zeros(len(df), dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_rms_factor[valid_slope] = 0.5 * np.log10(
+            1.0
+            / (
+                slope[valid_slope]
+                * np.sin(np.pi / slope[valid_slope])
+            )
+        )
+        derivative = -0.5 / np.log(10.0) * (
+            1.0 / slope
+            - np.pi
+            * np.cos(np.pi / slope)
+            / (slope**2 * np.sin(np.pi / slope))
+        )
+    finite_slope_err = valid_slope & np.isfinite(slope_err) & (slope_err >= 0.0)
+    normalization_err[finite_slope_err] = (
+        np.abs(derivative[finite_slope_err]) * slope_err[finite_slope_err]
+    )
+
+    free_sigma = _numeric("log_sigma_ls") + log_rms_factor
+    free_sigma_err = np.hypot(_numeric("log_sigma_ls_err"), normalization_err)
+    free_valid = pd.Series(df["psd_ls_valid"]).fillna(False).astype(bool).to_numpy()
+    fixed_valid = (
+        pd.Series(df["psd_ls_fixed_valid"])
+        .fillna(False)
+        .astype(bool)
+        .to_numpy()
+    )
+
+    panel_inputs = [
+        (
+            log_sigma_uv,
+            free_sigma,
+            log_sigma_uv_err,
+            free_sigma_err,
+            free_valid,
+            r"$\log\,\sigma_{\rm UV}\ ({\rm mag})$",
+            r"$\log\,\sigma_{\rm PSD,RMS}\ ({\rm mag})$",
+            "sigma",
+        ),
+        (
+            log_sigma_uv,
+            _numeric("log_sigma_ls_fixed"),
+            log_sigma_uv_err,
+            _numeric("log_sigma_ls_fixed_err"),
+            fixed_valid,
+            r"$\log\,\sigma_{\rm UV}\ ({\rm mag})$",
+            r"$\log\,\sigma_{\rm PSD,RMS}\ ({\rm mag})$",
+            "sigma",
+        ),
+        (
+            log_tau_uv_rf,
+            _numeric("log_tau_ls"),
+            log_tau_uv_rf_err,
+            _numeric("log_tau_ls_err"),
+            free_valid,
+            r"$\log\,\tau_{\rm UV,RF}\ ({\rm days})$",
+            r"$\log\,\tau_{\rm PSD,RF}\ ({\rm days})$",
+            "tau",
+        ),
+        (
+            log_tau_uv_rf,
+            _numeric("log_tau_ls_fixed"),
+            log_tau_uv_rf_err,
+            _numeric("log_tau_ls_fixed_err"),
+            fixed_valid,
+            r"$\log\,\tau_{\rm UV,RF}\ ({\rm days})$",
+            r"$\log\,\tau_{\rm PSD,RF}\ ({\rm days})$",
+            "tau",
+        ),
+    ]
+
+    panels = []
+    for x, y, xerr, yerr, valid, xlabel, ylabel, quantity in panel_inputs:
+        mask = (
+            valid
+            & np.isfinite(x)
+            & np.isfinite(y)
+            & np.isfinite(xerr)
+            & np.isfinite(yerr)
+            & (xerr >= 0.0)
+            & (yerr >= 0.0)
+        )
+        panels.append(
+            {
+                "x": x[mask],
+                "y": y[mask],
+                "xerr": xerr[mask],
+                "yerr": yerr[mask],
+                "xlabel": xlabel,
+                "ylabel": ylabel,
+                "quantity": quantity,
+            }
+        )
+
+    def _shared_limits(selected_panels, *, step, margin_floor):
+        values = [
+            values
+            for panel in selected_panels
+            for values in (panel["x"], panel["y"])
+            if values.size
+        ]
+        if not values:
+            return None
+        values = np.concatenate(values)
+        span = float(np.max(values) - np.min(values))
+        margin = max(0.04 * span, margin_floor)
+        lower = step * np.floor((np.min(values) - margin) / step)
+        upper = step * np.ceil((np.max(values) + margin) / step)
+        return float(lower), float(upper)
+
+    sigma_limits = _shared_limits(panels[:2], step=0.05, margin_floor=0.06)
+    tau_limits = _shared_limits(panels[2:], step=0.05, margin_floor=0.08)
+    if sigma_limits is None and tau_limits is None:
+        raise ValueError("No finite valid free-slope or fixed-slope PSD fits to plot.")
+
+    def _plot_kde_contours(ax, x, y):
+        if x.size <= 50:
+            return
+        try:
+            kde = gaussian_kde(np.vstack([x, y]), bw_method="scott")
+            xq = np.quantile(x, [0.01, 0.99])
+            yq = np.quantile(y, [0.01, 0.99])
+            x_range = float(xq[1] - xq[0])
+            y_range = float(yq[1] - yq[0])
+            if x_range <= 0.0 or y_range <= 0.0:
+                return
+            x_grid, y_grid = np.meshgrid(
+                np.linspace(xq[0] - 0.1 * x_range, xq[1] + 0.1 * x_range, 220),
+                np.linspace(yq[0] - 0.1 * y_range, yq[1] + 0.1 * y_range, 220),
+            )
+            density = kde(
+                np.vstack([x_grid.ravel(), y_grid.ravel()])
+            ).reshape(x_grid.shape)
+            levels = _kde_conf_levels(density, conf=(0.954, 0.683))
+            ax.contour(
+                x_grid,
+                y_grid,
+                density,
+                levels=levels,
+                colors="red",
+                linestyles=("solid", "solid"),
+                linewidths=(2.6, 3.2),
+                alpha=1.0,
+                zorder=3,
+            )
+        except (ValueError, np.linalg.LinAlgError) as exc:
+            print(f"[PSD-vs-UV KDE contours] skipped: {exc}")
+
+    fig, axes = plt.subplots(
+        2,
+        2,
+        figsize=(10.0, 9.0),
+        sharex="row",
+        sharey="row",
+        constrained_layout=True,
+    )
+    fig.get_layout_engine().set(
+        w_pad=0.04,
+        h_pad=0.04,
+        wspace=0.06,
+        hspace=0.04,
+    )
+
+    for ax, panel in zip(axes.flat, panels):
+        limits = sigma_limits if panel["quantity"] == "sigma" else tau_limits
+        if limits is None or panel["x"].size == 0:
+            ax.text(
+                0.5,
+                0.5,
+                "No valid PSD fits",
+                transform=ax.transAxes,
+                ha="center",
+                va="center",
+            )
+            continue
+        x = panel["x"]
+        y = panel["y"]
+        delta = y - x
+        ax.plot(limits, limits, "--", color="m", lw=2.0, zorder=-4)
+        ax.errorbar(
+            x,
+            y,
+            xerr=panel["xerr"],
+            yerr=panel["yerr"],
+            fmt="none",
+            color="0.4",
+            alpha=0.15,
+            lw=0.75,
+            capsize=1.2,
+            capthick=0.6,
+            rasterized=True,
+            zorder=-3,
+        )
+        ax.scatter(
+            x,
+            y,
+            s=10,
+            color="k",
+            alpha=0.58,
+            edgecolors="none",
+            rasterized=True,
+            zorder=-2,
+        )
+        _plot_kde_contours(ax, x, y)
+        ax.set_xlim(*limits)
+        ax.set_ylim(*limits)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xlabel(panel["xlabel"])
+        ax.set_ylabel(panel["ylabel"])
+        ax.text(
+            0.97,
+            0.03,
+            (
+                f"N = {delta.size}\n"
+                f"Bias = {np.mean(delta):+.2f} dex\n"
+                f"$\\sigma$ = {np.std(delta):.2f} dex"
+            ),
+            transform=ax.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=10.5,
+            bbox=dict(
+                boxstyle="round,pad=0.25",
+                facecolor="white",
+                edgecolor="0.65",
+                alpha=0.92,
+            ),
+        )
+        major_step = 0.5
+        ax.xaxis.set_major_locator(MultipleLocator(major_step))
+        ax.yaxis.set_major_locator(MultipleLocator(major_step))
+        ax.xaxis.set_minor_locator(AutoMinorLocator(5))
+        ax.yaxis.set_minor_locator(AutoMinorLocator(5))
+        ax.tick_params(
+            direction="in",
+            top=True,
+            right=True,
+            which="major",
+            length=4,
+            width=1.0,
+        )
+        ax.tick_params(
+            direction="in",
+            top=True,
+            right=True,
+            which="minor",
+            length=2.5,
+            width=0.8,
+        )
+        for spine in ax.spines.values():
+            spine.set_linewidth(1.1)
+
+    axes[0, 0].set_title("Free-slope BPL", fontsize=14)
+    axes[0, 1].set_title("Fixed-slope DRW", fontsize=14)
+    axes[0, 1].tick_params(labelleft=False)
+    axes[1, 1].tick_params(labelleft=False)
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=300,
         show=show,
     )
 

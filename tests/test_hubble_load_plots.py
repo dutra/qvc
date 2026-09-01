@@ -339,6 +339,53 @@ def test_load_agn_data_writes_sigma_tau_ls_identity_grids_to_diagnostics(tmp_pat
     assert postcut_kwargs["tau_limits"] == (-0.2, 4.9)
 
 
+def test_load_agn_data_writes_psd_uv_recovery_comparisons(tmp_path, monkeypatch):
+    source_path = tmp_path / "agn.h5"
+    source_path.touch()
+    frame = _minimal_agn_frame()
+    frame["log_sigma_uv_err"] = 0.05
+    frame["log_tau_uv_rf_err"] = 0.08
+    frame["alpha_high_ls"] = -2.0
+    frame["alpha_high_ls_err"] = 0.05
+    frame["psd_ls_valid"] = True
+    frame["log_sigma_ls_fixed"] = -0.65
+    frame["log_sigma_ls_fixed_err"] = 0.05
+    frame["log_tau_ls_fixed"] = 2.45
+    frame["log_tau_ls_fixed_err"] = 0.08
+    frame["psd_ls_fixed_valid"] = True
+    frame["ebv_gal"] = 0.02
+    frame["ebv_agn"] = 0.02
+
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *_args, **_kwargs: frame.copy(),
+    )
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda value: value)
+    _patch_load_agn_plotters(monkeypatch)
+
+    calls = []
+    monkeypatch.setattr(
+        hubble_plotting,
+        "plot_psd_uv_recovery_comparison",
+        lambda data, **kwargs: calls.append((data.copy(), kwargs)),
+    )
+
+    hubble_utils.load_agn_data(
+        source_path,
+        magnitude_convention="dereddened",
+        spectra_fit_h5=None,
+        cut_tier="1",
+        plot_path=str(tmp_path / "plots"),
+    )
+
+    assert [call[1]["filename"] for call in calls] == [
+        "sigma_tau_psd_free_vs_fixed_precut.pdf",
+        "sigma_tau_psd_free_vs_fixed_postcut.pdf",
+    ]
+    assert all(call[1]["plot_path"] == str(tmp_path / "plots") for call in calls)
+
+
 def test_plot_f_host_2500_vs_l2500_accepts_psf_column(tmp_path, monkeypatch):
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
     df = _minimal_agn_frame(n=12).drop(columns=["f_host_2500"])

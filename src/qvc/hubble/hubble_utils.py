@@ -1234,6 +1234,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         plot_blr_lag_vs_amp_by_band,
         plot_blr_lag_vs_redshift_by_band,
         plot_bpl_psd_vs_uv_variability,
+        plot_psd_uv_recovery_comparison,
         plot_eta_sigma_vs_redshift_colored_by_kl,
         plot_eta_tau_sigma_vs_redshift,
         plot_fast_vs_uv_variability,
@@ -1280,6 +1281,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         plot_blr_lag_vs_amp_by_band = _skip_diagnostic_plot
         plot_blr_lag_vs_redshift_by_band = _skip_diagnostic_plot
         plot_bpl_psd_vs_uv_variability = _skip_diagnostic_plot
+        plot_psd_uv_recovery_comparison = _skip_diagnostic_plot
         plot_eta_sigma_vs_redshift_colored_by_kl = _skip_diagnostic_plot
         plot_eta_tau_sigma_vs_redshift = _skip_diagnostic_plot
         plot_fast_vs_uv_variability = _skip_diagnostic_plot
@@ -2108,6 +2110,30 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             show=False,
             filename="bpl_psd_vs_uv_variability_precut.pdf",
         )
+    psd_recovery_columns = {
+        "log_sigma_uv",
+        "log_sigma_uv_err",
+        "log_tau_uv_rf",
+        "log_tau_uv_rf_err",
+        "log_sigma_ls",
+        "log_sigma_ls_err",
+        "log_tau_ls",
+        "log_tau_ls_err",
+        "alpha_high_ls",
+        "psd_ls_valid",
+        "log_sigma_ls_fixed",
+        "log_sigma_ls_fixed_err",
+        "log_tau_ls_fixed",
+        "log_tau_ls_fixed_err",
+        "psd_ls_fixed_valid",
+    }
+    if psd_recovery_columns.issubset(df.columns):
+        plot_psd_uv_recovery_comparison(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="sigma_tau_psd_free_vs_fixed_precut.pdf",
+        )
     if {"z", "apparent_mag_2500"}.issubset(df.columns) and any(
         (f"log_lag_blr_{band}_RF" in df.columns) or (f"log_lag_blr2_{band}_RF" in df.columns)
         for band in ("u", "g", "r", "i", "z")
@@ -2868,6 +2894,13 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             plot_path=plot_path,
             show=False,
             filename="bpl_psd_vs_uv_variability_postcut.pdf",
+        )
+    if psd_recovery_columns.issubset(df.columns):
+        plot_psd_uv_recovery_comparison(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="sigma_tau_psd_free_vs_fixed_postcut.pdf",
         )
     _plot_sigma_tau_ls_identity(
         df,
