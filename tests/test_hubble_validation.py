@@ -267,6 +267,84 @@ def test_ensemble_summary_and_corner_use_one_median_per_fit(tmp_path):
     assert output_pdf.is_file() and output_pdf.stat().st_size > 0
     assert output_png.is_file() and output_png.stat().st_size > 0
 
+    hubble_pdf = tmp_path / "hubble.pdf"
+    hubble_png = tmp_path / "hubble.png"
+    plot_module.plot_hubble_recovery(
+        recovery,
+        {
+            "configuration": {
+                "truth": {
+                    "h0": truth.h0,
+                    "om0": truth.om0,
+                    "w0": truth.w0,
+                    "wa": truth.wa,
+                },
+                "z_range": [0.1, 4.0],
+            }
+        },
+        hubble_pdf,
+        output_png=hubble_png,
+    )
+    assert hubble_pdf.is_file() and hubble_pdf.stat().st_size > 0
+    assert hubble_png.is_file() and hubble_png.stat().st_size > 0
+
+
+def test_completeness_effects_plot_uses_persisted_catalogs(tmp_path):
+    plot_module = _load_plot_module()
+    truth = ValidationTruth()
+    campaign = tmp_path / "campaign"
+    run_dir = campaign / "runs/seed_0000"
+    run_dir.mkdir(parents=True)
+    rng = np.random.default_rng(44)
+    magnitude = rng.uniform(17.5, 27.0, 2000)
+    redshift = rng.uniform(0.1, 4.0, 2000)
+    probability = 1.0 / (1.0 + np.exp((magnitude - 23.0) / 0.3))
+    probability[(magnitude < 18.5) | (magnitude > 24.0)] = 0.0
+    detected = rng.random(magnitude.size) < probability
+    parent = pd.DataFrame(
+        {
+            "z": redshift,
+            "apparent_mag_2500": magnitude,
+            "injected_detection_probability": probability,
+            "injected_detected": detected,
+        }
+    )
+    selected = parent.loc[detected, ["z", "apparent_mag_2500"]].copy()
+    parent.to_csv(run_dir / "all.csv", index=False)
+    selected.to_csv(run_dir / "selected.csv", index=False)
+    calibration_parent = pd.DataFrame(
+        {"z": redshift, "apparent_mag_2500": magnitude}
+    )
+    write_completeness_parent_hdf5(
+        calibration_parent, run_dir / "calibration_parent.h5"
+    )
+    selected.to_csv(run_dir / "calibration_detected.csv", index=False)
+    recovery = _synthetic_recovery(truth, n_runs=1)
+    manifest = {
+        "configuration": {
+            "truth": {
+                "h0": truth.h0,
+                "om0": truth.om0,
+                "w0": truth.w0,
+                "wa": truth.wa,
+            },
+            "selection": {"m50": 23.0, "width": 0.3},
+            "fit": {"completeness_magnitude_support": [18.5, 24.0]},
+            "z_range": [0.1, 4.0],
+        }
+    }
+    output_pdf = tmp_path / "completeness.pdf"
+    output_png = tmp_path / "completeness.png"
+    plot_module.plot_completeness_effects(
+        campaign,
+        recovery,
+        manifest,
+        output_pdf,
+        output_png=output_png,
+    )
+    assert output_pdf.is_file() and output_pdf.stat().st_size > 0
+    assert output_png.is_file() and output_png.stat().st_size > 0
+
 
 def test_plot_script_reads_persisted_campaign_without_posteriors(tmp_path):
     truth = ValidationTruth()
@@ -285,6 +363,7 @@ def test_plot_script_reads_persisted_campaign_without_posteriors(tmp_path):
     plot_module = _load_plot_module()
     assert plot_module.main([str(campaign)]) == 0
     assert (campaign / "plots" / "median_recovery_corner.pdf").is_file()
+    assert (campaign / "plots" / "hubble_diagram_recovery.pdf").is_file()
     assert (campaign / "ensemble_summary.csv").is_file()
 
 
@@ -546,6 +625,7 @@ def test_plot_aggregates_partial_fragments_and_reports_missing_fits(tmp_path):
     assert set(incomplete["status"]) == {"missing"}
     assert (campaign / "recovery.csv").is_file()
     assert (campaign / "plots/median_recovery_corner.pdf").is_file()
+    assert (campaign / "plots/hubble_diagram_recovery.pdf").is_file()
 
 
 def test_plot_reports_incomplete_campaign_before_failing_without_successes(tmp_path):
