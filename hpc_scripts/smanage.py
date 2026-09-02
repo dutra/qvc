@@ -16,7 +16,7 @@ import tempfile
 from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import numpy as np
 from scipy.optimize import brentq, minimize
@@ -1782,8 +1782,31 @@ def format_expanded_details(selection: dict[str, Any], details: dict[str, str]) 
     return "\n".join(lines)
 
 
-class ConfirmCancelScreen(ModalScreen[bool]):
+ModalResult = TypeVar("ModalResult")
+
+BUTTON_CHOICE_BINDINGS = [
+    Binding("left", "focus_previous_button", "Previous option", show=False, priority=True),
+    Binding("up", "focus_previous_button", "Previous option", show=False, priority=True),
+    Binding("right", "focus_next_button", "Next option", show=False, priority=True),
+    Binding("down", "focus_next_button", "Next option", show=False, priority=True),
+]
+
+
+class ButtonChoiceScreen(ModalScreen[ModalResult]):
+    """Modal screen with discoverable keyboard navigation between buttons."""
+
+    AUTO_FOCUS = "Button"
+
+    def action_focus_previous_button(self) -> None:
+        self.focus_previous("Button")
+
+    def action_focus_next_button(self) -> None:
+        self.focus_next("Button")
+
+
+class ConfirmCancelScreen(ButtonChoiceScreen[bool]):
     BINDINGS = [
+        *BUTTON_CHOICE_BINDINGS,
         Binding("y", "confirm", "Yes"),
         Binding("n", "dismiss_no", "No"),
         Binding("escape", "dismiss_no", "No", show=False),
@@ -1795,6 +1818,7 @@ class ConfirmCancelScreen(ModalScreen[bool]):
     #confirm-title { text-style: bold; color: $error; margin-bottom: 1; }
     #confirm-buttons { height: auto; align-horizontal: right; margin-top: 1; }
     #confirm-buttons Button { margin-left: 1; }
+    #confirm-buttons Button:focus { border: heavy $accent; text-style: bold reverse; }
     """
 
     def __init__(self, target: str, description: str) -> None:
@@ -1824,8 +1848,9 @@ class ConfirmCancelScreen(ModalScreen[bool]):
         self.dismiss(event.button.id == "confirm")
 
 
-class ConfirmExecuteScreen(ModalScreen[bool]):
+class ConfirmExecuteScreen(ButtonChoiceScreen[bool]):
     BINDINGS = [
+        *BUTTON_CHOICE_BINDINGS,
         Binding("y", "confirm", "Yes"),
         Binding("n", "dismiss_no", "No"),
         Binding("escape", "dismiss_no", "No", show=False),
@@ -1840,6 +1865,7 @@ class ConfirmExecuteScreen(ModalScreen[bool]):
     #execute-confirm-title { text-style: bold; color: $warning; margin-bottom: 1; }
     #execute-confirm-buttons { height: auto; align-horizontal: right; margin-top: 1; }
     #execute-confirm-buttons Button { margin-left: 1; }
+    #execute-confirm-buttons Button:focus { border: heavy $accent; text-style: bold reverse; }
     """
 
     def __init__(self, execution: dict[str, Any]) -> None:
@@ -1912,8 +1938,9 @@ class InformationScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
-class LogChoiceScreen(ModalScreen[str | None]):
+class LogChoiceScreen(ButtonChoiceScreen[str | None]):
     BINDINGS = [
+        *BUTTON_CHOICE_BINDINGS,
         Binding("o", "choose_stdout", "Stdout"),
         Binding("e", "choose_stderr", "Stderr"),
         Binding("escape", "dismiss_choice", "Close", show=False),
@@ -1924,6 +1951,7 @@ class LogChoiceScreen(ModalScreen[str | None]):
     #log-choice-box { width: 78; height: auto; padding: 1 2; border: heavy $accent; background: $surface; }
     #log-choice-buttons { height: auto; align-horizontal: right; margin-top: 1; }
     #log-choice-buttons Button { margin-left: 1; }
+    #log-choice-buttons Button:focus { border: heavy $accent; text-style: bold reverse; }
     """
 
     def __init__(self, stdout_path: Path, stderr_path: Path) -> None:
