@@ -67,6 +67,14 @@ def test_shared_latent_kernel_has_one_driver_pair():
     assert float(kernel.evaluate((0.0, 0), (10.0, 1))) != 0.0
 
 
+def test_stationary_rms_matches_zero_lag_kernel_variance():
+    kernel = _kernel()
+    expected = np.sqrt(
+        [float(kernel.evaluate((0.0, band), (0.0, band))) for band in range(2)]
+    )
+    np.testing.assert_allclose(kernel.stationary_rms(), expected, rtol=2e-6)
+
+
 def test_shared_model_kernel_driver_is_independent_of_band_arrays_and_order():
     model = SimpleNamespace(disk_order=3, blr_order=2)
     params = {

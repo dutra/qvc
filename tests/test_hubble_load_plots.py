@@ -353,6 +353,11 @@ def test_load_agn_data_writes_psd_uv_recovery_comparisons(tmp_path, monkeypatch)
     frame["log_tau_ls_fixed"] = 2.45
     frame["log_tau_ls_fixed_err"] = 0.08
     frame["psd_ls_fixed_valid"] = True
+    frame["eta_sigma"] = -0.5
+    frame["psd_bpl_ref_band"] = "g"
+    frame["psd_bpl_ref_lambda_rf"] = 2500.0
+    frame["log_sigma_total_rms_band_g"] = -0.60
+    frame["log_sigma_total_rms_band_g_err"] = 0.05
     frame["ebv_gal"] = 0.02
     frame["ebv_agn"] = 0.02
 
@@ -384,6 +389,56 @@ def test_load_agn_data_writes_psd_uv_recovery_comparisons(tmp_path, monkeypatch)
         "sigma_tau_psd_free_vs_fixed_postcut.pdf",
     ]
     assert all(call[1]["plot_path"] == str(tmp_path / "plots") for call in calls)
+    assert all(call[1]["tau_resolution_mode"] == "filter" for call in calls)
+
+    calls.clear()
+    missing_total_tau_error = frame.drop(columns="log_tau_band_g_RF_err")
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *_args, **_kwargs: missing_total_tau_error.copy(),
+    )
+    hubble_utils.load_agn_data(
+        source_path,
+        magnitude_convention="dereddened",
+        spectra_fit_h5=None,
+        cut_tier="1",
+        plot_path=str(tmp_path / "plots_missing_current_schema"),
+    )
+    assert calls == []
+
+    legacy_frame = frame.drop(
+        columns=[
+            "log_sigma_total_rms_band_g",
+            "log_sigma_total_rms_band_g_err",
+        ]
+    )
+    for column, value in {
+        "tau_fast_driver": 30.0,
+        "tau_slow_driver": 300.0,
+        "lag_disk_g": 5.0,
+        "lag_blr_g": 80.0,
+        "amp_cont_relflux_g": 0.08,
+        "amp_blr_relflux_g": 0.04,
+    }.items():
+        legacy_frame[column] = value
+        legacy_frame[f"{column}_err"] = 0.05 * value
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *_args, **_kwargs: legacy_frame.copy(),
+    )
+    hubble_utils.load_agn_data(
+        source_path,
+        magnitude_convention="dereddened",
+        spectra_fit_h5=None,
+        cut_tier="1",
+        plot_path=str(tmp_path / "plots_legacy_total_rms"),
+    )
+    assert [call[1]["filename"] for call in calls] == [
+        "sigma_tau_psd_free_vs_fixed_precut.pdf",
+        "sigma_tau_psd_free_vs_fixed_postcut.pdf",
+    ]
 
 
 def test_plot_f_host_2500_vs_l2500_accepts_psf_column(tmp_path, monkeypatch):

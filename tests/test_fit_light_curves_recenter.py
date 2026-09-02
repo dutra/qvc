@@ -61,6 +61,7 @@ from qvc.light_curve.multiband_model_dho_blr_erlang import (
     make_multiband_dho_blr_flux_linearized_erlang_model,
 )
 from qvc.light_curve.multiband_model_shared_latent_blr import (
+    SharedLatentDiskBLRQS,
     continuum_effective_timescale,
 )
 from qvc.light_curve.multiband_fit_plotting import (
@@ -1546,6 +1547,43 @@ def test_process_samples_stores_shared_latent_effective_band_timescales():
     assert result["log_tau_driver_rf"] == pytest.approx(np.median(expected_driver))
     assert "eta_tau" not in result
     assert "log_tau_fast_uv_rf" not in result
+    expected_total_rms_g = np.median(
+        [
+            np.log10(
+                float(
+                    SharedLatentDiskBLRQS(
+                        tau_fast=jnp.atleast_1d(tau_fast[draw]),
+                        tau_slow=jnp.atleast_1d(tau_slow[draw]),
+                        lag_disk=jnp.asarray(
+                            [samples[f"lag_disk_{band}"][draw] for band in bands]
+                        ),
+                        lag_blr=jnp.asarray(
+                            [samples[f"lag_blr_{band}"][draw] for band in bands]
+                        ),
+                        amp_cont=jnp.asarray(
+                            [
+                                samples[f"amp_cont_relflux_{band}"][draw]
+                                for band in bands
+                            ]
+                        ),
+                        amp_blr=jnp.asarray(
+                            [
+                                samples[f"amp_blr_relflux_{band}"][draw]
+                                for band in bands
+                            ]
+                        ),
+                        disk_order=3,
+                        blr_order=3,
+                    ).stationary_rms()[0]
+                )
+                * (2.5 / np.log(10.0))
+            )
+            for draw in range(3)
+        ]
+    )
+    assert result["log_sigma_total_rms_band_g"] == pytest.approx(
+        expected_total_rms_g
+    )
     assert (
         result[LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY]["format"]
         == LIGHT_CURVE_POSTERIOR_DRAW_FORMAT

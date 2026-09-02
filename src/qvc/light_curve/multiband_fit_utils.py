@@ -1051,8 +1051,10 @@ def process_samples(
             [np.asarray(flat_samples[f"amp_blr_relflux_{band}"]) for band in bands]
         )
 
-        def effective_one(tau_fast, tau_slow, lag_disk, lag_blr, amp_cont, amp_blr):
-            return SharedLatentDiskBLRQS(
+        def band_moments_one(
+            tau_fast, tau_slow, lag_disk, lag_blr, amp_cont, amp_blr
+        ):
+            kernel = SharedLatentDiskBLRQS(
                 tau_fast=jnp.atleast_1d(tau_fast),
                 tau_slow=jnp.atleast_1d(tau_slow),
                 lag_disk=lag_disk,
@@ -1061,10 +1063,12 @@ def process_samples(
                 amp_blr=amp_blr,
                 disk_order=int(disk_order),
                 blr_order=int(erlang_order),
-            ).effective_timescales()
+            )
+            return kernel.effective_timescales(), kernel.stationary_rms()
 
-        effective_tau_obs = np.asarray(
-            jax.jit(jax.vmap(effective_one))(
+        effective_tau_obs, total_rms_relflux = (
+            np.asarray(value)
+            for value in jax.jit(jax.vmap(band_moments_one))(
                 jnp.asarray(tau_fast_draws),
                 jnp.asarray(tau_slow_draws),
                 jnp.asarray(lag_disk_draws),
@@ -1074,6 +1078,9 @@ def process_samples(
             )
         )
         log_tau_band = np.log10(effective_tau_obs) - np.log10(1.0 + data["z"])
+        log_sigma_total_rms_band = np.log10(
+            total_rms_relflux * (2.5 / np.log(10.0))
+        )
 
     log_tau_fast_band = None
     if has_fast_pole and not shared_latent:
@@ -1094,6 +1101,10 @@ def process_samples(
         median, err = sym_percentile(sigma_rms_band[:, i])
         result[f"log_sigma_rms_band_{band}"] = median
         result[f"log_sigma_rms_band_{band}_err"] = err
+        if model_variant == "shared_latent_blr":
+            median, err = sym_percentile(log_sigma_total_rms_band[:, i])
+            result[f"log_sigma_total_rms_band_{band}"] = median
+            result[f"log_sigma_total_rms_band_{band}_err"] = err
         median, err = sym_percentile(log_tau_band[:, i])
         result[f"log_tau_band_{band}_RF"] = median
         result[f"log_tau_band_{band}_RF_err"] = err

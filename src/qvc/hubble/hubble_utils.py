@@ -2111,10 +2111,6 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             filename="bpl_psd_vs_uv_variability_precut.pdf",
         )
     psd_recovery_columns = {
-        "log_sigma_uv",
-        "log_sigma_uv_err",
-        "log_tau_uv_rf",
-        "log_tau_uv_rf_err",
         "log_sigma_ls",
         "log_sigma_ls_err",
         "log_tau_ls",
@@ -2126,13 +2122,60 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         "log_tau_ls_fixed",
         "log_tau_ls_fixed_err",
         "psd_ls_fixed_valid",
+        "z",
+        "eta_sigma",
+        "psd_bpl_ref_band",
+        "psd_bpl_ref_lambda_rf",
     }
-    if psd_recovery_columns.issubset(df.columns):
+
+    psd_ref_bands = {
+        str(value).strip().lower()
+        for value in df["psd_bpl_ref_band"].dropna().unique()
+        if str(value).strip()
+    } if "psd_bpl_ref_band" in df.columns else set()
+    psd_total_tau_columns = {
+        column
+        for band in psd_ref_bands
+        for column in (
+            f"log_tau_band_{band}_RF",
+            f"log_tau_band_{band}_RF_err",
+        )
+    }
+    psd_sigma_ready = True
+    for band in psd_ref_bands:
+        current_sigma_columns = {
+            f"log_sigma_total_rms_band_{band}",
+            f"log_sigma_total_rms_band_{band}_err",
+        }
+        legacy_stems = (
+            "tau_fast_driver",
+            "tau_slow_driver",
+            f"lag_disk_{band}",
+            f"lag_blr_{band}",
+            f"amp_cont_relflux_{band}",
+            f"amp_blr_relflux_{band}",
+        )
+        legacy_sigma_columns = {
+            column
+            for stem in legacy_stems
+            for column in (stem, f"{stem}_err")
+        }
+        psd_sigma_ready &= current_sigma_columns.issubset(
+            df.columns
+        ) or legacy_sigma_columns.issubset(df.columns)
+    psd_recovery_ready = (
+        psd_recovery_columns.issubset(df.columns)
+        and bool(psd_ref_bands)
+        and psd_total_tau_columns.issubset(df.columns)
+        and psd_sigma_ready
+    )
+    if psd_recovery_ready:
         plot_psd_uv_recovery_comparison(
             df,
             plot_path=plot_path,
             show=False,
             filename="sigma_tau_psd_free_vs_fixed_precut.pdf",
+            tau_resolution_mode="filter",
         )
     if {"z", "apparent_mag_2500"}.issubset(df.columns) and any(
         (f"log_lag_blr_{band}_RF" in df.columns) or (f"log_lag_blr2_{band}_RF" in df.columns)
@@ -2895,12 +2938,13 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             show=False,
             filename="bpl_psd_vs_uv_variability_postcut.pdf",
         )
-    if psd_recovery_columns.issubset(df.columns):
+    if psd_recovery_ready:
         plot_psd_uv_recovery_comparison(
             df,
             plot_path=plot_path,
             show=False,
             filename="sigma_tau_psd_free_vs_fixed_postcut.pdf",
+            tau_resolution_mode="filter",
         )
     _plot_sigma_tau_ls_identity(
         df,

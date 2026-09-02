@@ -3582,14 +3582,26 @@ def plot_psd_uv_recovery_comparison(
     plot_path="plots/hubble",
     show=False,
     filename="sigma_tau_psd_free_vs_fixed.pdf",
+    *,
+    tau_resolution_mode="mark",
+    nominal_psd_fmax=2e-3,
 ):
-    """Compare valid free-slope BPL and fixed-slope DRW PSD fits to the UV fit."""
+    """Compare PSD fits with like-for-like model RMS and timescale estimates.
+
+    ``tau_resolution_mode='mark'`` retains PSD-unresolved points in the tau
+    panels but excludes them from the KDE and summary statistics. ``'filter'``
+    hides them from this diagnostic only; it does not modify ``df`` or the
+    science-cut pipeline.
+    """
+
+    if tau_resolution_mode not in {"mark", "filter", "none"}:
+        raise ValueError(
+            "tau_resolution_mode must be one of 'mark', 'filter', or 'none'."
+        )
+    if not np.isfinite(nominal_psd_fmax) or nominal_psd_fmax <= 0.0:
+        raise ValueError("nominal_psd_fmax must be finite and positive.")
 
     required = {
-        "log_sigma_uv",
-        "log_sigma_uv_err",
-        "log_tau_uv_rf",
-        "log_tau_uv_rf_err",
         "log_sigma_ls",
         "log_sigma_ls_err",
         "log_tau_ls",
@@ -3601,18 +3613,184 @@ def plot_psd_uv_recovery_comparison(
         "log_tau_ls_fixed",
         "log_tau_ls_fixed_err",
         "psd_ls_fixed_valid",
+        "z",
+        "eta_sigma",
+        "psd_bpl_ref_band",
+        "psd_bpl_ref_lambda_rf",
     }
     if not required.issubset(df.columns):
         missing = ", ".join(sorted(required - set(df.columns)))
-        raise KeyError(f"Missing required columns for PSD-vs-UV recovery plot: {missing}")
+        raise KeyError(
+            f"Missing required columns for PSD recovery comparison: {missing}"
+        )
 
     def _numeric(column):
         return pd.to_numeric(df[column], errors="coerce").to_numpy(dtype=float)
 
-    log_sigma_uv = _numeric("log_sigma_uv")
-    log_sigma_uv_err = _numeric("log_sigma_uv_err")
-    log_tau_uv_rf = _numeric("log_tau_uv_rf")
-    log_tau_uv_rf_err = _numeric("log_tau_uv_rf_err")
+    ref_band = (
+        pd.Series(df["psd_bpl_ref_band"], index=df.index)
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .to_numpy()
+    )
+
+    current_tau_columns = set()
+    current_sigma_columns_by_band = {}
+    for band in np.unique(ref_band):
+        if not band:
+            continue
+        current_tau_columns.update(
+            {
+                f"log_tau_band_{band}_RF",
+                f"log_tau_band_{band}_RF_err",
+            }
+        )
+        current_sigma_columns_by_band[band] = {
+            f"log_sigma_total_rms_band_{band}",
+            f"log_sigma_total_rms_band_{band}_err",
+        }
+    missing_current_tau = current_tau_columns - set(df.columns)
+    if missing_current_tau:
+        missing = ", ".join(sorted(missing_current_tau))
+        raise KeyError(
+            "Missing stored total-band tau columns for PSD recovery "
+            f"comparison: {missing}"
+        )
+
+    def _select_ref_band_columns(stem, *, suffix=""):
+        values = np.full(len(df), np.nan, dtype=float)
+        for band in np.unique(ref_band):
+            column = f"{stem}_{band}{suffix}"
+            if band and column in df.columns:
+                selected = ref_band == band
+                values[selected] = _numeric(column)[selected]
+        return values
+
+    model_total_sigma = np.full(len(df), np.nan, dtype=float)
+    model_total_sigma_err = np.full(len(df), np.nan, dtype=float)
+    legacy_bands = []
+    for band, sigma_columns in current_sigma_columns_by_band.items():
+        selected = ref_band == band
+        if sigma_columns.issubset(df.columns):
+            model_total_sigma[selected] = _numeric(
+                f"log_sigma_total_rms_band_{band}"
+            )[selected]
+            model_total_sigma_err[selected] = _numeric(
+                f"log_sigma_total_rms_band_{band}_err"
+            )[selected]
+        else:
+            legacy_bands.append(band)
+
+    if legacy_bands:
+        import jax
+        import jax.numpy as jnp
+
+        from qvc.light_curve.multiband_model_shared_latent_blr import (
+            SharedLatentDiskBLRQS,
+        )
+
+        common_legacy_columns = {
+            "tau_fast_driver",
+            "tau_fast_driver_err",
+            "tau_slow_driver",
+            "tau_slow_driver_err",
+        }
+
+        def _legacy_log_total_rms(parameters):
+            kernel = SharedLatentDiskBLRQS(
+                tau_fast=jnp.atleast_1d(parameters[0]),
+                tau_slow=jnp.atleast_1d(parameters[1]),
+                lag_disk=jnp.atleast_1d(parameters[2]),
+                lag_blr=jnp.atleast_1d(parameters[3]),
+                amp_cont=jnp.atleast_1d(parameters[4]),
+                amp_blr=jnp.atleast_1d(parameters[5]),
+                disk_order=3,
+                blr_order=3,
+            )
+            return jnp.log10(kernel.stationary_rms()[0] * (2.5 / jnp.log(10.0)))
+
+        value_and_grad = jax.jit(jax.vmap(jax.value_and_grad(_legacy_log_total_rms)))
+        for band in legacy_bands:
+            band_stems = (
+                "tau_fast_driver",
+                "tau_slow_driver",
+                f"lag_disk_{band}",
+                f"lag_blr_{band}",
+                f"amp_cont_relflux_{band}",
+                f"amp_blr_relflux_{band}",
+            )
+            required_legacy = common_legacy_columns | {
+                column
+                for stem in band_stems[2:]
+                for column in (stem, f"{stem}_err")
+            }
+            missing_legacy = required_legacy - set(df.columns)
+            if missing_legacy:
+                missing_current = current_sigma_columns_by_band[band] - set(df.columns)
+                raise KeyError(
+                    "Missing stored total-band RMS columns and legacy shared-latent "
+                    f"reconstruction columns for reference band {band!r}. "
+                    "Missing current columns: "
+                    + ", ".join(sorted(missing_current))
+                    + "; missing legacy columns: "
+                    + ", ".join(sorted(missing_legacy))
+                )
+
+            selected_indices = np.flatnonzero(ref_band == band)
+            parameters = np.column_stack([_numeric(stem) for stem in band_stems])[
+                selected_indices
+            ]
+            parameter_errors = np.column_stack(
+                [_numeric(f"{stem}_err") for stem in band_stems]
+            )[selected_indices]
+            valid = (
+                np.all(np.isfinite(parameters), axis=1)
+                & np.all(parameters > 0.0, axis=1)
+                & np.all(np.isfinite(parameter_errors), axis=1)
+                & np.all(parameter_errors >= 0.0, axis=1)
+            )
+            if not np.any(valid):
+                continue
+            values, gradients = value_and_grad(jnp.asarray(parameters[valid]))
+            reconstructed_errors = np.sqrt(
+                np.sum(
+                    np.square(np.asarray(gradients) * parameter_errors[valid]),
+                    axis=1,
+                )
+            )
+            valid_indices = selected_indices[valid]
+            model_total_sigma[valid_indices] = np.asarray(values)
+            model_total_sigma_err[valid_indices] = reconstructed_errors
+
+        warnings.warn(
+            "Reconstructed legacy total-band RMS values from shared-latent "
+            "driver/response medians; uncertainties use independent first-order "
+            "propagation.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    model_total_tau = _select_ref_band_columns("log_tau_band", suffix="_RF")
+    model_total_tau_err = _select_ref_band_columns(
+        "log_tau_band", suffix="_RF_err"
+    )
+    eta_sigma = _numeric("eta_sigma")
+    eta_sigma_err = (
+        _numeric("eta_sigma_err")
+        if "eta_sigma_err" in df.columns
+        else np.zeros(len(df), dtype=float)
+    )
+    ref_lambda_rf = _numeric("psd_bpl_ref_lambda_rf")
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_wavelength_ratio = np.log10(2500.0 / ref_lambda_rf)
+    reference_to_2500 = eta_sigma * log_wavelength_ratio
+    reference_to_2500_err = np.abs(log_wavelength_ratio) * eta_sigma_err
+    model_total_sigma_2500 = model_total_sigma + reference_to_2500
+    model_total_sigma_2500_err = np.hypot(
+        model_total_sigma_err, reference_to_2500_err
+    )
 
     slope = -_numeric("alpha_high_ls")
     slope_err = (
@@ -3642,8 +3820,15 @@ def plot_psd_uv_recovery_comparison(
         np.abs(derivative[finite_slope_err]) * slope_err[finite_slope_err]
     )
 
-    free_sigma = _numeric("log_sigma_ls") + log_rms_factor
-    free_sigma_err = np.hypot(_numeric("log_sigma_ls_err"), normalization_err)
+    free_sigma = _numeric("log_sigma_ls") + log_rms_factor + reference_to_2500
+    free_sigma_err = np.hypot(
+        np.hypot(_numeric("log_sigma_ls_err"), normalization_err),
+        reference_to_2500_err,
+    )
+    fixed_sigma = _numeric("log_sigma_ls_fixed") + reference_to_2500
+    fixed_sigma_err = np.hypot(
+        _numeric("log_sigma_ls_fixed_err"), reference_to_2500_err
+    )
     free_valid = pd.Series(df["psd_ls_valid"]).fillna(False).astype(bool).to_numpy()
     fixed_valid = (
         pd.Series(df["psd_ls_fixed_valid"])
@@ -3652,51 +3837,80 @@ def plot_psd_uv_recovery_comparison(
         .to_numpy()
     )
 
+    z = _numeric("z")
+
+    def _tau_resolution_floor(fmax_column):
+        if fmax_column in df.columns:
+            fmax = _numeric(fmax_column)
+        else:
+            fmax = np.full(len(df), nominal_psd_fmax, dtype=float)
+        use_nominal = ~np.isfinite(fmax) | (fmax <= 0.0)
+        fmax[use_nominal] = nominal_psd_fmax
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return -np.log10(2.0 * np.pi * fmax) - np.log10(1.0 + z)
+
+    free_tau_resolution = _tau_resolution_floor("psd_ls_fmax")
+    fixed_tau_resolution = _tau_resolution_floor("psd_ls_fixed_fmax")
+
     panel_inputs = [
         (
-            log_sigma_uv,
+            model_total_sigma_2500,
             free_sigma,
-            log_sigma_uv_err,
+            model_total_sigma_2500_err,
             free_sigma_err,
             free_valid,
-            r"$\log\,\sigma_{\rm UV}\ ({\rm mag})$",
-            r"$\log\,\sigma_{\rm PSD,RMS}\ ({\rm mag})$",
+            r"$\log\,\sigma_{\rm model}$ (mag)",
+            r"$\log\,\sigma_{\rm PSD}$ (mag)",
             "sigma",
+            None,
         ),
         (
-            log_sigma_uv,
-            _numeric("log_sigma_ls_fixed"),
-            log_sigma_uv_err,
-            _numeric("log_sigma_ls_fixed_err"),
+            model_total_sigma_2500,
+            fixed_sigma,
+            model_total_sigma_2500_err,
+            fixed_sigma_err,
             fixed_valid,
-            r"$\log\,\sigma_{\rm UV}\ ({\rm mag})$",
-            r"$\log\,\sigma_{\rm PSD,RMS}\ ({\rm mag})$",
+            r"$\log\,\sigma_{\rm model}$ (mag)",
+            r"$\log\,\sigma_{\rm PSD}$ (mag)",
             "sigma",
+            None,
         ),
         (
-            log_tau_uv_rf,
+            model_total_tau,
             _numeric("log_tau_ls"),
-            log_tau_uv_rf_err,
+            model_total_tau_err,
             _numeric("log_tau_ls_err"),
             free_valid,
-            r"$\log\,\tau_{\rm UV,RF}\ ({\rm days})$",
-            r"$\log\,\tau_{\rm PSD,RF}\ ({\rm days})$",
+            r"$\log\,\tau_{\rm model}$ (days)",
+            r"$\log\,\tau_{\rm PSD}$ (days)",
             "tau",
+            free_tau_resolution,
         ),
         (
-            log_tau_uv_rf,
+            model_total_tau,
             _numeric("log_tau_ls_fixed"),
-            log_tau_uv_rf_err,
+            model_total_tau_err,
             _numeric("log_tau_ls_fixed_err"),
             fixed_valid,
-            r"$\log\,\tau_{\rm UV,RF}\ ({\rm days})$",
-            r"$\log\,\tau_{\rm PSD,RF}\ ({\rm days})$",
+            r"$\log\,\tau_{\rm model}$ (days)",
+            r"$\log\,\tau_{\rm PSD}$ (days)",
             "tau",
+            fixed_tau_resolution,
         ),
     ]
 
     panels = []
-    for x, y, xerr, yerr, valid, xlabel, ylabel, quantity in panel_inputs:
+    for (
+        x,
+        y,
+        xerr,
+        yerr,
+        valid,
+        xlabel,
+        ylabel,
+        quantity,
+        resolution_floor,
+    ) in panel_inputs:
         mask = (
             valid
             & np.isfinite(x)
@@ -3706,12 +3920,25 @@ def plot_psd_uv_recovery_comparison(
             & (xerr >= 0.0)
             & (yerr >= 0.0)
         )
+        if resolution_floor is None or tau_resolution_mode == "none":
+            resolved = np.ones(np.count_nonzero(mask), dtype=bool)
+            floor_selected = np.full(np.count_nonzero(mask), np.nan, dtype=float)
+        else:
+            mask &= np.isfinite(resolution_floor)
+            floor_selected = resolution_floor[mask]
+            resolved = x[mask] >= floor_selected
+        if quantity == "tau" and tau_resolution_mode == "filter":
+            keep = resolved
+        else:
+            keep = np.ones(np.count_nonzero(mask), dtype=bool)
         panels.append(
             {
-                "x": x[mask],
-                "y": y[mask],
-                "xerr": xerr[mask],
-                "yerr": yerr[mask],
+                "x": x[mask][keep],
+                "y": y[mask][keep],
+                "xerr": xerr[mask][keep],
+                "yerr": yerr[mask][keep],
+                "resolved": resolved[keep],
+                "resolution_floor": floor_selected[keep],
                 "xlabel": xlabel,
                 "ylabel": ylabel,
                 "quantity": quantity,
@@ -3801,46 +4028,85 @@ def plot_psd_uv_recovery_comparison(
             continue
         x = panel["x"]
         y = panel["y"]
-        delta = y - x
+        resolved = panel["resolved"]
+        stats_mask = resolved if panel["quantity"] == "tau" else np.ones(
+            x.size, dtype=bool
+        )
+        delta = y[stats_mask] - x[stats_mask]
         ax.plot(limits, limits, "--", color="m", lw=2.0, zorder=-4)
-        ax.errorbar(
-            x,
-            y,
-            xerr=panel["xerr"],
-            yerr=panel["yerr"],
-            fmt="none",
-            color="0.4",
-            alpha=0.15,
-            lw=0.75,
-            capsize=1.2,
-            capthick=0.6,
-            rasterized=True,
-            zorder=-3,
-        )
-        ax.scatter(
-            x,
-            y,
-            s=10,
-            color="k",
-            alpha=0.58,
-            edgecolors="none",
-            rasterized=True,
-            zorder=-2,
-        )
-        _plot_kde_contours(ax, x, y)
+        if np.any(resolved):
+            ax.errorbar(
+                x[resolved],
+                y[resolved],
+                xerr=panel["xerr"][resolved],
+                yerr=panel["yerr"][resolved],
+                fmt="none",
+                color="0.4",
+                alpha=0.15,
+                lw=0.75,
+                capsize=1.2,
+                capthick=0.6,
+                rasterized=True,
+                zorder=-3,
+            )
+            ax.scatter(
+                x[resolved],
+                y[resolved],
+                s=10,
+                color="k",
+                alpha=0.58,
+                edgecolors="none",
+                rasterized=True,
+                zorder=-2,
+            )
+        unresolved = ~resolved
+        if np.any(unresolved):
+            ax.errorbar(
+                x[unresolved],
+                y[unresolved],
+                xerr=panel["xerr"][unresolved],
+                yerr=panel["yerr"][unresolved],
+                fmt="none",
+                color="darkorange",
+                alpha=0.32,
+                lw=0.75,
+                capsize=1.2,
+                capthick=0.6,
+                rasterized=True,
+                zorder=-2,
+            )
+            ax.scatter(
+                x[unresolved],
+                y[unresolved],
+                s=19,
+                marker="x",
+                color="darkorange",
+                alpha=0.82,
+                linewidths=0.9,
+                rasterized=True,
+                zorder=-1,
+                label=(
+                    r"$\tau_{\rm model}<[2\pi f_{\max}(1+z)]^{-1}$"
+                ),
+            )
+        _plot_kde_contours(ax, x[stats_mask], y[stats_mask])
         ax.set_xlim(*limits)
         ax.set_ylim(*limits)
         ax.set_aspect("equal", adjustable="box")
         ax.set_xlabel(panel["xlabel"])
         ax.set_ylabel(panel["ylabel"])
-        ax.text(
-            0.97,
-            0.03,
-            (
+        if delta.size:
+            summary = (
                 f"N = {delta.size}\n"
                 f"Bias = {np.mean(delta):+.2f} dex\n"
                 f"$\\sigma$ = {np.std(delta):.2f} dex"
-            ),
+            )
+        else:
+            summary = "N = 0"
+        ax.text(
+            0.97,
+            0.03,
+            summary,
             transform=ax.transAxes,
             ha="right",
             va="bottom",
@@ -3875,6 +4141,9 @@ def plot_psd_uv_recovery_comparison(
         )
         for spine in ax.spines.values():
             spine.set_linewidth(1.1)
+
+        if np.any(unresolved):
+            ax.legend(loc="upper left", fontsize=8.5, frameon=True)
 
     axes[0, 0].set_title("Free-slope BPL", fontsize=14)
     axes[0, 1].set_title("Fixed-slope DRW", fontsize=14)

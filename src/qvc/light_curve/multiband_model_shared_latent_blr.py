@@ -264,6 +264,20 @@ class SharedLatentDiskBLRQS(qs.Quasisep):
         )(h)
         return integrated / _safe_pos(variance)
 
+    def stationary_rms(self):
+        """Return the total stationary RMS of each observed band."""
+
+        Pinf = self.stationary_covariance()
+        slices, _size = self._chain_slices()
+        endpoints = jnp.asarray([chain_slice.stop - 1 for chain_slice in slices])
+        stds = jnp.sqrt(_safe_pos(Pinf[endpoints, endpoints]))
+        B = int(jnp.asarray(self.lag_disk).shape[0])
+        h = jax.vmap(
+            lambda band: self._observation_model_with_stds((0.0, band), stds)
+        )(jnp.arange(B, dtype=jnp.int32))
+        variance = jnp.einsum("bi,ij,bj->b", h, Pinf, h)
+        return jnp.sqrt(_safe_pos(variance))
+
     def continuum_effective_timescales(self):
         """Return exact integral timescales for the disk continua alone."""
 
