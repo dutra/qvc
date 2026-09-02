@@ -51,6 +51,12 @@ def _load_runner_module():
     return module
 
 
+def test_plot_parser_shows_points_by_default_and_accepts_no_points():
+    plot_module = _load_plot_module()
+    assert plot_module._parser().parse_args(["campaign"]).no_points is False
+    assert plot_module._parser().parse_args(["campaign", "--no-points"]).no_points is True
+
+
 def test_seed_ledger_is_reproducible_and_streams_are_distinct():
     first = derive_seed_ledger(1234, 7)
     second = derive_seed_ledger(1234, 7)
@@ -405,7 +411,7 @@ def test_validation_manifest_records_only_nondefault_prior_profile():
     )
     fit = centered_configuration["fit"]
     assert fit["prior_profile"] == "centered_lcdm"
-    assert fit["prior_bounds"]["M0_agn"] == [-30.0, -10.0]
+    assert fit["prior_bounds"]["M0_agn"] == [-26.0, -18.0]
     assert fit["prior_bounds"]["w0"] == [-3.0, 1.0]
     assert fit["prior_bounds"]["wa"] == [-10.0, 10.0]
 

@@ -57,6 +57,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--dpi", type=int, default=220)
     parser.add_argument("--min-contour-points", type=int, default=8)
+    parser.add_argument(
+        "--no-points",
+        action="store_true",
+        help="Hide the individual recovered-median points in the corner plot.",
+    )
     return parser
 
 
@@ -561,8 +566,9 @@ def plot_median_recovery_corner(
     output_png: Path | None = None,
     dpi: int = 220,
     min_contour_points: int = 8,
+    show_points: bool = True,
 ) -> Path:
-    """Plot one point per run and contours of recovered posterior medians."""
+    """Plot contours and, optionally, one point per recovered posterior median."""
 
     complete = recovery.loc[recovery["status"] == "complete"].copy()
     if complete.empty:
@@ -610,6 +616,17 @@ def plot_median_recovery_corner(
                     x = subset[f"{x_parameter}_q50"].to_numpy(dtype=float)
                     y = subset[f"{y_parameter}_q50"].to_numpy(dtype=float)
                     style = ARM_STYLE[arm]
+                    if show_points:
+                        finite = np.isfinite(x) & np.isfinite(y)
+                        ax.scatter(
+                            x[finite],
+                            y[finite],
+                            s=15,
+                            color=style["color"],
+                            alpha=0.55,
+                            edgecolors="none",
+                            zorder=2,
+                        )
                     _draw_contours(
                         ax,
                         x,
@@ -701,6 +718,7 @@ def main(argv=None) -> int:
         output_png=output_dir / "median_recovery_corner.png",
         dpi=args.dpi,
         min_contour_points=args.min_contour_points,
+        show_points=not args.no_points,
     )
     plot_hubble_recovery(
         recovery,
