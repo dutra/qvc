@@ -13509,6 +13509,110 @@ def plot_g_band_drift_slope_histograms(
     )
 
 
+def _add_bivariate_sigma_contours(ax, x, y, *, grid_size=160):
+    """Draw KDE contours enclosing 68.3% and 95.4% of the sample density."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    finite = np.isfinite(x) & np.isfinite(y)
+    x = x[finite]
+    y = y[finite]
+    if x.size < 5:
+        warnings.warn(
+            "Skipping 1- and 2-sigma contours: fewer than five finite points.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+
+    x_center = float(np.median(x))
+    y_center = float(np.median(y))
+    x_scale = float(np.std(x))
+    y_scale = float(np.std(y))
+    if (
+        not np.isfinite(x_scale)
+        or not np.isfinite(y_scale)
+        or x_scale <= 0
+        or y_scale <= 0
+    ):
+        warnings.warn(
+            "Skipping 1- and 2-sigma contours: a plotted variable has zero spread.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+
+    x_standard = (x - x_center) / x_scale
+    y_standard = (y - y_center) / y_scale
+    try:
+        kde = gaussian_kde(np.vstack([x_standard, y_standard]), bw_method="scott")
+    except (ValueError, np.linalg.LinAlgError) as exc:
+        warnings.warn(
+            f"Skipping 1- and 2-sigma contours because the KDE failed: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+
+    # Include the KDE tails when converting enclosed probabilities to density
+    # thresholds.  Standardizing first prevents either axis from dominating the
+    # covariance calculation merely because of its units.
+    padding = max(0.5, 3.0 * float(kde.factor))
+    x_grid_standard = np.linspace(
+        float(np.min(x_standard)) - padding,
+        float(np.max(x_standard)) + padding,
+        grid_size,
+    )
+    y_grid_standard = np.linspace(
+        float(np.min(y_standard)) - padding,
+        float(np.max(y_standard)) + padding,
+        grid_size,
+    )
+    xx_standard, yy_standard = np.meshgrid(x_grid_standard, y_grid_standard)
+    density = kde(np.vstack([xx_standard.ravel(), yy_standard.ravel()])).reshape(
+        xx_standard.shape
+    )
+
+    density_sorted = np.sort(density.ravel())[::-1]
+    enclosed_probability = np.cumsum(density_sorted)
+    enclosed_probability /= enclosed_probability[-1]
+
+    def density_threshold(probability):
+        index = int(np.searchsorted(enclosed_probability, probability, side="left"))
+        return float(density_sorted[min(index, density_sorted.size - 1)])
+
+    threshold_1sigma = density_threshold(0.683)
+    threshold_2sigma = density_threshold(0.954)
+    levels = np.array([threshold_2sigma, threshold_1sigma])
+    if not np.all(np.isfinite(levels)) or levels[0] >= levels[1]:
+        warnings.warn(
+            "Skipping 1- and 2-sigma contours: KDE density thresholds are degenerate.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+
+    xx = xx_standard * x_scale + x_center
+    yy = yy_standard * y_scale + y_center
+    contours = ax.contour(
+        xx,
+        yy,
+        density,
+        levels=levels,
+        colors="black",
+        linestyles=["--", "-"],
+        linewidths=1.4,
+        zorder=4,
+    )
+    ax.clabel(
+        contours,
+        levels=levels,
+        fmt={threshold_2sigma: r"$2\sigma$", threshold_1sigma: r"$1\sigma$"},
+        inline=True,
+        fontsize=9,
+    )
+    return contours
+
+
 def plot_completeness_diagnostics(
     dmi_plot,
     z,
@@ -13534,33 +13638,59 @@ def plot_completeness_diagnostics(
     else:
         fit_mask = finite & (z >= z_range[0]) & (z <= z_range[1])
         out_mask = finite & ~((z >= z_range[0]) & (z <= z_range[1]))
-    
+
+    cmap = "viridis"
+    magnitude_norm = colors.Normalize(
+        vmin=float(np.min(m2500[finite])),
+        vmax=float(np.max(m2500[finite])),
+    )
+    redshift_norm = colors.Normalize(
+        vmin=float(np.min(z[finite])),
+        vmax=float(np.max(z[finite])),
+    )
+
     fig, ax = plt.subplots(figsize=(8, 5))
 
     if np.any(fit_mask):
-        ax.plot(
+        ax.scatter(
             z[fit_mask],
             -dmi_plot[fit_mask],
+            c=m2500[fit_mask],
+            cmap=cmap,
+            norm=magnitude_norm,
+            s=20,
             marker="o",
-            linestyle="none",
             label="in $z$ range",
-            color="k",
             alpha=0.5,
+            linewidths=0,
         )
     if np.any(out_mask):
-        ax.plot(
+        ax.scatter(
             z[out_mask],
             -dmi_plot[out_mask],
+            c=m2500[out_mask],
+            cmap=cmap,
+            norm=magnitude_norm,
+            s=28,
             marker="D",
-            linestyle="none",
             label="outside $z$ range",
-            color="k",
             alpha=0.5,
+            linewidths=0,
+        )
+    if np.any(fit_mask):
+        _add_bivariate_sigma_contours(
+            ax,
+            z[fit_mask],
+            -dmi_plot[fit_mask],
         )
 
     ax.set_xlabel(r"$z$")
     ax.set_ylabel(r"$\Delta m$ (mag)")
-    
+    magnitude_mappable = mpl.cm.ScalarMappable(norm=magnitude_norm, cmap=cmap)
+    magnitude_mappable.set_array([])
+    cbar = fig.colorbar(magnitude_mappable, ax=ax)
+    cbar.set_label(r"Apparent magnitude $m_{2500}$ (mag)")
+
     ax.legend(frameon=True, loc="upper right", fontsize=12)
     fig.tight_layout()
 
@@ -13577,25 +13707,41 @@ def plot_completeness_diagnostics(
         ax.scatter(
             m2500[fit_mask],
             -dmi_plot[fit_mask],
+            c=z[fit_mask],
+            cmap=cmap,
+            norm=redshift_norm,
             alpha=0.5,
             s=20,
             marker="o",
-            color="k",
             label="in $z$ range",
+            linewidths=0,
         )
     if np.any(out_mask):
         ax.scatter(
             m2500[out_mask],
             -dmi_plot[out_mask],
+            c=z[out_mask],
+            cmap=cmap,
+            norm=redshift_norm,
             alpha=0.5,
             s=28,
             marker="D",
-            color="k",
             label="outside $z$ range",
+            linewidths=0,
+        )
+    if np.any(fit_mask):
+        _add_bivariate_sigma_contours(
+            ax,
+            m2500[fit_mask],
+            -dmi_plot[fit_mask],
         )
 
     ax.set_xlabel(r"Apparent magnitude $m_{2500}$ (mag)")
     ax.set_ylabel(r"$\Delta m$ (mag)")
+    redshift_mappable = mpl.cm.ScalarMappable(norm=redshift_norm, cmap=cmap)
+    redshift_mappable.set_array([])
+    cbar = fig.colorbar(redshift_mappable, ax=ax)
+    cbar.set_label(r"Redshift $z$")
 
     ax.legend(frameon=True, loc="upper right", fontsize=12)
     fig.tight_layout()

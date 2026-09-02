@@ -895,3 +895,57 @@ def test_fast_vs_uv_diagnostic_skips_catalog_without_fast_timescale(tmp_path):
 
     assert result is None
     assert not (tmp_path / "diagnostics" / "fast_vs_uv_variability.pdf").exists()
+
+
+def test_completeness_diagnostics_color_by_complementary_variable(
+    tmp_path, monkeypatch
+):
+    from matplotlib.axes import Axes
+
+    phase = np.linspace(0.0, 2.0 * np.pi, 40, endpoint=False)
+    z = np.concatenate([0.5 + 2.5 * np.arange(40) / 39.0, [0.3, 3.3]])
+    m2500 = np.concatenate([20.5 + 0.8 * np.sin(phase), [19.0, 22.0]])
+    dmi = np.concatenate([0.15 * np.cos(phase) + 0.03 * np.sin(2 * phase), [0.2, -0.3]])
+    fit_mask = (z >= 0.44) & (z <= 3.16)
+    out_mask = ~fit_mask
+    scatter_calls = []
+    contour_calls = []
+    original_scatter = Axes.scatter
+    original_contour = Axes.contour
+
+    def capture_scatter(self, *args, **kwargs):
+        scatter_calls.append(kwargs.copy())
+        return original_scatter(self, *args, **kwargs)
+
+    def capture_contour(self, *args, **kwargs):
+        contour_calls.append(kwargs.copy())
+        return original_contour(self, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "scatter", capture_scatter)
+    monkeypatch.setattr(Axes, "contour", capture_contour)
+    hubble_plotting.plot_completeness_diagnostics(
+        dmi,
+        z,
+        m2500,
+        plot_path=str(tmp_path),
+        z_range=(0.44, 3.16),
+    )
+
+    assert len(scatter_calls) == 4
+    np.testing.assert_allclose(scatter_calls[0]["c"], m2500[fit_mask])
+    np.testing.assert_allclose(scatter_calls[1]["c"], m2500[out_mask])
+    np.testing.assert_allclose(scatter_calls[2]["c"], z[fit_mask])
+    np.testing.assert_allclose(scatter_calls[3]["c"], z[out_mask])
+    assert len(contour_calls) == 2
+    for contour_call in contour_calls:
+        levels = np.asarray(contour_call["levels"])
+        assert levels.shape == (2,)
+        assert levels[0] < levels[1]
+        assert contour_call["linestyles"] == ["--", "-"]
+        assert contour_call["colors"] == "black"
+    assert (
+        tmp_path / "completeness" / "dmi_vs_z_posterior_median.pdf"
+    ).exists()
+    assert (
+        tmp_path / "completeness" / "dmi_vs_m2500_posterior_median.pdf"
+    ).exists()
