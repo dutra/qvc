@@ -22,10 +22,16 @@ python_bin = hpc_home / ".conda/envs/jaxcpu2/bin/python"
 output_root = repo_dir / "results/hubble_validation"
 
 speed = "quick"
-prior_profile = "default"
+prior_profile = "centered_lcdm"
 num_agns = 2000
 num_runs = 64
-campaign = f"fixed_truth_nagns{num_agns}_nruns{num_runs}_{speed}"
+prior_campaign_tag = (
+    f"_prior-{prior_profile}" if prior_profile != "default" else ""
+)
+campaign = (
+    f"fixed_truth_nagns{num_agns}_nruns{num_runs}_{speed}"
+    f"{prior_campaign_tag}"
+)
 seed_start = 0
 master_seed = 20260901
 calibration_size = 200000

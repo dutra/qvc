@@ -22,6 +22,8 @@ def test_bouchet_resource_and_campaign_defaults():
     assert values["time_limit"] == "02:00:00"
     assert values["num_agns"] == 2000
     assert values["num_runs"] == 64
+    assert values["prior_profile"] == "centered_lcdm"
+    assert values["campaign"].endswith("_prior-centered_lcdm")
 
 
 def test_submission_prefix_uses_requested_local_timestamp_format():
@@ -31,12 +33,10 @@ def test_submission_prefix_uses_requested_local_timestamp_format():
     assert values["submission_prefix"](datetime(2026, 9, 1, 17, 52)) == "sep01_0552pm_"
 
 
-def test_centered_prior_profile_is_forwarded_only_when_requested():
+def test_configured_centered_prior_profile_is_forwarded():
     values = runpy.run_path(str(SCRIPT))
-    default_args = values["parse_args"]([])
-    centered_args = values["parse_args"](
-        ["--prior-profile", "centered_lcdm"]
-    )
+    centered_args = values["parse_args"]([])
+    default_args = values["parse_args"](["--prior-profile", "default"])
 
     assert "--prior-profile" not in values["runner_arguments"](default_args)
     centered_arguments = values["runner_arguments"](centered_args)
