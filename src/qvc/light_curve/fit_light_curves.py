@@ -1925,6 +1925,16 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
         & (f_bin_raw >= psd_xlim[0])
         & (f_bin_raw <= psd_bpl_fit_fmax)
     )
+    psd_ls_fmax = (
+        float(np.max(f_bin_raw[display_fit_mask]))
+        if np.any(display_fit_mask)
+        else np.nan
+    )
+    psd_ls_fixed_fmax = (
+        float(np.max(f_bin_raw[fixed_mask]))
+        if np.any(fixed_mask)
+        else np.nan
+    )
     fit_fixed = fit_fixed_slope_drw_psd(
         f_bin_raw[fixed_mask],
         p_bin_raw[fixed_mask],
@@ -2038,6 +2048,7 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
         "psd_noise_floor_ls": psd_noise_floor_raw,
         "psd_ls_valid": fit_raw["psd_bpl_valid"],
         "psd_ls_nbins": fit_raw["psd_bpl_nbins"],
+        "psd_ls_fmax": psd_ls_fmax,
         "log_sigma_ls_fixed": log_sigma_ls_fixed,
         "log_sigma_ls_fixed_err": fit_fixed["log_sigma_err"],
         "sigma_ls_fixed": sigma_ls_fixed,
@@ -2050,6 +2061,7 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
         "tau_ls_fixed_err": tau_ls_fixed_err,
         "psd_ls_fixed_valid": fit_fixed["valid"],
         "psd_ls_fixed_nbins": float(fit_fixed["n_bins"]),
+        "psd_ls_fixed_fmax": psd_ls_fixed_fmax,
     }
     if np.isfinite(fit_norm["log_tau_bpl"]):
         out["log_nu_break_bpl"] = -np.log10(2.0 * np.pi) - fit_norm["log_tau_bpl"]
