@@ -13691,7 +13691,6 @@ def plot_completeness_diagnostics(
     cbar = fig.colorbar(magnitude_mappable, ax=ax)
     cbar.set_label(r"Apparent magnitude $m_{2500}$ (mag)")
 
-    ax.legend(frameon=True, loc="upper right", fontsize=12)
     fig.tight_layout()
 
     outdir = os.path.join(plot_path, "completeness")
@@ -13743,7 +13742,6 @@ def plot_completeness_diagnostics(
     cbar = fig.colorbar(redshift_mappable, ax=ax)
     cbar.set_label(r"Redshift $z$")
 
-    ax.legend(frameon=True, loc="upper right", fontsize=12)
     fig.tight_layout()
 
     fig.savefig(f"{outdir}/dmi_vs_m2500_posterior_median.pdf", dpi=300)

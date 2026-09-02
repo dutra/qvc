@@ -910,8 +910,10 @@ def test_completeness_diagnostics_color_by_complementary_variable(
     out_mask = ~fit_mask
     scatter_calls = []
     contour_calls = []
+    legend_calls = []
     original_scatter = Axes.scatter
     original_contour = Axes.contour
+    original_legend = Axes.legend
 
     def capture_scatter(self, *args, **kwargs):
         scatter_calls.append(kwargs.copy())
@@ -921,8 +923,13 @@ def test_completeness_diagnostics_color_by_complementary_variable(
         contour_calls.append(kwargs.copy())
         return original_contour(self, *args, **kwargs)
 
+    def capture_legend(self, *args, **kwargs):
+        legend_calls.append(kwargs.copy())
+        return original_legend(self, *args, **kwargs)
+
     monkeypatch.setattr(Axes, "scatter", capture_scatter)
     monkeypatch.setattr(Axes, "contour", capture_contour)
+    monkeypatch.setattr(Axes, "legend", capture_legend)
     hubble_plotting.plot_completeness_diagnostics(
         dmi,
         z,
@@ -943,6 +950,7 @@ def test_completeness_diagnostics_color_by_complementary_variable(
         assert levels[0] < levels[1]
         assert contour_call["linestyles"] == ["--", "-"]
         assert contour_call["colors"] == "black"
+    assert legend_calls == []
     assert (
         tmp_path / "completeness" / "dmi_vs_z_posterior_median.pdf"
     ).exists()
