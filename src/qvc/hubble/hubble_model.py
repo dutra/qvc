@@ -35,7 +35,7 @@ PRIOR_PROFILE_CHOICES = (
     CENTERED_LCDM_PRIOR_PROFILE,
 )
 CENTERED_LCDM_PRIOR_BOUNDS = {
-    "M0_agn": (-30.0, -10.0),
+    "M0_agn": (-26.0, -18.0),
     "w0": (-3.0, 1.0),
     "wa": (-10.0, 10.0),
 }

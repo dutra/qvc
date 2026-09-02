@@ -39,6 +39,7 @@ from tqdm import tqdm
 from qvc.hubble.hubble_model import (
     AGN_ALPHA_LAMBDA_ERR,
     AGN_ALPHA_LAMBDA_PARAM,
+    DEFAULT_PRIOR_PROFILE,
     AgnPivotContext,
     M_model_agn,
     M_model_agn_err,
@@ -3451,8 +3452,19 @@ def plot_bpl_psd_vs_uv_variability(
         )
         lower = np.full(value.shape, np.nan, dtype=float)
         upper = np.full(value.shape, np.nan, dtype=float)
-        lower[finite] = np.clip(value[finite] - np.power(10.0, log_value[finite] - log_err[finite]), 0.0, None)
-        upper[finite] = np.clip(np.power(10.0, log_value[finite] + log_err[finite]) - value[finite], 0.0, None)
+        lower_exponent = log_value - log_err
+        upper_exponent = log_value + log_err
+        lower[finite] = np.clip(
+            value[finite] - np.power(10.0, lower_exponent[finite]),
+            0.0,
+            None,
+        )
+        finite_upper = finite & (upper_exponent <= np.log10(np.finfo(float).max))
+        upper[finite_upper] = np.clip(
+            np.power(10.0, upper_exponent[finite_upper]) - value[finite_upper],
+            0.0,
+            None,
+        )
         return np.vstack([lower, upper])
 
     panels = [
@@ -7363,7 +7375,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 ha="left",
                 va="bottom",
                 fontsize=11,
-                bbox=dict(boxstyle="round,pad=0.02", facecolor="white", alpha=0.8, edgecolor="none"),
+                bbox=dict(boxstyle="round,pad=0.02", facecolor="white", alpha=0.0, edgecolor="none"),
                 zorder=20,                
             )
         if df_calibrators is not None:
@@ -8631,10 +8643,18 @@ def plot_predicted_vs_actual_M2500(
 
         # Add band/completeness legend once as well (if present)
         if (show_sigma_band or show_cosmo_uncertainty_band or completeness) and i == num_cols-1:
-            leg = ax.legend(loc="lower right", fontsize=12, frameon=True)
-            leg.get_frame().set_facecolor("none")
-            leg.get_frame().set_alpha(box_alpha)
-            leg.get_frame().set_edgecolor("none")
+            handles, labels = ax.get_legend_handles_labels()
+            if handles:
+                leg = ax.legend(
+                    handles,
+                    labels,
+                    loc="lower right",
+                    fontsize=12,
+                    frameon=True,
+                )
+                leg.get_frame().set_facecolor("none")
+                leg.get_frame().set_alpha(box_alpha)
+                leg.get_frame().set_edgecolor("none")
 
     for ax in axes:
         if ax.has_data():
@@ -12036,7 +12056,9 @@ def _highest_weight_theta(results, plot_path=None):
 def _blob_for_theta(theta, *, df_agn, df_pantheon, cosmo_model,
                     completeness_params, _sna_L, _sna_Lower, _sna_LogdetCov,
                     z_pivot_agn, agn_pivot_context,
-                    use_full_cov=True, plot_path=None):
+                    use_full_cov=True,
+                    prior_profile=DEFAULT_PRIOR_PROFILE,
+                    plot_path=None):
     """
     Re-evaluate the likelihood exactly once at 'theta' to get the selection blob.
     Returns: blob (2, N) and the AGN arrays z, m_obs needed for plotting.
@@ -12050,6 +12072,7 @@ def _blob_for_theta(theta, *, df_agn, df_pantheon, cosmo_model,
         completeness_params=completeness_params,
         z_pivot_agn=z_pivot_agn,
         agn_pivot_context=agn_pivot_context,
+        prior_profile=prior_profile,
         only_sna=False, use_full_cov=use_full_cov,
     )
     z = df_agn['z'].values
@@ -12155,7 +12178,8 @@ def run_completeness_diagnostics(sampler_results, df_agn, df_pantheon,
                                  title_note="— highest posterior weight sample",
                                  *,
                                  z_pivot_agn,
-                                 agn_pivot_context: AgnPivotContext):
+                                 agn_pivot_context: AgnPivotContext,
+                                 prior_profile=DEFAULT_PRIOR_PROFILE):
     """
     One-call orchestration:
       - choose highest-posterior θ,
@@ -12169,6 +12193,7 @@ def run_completeness_diagnostics(sampler_results, df_agn, df_pantheon,
                                  _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov,
                                  z_pivot_agn=z_pivot_agn,
                                  agn_pivot_context=agn_pivot_context,
+                                 prior_profile=prior_profile,
                                  use_full_cov=use_full_cov)
     Z   = np.asarray(blob[0], dtype=float)
     dmi = np.asarray(blob[1], dtype=float)

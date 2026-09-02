@@ -141,6 +141,275 @@ def test_completeness_loglike_respects_finite_hard_magnitude_support():
     np.testing.assert_allclose(blob[2, 0], np.sqrt(expected_variance), rtol=2e-5)
 
 
+def test_finite_exponential_tail_moments_match_dense_quadrature():
+    mean = np.array([24.2, 26.0])
+    sigma = np.array([0.7, 1.1])
+    probability = np.array([0.35, 0.12])
+    decay = np.array([0.45, 1.2])
+    lower, upper, anchor = 24.45, 32.0, 24.45
+    analytic = hubble_likelihood._exponential_interval_moments(
+        mean, sigma, lower, upper, probability, decay, anchor=anchor
+    )
+    grid = np.linspace(lower, upper, 250_001)
+    for index in range(mean.size):
+        gaussian = np.exp(-0.5 * ((grid - mean[index]) / sigma[index]) ** 2) / (
+            np.sqrt(2.0 * np.pi) * sigma[index]
+        )
+        weighted = gaussian * probability[index] * np.exp(
+            -decay[index] * (grid - anchor)
+        )
+        numeric = (
+            np.trapezoid(weighted, grid),
+            np.trapezoid(weighted * grid, grid),
+            np.trapezoid(weighted * grid**2, grid),
+        )
+        np.testing.assert_allclose(
+            [value[index] for value in analytic], numeric, rtol=2e-9, atol=1e-12
+        )
+
+
+def test_tails_mode_is_continuous_monotone_and_zero_outside_physical_guard():
+    mag = np.arange(18.05, 24.5, 0.1)
+    redshift = np.arange(0.05, 4.5, 0.1)
+    completeness_by_mag = 0.8 * np.exp(-0.35 * (mag - mag[0]))
+    model = hcr.Completeness2D(
+        mag,
+        redshift,
+        completeness_by_mag[:, None] * np.ones((1, redshift.size)),
+        magnitude_support=(18.0, 24.5),
+        selection_magnitude_support=(14.0, 32.0),
+        magnitude_support_mode="tails",
+    )
+    query = np.array([13.99, 14.0, model.mag_min, model.mag_max, 28.0, 32.0, 32.01])
+    values = model(query, np.ones(query.size))
+    assert values[0] == 0.0
+    assert values[-1] == 0.0
+    assert values[1] == pytest.approx(values[2])
+    assert values[4] < values[3]
+    assert values[5] < values[4]
+    np.testing.assert_allclose(model.faint_tail_decay, 0.35, rtol=1e-12)
+
+
+def test_faint_tail_decay_uses_last_count_supported_transition_not_smoothed_cliff():
+    mag = np.arange(18.05, 24.5, 0.1)
+    redshift = np.array([0.5, 0.6, 0.7])
+    physical_decay = 0.8
+    transition_start = 21.5
+    transition_end = 23.5
+    profile = np.ones_like(mag)
+    transition = mag >= transition_start
+    profile[transition] = np.exp(-physical_decay * (mag[transition] - transition_start))
+    # Mimic the numerical Gaussian tail after observed counts disappear.
+    unsupported = mag > transition_end
+    profile[unsupported] = profile[~unsupported][-1] * np.exp(
+        -18.0 * (mag[unsupported] - transition_end)
+    )
+    completeness = profile[:, None] * np.ones((1, redshift.size))
+    parent_counts = np.full_like(completeness, 100.0)
+    observed_counts = np.rint(20.0 * completeness)
+    observed_counts[unsupported] = 0.0
+
+    decay, diagnostics = hcr._estimate_regularized_faint_tail_decay(
+        mag,
+        redshift,
+        completeness,
+        parent_counts_2d=parent_counts,
+        observed_counts_2d=observed_counts,
+        shrinkage=0.0,
+    )
+
+    np.testing.assert_allclose(decay, physical_decay, atol=0.03)
+    assert diagnostics["support_source"] == "raw_count_supported_transition"
+    assert np.all(diagnostics["fit_end_magnitude"] <= transition_end + 0.05)
+    assert np.all(diagnostics["fit_end_magnitude"] < mag[-1])
+    assert np.all(diagnostics["supported_observed_count"] >= 3.0)
+
+
+def test_faint_tail_decay_count_support_falls_back_to_global_supported_target():
+    mag = np.arange(18.05, 24.5, 0.1)
+    redshift = np.array([0.5, 1.0])
+    profile = np.exp(-0.6 * (mag - mag[0]))
+    completeness = profile[:, None] * np.ones((1, redshift.size))
+    parent_counts = np.full_like(completeness, 100.0)
+    observed_counts = np.rint(30.0 * completeness)
+    observed_counts[:, 1] = 0.0
+
+    decay, diagnostics = hcr._estimate_regularized_faint_tail_decay(
+        mag,
+        redshift,
+        completeness,
+        parent_counts_2d=parent_counts,
+        observed_counts_2d=observed_counts,
+        shrinkage=0.0,
+        smooth_sigma_z=0.0,
+    )
+
+    assert diagnostics["fallback_count"] == 1
+    assert np.isfinite(diagnostics["fit_end_magnitude"][0])
+    assert np.isnan(diagnostics["fit_end_magnitude"][1])
+    np.testing.assert_allclose(decay, [0.6, 0.6], atol=1e-12)
+
+
+def test_tails_mode_posterior_draws_match_identical_scalar_and_jax():
+    pytest.importorskip("jax")
+    import jax
+    import jax.numpy as jnp
+    from qvc.hubble.hubble_fit_jax import (
+        _completeness_loglike_jax,
+        _prepare_completeness_for_jax,
+    )
+
+    mag = np.arange(18.05, 24.5, 0.05)
+    redshift_grid = np.arange(0.05, 4.5, 0.1)
+    cmap = np.exp(-0.3 * (mag - mag[0]))[:, None] * np.ones((1, redshift_grid.size))
+    model = hcr.Completeness2D(
+        mag,
+        redshift_grid,
+        cmap,
+        magnitude_support=(18.0, 24.5),
+        selection_magnitude_support=(14.0, 32.0),
+        magnitude_support_mode="tails",
+    )
+    observed = np.array([14.2, 25.7, 31.5])
+    centers = np.array([16.0, 24.8, 30.0])
+    errors = np.array([0.4, 0.7, 1.0])
+    redshift = np.array([0.5, 1.5, 3.0])
+    cpu_logl, cpu_blob = completeness_loglike(
+        observed, np.full(3, 0.05), centers, errors, redshift,
+        model, mag, model.magnitude_support,
+    )
+    draw_logl, draw_blob = completeness_loglike_posterior_draws(
+        observed, np.full(3, 0.05), np.repeat(centers[:, None], 3, axis=1),
+        centers, errors, np.full(3, 3), redshift, model, mag,
+        model.magnitude_support,
+    )
+    np.testing.assert_allclose(draw_logl, cpu_logl, rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(draw_blob, cpu_blob, rtol=0.0, atol=1e-12)
+    assert set(model._last_selection_components) == {"bright", "core", "faint"}
+    for component in model._last_selection_components.values():
+        assert set(component) == {"Z", "dmi", "sigma_sel"}
+        assert np.all(np.isfinite(component["dmi"]))
+        assert np.all(np.isfinite(component["sigma_sel"]))
+    prepared = _prepare_completeness_for_jax(
+        (model, mag, redshift_grid, 0.05, 0.1, 0.0),
+        selection_magnitude=observed,
+        selection_redshift=redshift,
+    )
+    jax_logl = _completeness_loglike_jax(
+        jnp.asarray(centers), jnp.asarray(errors), jnp.asarray(redshift),
+        prepared, None, None,
+    )
+    np.testing.assert_allclose(float(jax_logl), cpu_logl, rtol=2e-11)
+    gradient = jax.grad(
+        lambda trial_centers: _completeness_loglike_jax(
+            trial_centers,
+            jnp.asarray(errors),
+            jnp.asarray(redshift),
+            prepared,
+            None,
+            None,
+        )
+    )(jnp.asarray(centers))
+    assert np.all(np.isfinite(np.asarray(gradient)))
+
+
+def test_tail_dominance_warning_is_explicit_not_in_likelihood_hot_path(capsys):
+    components = {
+        "bright": {"Z": np.array([0.6, 0.1])},
+        "core": {"Z": np.array([0.3, 0.8])},
+        "faint": {"Z": np.array([0.1, 0.1])},
+    }
+
+    count = hubble_likelihood.warn_if_selection_tails_dominate(components)
+
+    assert count == 1
+    captured = capsys.readouterr().out
+    assert captured.count("Completeness magnitude tails contribute") == 1
+    assert "highest-weight posterior sample" in captured
+
+
+@pytest.mark.parametrize("dimensions", [3, 4])
+def test_host_aware_tail_queries_preserve_conditional_edge_amplitudes(dimensions):
+    mag = np.arange(18.05, 24.5, 0.1)
+    redshift = np.array([0.5, 1.5])
+    host = np.array([0.1, 0.9])
+    base = np.exp(-0.25 * (mag - mag[0]))[:, None, None]
+    cube = base * np.ones((1, redshift.size, 1)) * (1.0 - 0.5 * host[None, None, :])
+    kwargs = dict(
+        magnitude_support=(18.0, 24.5),
+        selection_magnitude_support=(14.0, 32.0),
+        magnitude_support_mode="tails",
+    )
+    if dimensions == 3:
+        model = hcr.Completeness3D(mag, redshift, host, cube, **kwargs)
+        bright = model(np.array([15.0, 15.0]), np.ones(2), host)
+        faint = model(np.array([27.0, 27.0]), np.ones(2), host)
+    else:
+        alpha = np.array([-2.0, -1.0])
+        hypercube = cube[:, :, :, None] * np.array([1.0, 0.8])[None, None, None, :]
+        model = hcr.Completeness4D(mag, redshift, host, alpha, hypercube, **kwargs)
+        bright = model(np.array([15.0, 15.0]), np.ones(2), host, alpha)
+        faint = model(np.array([27.0, 27.0]), np.ones(2), host, alpha)
+    assert bright[0] > bright[1]
+    assert faint[0] > faint[1]
+
+
+@pytest.mark.parametrize("dimensions", [3, 4])
+def test_host_aware_tail_normalization_matches_jax(dimensions):
+    pytest.importorskip("jax")
+    import jax.numpy as jnp
+    from qvc.hubble.hubble_fit_jax import (
+        _completeness_loglike_jax,
+        _prepare_completeness_for_jax,
+    )
+
+    mag = np.arange(18.05, 24.5, 0.05)
+    redshift_grid = np.arange(0.05, 4.5, 0.1)
+    host_grid = np.array([0.1, 0.5, 0.9])
+    core = np.exp(-0.28 * (mag - mag[0]))[:, None, None]
+    cube = core * np.ones((1, redshift_grid.size, 1)) * (
+        1.0 - 0.4 * host_grid[None, None, :]
+    )
+    kwargs = dict(
+        magnitude_support=(18.0, 24.5),
+        selection_magnitude_support=(14.0, 32.0),
+        magnitude_support_mode="tails",
+    )
+    if dimensions == 3:
+        model = hcr.Completeness3D(mag, redshift_grid, host_grid, cube, **kwargs)
+        params = (model, mag, redshift_grid, host_grid, 0.05, 0.1, 0.4, 0.0, {})
+        alpha = None
+    else:
+        alpha_grid = np.array([-2.0, -1.5, -1.0])
+        hypercube = cube[:, :, :, None] * np.array([1.0, 0.9, 0.8])[None, None, None, :]
+        model = hcr.Completeness4D(
+            mag, redshift_grid, host_grid, alpha_grid, hypercube, **kwargs
+        )
+        params = (
+            model, mag, redshift_grid, host_grid, alpha_grid,
+            0.05, 0.1, 0.4, 0.5, 0.0, {}, {},
+        )
+        alpha = np.array([-1.8, -1.2])
+    observed = np.array([15.0, 28.0])
+    centers = np.array([16.0, 27.0])
+    errors = np.array([0.5, 0.8])
+    redshift = np.array([0.8, 2.0])
+    host = np.array([0.2, 0.8])
+    cpu, _ = completeness_loglike(
+        observed, np.full(2, 0.05), centers, errors, redshift,
+        model, mag, model.magnitude_support,
+        f_host_2500_psf=host, alpha_lambda=alpha,
+    )
+    prepared = _prepare_completeness_for_jax(
+        params, selection_magnitude=observed, selection_redshift=redshift
+    )
+    jax_value = _completeness_loglike_jax(
+        jnp.asarray(centers), jnp.asarray(errors), jnp.asarray(redshift), prepared,
+        jnp.asarray(host), None if alpha is None else jnp.asarray(alpha),
+    )
+    np.testing.assert_allclose(float(jax_value), cpu, rtol=3e-10)
+
+
 def test_posterior_draw_completeness_matches_scalar_for_identical_draws():
     lower, upper = 18.5, 24.0
     mag_centers = np.linspace(lower, upper, 401)
@@ -357,6 +626,38 @@ def test_joint_posterior_selection_uses_the_same_hard_support():
         )
 
 
+def test_joint_posterior_selection_includes_finite_bright_and_faint_tails():
+    mag = np.arange(18.05, 24.5, 0.05)
+    redshift_grid = np.arange(0.05, 4.5, 0.1)
+    cmap = np.exp(-0.3 * (mag - mag[0]))[:, None] * np.ones((1, redshift_grid.size))
+    model = hcr.Completeness2D(
+        mag,
+        redshift_grid,
+        cmap,
+        magnitude_support=(18.0, 24.5),
+        selection_magnitude_support=(14.0, 32.0),
+        magnitude_support_mode="tails",
+    )
+    params = (model, mag, redshift_grid, 0.05, 0.1, 0.0)
+    agn_data = {
+        hcr.COMPLETENESS_MAG_COL: np.array([26.0]),
+        "m_2500_dereddened_draws": np.array([[24.5, 25.0]]),
+        "m_2500_attenuated_model_draws": np.array([[25.5, 26.5]]),
+        "joint_posterior_valid_count": np.array([2]),
+    }
+    log_z, blob = hubble_likelihood.joint_posterior_completeness_loglike_for_data(
+        completeness_params=params,
+        agn_data=agn_data,
+        hubble_magnitude=np.array([24.75]),
+        hubble_magnitude_error=np.array([0.1]),
+        hubble_model_magnitude=np.array([24.8]),
+        hubble_total_error=np.array([0.5]),
+        z=np.array([1.5]),
+    )
+    assert np.isfinite(log_z)
+    assert np.all(np.isfinite(blob))
+    assert model._last_tail_contributions["faint_Z"][0] > 0.0
+
 def test_selection_correction_matches_truncated_normal_and_recovers_parent_mean():
     """Regression test the full correction against a known magnitude-limit solution."""
 
@@ -572,6 +873,29 @@ def test_completeness_2d_plot_smoothing_is_display_only(tmp_path):
     assert (
         tmp_path / "completeness" / "completeness_map_with_log_contours.pdf"
     ).exists()
+    assert (
+        tmp_path
+        / "completeness"
+        / "completeness_map_with_relative_percent_contours.pdf"
+    ).exists()
+
+
+def test_relative_completeness_percent_uses_supported_robust_peak():
+    completeness = np.array([[0.01, 0.04], [0.07, 0.50]])
+    parent_counts = np.array([[30.0, 30.0], [30.0, 1.0]])
+
+    relative, reference, n_reference_bins = hcr._relative_completeness_percent(
+        completeness,
+        parent_counts,
+        reference_percentile=100.0,
+        min_parent_count=20.0,
+    )
+
+    assert reference == pytest.approx(0.07)
+    assert n_reference_bins == 3
+    assert relative[1, 0] == pytest.approx(100.0)
+    assert relative[1, 1] == pytest.approx(100.0)
+    assert np.all((relative >= 0.0) & (relative <= 100.0))
 
 
 def test_fit_fhost_2500_model_monotonic_and_bounded():

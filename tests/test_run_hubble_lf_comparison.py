@@ -221,7 +221,11 @@ def _write_diagnostic_inputs(tmp_path: Path, base_prefix: str):
             )
             handle.create_dataset(
                 "dmi_posterior_median",
-                data=-0.1 * model_index + 0.01 * redshift,
+                data=(
+                    -0.1 * model_index
+                    + 0.01 * redshift
+                    + np.tile([-0.02, 0.0, 0.02], 6)
+                ),
             )
             samples = np.zeros((20, 9), dtype=float)
             samples[:, 1] = 0.1 * model_index
@@ -262,9 +266,21 @@ def test_diagnostics_generate_paired_figures_and_tables(tmp_path):
         ]
     )
     assert set(binned.loc[delta_rows, "interval_kind"]) == {"paired_distribution"}
-    assert set(binned.loc[~delta_rows, "interval_kind"]) == {"bootstrap_median"}
+    absolute_rows = binned["quantity"].eq("dmi")
+    assert set(binned.loc[absolute_rows, "interval_kind"]) == {
+        "object_distribution"
+    }
+    assert np.all(
+        binned.loc[absolute_rows, "interval_16"]
+        < binned.loc[absolute_rows, "median"]
+    )
+    assert np.all(
+        binned.loc[absolute_rows, "median"]
+        < binned.loc[absolute_rows, "interval_84"]
+    )
     readme = outputs["readme"].read_text()
     assert "same 18 fit-selection object IDs" in readme
+    assert "actual object-level dmi values" in readme
     assert "actual paired object differences" in readme
     assert "style.mplstyle" in readme
 

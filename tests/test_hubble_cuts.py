@@ -15,13 +15,19 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from qvc.hubble.cuts import (  # noqa: E402
+    A_2500_TOTAL_MAX,
     AGN_TIER0_ELIGIBILITY_CUTS,
+    AGN_TIER0_EXTREME_MAGNITUDE_CUTS,
     AGN_TIER1_FIT_QUALITY_CUTS,
     AGN_TIER2_PARAMETER_CUTS,
     ALLOW_MISSING_SCALAR_CUT_COLUMNS,
     APPARENT_MAG_2500_ERR_MAX,
     COMPLETENESS_MAG_2500_MIN,
     COMPLETENESS_MAG_2500_MAX,
+    COMPLETENESS_TAIL_MAG_2500_MAX,
+    COMPLETENESS_TAIL_MAG_2500_MIN,
+    EBV_GAL_PLUS_EBV_AGN_COLUMN,
+    EBV_GAL_PLUS_EBV_AGN_MAX,
     EXCLUDED_SDSS_NAMES,
     FRAC_AGN_5100_MIN,
     JAXSEDFIT_JOINT_REDUCED_CHI2_MAX,
@@ -67,6 +73,8 @@ def test_build_agn_cuts_are_partitioned_in_tier_order():
         "log_tau_uv_rf": (1.5, 4.0),
         T_RF_OVER_TAU_UV_RF_COLUMN: (5.0, None),
         "apparent_mag_2500_err": (None, APPARENT_MAG_2500_ERR_MAX),
+        "a_2500_total": (None, A_2500_TOTAL_MAX),
+        EBV_GAL_PLUS_EBV_AGN_COLUMN: (None, EBV_GAL_PLUS_EBV_AGN_MAX),
         "m_2500_dereddened": (
             COMPLETENESS_MAG_2500_MIN,
             COMPLETENESS_MAG_2500_MAX,
@@ -81,6 +89,7 @@ def test_build_agn_cuts_are_partitioned_in_tier_order():
         "log_sigma_uv_rhat": (None, LIGHT_CURVE_RHAT_MAX),
     }
     assert LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS == ("u",)
+    assert A_2500_TOTAL_MAX == 3.5
     assert COMPLETENESS_MAG_2500_MIN == 18.5
     assert COMPLETENESS_MAG_2500_MAX == 24.0
 
@@ -91,6 +100,26 @@ def test_normalize_cut_tier_accepts_exact_four_modes():
     ]
     with np.testing.assert_raises_regex(ValueError, "Unknown cut tier"):
         normalize_cut_tier("3")
+
+
+def test_tails_tier0_uses_extreme_guard_in_selected_magnitude_coordinate():
+    assert tuple(
+        build_tier0_cuts(completeness_magnitude_support_mode="tails")
+    ) == AGN_TIER0_EXTREME_MAGNITUDE_CUTS
+    assert build_tier0_cuts(
+        completeness_magnitude="attenuated",
+        completeness_magnitude_support_mode="tails",
+    ) == [
+        (
+            "m_2500_attenuated_model",
+            COMPLETENESS_TAIL_MAG_2500_MIN,
+            COMPLETENESS_TAIL_MAG_2500_MAX,
+        )
+    ]
+    assert (COMPLETENESS_TAIL_MAG_2500_MIN, COMPLETENESS_TAIL_MAG_2500_MAX) == (
+        14.0,
+        32.0,
+    )
 
 
 def test_previous_scalar_and_component_defaults_are_disabled():
@@ -116,6 +145,7 @@ def test_fiducial_cut_boundaries_are_inclusive_and_nonfinite_values_fail():
         ("log_tau_uv_rf", 1.5, 4.0),
         ("fracAGN_5100_fit", FRAC_AGN_5100_MIN, None),
         ("apparent_mag_2500_err", None, APPARENT_MAG_2500_ERR_MAX),
+        ("a_2500_total", None, A_2500_TOTAL_MAX),
         (
             "m_2500_dereddened",
             COMPLETENESS_MAG_2500_MIN,
@@ -172,6 +202,19 @@ def test_jaxsedfit_joint_reduced_chi2_cut_requires_finite_values():
         pd.DataFrame({column: values}), column, None, upper
     )
     np.testing.assert_array_equal(mask, [True, False, False, False, False])
+
+
+def test_total_fitted_reddening_cut_has_strict_upper_boundary():
+    upper = EBV_GAL_PLUS_EBV_AGN_MAX
+    values = [np.nextafter(upper, -np.inf), upper, np.nan, np.inf, -np.inf]
+    mask = _scalar_parameter_cut_mask(
+        pd.DataFrame({EBV_GAL_PLUS_EBV_AGN_COLUMN: values}),
+        EBV_GAL_PLUS_EBV_AGN_COLUMN,
+        None,
+        upper,
+    )
+    np.testing.assert_array_equal(mask, [True, False, False, False, False])
+    assert not _scalar_cut_has_inclusive_upper(EBV_GAL_PLUS_EBV_AGN_COLUMN)
 
 
 def test_fit_quality_cuts_reject_bad_or_missing_values():

@@ -199,6 +199,16 @@ def test_completeness_magnitude_changes_run_tag():
     assert default_tag != attenuated_tag
 
 
+def test_hard_cut_completeness_support_has_distinct_run_tag():
+    common = ("FlatLambdaCDM", False, "fastest", None, (0.44, 3.16))
+    hard_cut = hubble_fit.make_run_tag(*common)
+    tails = hubble_fit.make_run_tag(
+        *common, completeness_magnitude_support_mode="tails"
+    )
+    assert "_compsupport-hardcut" not in tails
+    assert "_compsupport-hardcut" in hard_cut
+
+
 def test_light_curve_posterior_draw_mode_changes_run_tag_only_when_requested():
     common = ("FlatLambdaCDM", False, "fastest", None, (0.44, 3.16))
 
@@ -252,7 +262,7 @@ def test_centered_lcdm_prior_profile_bounds(cosmo_model, expected_dark_energy):
     )
 
     assert default_priors["M0_agn"] == (-26.0, -18.0)
-    assert centered_priors["M0_agn"] == (-30.0, -10.0)
+    assert centered_priors["M0_agn"] == (-26.0, -18.0)
     for parameter, bounds in expected_dark_energy.items():
         assert centered_priors[parameter] == bounds
     if cosmo_model == "Flatw0waCDM":
@@ -1055,6 +1065,63 @@ def test_log_likelihood_only_agn_skips_pantheon_and_sn_parameter(fake_data):
     assert blob.shape == (3, len(df_agn))
 
 
+def test_log_likelihood_enforces_selected_prior_profile(fake_data):
+    df_agn, _ = fake_data
+    priors, model_labels, _ = hubble_model.get_model_params(
+        "Flatw0waCDM",
+        only_agn=True,
+        fixed_h0=70.0,
+        prior_profile="centered_lcdm",
+    )
+    params = {
+        key: (low + high) / 2.0
+        for key, (low, high) in priors.items()
+    }
+    params["wa"] = 5.0
+    theta = np.array([params[key] for key in model_labels], dtype=float)
+
+    agn_fields = hubble_model.agn_model_req_obs + hubble_model.agn_model_req_errs
+    agn_fields += (
+        "apparent_mag_2500",
+        "apparent_mag_2500_err",
+        "z",
+        "z_err",
+        "object_id",
+    )
+    agn_data = {col: df_agn[col].to_numpy() for col in agn_fields}
+    common = dict(
+        agn_data=agn_data,
+        pantheon_data={},
+        _sna_L=None,
+        _sna_Lower=True,
+        _sna_LogdetCov=None,
+        cosmo_model="Flatw0waCDM",
+        completeness_params=None,
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        agn_pivot_context=_agn_pivot_context(df_agn),
+        agn_calibrators_data=None,
+        fixed_h0=70.0,
+        only_agn=True,
+        use_full_cov=False,
+    )
+
+    centered_logl, centered_blob = hubble_likelihood.log_likelihood(
+        theta,
+        prior_profile="centered_lcdm",
+        **common,
+    )
+    default_logl, default_blob = hubble_likelihood.log_likelihood(
+        theta,
+        prior_profile="default",
+        **common,
+    )
+
+    assert np.isfinite(centered_logl)
+    assert centered_blob.shape == (3, len(df_agn))
+    assert default_logl == -np.inf
+    np.testing.assert_array_equal(default_blob, np.zeros((3, len(df_agn))))
+
+
 @pytest.mark.parametrize("prior_profile", ["default", "centered_lcdm"])
 def test_flatw0wa_early_de_guard_is_opt_in(fake_data, prior_profile):
     df_agn, df_pantheon = fake_data
@@ -1086,6 +1153,7 @@ def test_flatw0wa_early_de_guard_is_opt_in(fake_data, prior_profile):
         z_pivot_agn=hubble_fit.z_pivot_agn,
         agn_pivot_context=pivot_context,
         agn_calibrators_data=None,
+        prior_profile=prior_profile,
         only_sna=False,
         use_full_cov=False,
     )
@@ -1101,6 +1169,7 @@ def test_flatw0wa_early_de_guard_is_opt_in(fake_data, prior_profile):
         z_pivot_agn=hubble_fit.z_pivot_agn,
         agn_pivot_context=pivot_context,
         agn_calibrators_data=None,
+        prior_profile=prior_profile,
         early_de_guard=True,
         only_sna=False,
         use_full_cov=False,
@@ -1383,6 +1452,7 @@ def test_completeness_redshift_support_covers_plot_sample_and_rejects_narrow_moc
 def test_strict_padded_support_is_recorded_in_checkpoint_selection_metadata():
     frame = pd.DataFrame({"z": [0.5, 3.5]})
     frame.attrs["cut_configuration_json"] = '{"cut_tier":"2"}'
+    frame.attrs["completeness_magnitude_support_mode"] = "hard-cut"
 
     hubble_fit.record_completeness_support_metadata(
         (frame,),
@@ -1423,8 +1493,10 @@ def test_compute_direct_full_sample_completeness_summaries_optionally_returns_se
     df_plot = df_agn.iloc[:3].copy()
     flat_samples = np.array([[10.0], [20.0], [30.0], [40.0]])
     draw_indices = np.array([0, 2], dtype=int)
+    observed_prior_profiles = []
 
     def fake_log_likelihood(theta, *, agn_data, **kwargs):
+        observed_prior_profiles.append(kwargs["prior_profile"])
         n_objects = len(agn_data)
         blob = np.zeros((3, n_objects), dtype=float)
         blob[1] = float(theta[0]) + np.arange(n_objects, dtype=float)
@@ -1450,6 +1522,7 @@ def test_compute_direct_full_sample_completeness_summaries_optionally_returns_se
         disable_ceph_dist_calibration=False,
         use_planck_h0_prior=False,
         use_planck_om_prior=False,
+        prior_profile="centered_lcdm",
     )
 
     legacy_result = (
@@ -1498,6 +1571,8 @@ def test_compute_direct_full_sample_completeness_summaries_optionally_returns_se
     assert selected_draws.object_ids == tuple(
         df_plot["object_id"].astype(str)
     )
+    assert observed_prior_profiles
+    assert set(observed_prior_profiles) == {"centered_lcdm"}
 
 
 def test_get_hubble_posterior_sample_indices_preserves_plot_stride():
@@ -3898,10 +3973,10 @@ def test_run_mcmc_pipeline_compare_sigma_only_skips_completeness_plots_on_resume
         / "hubble_posteriors"
         / "unit"
         / (
-            "posteriors_FlatLambdaCDM_joint_fastest_all_z0p44_3p16_"
-            "2d_compmag-dereddened.h5"
+                "posteriors_FlatLambdaCDM_joint_fastest_all_z0p44_3p16_"
+                "2d_compmag-dereddened_compsupport-hardcut.h5"
+            )
         )
-    )
     completeness_calls = []
     diagnostics_calls = []
     pivot_context = _agn_pivot_context(df_agn, (0.44, 3.16))
@@ -3971,6 +4046,7 @@ def test_run_mcmc_pipeline_uses_explicit_parent_sample_for_completeness_map(monk
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
     theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
     completeness_sample_ids = []
+    sampler_logl_kwargs = []
     pivot_context = _agn_pivot_context(df_fit, (0.44, 3.16))
 
     class FakeResults:
@@ -3984,7 +4060,7 @@ def test_run_mcmc_pipeline_uses_explicit_parent_sample_for_completeness_map(monk
 
     class FakeSampler:
         def __init__(self, *args, **kwargs):
-            pass
+            sampler_logl_kwargs.append(kwargs["logl_kwargs"])
 
         def run_nested(self, *args, **kwargs):
             self.results = FakeResults()
@@ -4036,12 +4112,14 @@ def test_run_mcmc_pipeline_uses_explicit_parent_sample_for_completeness_map(monk
         use_full_cov=False,
         speed="fastest",
         prefix="unit",
+        prior_profile="centered_lcdm",
         completeness_sim_file="dummy_completeness.h5",
         df_agn_completeness=df_parent,
     )
 
     assert result[6].shape == (len(df_fit),)
     assert completeness_sample_ids == [df_parent["object_id"].tolist()]
+    assert sampler_logl_kwargs[0]["prior_profile"] == "centered_lcdm"
     audit_paths = list(
         (tmp_path / "plots" / "hubble" / "unit").glob(
             "*/completeness_audit_pre_post_cuts.pdf"
@@ -5664,7 +5742,11 @@ def test_hubble_fit_cli_declares_and_forwards_prior_profile():
 def test_jax_fit_forwards_prior_profile_to_tag_and_prior_builder():
     source_path = SRC / "qvc" / "hubble" / "hubble_fit_jax.py"
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
-    forwarded = {"make_run_tag": [], "get_model_params": []}
+    forwarded = {
+        "make_run_tag": [],
+        "get_model_params": [],
+        "_compute_numpy_blobs_from_samples": [],
+    }
     parser_flag = None
     cli_forwarded = []
 
@@ -5821,3 +5903,7 @@ def test_run_hubble_forwards_configurable_cumulative_cut_tier():
     assert "tiers are cumulative" in runner
     assert '"QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG", "0.10"' in runner
     assert '"QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z", "0.30"' in runner
+    assert '"QVC_HUBBLE_COMPLETENESS_MAGNITUDE_SUPPORT_MODE", "hard-cut"' in runner
+    assert "--completeness-magnitude-support-mode @(completeness_magnitude_support_mode)" in runner
+    assert '"QVC_CUT_A_2500_TOTAL_MAX": "3.5"' in runner
+    assert '"QVC_CUT_EBV_GAL_PLUS_EBV_AGN_MAX": "1.0"' in runner

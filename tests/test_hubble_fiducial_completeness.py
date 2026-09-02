@@ -22,6 +22,7 @@ def test_default_completeness_support_matches_histogram_edges(tmp_path):
         COMPLETENESS_MAG_EDGE_MIN,
         COMPLETENESS_MAG_2500_MAX,
         COMPLETENESS_MAG_2500_MIN,
+        DEFAULT_COMPLETENESS_MAGNITUDE_SUPPORT_MODE,
     )
     from qvc.hubble.hubble_completeness_refactored import (
         COMPLETENESS_MAG_COL,
@@ -53,8 +54,10 @@ def test_default_completeness_support_matches_histogram_edges(tmp_path):
     assert COMPLETENESS_MAG_2500_MIN == pytest.approx(COMPLETENESS_MAG_EDGE_MIN)
     assert COMPLETENESS_MAG_2500_MAX == pytest.approx(COMPLETENESS_MAG_EDGE_MAX)
     assert completeness.magnitude_support == pytest.approx(
-        (COMPLETENESS_MAG_EDGE_MIN, COMPLETENESS_MAG_EDGE_MAX)
+        (COMPLETENESS_MAG_2500_MIN, COMPLETENESS_MAG_2500_MAX)
     )
+    assert DEFAULT_COMPLETENESS_MAGNITUDE_SUPPORT_MODE == "hard-cut"
+    assert completeness.magnitude_support_mode == "hard-cut"
     assert completeness.map_magnitude_support == pytest.approx(
         (COMPLETENESS_MAP_MAG_EDGE_MIN, COMPLETENESS_MAP_MAG_EDGE_MAX)
     )

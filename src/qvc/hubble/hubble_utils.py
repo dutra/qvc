@@ -34,9 +34,13 @@ from qvc.hubble.cuts import (
     COMPLETENESS_MAP_Z_EDGE_MIN,
     COMPLETENESS_MAG_2500_MAX,
     COMPLETENESS_MAG_2500_MIN,
+    COMPLETENESS_TAIL_MAG_2500_MAX,
+    COMPLETENESS_TAIL_MAG_2500_MIN,
+    EBV_GAL_PLUS_EBV_AGN_COLUMN,
     EXCLUDED_SDSS_NAMES,
     LIGHT_CURVE_N_POINTS_COLUMN,
     LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
+    normalize_completeness_magnitude_support_mode,
     T_RF_OVER_TAU_UV_RF_COLUMN,
     LOG_AMP_DELTA_BC_UPPER,
     LOG_F_BC_3000_MAX,
@@ -79,7 +83,7 @@ from qvc.spectra.catalog_hdf5 import read_spectra_catalog_hdf5
 PURPLE_ANSI = "\033[95m"
 RESET_ANSI = "\033[0m"
 HUBBLE_JITTER_SURVEYS = ("sdss", "ps1", "ztf")
-STRICT_UPPER_BOUND_SCALAR_CUT_COLUMNS = frozenset()
+STRICT_UPPER_BOUND_SCALAR_CUT_COLUMNS = frozenset({EBV_GAL_PLUS_EBV_AGN_COLUMN})
 
 AB_MAG_ZERO_POINT = 48.60
 XRAY_PHOTON_INDEX = 1.9
@@ -1157,6 +1161,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                   *,
                   magnitude_convention,
                   completeness_magnitude="dereddened",
+                  completeness_magnitude_support_mode="hard-cut",
                   enforce_completeness_support=False,
                   allow_legacy_v3_host_capture_metadata=False,
                   light_curve_uncertainty_mode="covariance",
@@ -1175,6 +1180,11 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             "completeness_magnitude must be exactly 'dereddened' or "
             f"'attenuated', got {completeness_magnitude!r}."
         )
+    completeness_magnitude_support_mode = (
+        normalize_completeness_magnitude_support_mode(
+            completeness_magnitude_support_mode
+        )
+    )
     cut_tier = normalize_cut_tier(cut_tier)
     maximum_cut_tier = cut_tier_level(cut_tier)
     apply_tier0 = maximum_cut_tier >= 0
@@ -2265,6 +2275,12 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             return df, df_all, df.copy()
         return df, df_all
 
+    ebv_columns = ("ebv_gal", "ebv_agn")
+    if all(column in df.columns for column in ebv_columns):
+        ebv_gal = pd.to_numeric(df["ebv_gal"], errors="coerce")
+        ebv_agn = pd.to_numeric(df["ebv_agn"], errors="coerce")
+        df[EBV_GAL_PLUS_EBV_AGN_COLUMN] = ebv_gal + ebv_agn
+
     df['log_t_rf_length'] = np.log10(df['t_rf_length'])
 
     if {"apparent_mag_2500", "apparent_mag_2500_err"}.issubset(df.columns):
@@ -2293,6 +2309,20 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                 raise ValueError(
                     f"Tier {tier} cut requires missing column {col!r}. "
                     "Use a compatible input catalog or select a lower cut tier."
+                )
+            if (
+                str(tier) == "0"
+                and completeness_magnitude_support_mode == "tails"
+                and lower == COMPLETENESS_TAIL_MAG_2500_MIN
+                and upper == COMPLETENESS_TAIL_MAG_2500_MAX
+            ):
+                values = pd.to_numeric(frame[col], errors="coerce").to_numpy(dtype=float)
+                print(
+                    "Tier-0 extreme-magnitude guard "
+                    f"{col} in [{lower}, {upper}]: "
+                    f"below={int(np.count_nonzero(np.isfinite(values) & (values < lower)))}, "
+                    f"above={int(np.count_nonzero(np.isfinite(values) & (values > upper)))}, "
+                    f"nonfinite={int(np.count_nonzero(~np.isfinite(values)))}."
                 )
             col_mask = _scalar_parameter_cut_mask(frame, col, lower, upper)
             plot_cut_diagnostics(
@@ -2326,9 +2356,10 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
     )
 
     completeness_support_cuts = build_tier0_cuts(
-        completeness_magnitude=completeness_magnitude
+        completeness_magnitude=completeness_magnitude,
+        completeness_magnitude_support_mode=completeness_magnitude_support_mode,
     )
-    if enforce_completeness_support:
+    if enforce_completeness_support and completeness_magnitude_support_mode == "hard-cut":
         if return_completeness_parent:
             map_support_cuts = tuple(
                 (column, COMPLETENESS_MAP_MAG_EDGE_MIN, COMPLETENESS_MAP_MAG_EDGE_MAX)
@@ -2651,9 +2682,18 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             completeness_support_cuts if enforce_completeness_support else []
         ),
         "completeness_magnitude_support": [
-            float(COMPLETENESS_MAG_2500_MIN),
-            float(COMPLETENESS_MAG_2500_MAX),
+            float(
+                COMPLETENESS_TAIL_MAG_2500_MIN
+                if completeness_magnitude_support_mode == "tails"
+                else COMPLETENESS_MAG_2500_MIN
+            ),
+            float(
+                COMPLETENESS_TAIL_MAG_2500_MAX
+                if completeness_magnitude_support_mode == "tails"
+                else COMPLETENESS_MAG_2500_MAX
+            ),
         ],
+        "completeness_magnitude_support_mode": completeness_magnitude_support_mode,
         "completeness_redshift_support": None,
         "completeness_map_magnitude_support": [
             float(COMPLETENESS_MAP_MAG_EDGE_MIN),
@@ -2665,7 +2705,13 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         ],
         "completeness_support_enforced": bool(enforce_completeness_support),
         "completeness_interpolation_policy": (
-            "strict-padded-v1" if enforce_completeness_support else None
+            (
+                "constant-bright-supported-transition-faint-v2"
+                if completeness_magnitude_support_mode == "tails"
+                else "strict-padded-v1"
+            )
+            if enforce_completeness_support
+            else None
         ),
         "tier0": (
             completeness_support_cuts
@@ -2703,6 +2749,9 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         if frame is None:
             continue
         frame.attrs["cut_tier"] = cut_tier
+        frame.attrs["completeness_magnitude_support_mode"] = (
+            completeness_magnitude_support_mode
+        )
         frame.attrs["cut_configuration_json"] = cut_configuration_json
 
     num_quasars_z_0_1 = len(df[(df['z'] > 0) & (df['z'] <= 1.0)])

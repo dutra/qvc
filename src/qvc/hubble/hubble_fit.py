@@ -44,11 +44,16 @@ from qvc.hubble.cuts import (
     COMPLETENESS_MAP_Z_EDGE_MIN,
     COMPLETENESS_MAG_2500_MAX,
     COMPLETENESS_MAG_2500_MIN,
+    COMPLETENESS_MAGNITUDE_SUPPORT_MODES,
+    DEFAULT_COMPLETENESS_MAGNITUDE_SUPPORT_MODE,
+    COMPLETENESS_TAIL_MAG_2500_MAX,
+    COMPLETENESS_TAIL_MAG_2500_MIN,
     COMPLETENESS_N_MAG_BINS,
     COMPLETENESS_N_Z_BINS,
     CUT_TIER_CHOICES,
     SDSS_TARGET_SELECTION_CHOICES,
     normalize_cut_tier,
+    normalize_completeness_magnitude_support_mode,
     normalize_sdss_target_selection,
 )
 from qvc.hubble.hubble_utils import (
@@ -89,6 +94,7 @@ from qvc.hubble.hubble_likelihood import (
     normalize_selection_attenuation_mode,
     sigma_lens_from_dc,
     sigma_mu_from_z_err,
+    warn_if_selection_tails_dominate,
 )
 from qvc.light_curve.posterior_draws import (
     LIGHT_CURVE_LOG_SIGMA_DRAW_COL,
@@ -664,6 +670,7 @@ def make_run_tag(
     completeness=True,
     completeness_mode="2d",
     completeness_magnitude="dereddened",
+    completeness_magnitude_support_mode="hard-cut",
     disable_ceph_dist_calibration=False,
     use_planck_h0_prior=False,
     use_planck_om_prior=False,
@@ -685,10 +692,20 @@ def make_run_tag(
     completeness_magnitude = normalize_completeness_magnitude(
         completeness_magnitude
     )
+    completeness_magnitude_support_mode = (
+        normalize_completeness_magnitude_support_mode(
+            completeness_magnitude_support_mode
+        )
+    )
     completeness_tag = (
         f"_{completeness_mode}_compmag-{completeness_magnitude}"
         if completeness
         else "_disable_completeness"
+    )
+    completeness_support_tag = (
+        "_compsupport-hardcut"
+        if completeness and completeness_magnitude_support_mode == "hard-cut"
+        else ""
     )
     ceph_tag = "_nocephdist_planckh0" if disable_ceph_dist_calibration else ""
     planck_h0_tag = "_planckh0" if use_planck_h0_prior and not disable_ceph_dist_calibration else ""
@@ -725,7 +742,7 @@ def make_run_tag(
     )
     return (
         f"{cosmo_model}_{_fit_mode_label(only_sna, only_agn)}_{speed}_{n_tag}_{z_tag}"
-        f"{completeness_tag}{attenuation_tag}{light_curve_uncertainty_tag}"
+        f"{completeness_tag}{completeness_support_tag}{attenuation_tag}{light_curve_uncertainty_tag}"
         f"{ceph_tag}{planck_h0_tag}{fixed_h0_tag}{planck_om_tag}{prior_profile_tag}{alpha_tag}{eta_sigma_tag}"
         f"{fagn_sigmoid_tag}{fagn_flux_fraction_tag}{logf_tag}"
     )
@@ -1886,7 +1903,23 @@ def resolve_completeness_redshift_support(df_agn, z_range):
 def record_completeness_support_metadata(frames, *, magnitude_support, redshift_support):
     """Persist strict padded-map support in selection/checkpoint metadata."""
 
-    magnitude_support = [float(value) for value in magnitude_support]
+    frames = tuple(frame for frame in frames if frame is not None)
+    support_mode = (
+        frames[0].attrs.get(
+            "completeness_magnitude_support_mode",
+            DEFAULT_COMPLETENESS_MAGNITUDE_SUPPORT_MODE,
+        )
+        if frames
+        else DEFAULT_COMPLETENESS_MAGNITUDE_SUPPORT_MODE
+    )
+    support_mode = normalize_completeness_magnitude_support_mode(support_mode)
+    if support_mode == "tails":
+        magnitude_support = [
+            float(COMPLETENESS_TAIL_MAG_2500_MIN),
+            float(COMPLETENESS_TAIL_MAG_2500_MAX),
+        ]
+    else:
+        magnitude_support = [float(value) for value in magnitude_support]
     redshift_support = [float(value) for value in redshift_support]
     for frame in frames:
         if frame is None:
@@ -1896,6 +1929,7 @@ def record_completeness_support_metadata(frames, *, magnitude_support, redshift_
         configuration.update(
             {
                 "completeness_magnitude_support": magnitude_support,
+                "completeness_magnitude_support_mode": support_mode,
                 "completeness_redshift_support": redshift_support,
                 "completeness_map_magnitude_support": [
                     COMPLETENESS_MAP_MAG_EDGE_MIN, COMPLETENESS_MAP_MAG_EDGE_MAX
@@ -1911,15 +1945,86 @@ def record_completeness_support_metadata(frames, *, magnitude_support, redshift_
                 "completeness_smooth_sigma_z": float(os.environ.get(
                     COMPLETENESS_SMOOTH_SIGMA_Z_ENV, DEFAULT_COMPLETENESS_SMOOTH_SIGMA_Z
                 )),
-                "completeness_interpolation_policy": "strict-padded-v1",
+                "completeness_interpolation_policy": (
+                    "constant-bright-supported-transition-faint-v2"
+                    if support_mode == "tails"
+                    else "strict-padded-v1"
+                ),
             }
         )
         frame.attrs["cut_configuration_json"] = json.dumps(
             configuration, sort_keys=True, separators=(",", ":")
         )
+        frame.attrs["completeness_magnitude_support_mode"] = support_mode
 
 
-def completeness_checkpoint_metadata(completeness_sim_file):
+def record_completeness_tail_metadata(frames, completeness_model):
+    """Add fitted tail parameters to the immutable selection fingerprint."""
+    decay = getattr(completeness_model, "faint_tail_decay", None)
+    if decay is None:
+        return
+    diagnostics = completeness_model.faint_tail_diagnostics or {}
+    payload = {
+        "completeness_faint_tail_decay": np.asarray(decay, dtype=float).tolist(),
+        "completeness_faint_tail_redshift": np.asarray(
+            completeness_model.z_centers, dtype=float
+        ).tolist(),
+        "completeness_faint_tail_fit_width_mag": float(
+            diagnostics.get("fit_width_mag", 0.75)
+        ),
+        "completeness_faint_tail_max_fit_width_mag": float(
+            diagnostics.get("max_fit_width_mag", 2.0)
+        ),
+        "completeness_faint_tail_shrinkage": float(
+            diagnostics.get("shrinkage", 4.0)
+        ),
+        "completeness_faint_tail_support_source": str(
+            diagnostics.get("support_source", "unknown")
+        ),
+        "completeness_faint_tail_support_z_half_width": float(
+            diagnostics.get("support_z_half_width", 0.2)
+        ),
+        "completeness_faint_tail_min_parent_count": float(
+            diagnostics.get("min_parent_count", 20.0)
+        ),
+        "completeness_faint_tail_min_observed_count": float(
+            diagnostics.get("min_observed_count", 3.0)
+        ),
+        "completeness_faint_tail_min_endpoint_observed_count": float(
+            diagnostics.get("min_endpoint_observed_count", 1.0)
+        ),
+        "completeness_faint_tail_transition_relative_bounds": list(
+            diagnostics.get("transition_relative_bounds", (0.02, 0.95))
+        ),
+        "completeness_faint_tail_min_fit_bins": int(
+            diagnostics.get("min_fit_bins", 3)
+        ),
+        "completeness_faint_tail_fit_start_magnitude": np.asarray(
+            diagnostics.get("fit_start_magnitude", []), dtype=float
+        ).tolist(),
+        "completeness_faint_tail_fit_end_magnitude": np.asarray(
+            diagnostics.get("fit_end_magnitude", []), dtype=float
+        ).tolist(),
+        "completeness_faint_tail_raw_target_decay": float(
+            diagnostics.get("raw_target_decay", np.nan)
+        ),
+        "completeness_faint_tail_target_decay": float(
+            diagnostics.get("target_decay", np.nan)
+        ),
+    }
+    for frame in frames:
+        if frame is None:
+            continue
+        configuration = json.loads(frame.attrs.get("cut_configuration_json", "{}"))
+        configuration.update(payload)
+        frame.attrs["cut_configuration_json"] = json.dumps(
+            configuration, sort_keys=True, separators=(",", ":")
+        )
+
+
+def completeness_checkpoint_metadata(
+    completeness_sim_file, *, magnitude_support_mode="hard-cut", completeness_model=None
+):
     """Return immutable fixed-grid and mock provenance for new checkpoints."""
 
     provenance = {"path": None}
@@ -1948,8 +2053,21 @@ def completeness_checkpoint_metadata(completeness_sim_file):
                         provenance[key] = value
                 provenance["datasets"] = sorted(handle.keys())
 
-    return {
-        "completeness_interpolation_policy": "strict-padded-v1",
+    support_mode = normalize_completeness_magnitude_support_mode(
+        magnitude_support_mode
+    )
+    selection_support = (
+        [COMPLETENESS_TAIL_MAG_2500_MIN, COMPLETENESS_TAIL_MAG_2500_MAX]
+        if support_mode == "tails"
+        else [COMPLETENESS_MAG_2500_MIN, COMPLETENESS_MAG_2500_MAX]
+    )
+    metadata = {
+        "completeness_interpolation_policy": (
+            "constant-bright-supported-transition-faint-v2"
+            if support_mode == "tails"
+            else "strict-padded-v1"
+        ),
+        "completeness_magnitude_support_mode": support_mode,
         "completeness_map_magnitude_support": np.asarray(
             [COMPLETENESS_MAP_MAG_EDGE_MIN, COMPLETENESS_MAP_MAG_EDGE_MAX],
             dtype=float,
@@ -1961,7 +2079,7 @@ def completeness_checkpoint_metadata(completeness_sim_file):
         "completeness_map_n_magnitude_bins": int(COMPLETENESS_N_MAG_BINS),
         "completeness_map_n_redshift_bins": int(COMPLETENESS_N_Z_BINS),
         "completeness_selection_magnitude_support": np.asarray(
-            [COMPLETENESS_MAG_2500_MIN, COMPLETENESS_MAG_2500_MAX], dtype=float
+            selection_support, dtype=float
         ),
         "completeness_smooth_sigma_mag": float(
             os.environ.get(
@@ -1979,6 +2097,41 @@ def completeness_checkpoint_metadata(completeness_sim_file):
             provenance, sort_keys=True, separators=(",", ":")
         ),
     }
+    if completeness_model is not None and getattr(
+        completeness_model, "faint_tail_decay", None
+    ) is not None:
+        metadata["completeness_faint_tail_decay"] = np.asarray(
+            completeness_model.faint_tail_decay, dtype=float
+        )
+        metadata["completeness_faint_tail_redshift"] = np.asarray(
+            completeness_model.z_centers, dtype=float
+        )
+        diagnostics = completeness_model.faint_tail_diagnostics or {}
+        for output_key, diagnostics_key in (
+            ("completeness_faint_tail_fit_start_magnitude", "fit_start_magnitude"),
+            ("completeness_faint_tail_fit_end_magnitude", "fit_end_magnitude"),
+            ("completeness_faint_tail_fit_n_bins", "fit_n_bins"),
+            ("completeness_faint_tail_supported_parent_count", "supported_parent_count"),
+            ("completeness_faint_tail_supported_observed_count", "supported_observed_count"),
+        ):
+            metadata[output_key] = np.asarray(
+                diagnostics.get(diagnostics_key, []), dtype=float
+            )
+        metadata["completeness_faint_tail_diagnostics_json"] = json.dumps(
+            {
+                key: (
+                    value.tolist()
+                    if isinstance(value, np.ndarray)
+                    else list(value)
+                    if isinstance(value, tuple)
+                    else value
+                )
+                for key, value in diagnostics.items()
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    return metadata
 
 
 def _validate_strict_padded_checkpoint_metadata(
@@ -1989,9 +2142,19 @@ def _validate_strict_padded_checkpoint_metadata(
     if not expected_cut_configuration_json:
         return
     expected_configuration = json.loads(str(expected_cut_configuration_json))
-    if expected_configuration.get("completeness_interpolation_policy") != "strict-padded-v1":
+    policy = expected_configuration.get("completeness_interpolation_policy")
+    if policy not in {
+        "strict-padded-v1",
+        "constant-bright-exponential-faint-v1",
+        "constant-bright-supported-transition-faint-v2",
+    }:
         return
-    expected = completeness_checkpoint_metadata(None)
+    expected = completeness_checkpoint_metadata(
+        None,
+        magnitude_support_mode=expected_configuration.get(
+            "completeness_magnitude_support_mode", "hard-cut"
+        ),
+    )
     required = set(expected)
     missing = sorted(required - set(results))
     if missing:
@@ -2126,6 +2289,9 @@ def _prepare_shared_agn_pivot_context(
             completeness=completeness,
             completeness_mode=completeness_mode,
             completeness_magnitude=completeness_magnitude,
+            completeness_magnitude_support_mode=reference_selection.attrs.get(
+                "completeness_magnitude_support_mode", "hard-cut"
+            ),
             disable_ceph_dist_calibration=disable_ceph_dist_calibration,
             use_planck_h0_prior=use_planck_h0_prior,
             use_planck_om_prior=use_planck_om_prior,
@@ -2213,9 +2379,18 @@ def _build_completeness_params(
     plot_path,
     plot=False,
     completeness_z_range=None,
+    magnitude_support_mode=None,
 ):
     if not completeness:
         return None
+    if magnitude_support_mode is None:
+        magnitude_support_mode = df_agn_completeness.attrs.get(
+            "completeness_magnitude_support_mode",
+            DEFAULT_COMPLETENESS_MAGNITUDE_SUPPORT_MODE,
+        )
+    magnitude_support_mode = normalize_completeness_magnitude_support_mode(
+        magnitude_support_mode
+    )
     missing_magnitude_columns = {
         COMPLETENESS_MAG_COL,
         COMPLETENESS_MAG_ERR_COL,
@@ -2266,6 +2441,7 @@ def _build_completeness_params(
             plot_path=plot_path,
             df_agn_fhost_population=df_agn_all,
             z_range=completeness_z_range,
+            magnitude_support_mode=magnitude_support_mode,
         )
     if completeness_mode == "3d_fhost":
         return get_completeness_function_3d_fhost(
@@ -2275,6 +2451,7 @@ def _build_completeness_params(
             plot_path=plot_path,
             df_agn_fhost_population=df_agn_all,
             z_range=completeness_z_range,
+            magnitude_support_mode=magnitude_support_mode,
         )
     return get_completeness_function_2d(
         df_agn_completeness,
@@ -2282,6 +2459,7 @@ def _build_completeness_params(
         plot=plot,
         plot_path=plot_path,
         z_range=completeness_z_range,
+        magnitude_support_mode=magnitude_support_mode,
     )
 
 
@@ -2388,6 +2566,7 @@ def _compute_direct_full_sample_completeness_summaries(
     disable_ceph_dist_calibration,
     use_planck_h0_prior,
     use_planck_om_prior,
+    prior_profile=DEFAULT_PRIOR_PROFILE,
     only_agn=False,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
@@ -2508,6 +2687,7 @@ def _compute_direct_full_sample_completeness_summaries(
             agn_pivot_context=agn_pivot_context,
             use_planck_h0_prior=use_planck_h0_prior,
             use_planck_om_prior=use_planck_om_prior,
+            prior_profile=prior_profile,
             use_ceph_dist_calibration=not disable_ceph_dist_calibration,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
@@ -3063,6 +3243,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         completeness=completeness,
         completeness_mode=completeness_mode,
         completeness_magnitude=completeness_magnitude,
+        completeness_magnitude_support_mode=df_agn.attrs.get(
+            "completeness_magnitude_support_mode", "hard-cut"
+        ),
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
@@ -3209,6 +3392,11 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 plot_path=plot_path,
                 plot=not (compare_sigma_only or minimal_plots),
                 completeness_z_range=completeness_z_range,
+            )
+        if completeness_params is not None:
+            record_completeness_tail_metadata(
+                (df_agn, df_agn_all, df_agn_completeness),
+                completeness_params[0],
             )
         if not (compare_sigma_only or minimal_plots):
             _plot_completeness_cut_audit(
@@ -3418,6 +3606,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 use_full_cov=use_full_cov,
                 use_planck_h0_prior=use_planck_h0_prior,
                 use_planck_om_prior=use_planck_om_prior,
+                prior_profile=prior_profile,
                 fixed_h0=fixed_h0,
                 use_ceph_dist_calibration=not disable_ceph_dist_calibration,
                 use_alpha_lambda_term=use_alpha_lambda_term,
@@ -3615,8 +3804,26 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             ),
         )
         if completeness:
+            # Re-evaluate the highest-weight point so the persisted tail audit
+            # corresponds to the same sample as integrals_max_w and dmi_max_w.
+            loglike_func(samples[idx_max_weight], **logl_kwargs)
+            selection_components = getattr(
+                completeness_params[0], "_last_selection_components", {}
+            )
+            warn_if_selection_tails_dominate(selection_components)
+            for region, diagnostics in selection_components.items():
+                for quantity, values in diagnostics.items():
+                    checkpoint_payload[
+                        f"completeness_{region}_{quantity}"
+                    ] = np.asarray(values, dtype=float)
             checkpoint_payload.update(
-                completeness_checkpoint_metadata(completeness_sim_file)
+                completeness_checkpoint_metadata(
+                    completeness_sim_file,
+                    magnitude_support_mode=df_agn.attrs.get(
+                        "completeness_magnitude_support_mode", "hard-cut"
+                    ),
+                    completeness_model=completeness_params[0],
+                )
             )
         if not only_sna:
             checkpoint_payload.update(
@@ -3782,6 +3989,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         completeness=completeness,
         completeness_mode=completeness_mode,
         completeness_magnitude=completeness_magnitude,
+        completeness_magnitude_support_mode=df_agn.attrs.get(
+            "completeness_magnitude_support_mode", "hard-cut"
+        ),
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
@@ -4086,6 +4296,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 disable_ceph_dist_calibration=disable_ceph_dist_calibration,
                 use_planck_h0_prior=use_planck_h0_prior,
                 use_planck_om_prior=use_planck_om_prior,
+                prior_profile=prior_profile,
                 only_agn=only_agn,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
@@ -4466,6 +4677,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             disable_ceph_dist_calibration=disable_ceph_dist_calibration,
             use_planck_h0_prior=use_planck_h0_prior,
             use_planck_om_prior=use_planck_om_prior,
+            prior_profile=prior_profile,
             only_agn=only_agn,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
@@ -4577,6 +4789,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        prior_profile=prior_profile,
         only_agn=only_agn,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
@@ -4909,6 +5122,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 disable_ceph_dist_calibration=disable_ceph_dist_calibration,
                 use_planck_h0_prior=use_planck_h0_prior,
                 use_planck_om_prior=use_planck_om_prior,
+                prior_profile=prior_profile,
                 only_agn=only_agn,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
@@ -5609,7 +5823,8 @@ def render_hubble_mode_table(args):
     else:
         completeness = (
             f"{args.completeness_mode}; m2500={args.completeness_magnitude}; "
-            f"LF={args.completeness_lf_model}"
+            f"LF={args.completeness_lf_model}; "
+            f"support={getattr(args, 'completeness_magnitude_support_mode', 'hard-cut')}"
         )
         selection_attenuation = args.selection_attenuation_mode
 
@@ -5686,7 +5901,7 @@ if __name__ == "__main__":
         default=DEFAULT_PRIOR_PROFILE,
         help=(
             "Named top-hat prior profile. centered_lcdm uses "
-            "M0_agn=[-30,-10], w0=[-3,1], and wa=[-10,10] where applicable."
+            "M0_agn=[-26,-18], w0=[-3,1], and wa=[-10,10] where applicable."
         ),
     )
     parser.add_argument(
@@ -5855,6 +6070,15 @@ if __name__ == "__main__":
         help=(
             "m_2500 definition used by the completeness model: "
             "'dereddened' (default) or 'attenuated'."
+        ),
+    )
+    parser.add_argument(
+        "--completeness-magnitude-support-mode",
+        choices=list(COMPLETENESS_MAGNITUDE_SUPPORT_MODES),
+        default=DEFAULT_COMPLETENESS_MAGNITUDE_SUPPORT_MODE,
+        help=(
+            "Magnitude selection support: 'tails' uses the physical 14--32 "
+            "guard with map extrapolation; 'hard-cut' retains 18.5--24.0."
         ),
     )
     parser.add_argument(
@@ -6033,6 +6257,9 @@ if __name__ == "__main__":
                            sdss_target_selection=args.sdss_target_selection,
                            magnitude_convention=args.magnitude_convention,
                            completeness_magnitude=args.completeness_magnitude,
+                           completeness_magnitude_support_mode=(
+                               args.completeness_magnitude_support_mode
+                           ),
                            spectra_sdss_run2d=args.spectra_sdss_run2d,
                            correct_sigma_uv_host=args.correct_sigma_uv_host,
                            light_curve_uncertainty_mode=(

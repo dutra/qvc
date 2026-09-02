@@ -66,6 +66,8 @@ def _minimal_agn_frame(n=10):
             "spectroscopy_reduced_chi2": np.full(n, 1.0),
             "joint_reduced_chi2": np.full(n, 1.0),
             "loo_chi2_eff": np.full(n, 1.0),
+            "ebv_gal": np.full(n, 0.02),
+            "ebv_agn": np.full(n, 0.02),
             "m_2500_dereddened_rhat": np.full(n, 1.01),
             "m_2500_attenuated_model_rhat": np.full(n, 1.01),
             "log_tau_uv_rf_rhat": np.full(n, 1.01),
@@ -609,12 +611,12 @@ def test_load_agn_data_run2d_filter_bypassed_at_cut_tier_none(tmp_path, monkeypa
     assert filtered["object_id"].tolist() == ["a", "b", "c", "d"]
 
 
-def test_completeness_support_is_structural_at_cut_tier_none(tmp_path, monkeypatch):
+def test_extreme_magnitude_tier0_guard_is_bypassed_at_cut_tier_none(tmp_path, monkeypatch):
     source_path = tmp_path / "agn.h5"
     source_path.touch()
     frame = _minimal_agn_frame(n=4)
     frame["object_id"] = ["bright", "lower-edge", "upper-edge", "faint"]
-    values = [18.49, 18.5, 24.0, 24.01]
+    values = [13.99, 14.0, 32.0, 32.01]
     frame["m_2500_dereddened"] = values
     frame["m_2500_attenuated_model"] = values
 
@@ -645,13 +647,19 @@ def test_completeness_support_is_structural_at_cut_tier_none(tmp_path, monkeypat
         cut_report_path=tmp_path / "disabled.txt",
     )
 
-    assert enabled["object_id"].tolist() == ["lower-edge", "upper-edge"]
+    assert enabled["object_id"].tolist() == [
+        "bright", "lower-edge", "upper-edge", "faint"
+    ]
     assert disabled["object_id"].tolist() == [
         "bright", "lower-edge", "upper-edge", "faint"
     ]
     config = json.loads(enabled.attrs["cut_configuration_json"])
     assert config["completeness_support_enforced"] is True
-    assert config["completeness_interpolation_policy"] == "strict-padded-v1"
+    assert (
+        config["completeness_interpolation_policy"]
+        == "constant-bright-supported-transition-faint-v2"
+    )
+    assert config["completeness_magnitude_support"] == [14.0, 32.0]
 
 
 def test_tier0_applies_science_magnitude_support_before_completeness_parent(
@@ -661,7 +669,7 @@ def test_tier0_applies_science_magnitude_support_before_completeness_parent(
     source_path.touch()
     frame = _minimal_agn_frame(n=7)
     frame["object_id"] = ["map-bright-oob", "pad-bright", "lower", "upper", "pad-faint", "map-faint-oob", "middle"]
-    values = [17.9, 18.2, 18.5, 24.0, 24.3, 24.6, 21.0]
+    values = [13.9, 14.0, 18.5, 24.0, 31.9, 32.1, 21.0]
     frame["m_2500_dereddened"] = values
     frame["m_2500_attenuated_model"] = values
 
@@ -680,8 +688,9 @@ def test_tier0_applies_science_magnitude_support_before_completeness_parent(
         cut_report_path=tmp_path / "cuts.txt",
     )
 
-    assert parent["object_id"].tolist() == ["lower", "upper", "middle"]
-    assert analysis["object_id"].tolist() == ["lower", "upper", "middle"]
+    expected = ["pad-bright", "lower", "upper", "pad-faint", "middle"]
+    assert parent["object_id"].tolist() == expected
+    assert analysis["object_id"].tolist() == expected
 
 
 def test_load_agn_data_target_selection_is_tier0_eligibility(
@@ -749,7 +758,7 @@ def test_load_agn_data_cut_tiers_apply_cumulatively(tmp_path, monkeypatch):
     source_path.touch()
     frame = _minimal_agn_frame(n=4)
     frame["object_id"] = ["keep", "tier0", "tier1", "tier2"]
-    frame.loc[1, ["m_2500_dereddened", "m_2500_attenuated_model"]] = 24.5
+    frame.loc[1, ["m_2500_dereddened", "m_2500_attenuated_model"]] = 32.5
     frame.loc[2, "joint_reduced_chi2"] = 10.0
     frame.loc[3, "log_tau_uv_rf"] = 4.5
 
@@ -872,6 +881,43 @@ def test_tier2_excludes_only_joint_low_l2500_low_psf_host_region(
     )
 
     assert selected["object_id"].tolist() == ["high-l-low-host"]
+
+
+def test_tier2_requires_total_fitted_reddening_below_point_zero_five(
+    tmp_path, monkeypatch
+):
+    source_path = tmp_path / "agn.h5"
+    source_path.touch()
+    frame = _minimal_agn_frame(n=3)
+    frame["object_id"] = ["below", "at-boundary", "above"]
+    frame["ebv_gal"] = [0.019, 0.020, 0.021]
+    frame["ebv_agn"] = 0.030
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *_args, **_kwargs: frame.copy(),
+    )
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda value: value)
+    _patch_load_agn_plotters(monkeypatch)
+
+    tier1, _ = hubble_utils.load_agn_data(
+        source_path,
+        magnitude_convention="dereddened",
+        spectra_fit_h5=None,
+        cut_tier="1",
+        plot_diagnostics=False,
+    )
+    tier2, _ = hubble_utils.load_agn_data(
+        source_path,
+        magnitude_convention="dereddened",
+        spectra_fit_h5=None,
+        cut_tier="2",
+        plot_diagnostics=False,
+    )
+
+    assert tier1["object_id"].tolist() == ["below", "at-boundary", "above"]
+    assert tier2["object_id"].tolist() == ["below"]
+    assert tier2["ebv_gal_plus_ebv_agn"].tolist() == pytest.approx([0.049])
 
 
 def test_fast_vs_uv_diagnostic_skips_catalog_without_fast_timescale(tmp_path):

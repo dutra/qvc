@@ -96,7 +96,11 @@ def _binned_medians(
     bootstrap_draws: int,
     interval_kind: str = "bootstrap_median",
 ):
-    if interval_kind not in {"bootstrap_median", "paired_distribution"}:
+    if interval_kind not in {
+        "bootstrap_median",
+        "object_distribution",
+        "paired_distribution",
+    }:
         raise ValueError(f"Unknown interval kind: {interval_kind!r}.")
     rows = []
     for index, (lower, upper) in enumerate(zip(Z_EDGES[:-1], Z_EDGES[1:])):
@@ -258,12 +262,18 @@ def _selection_correction_and_residual_figure(
     for offset, model in zip(absolute_offsets, COMPLETENESS_LF_MODELS):
         dmi = corrections[model].loc[ids].to_numpy(float)
         stats = _binned_medians(
-            z, dmi, rng, bootstrap_draws=bootstrap_draws
+            z,
+            dmi,
+            rng,
+            bootstrap_draws=bootstrap_draws,
+            interval_kind="object_distribution",
         )
         axes[0].errorbar(
             stats[:, 0] + offset,
             stats[:, 2],
-            yerr=np.vstack((stats[:, 2] - stats[:, 3], stats[:, 4] - stats[:, 2])),
+            yerr=np.vstack(
+                (stats[:, 2] - stats[:, 3], stats[:, 4] - stats[:, 2])
+            ),
             color=COLORS[model],
             marker=MARKERS[model],
             ms=4.7,
@@ -275,6 +285,7 @@ def _selection_correction_and_residual_figure(
             model=model,
             quantity="dmi",
             stats=stats,
+            interval_kind="object_distribution",
         )
 
     for offset, model in zip(offsets, COMPLETENESS_LF_MODELS[1:]):
@@ -473,9 +484,10 @@ def generate_lf_comparison_diagnostics(
     readme_path.write_text(
         "Automatically generated paired diagnostics for the luminosity-function "
         f"Hubble sweep. All statistics use the same {len(ids)} fit-selection "
-        "object IDs in every run. In the absolute-value panel, error bars are the "
-        f"16th-84th percentiles of {bootstrap_draws} bootstrap resamples of the "
-        "median within each redshift bin. In delta panels, error bars are the "
+        "object IDs in every run. In the absolute-value panel, points are the "
+        "median and error bars are the 16th-84th percentiles of the actual "
+        "object-level dmi values within each redshift bin. In delta panels, "
+        "error bars are the "
         "16th-84th percentiles of the actual paired object differences within "
         "each bin; plotted points remain the medians. The figure uses "
         "src/qvc/hubble/style.mplstyle.\n",

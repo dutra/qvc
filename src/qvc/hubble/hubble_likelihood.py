@@ -2,10 +2,11 @@
 from scipy.linalg import cho_solve
 from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
 import numpy as np
-from scipy.special import logsumexp
+from scipy.special import logsumexp, ndtr
 
 #from qvc.hubble.hubble_utils import loglike_cmb_theta_simple
 from qvc.hubble.hubble_model import (
+    DEFAULT_PRIOR_PROFILE,
     get_model_params,
     M_model_agn,
     M_model_agn_err,
@@ -304,14 +305,166 @@ def _magnitude_integration_grid(m_grid, magnitude_support):
 
 def _cached_magnitude_integration_grid(completeness_model, m_grid, magnitude_support):
     support = _validate_magnitude_support(magnitude_support)
-    key = (_array_cache_token(m_grid), support)
+    map_lower = float(getattr(completeness_model, "mag_min", np.asarray(m_grid)[0]))
+    map_upper = float(getattr(completeness_model, "mag_max", np.asarray(m_grid)[-1]))
+    core_support = (max(support[0], map_lower), min(support[1], map_upper))
+    if core_support[0] >= core_support[1]:
+        raise ValueError("Magnitude selection support does not overlap the completeness map.")
+    key = (_array_cache_token(m_grid), support, core_support)
     cache = getattr(completeness_model, "_likelihood_magnitude_grid_cache", None)
     if cache is None:
         cache = {}
         setattr(completeness_model, "_likelihood_magnitude_grid_cache", cache)
     if key not in cache:
-        cache[key] = _magnitude_integration_grid(m_grid, support)
+        cache[key] = _magnitude_integration_grid(m_grid, core_support)
     return cache[key]
+
+
+def _normal_interval_moments(mean, sigma, lower, upper, probability=1.0):
+    """Gaussian-weighted raw moments on one finite constant-probability interval."""
+    mean, sigma, probability = np.broadcast_arrays(
+        np.asarray(mean, dtype=float),
+        np.asarray(sigma, dtype=float),
+        np.asarray(probability, dtype=float),
+    )
+    if upper <= lower:
+        zeros = np.zeros_like(mean)
+        return zeros, zeros, zeros
+    a = (float(lower) - mean) / sigma
+    b = (float(upper) - mean) / sigma
+    phi_a = np.exp(-0.5 * a**2) * _INV_SQRT_2PI
+    phi_b = np.exp(-0.5 * b**2) * _INV_SQRT_2PI
+    mass = ndtr(b) - ndtr(a)
+    first = mean * mass + sigma * (phi_a - phi_b)
+    second = (
+        (mean**2 + sigma**2) * mass
+        + sigma * ((mean + float(lower)) * phi_a - (mean + float(upper)) * phi_b)
+    )
+    return probability * mass, probability * first, probability * second
+
+
+def _exponential_interval_moments(
+    mean, sigma, lower, upper, boundary_probability, decay, *, anchor
+):
+    """Gaussian-weighted raw moments for a finite exponential faint tail."""
+    mean, sigma, boundary_probability, decay = np.broadcast_arrays(
+        np.asarray(mean, dtype=float),
+        np.asarray(sigma, dtype=float),
+        np.asarray(boundary_probability, dtype=float),
+        np.asarray(decay, dtype=float),
+    )
+    shifted = mean - decay * sigma**2
+    amplitude = boundary_probability * np.exp(
+        np.clip(decay * (float(anchor) - mean) + 0.5 * (decay * sigma) ** 2, -745.0, 709.0)
+    )
+    mass, first, second = _normal_interval_moments(
+        shifted, sigma, lower, upper, probability=amplitude
+    )
+    return mass, first, second
+
+
+def _selection_tail_moments(
+    completeness_model,
+    mean,
+    sigma,
+    z,
+    *,
+    f_host_2500_psf=None,
+    alpha_lambda=None,
+):
+    """Return separate finite bright/faint contributions for a selection model."""
+    mean = np.asarray(mean, dtype=float)
+    sigma = np.asarray(sigma, dtype=float)
+    z = np.asarray(z, dtype=float)
+    if getattr(completeness_model, "magnitude_support_mode", "hard-cut") != "tails":
+        zeros = tuple(np.zeros_like(mean) for _ in range(3))
+        return zeros, zeros
+    support = _validate_magnitude_support(completeness_model.magnitude_support)
+    map_lower = float(completeness_model.mag_min)
+    map_upper = float(completeness_model.mag_max)
+    edge_probability = _cached_completeness_pdet(
+        completeness_model,
+        np.asarray([map_lower, map_upper]),
+        z,
+        f_host_2500_psf=f_host_2500_psf,
+        alpha_lambda=alpha_lambda,
+    )
+    edge_shape = (edge_probability.shape[0],) + (1,) * max(mean.ndim - 1, 0)
+    bright_probability = edge_probability[:, 0].reshape(edge_shape)
+    faint_probability = edge_probability[:, 1].reshape(edge_shape)
+    bright_upper = min(map_lower, support[1])
+    bright = _normal_interval_moments(
+        mean, sigma, support[0], bright_upper, bright_probability
+    ) if support[0] < bright_upper else tuple(np.zeros_like(mean) for _ in range(3))
+    faint_lower = max(map_upper, support[0])
+    if faint_lower < support[1] and getattr(completeness_model, "faint_tail_decay", None) is not None:
+        decay = np.interp(z, completeness_model.z_centers, completeness_model.faint_tail_decay)
+        decay = decay.reshape((decay.shape[0],) + (1,) * max(mean.ndim - 1, 0))
+        faint = _exponential_interval_moments(
+            mean,
+            sigma,
+            faint_lower,
+            support[1],
+            faint_probability,
+            decay,
+            anchor=map_upper,
+        )
+    else:
+        faint = tuple(np.zeros_like(mean) for _ in range(3))
+    return bright, faint
+
+
+def _component_diagnostics(raw_moments, reference):
+    z_value, first, second = (np.asarray(value, dtype=float) for value in raw_moments)
+    reference = np.asarray(reference, dtype=float)
+    valid = z_value > 1e-298
+    safe = np.clip(z_value, 1e-300, None)
+    expectation = np.where(valid, first / safe, reference)
+    expectation2 = np.where(valid, second / safe, reference**2)
+    return {
+        "Z": z_value,
+        "dmi": expectation - reference,
+        "sigma_sel": np.sqrt(np.clip(expectation2 - expectation**2, 0.0, None)),
+    }
+
+
+def _store_selection_component_diagnostics(model, *, core, bright, faint, reference):
+    model._last_selection_components = {
+        name: _component_diagnostics(moments, reference)
+        for name, moments in (("core", core), ("bright", bright), ("faint", faint))
+    }
+    model._last_tail_contributions = {
+        "bright_Z": model._last_selection_components["bright"]["Z"],
+        "faint_Z": model._last_selection_components["faint"]["Z"],
+    }
+
+
+def warn_if_selection_tails_dominate(selection_components, *, threshold=0.5):
+    """Warn once for a completed fit when tails dominate its normalization.
+
+    This deliberately lives outside the likelihood hot path.  Completeness
+    models are serialized for multiprocessing, so an instance-level
+    ``warned`` flag does not suppress messages across nested-sampling calls.
+    """
+
+    if not selection_components:
+        return 0
+    try:
+        bright = np.asarray(selection_components["bright"]["Z"], dtype=float)
+        core = np.asarray(selection_components["core"]["Z"], dtype=float)
+        faint = np.asarray(selection_components["faint"]["Z"], dtype=float)
+    except KeyError:
+        return 0
+    total = bright + core + faint
+    tail_fraction = (bright + faint) / np.clip(total, 1e-300, None)
+    count = int(np.count_nonzero(np.isfinite(tail_fraction) & (tail_fraction > threshold)))
+    if count:
+        print(
+            "[WARNING] Completeness magnitude tails contribute more than "
+            f"{100.0 * threshold:g}% of Z_i for {count} object(s) at the "
+            "highest-weight posterior sample."
+        )
+    return count
 
 
 def _cached_completeness_pdet(
@@ -420,7 +573,28 @@ def completeness_loglike(
     m2_Z = np.trapezoid(
         wpdf_model * integration_grid[None, :] ** 2, integration_grid, axis=1
     )
+    core = (Z.copy(), m_Z.copy(), m2_Z.copy())
 
+    bright, faint = _selection_tail_moments(
+        completeness_model,
+        m_model,
+        sig[:, 0],
+        z,
+        f_host_2500_psf=f_host_2500_psf,
+        alpha_lambda=alpha_lambda,
+    )
+    Z_bright, m_Z_bright, m2_Z_bright = bright
+    Z_faint, m_Z_faint, m2_Z_faint = faint
+    Z += Z_bright + Z_faint
+    m_Z += m_Z_bright + m_Z_faint
+    m2_Z += m2_Z_bright + m2_Z_faint
+    _store_selection_component_diagnostics(
+        completeness_model,
+        core=core,
+        bright=bright,
+        faint=faint,
+        reference=m_model,
+    )
     Z = np.clip(Z, tiny, None)                                          # guard denom
 
     # Debias for plotting (the scatter is mostly in M, not Malmquist)
@@ -523,6 +697,28 @@ def completeness_loglike_posterior_draws(
         weighted * integration_grid[None, :] ** 2,
         integration_grid,
         axis=1,
+    )
+    core = (Z_raw.copy(), m_Z.copy(), m2_Z.copy())
+    bright, faint = _selection_tail_moments(
+        completeness_model,
+        centers,
+        sigma[:, None],
+        z,
+        f_host_2500_psf=f_host_2500_psf,
+        alpha_lambda=alpha_lambda,
+    )
+    valid_draws = draw_axis < counts[:, None]
+    bright = tuple(np.sum(np.where(valid_draws, value, 0.0), axis=1) / counts for value in bright)
+    faint = tuple(np.sum(np.where(valid_draws, value, 0.0), axis=1) / counts for value in faint)
+    Z_raw += bright[0] + faint[0]
+    m_Z += bright[1] + faint[1]
+    m2_Z += bright[2] + faint[2]
+    _store_selection_component_diagnostics(
+        completeness_model,
+        core=core,
+        bright=bright,
+        faint=faint,
+        reference=reference,
     )
     Z = np.clip(Z_raw, tiny, None)
     usable = Z_raw > (100.0 * tiny)
@@ -627,7 +823,52 @@ def joint_posterior_completeness_loglike_for_data(
     component_m2z = np.trapezoid(
         weighted * hubble_grid**2, integration_grid, axis=2
     )
+    core_components = (component_z.copy(), component_mz.copy(), component_m2z.copy())
+    bright, faint = _selection_tail_moments(
+        model,
+        centers,
+        external_error[:, None],
+        np.asarray(z, dtype=float),
+    )
+    tail_z = bright[0] + faint[0]
+    tail_selection_mz = bright[1] + faint[1]
+    tail_selection_m2z = bright[2] + faint[2]
+    bright_hubble = (
+        bright[0],
+        bright[1] - attenuation * bright[0],
+        bright[2] - 2.0 * attenuation * bright[1] + attenuation**2 * bright[0],
+    )
+    faint_hubble = (
+        faint[0],
+        faint[1] - attenuation * faint[0],
+        faint[2] - 2.0 * attenuation * faint[1] + attenuation**2 * faint[0],
+    )
+    component_z += tail_z
+    component_mz += tail_selection_mz - attenuation * tail_z
+    component_m2z += (
+        tail_selection_m2z
+        - 2.0 * attenuation * tail_selection_mz
+        + attenuation**2 * tail_z
+    )
+    component_z = np.where(valid, component_z, 0.0)
+    component_mz = np.where(valid, component_mz, 0.0)
+    component_m2z = np.where(valid, component_m2z, 0.0)
     norm = counts.astype(float)
+    averaged_components = []
+    for moments in (core_components, bright_hubble, faint_hubble):
+        averaged_components.append(
+            tuple(
+                np.sum(np.where(valid, value, 0.0), axis=1) / norm
+                for value in moments
+            )
+        )
+    _store_selection_component_diagnostics(
+        model,
+        core=averaged_components[0],
+        bright=averaged_components[1],
+        faint=averaged_components[2],
+        reference=model_magnitude,
+    )
     z_raw = np.sum(component_z, axis=1) / norm
     mz = np.sum(component_mz, axis=1) / norm
     m2z = np.sum(component_m2z, axis=1) / norm
@@ -768,6 +1009,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
                    agn_calibrators_data=None,
                    use_planck_h0_prior=False,
                    use_planck_om_prior=False,
+                   prior_profile=DEFAULT_PRIOR_PROFILE,
                    fixed_h0=None,
                    use_ceph_dist_calibration=True,
                    use_alpha_lambda_term=False,
@@ -801,6 +1043,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         only_agn=only_agn,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        prior_profile=prior_profile,
         fixed_h0=fixed_h0,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
@@ -1039,6 +1282,7 @@ def log_likelihood_nearbylcs(
     agn_pivot_context,
     use_planck_h0_prior=False,
     use_planck_om_prior=False,
+    prior_profile=DEFAULT_PRIOR_PROFILE,
     fixed_h0=None,
     use_ceph_dist_calibration=True,
     use_alpha_lambda_term=False,
@@ -1078,6 +1322,7 @@ def log_likelihood_nearbylcs(
         only_agn=only_agn,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        prior_profile=prior_profile,
         fixed_h0=fixed_h0,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,

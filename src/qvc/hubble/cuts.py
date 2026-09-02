@@ -266,7 +266,15 @@ SPECTROSCOPY_REDUCED_CHI2_MAX = _cut_env_float(
     "QVC_CUT_SPECTROSCOPY_REDUCED_CHI2_MAX", 1.3
 )
 LOO_CHI2_EFF_MAX = _cut_env_float("QVC_CUT_LOO_CHI2_EFF_MAX", 1.01)
-A_2500_TOTAL_MAX = _cut_env_float("QVC_CUT_A_2500_TOTAL_MAX", None)
+# Reject spectral solutions whose inferred rest-frame 2500 A attenuation is so
+# large that the attenuated completeness coordinate admits extreme Hubble
+# outliers.  This is exactly
+# m_2500_attenuated_model - m_2500_dereddened.
+A_2500_TOTAL_MAX = _cut_env_float("QVC_CUT_A_2500_TOTAL_MAX", 3.5)
+EBV_GAL_PLUS_EBV_AGN_COLUMN = "ebv_gal_plus_ebv_agn"
+EBV_GAL_PLUS_EBV_AGN_MAX = _cut_env_float(
+    "QVC_CUT_EBV_GAL_PLUS_EBV_AGN_MAX", 0.05
+)
 SPECTRAL_RHAT_MAX = _cut_env_float("QVC_CUT_SPECTRAL_RHAT_MAX", 1.20)
 LIGHT_CURVE_RHAT_MAX = _cut_env_float("QVC_CUT_LIGHT_CURVE_RHAT_MAX", 1.10)
 NUM_DIVERGENCES_MAX = _cut_env_float("QVC_CUT_NUM_DIVERGENCES_MAX", None)
@@ -293,6 +301,24 @@ COMPLETENESS_MAG_2500_MIN = _cut_env_float(
 COMPLETENESS_MAG_2500_MAX = _cut_env_float(
     "QVC_CUT_COMPLETENESS_MAG_2500_MAX", COMPLETENESS_MAG_EDGE_MAX
 )
+
+# Magnitude-selection policies.  The completeness map is calibrated only over
+# the finite interval above, so every ordinary Hubble fit defaults to that hard
+# support.  Tail extrapolation remains available only as an explicit opt-in.
+COMPLETENESS_MAGNITUDE_SUPPORT_MODES = ("tails", "hard-cut")
+DEFAULT_COMPLETENESS_MAGNITUDE_SUPPORT_MODE = "hard-cut"
+COMPLETENESS_TAIL_MAG_2500_MIN = 14.0
+COMPLETENESS_TAIL_MAG_2500_MAX = 32.0
+
+
+def normalize_completeness_magnitude_support_mode(mode):
+    normalized = str(mode).strip().lower().replace("_", "-")
+    if normalized not in COMPLETENESS_MAGNITUDE_SUPPORT_MODES:
+        raise ValueError(
+            "completeness_magnitude_support_mode must be one of "
+            f"{COMPLETENESS_MAGNITUDE_SUPPORT_MODES}; got {mode!r}."
+        )
+    return normalized
 if (
     COMPLETENESS_MAG_2500_MIN is None
     or COMPLETENESS_MAG_2500_MAX is None
@@ -362,6 +388,14 @@ AGN_TIER0_ELIGIBILITY_CUTS = (
     ),
 )
 
+AGN_TIER0_EXTREME_MAGNITUDE_CUTS = (
+    (
+        "m_2500_dereddened",
+        COMPLETENESS_TAIL_MAG_2500_MIN,
+        COMPLETENESS_TAIL_MAG_2500_MAX,
+    ),
+)
+
 AGN_TIER1_FIT_QUALITY_CUTS = (
     ("sed_reduced_chi2", None, SED_REDUCED_CHI2_MAX),
     ("spectroscopy_reduced_chi2", None, SPECTROSCOPY_REDUCED_CHI2_MAX),
@@ -387,6 +421,7 @@ AGN_TIER2_PARAMETER_CUTS = (
     ),
     ("fracAGN_5100_fit", FRAC_AGN_5100_MIN, None),
     ("apparent_mag_2500_err", None, APPARENT_MAG_2500_ERR_MAX),
+    (EBV_GAL_PLUS_EBV_AGN_COLUMN, None, EBV_GAL_PLUS_EBV_AGN_MAX),
 )
 
 # Tier-1 convergence diagnostics are mandatory when Tier 1 is active.
