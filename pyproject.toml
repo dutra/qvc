@@ -30,6 +30,7 @@ dependencies = [
     "scipy==1.16.0",
     "speclite",
     "statsmodels",
+    "textual>=8.2.8",
     "tinygp==0.3.0",
     "tqdm==4.67.1",
     "gdown==5.2.1",

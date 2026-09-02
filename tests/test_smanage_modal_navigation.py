@@ -1,10 +1,6 @@
 import asyncio
 from pathlib import Path
 
-import pytest
-
-pytest.importorskip("textual")
-
 from textual.app import App
 from textual.widgets import Button
 

@@ -19,66 +19,21 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import numpy as np
+from rich import box
+from rich.console import Console
+from rich.markup import escape
+from rich.panel import Panel
+from rich.rule import Rule
+from rich.table import Table
+from rich.text import Text
 from scipy.optimize import brentq, minimize
 from scipy.special import log_ndtr, ndtri_exp
-
-try:
-    from rich import box
-    from rich.console import Console
-    from rich.panel import Panel
-    from rich.rule import Rule
-    from rich.table import Table
-    from rich.text import Text
-
-    RICH_AVAILABLE = True
-except ImportError:
-    RICH_AVAILABLE = False
-
-try:
-    from rich.markup import escape
-    from textual import on, work
-    from textual.app import App, ComposeResult
-    from textual.binding import Binding
-    from textual.containers import Horizontal, ScrollableContainer, Vertical
-    from textual.screen import ModalScreen
-    from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static
-
-    TEXTUAL_AVAILABLE = True
-except ImportError:
-    TEXTUAL_AVAILABLE = False
-
-    class _UnavailableTextual:
-        """Import-time stand-in so the non-TUI CLI does not require Textual."""
-
-        @classmethod
-        def __class_getitem__(cls, _item):
-            return cls
-
-        def __init__(self, *_args, **_kwargs):
-            raise ImportError("Textual is required for TUI mode.", name="textual")
-
-    class _UnavailableButton(_UnavailableTextual):
-        Pressed = object()
-
-    class _UnavailableDataTable(_UnavailableTextual):
-        RowHighlighted = object()
-        RowSelected = object()
-
-    class _UnavailableInput(_UnavailableTextual):
-        Changed = object()
-
-    def _unavailable_decorator(*_args, **_kwargs):
-        return lambda function: function
-
-    App = ModalScreen = Horizontal = ScrollableContainer = Vertical = _UnavailableTextual
-    Footer = Header = Label = Static = _UnavailableTextual
-    Button = _UnavailableButton
-    DataTable = _UnavailableDataTable
-    Input = _UnavailableInput
-    Binding = lambda *_args, **_kwargs: None
-    ComposeResult = Any
-    escape = str
-    on = work = _unavailable_decorator
+from textual import on, work
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, ScrollableContainer, Vertical
+from textual.screen import ModalScreen
+from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static
 
 
 STATE_STYLES = {
@@ -1268,10 +1223,7 @@ def render_plain_compact_status(groups, starttime, endtime=None):
 
 
 def render_compact_status(groups, starttime, endtime=None, console=None):
-    if RICH_AVAILABLE:
-        render_rich_compact_status(groups, starttime, endtime, console=console)
-    else:
-        render_plain_compact_status(groups, starttime, endtime)
+    render_rich_compact_status(groups, starttime, endtime, console=console)
 
 
 def build_tui_snapshot():
@@ -1622,10 +1574,7 @@ def render_plain_status(pattern, live_jobs, groups, starttime, endtime=None):
 
 
 def render_status(pattern, live_jobs, groups, starttime, endtime=None, console=None):
-    if RICH_AVAILABLE:
-        render_rich_status(pattern, live_jobs, groups, starttime, endtime, console=console)
-    else:
-        render_plain_status(pattern, live_jobs, groups, starttime, endtime)
+    render_rich_status(pattern, live_jobs, groups, starttime, endtime, console=console)
 
 
 REFRESH_INTERVAL_SECONDS = 2.0
@@ -2644,8 +2593,6 @@ class SlurmManagerApp(App[None]):
 
 
 def run_tui() -> None:
-    if not TEXTUAL_AVAILABLE:
-        raise ImportError("Textual is required for TUI mode.", name="textual")
     SlurmManagerApp().run()
 
 
@@ -2729,16 +2676,7 @@ def _run_status(args):
 def main():
     args = parse_args()
     if args.mode == "tui":
-        try:
-            run_tui()
-        except ImportError as exc:
-            if exc.name == "textual":
-                print(
-                    "Textual is required for TUI mode. Install the updated project dependencies.",
-                    file=sys.stderr,
-                )
-                return 1
-            raise
+        run_tui()
         return 0
     if args.mode == "status":
         if args.pattern is None:
