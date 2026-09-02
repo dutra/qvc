@@ -217,6 +217,89 @@ def test_light_curve_posterior_draw_mode_changes_run_tag_only_when_requested():
     assert "_lcpost64" in posterior_draw_tag
 
 
+def test_centered_lcdm_prior_profile_changes_run_tag_only_when_requested():
+    common = ("Flatw0waCDM", False, "fastest", None, (0.44, 3.16))
+
+    default_tag = hubble_fit.make_run_tag(*common)
+    explicit_default_tag = hubble_fit.make_run_tag(
+        *common, prior_profile="default"
+    )
+    centered_tag = hubble_fit.make_run_tag(
+        *common, prior_profile="centered_lcdm"
+    )
+
+    assert default_tag == explicit_default_tag
+    assert "_prior-" not in default_tag
+    assert "_prior-centered_lcdm" in centered_tag
+
+
+@pytest.mark.parametrize(
+    ("cosmo_model", "expected_dark_energy"),
+    [
+        ("FlatLambdaCDM", {}),
+        ("FlatwCDM", {"w0": (-3.0, 1.0)}),
+        (
+            "Flatw0waCDM",
+            {"w0": (-3.0, 1.0), "wa": (-10.0, 10.0)},
+        ),
+        ("FlatwpwaCDM", {"wp": (-10.0, 1.0), "wa": (-50, 500)}),
+    ],
+)
+def test_centered_lcdm_prior_profile_bounds(cosmo_model, expected_dark_energy):
+    default_priors, _, _ = hubble_model.get_model_params(cosmo_model)
+    centered_priors, _, _ = hubble_model.get_model_params(
+        cosmo_model, prior_profile="centered_lcdm"
+    )
+
+    assert default_priors["M0_agn"] == (-26.0, -18.0)
+    assert centered_priors["M0_agn"] == (-30.0, -10.0)
+    for parameter, bounds in expected_dark_energy.items():
+        assert centered_priors[parameter] == bounds
+    if cosmo_model == "Flatw0waCDM":
+        assert np.mean(centered_priors["w0"]) == pytest.approx(-1.0)
+        assert np.mean(centered_priors["wa"]) == pytest.approx(0.0)
+        for pivoted_m0 in (-22.3, -18.6):
+            assert centered_priors["M0_agn"][0] < pivoted_m0 < centered_priors["M0_agn"][1]
+
+
+def test_checkpoint_prior_metadata_allows_legacy_default_and_checks_centered(tmp_path):
+    hubble_fit._validate_checkpoint_prior_metadata(
+        {}, "legacy.h5", expected_prior_profile="default"
+    )
+    with pytest.raises(RuntimeError, match="predates prior-profile metadata"):
+        hubble_fit._validate_checkpoint_prior_metadata(
+            {}, "legacy.h5", expected_prior_profile="centered_lcdm"
+        )
+
+    priors, _, _ = hubble_model.get_model_params(
+        "Flatw0waCDM", prior_profile="centered_lcdm"
+    )
+    bounds_json = hubble_fit.canonical_prior_bounds_json(priors)
+    metadata = {
+        "prior_profile": "centered_lcdm",
+        "prior_bounds_json": bounds_json,
+        "early_de_guard": True,
+    }
+    checkpoint_path = tmp_path / "centered.h5"
+    hubble_fit.save_chains(checkpoint_path, **metadata)
+    metadata = hubble_fit.load_chains(checkpoint_path)
+    hubble_fit._validate_checkpoint_prior_metadata(
+        metadata,
+        checkpoint_path,
+        expected_prior_profile="centered_lcdm",
+        expected_prior_bounds_json=bounds_json,
+        expected_early_de_guard=True,
+    )
+    with pytest.raises(RuntimeError, match="early_de_guard"):
+        hubble_fit._validate_checkpoint_prior_metadata(
+            metadata,
+            checkpoint_path,
+            expected_prior_profile="centered_lcdm",
+            expected_prior_bounds_json=bounds_json,
+            expected_early_de_guard=False,
+        )
+
+
 def test_hubble_mode_table_highlights_active_scientific_modes():
     args = SimpleNamespace(
         only_sna=False,
@@ -972,9 +1055,14 @@ def test_log_likelihood_only_agn_skips_pantheon_and_sn_parameter(fake_data):
     assert blob.shape == (3, len(df_agn))
 
 
-def test_flatw0wa_early_de_guard_is_opt_in(fake_data):
+@pytest.mark.parametrize("prior_profile", ["default", "centered_lcdm"])
+def test_flatw0wa_early_de_guard_is_opt_in(fake_data, prior_profile):
     df_agn, df_pantheon = fake_data
-    priors, model_labels, _ = hubble_model.get_model_params("Flatw0waCDM", only_sna=False)
+    priors, model_labels, _ = hubble_model.get_model_params(
+        "Flatw0waCDM",
+        only_sna=False,
+        prior_profile=prior_profile,
+    )
     params = {key: (priors[key][0] + priors[key][1]) / 2.0 for key in model_labels}
     params["w0"] = -0.2
     params["wa"] = 0.3
@@ -5536,6 +5624,87 @@ def test_hubble_fit_clis_default_and_forward_completeness_magnitude():
             and value.attr == "completeness_magnitude"
             for value in forwarded
         )
+
+
+def test_hubble_fit_cli_declares_and_forwards_prior_profile():
+    tree = ast.parse(Path(hubble_fit.__file__).read_text(encoding="utf-8"))
+    parser_flag = None
+    forwarded = {"run_single": [], "run_all": [], "run_single_jax": []}
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument":
+            if (
+                node.args
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "--prior-profile"
+            ):
+                parser_flag = {keyword.arg: keyword.value for keyword in node.keywords}
+        if isinstance(node.func, ast.Name) and node.func.id in forwarded:
+            for keyword in node.keywords:
+                if keyword.arg == "prior_profile":
+                    forwarded[node.func.id].append(keyword.value)
+
+    assert parser_flag is not None
+    assert isinstance(parser_flag["choices"], ast.Name)
+    assert parser_flag["choices"].id == "PRIOR_PROFILE_CHOICES"
+    assert isinstance(parser_flag["default"], ast.Name)
+    assert parser_flag["default"].id == "DEFAULT_PRIOR_PROFILE"
+    for values in forwarded.values():
+        assert any(
+            isinstance(value, ast.Attribute)
+            and isinstance(value.value, ast.Name)
+            and value.value.id == "args"
+            and value.attr == "prior_profile"
+            for value in values
+        )
+
+
+def test_jax_fit_forwards_prior_profile_to_tag_and_prior_builder():
+    source_path = SRC / "qvc" / "hubble" / "hubble_fit_jax.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    forwarded = {"make_run_tag": [], "get_model_params": []}
+    parser_flag = None
+    cli_forwarded = []
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument":
+            if (
+                node.args
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == "--prior-profile"
+            ):
+                parser_flag = {keyword.arg: keyword.value for keyword in node.keywords}
+        if isinstance(node.func, ast.Name) and node.func.id == "run_single_jax":
+            for keyword in node.keywords:
+                if keyword.arg == "prior_profile":
+                    cli_forwarded.append(keyword.value)
+        if not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id not in forwarded:
+            continue
+        for keyword in node.keywords:
+            if keyword.arg == "prior_profile":
+                forwarded[node.func.id].append(keyword.value)
+
+    for values in forwarded.values():
+        assert any(
+            isinstance(value, ast.Name) and value.id == "prior_profile"
+            for value in values
+        )
+    assert parser_flag is not None
+    assert isinstance(parser_flag["choices"], ast.Name)
+    assert parser_flag["choices"].id == "PRIOR_PROFILE_CHOICES"
+    assert any(
+        isinstance(value, ast.Attribute)
+        and isinstance(value.value, ast.Name)
+        and value.value.id == "args"
+        and value.attr == "prior_profile"
+        for value in cli_forwarded
+    )
 
 
 def test_hubble_fit_cli_declares_only_agn_and_rejects_only_sna_combo():

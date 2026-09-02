@@ -23,8 +23,17 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from qvc.hubble.completeness_mock_catalog import build_completeness_lf
-from qvc.hubble.hubble_fit import run_mcmc_pipeline
-from qvc.hubble.hubble_model import build_agn_pivot_context
+from qvc.hubble.hubble_fit import (
+    _validate_checkpoint_prior_metadata,
+    canonical_prior_bounds_json,
+    run_mcmc_pipeline,
+)
+from qvc.hubble.hubble_model import (
+    DEFAULT_PRIOR_PROFILE,
+    PRIOR_PROFILE_CHOICES,
+    build_agn_pivot_context,
+    get_model_params,
+)
 from qvc.hubble.cuts import (
     COMPLETENESS_MAG_2500_MAX,
     COMPLETENESS_MAG_2500_MIN,
@@ -92,6 +101,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--m50", type=float, default=23.0)
     parser.add_argument("--selection-width", type=float, default=0.3)
     parser.add_argument("--speed", default="production")
+    parser.add_argument(
+        "--prior-profile",
+        choices=PRIOR_PROFILE_CHOICES,
+        default=DEFAULT_PRIOR_PROFILE,
+        help="Named Hubble-fit prior profile.",
+    )
     parser.add_argument(
         "--arms",
         nargs="+",
@@ -164,7 +179,7 @@ def _configuration(args, truth: ValidationTruth) -> dict:
     campaign_path = Path(args.campaign)
     if not args.campaign.strip() or campaign_path.is_absolute() or ".." in campaign_path.parts:
         raise ValueError("campaign must be a relative path below output-root.")
-    return {
+    configuration = {
         "schema_version": 2,
         "truth": asdict(truth),
         "n_runs": int(args.n_runs),
@@ -192,6 +207,19 @@ def _configuration(args, truth: ValidationTruth) -> dict:
         },
         "arms": list(args.arms),
     }
+    if args.prior_profile != DEFAULT_PRIOR_PROFILE:
+        priors, _, _ = get_model_params(
+            "Flatw0waCDM",
+            only_agn=True,
+            fixed_h0=args.h0,
+            prior_profile=args.prior_profile,
+        )
+        configuration["fit"]["prior_profile"] = args.prior_profile
+        configuration["fit"]["prior_bounds"] = {
+            name: [float(bounds[0]), float(bounds[1])]
+            for name, bounds in priors.items()
+        }
+    return configuration
 
 
 def _write_or_validate_manifest(campaign_dir: Path, configuration: dict, resume: bool) -> None:
@@ -430,8 +458,22 @@ def _fit_arm(
         + truth.beta_agn
         * (pivot_values["log_tau_uv_rf"] - truth.log_tau_pivot)
     )
+    priors, _, _ = get_model_params(
+        "Flatw0waCDM",
+        only_agn=True,
+        fixed_h0=truth.h0,
+        prior_profile=args.prior_profile,
+    )
+    prior_bounds_json = canonical_prior_bounds_json(priors)
     if args.resume and checkpoint_file.is_file():
         checkpoint = load_chains(checkpoint_file)
+        _validate_checkpoint_prior_metadata(
+            checkpoint,
+            checkpoint_file,
+            expected_prior_profile=args.prior_profile,
+            expected_prior_bounds_json=prior_bounds_json,
+            expected_early_de_guard=False,
+        )
         if "model_labels" not in checkpoint:
             raise RuntimeError(
                 f"Existing validation checkpoint lacks model_labels: {checkpoint_file}"
@@ -489,6 +531,7 @@ def _fit_arm(
         disable_ceph_dist_calibration=False,
         use_planck_h0_prior=False,
         use_planck_om_prior=False,
+        prior_profile=args.prior_profile,
         fixed_h0=truth.h0,
         rng_seed=seed_ledger[f"inference_{arm}"],
         df_agn_completeness=completeness_frame,

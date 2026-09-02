@@ -31,6 +31,19 @@ def test_submission_prefix_uses_requested_local_timestamp_format():
     assert values["submission_prefix"](datetime(2026, 9, 1, 17, 52)) == "sep01_0552pm_"
 
 
+def test_centered_prior_profile_is_forwarded_only_when_requested():
+    values = runpy.run_path(str(SCRIPT))
+    default_args = values["parse_args"]([])
+    centered_args = values["parse_args"](
+        ["--prior-profile", "centered_lcdm"]
+    )
+
+    assert "--prior-profile" not in values["runner_arguments"](default_args)
+    centered_arguments = values["runner_arguments"](centered_args)
+    index = centered_arguments.index("--prior-profile")
+    assert centered_arguments[index + 1] == "centered_lcdm"
+
+
 def _write_executable(path, source):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(source, encoding="utf-8")

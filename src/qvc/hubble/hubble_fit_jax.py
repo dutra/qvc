@@ -75,6 +75,7 @@ from qvc.hubble.hubble_fit import (
     _compute_direct_full_sample_completeness_summaries,
     _select_agn_fit_selection,
     completeness_checkpoint_metadata,
+    canonical_prior_bounds_json,
     estimate_sky_box_area_deg2,
     generate_fresh_completeness_sim_file,
     make_run_tag,
@@ -92,12 +93,15 @@ from qvc.hubble.hubble_likelihood import (
     log_likelihood,
 )
 from qvc.hubble.hubble_model import (
+    DEFAULT_PRIOR_PROFILE,
+    PRIOR_PROFILE_CHOICES,
     AgnPivotContext,
     agn_model_req_errs,
     agn_model_req_obs,
     agn_model_req_params,
     build_agn_pivot_context,
     get_model_params,
+    normalize_prior_profile,
     validate_agn_observable_uncertainties,
 )
 from qvc.hubble.hubble_plotting import (
@@ -858,6 +862,7 @@ def run_single_jax(
     disable_ceph_dist_calibration=False,
     use_planck_h0_prior=False,
     use_planck_om_prior=False,
+    prior_profile=DEFAULT_PRIOR_PROFILE,
     only_agn=False,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
@@ -888,6 +893,7 @@ def run_single_jax(
             completeness_magnitude,
         )
     speed = normalize_speed(speed)
+    prior_profile = normalize_prior_profile(prior_profile)
     if only_sna and only_agn:
         raise ValueError("only_sna and only_agn cannot both be True.")
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
@@ -905,6 +911,7 @@ def run_single_jax(
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        prior_profile=prior_profile,
         use_alpha_lambda_term=False,
         use_eta_sigma_term=False,
     )
@@ -1049,7 +1056,9 @@ def run_single_jax(
         only_agn=only_agn,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        prior_profile=prior_profile,
     )
+    prior_bounds_json = canonical_prior_bounds_json(priors)
     loglike_fn = jax.jit(
         lambda theta: _log_likelihood_jax(
             theta,
@@ -1126,6 +1135,10 @@ def run_single_jax(
     checkpoint_file = str(checkpoint_folder / f"posteriors_{run_tag}_jax.h5")
     checkpoint_payload = dict(
         flat_samples=flat_samples,
+        model_labels=np.asarray(model_labels, dtype=str),
+        prior_profile=prior_profile,
+        prior_bounds_json=prior_bounds_json,
+        early_de_guard=bool(early_de_guard),
         dmi_max_w=dmi_max_w,
         dmi_posterior_median=dmi_posterior_median,
         dmi_posterior_sigma=dmi_posterior_sigma,
@@ -1488,6 +1501,15 @@ def main():
     parser.add_argument("--use_planck_h0_prior", action="store_true", default=False)
     parser.add_argument("--use_planck_om_prior", action="store_true", default=False)
     parser.add_argument(
+        "--prior-profile",
+        choices=PRIOR_PROFILE_CHOICES,
+        default=DEFAULT_PRIOR_PROFILE,
+        help=(
+            "Named top-hat prior profile. centered_lcdm uses "
+            "M0_agn=[-30,-10], w0=[-3,1], and wa=[-10,10] where applicable."
+        ),
+    )
+    parser.add_argument(
         "--early-de-guard",
         action="store_true",
         default=False,
@@ -1569,6 +1591,7 @@ def main():
         disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
         use_planck_h0_prior=effective_use_planck_h0_prior,
         use_planck_om_prior=args.use_planck_om_prior,
+        prior_profile=args.prior_profile,
         early_de_guard=args.early_de_guard,
         seed=args.seed,
         df_agn_completeness_parent=df_agn_completeness_parent,

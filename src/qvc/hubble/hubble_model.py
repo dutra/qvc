@@ -28,6 +28,29 @@ AGN_LOG_F_PRIOR = (
 PLANCK_H0_PRIOR = (67.37 - 0.54, 67.37 + 0.54)
 PLANCK_OM0_PRIOR = (0.315 - 0.007, 0.315 + 0.007)
 AGN_PIVOT_RULE = "rounded_median_v1"
+DEFAULT_PRIOR_PROFILE = "default"
+CENTERED_LCDM_PRIOR_PROFILE = "centered_lcdm"
+PRIOR_PROFILE_CHOICES = (
+    DEFAULT_PRIOR_PROFILE,
+    CENTERED_LCDM_PRIOR_PROFILE,
+)
+CENTERED_LCDM_PRIOR_BOUNDS = {
+    "M0_agn": (-30.0, -10.0),
+    "w0": (-3.0, 1.0),
+    "wa": (-10.0, 10.0),
+}
+
+
+def normalize_prior_profile(prior_profile):
+    """Return a validated Hubble prior-profile name."""
+
+    normalized = str(prior_profile).strip().lower().replace("-", "_")
+    if normalized not in PRIOR_PROFILE_CHOICES:
+        raise ValueError(
+            f"Unknown prior profile {prior_profile!r}; "
+            f"expected one of {PRIOR_PROFILE_CHOICES}."
+        )
+    return normalized
 
 
 def get_agn_model_spec(
@@ -1243,7 +1266,9 @@ def get_model_params(
     use_redshift_log_f_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
+    prior_profile=DEFAULT_PRIOR_PROFILE,
 ):
+    prior_profile = normalize_prior_profile(prior_profile)
     if only_sna and only_agn:
         raise ValueError("only_sna and only_agn cannot both be True.")
     if fixed_h0 is not None:
@@ -1264,7 +1289,12 @@ def get_model_params(
     priors = OrderedDict([
         ("M0_sn",       (-20, -18)),    # SN absolute magnitude, MLE: ~-19.3
 
-        ("M0_agn",   (-26.0, -18.0)),
+        (
+            "M0_agn",
+            CENTERED_LCDM_PRIOR_BOUNDS["M0_agn"]
+            if prior_profile == CENTERED_LCDM_PRIOR_PROFILE
+            else (-26.0, -18.0),
+        ),
         ("alpha_agn", (-20,  20.0)),
         ("beta_agn",  (-20.0,  20.0)),
         (AGN_ALPHA_LAMBDA_PARAM, (-20.0, 20.0)),
@@ -1323,12 +1353,27 @@ def get_model_params(
         pass
     elif cosmo_model == 'FlatwCDM':
         priors |= OrderedDict([
-            ("w0",          (-3.0, 1.0))
+            (
+                "w0",
+                CENTERED_LCDM_PRIOR_BOUNDS["w0"]
+                if prior_profile == CENTERED_LCDM_PRIOR_PROFILE
+                else (-3.0, 1.0),
+            )
         ])
     elif cosmo_model == 'Flatw0waCDM':
         priors |= OrderedDict([
-            ("w0", (-3.0, 1.0)),   # covers phantom (<-1), Λ (-1), quintessence (> -1), and even w>0
-            ("wa", (-30, 1))    # symmetric variation
+            (
+                "w0",
+                CENTERED_LCDM_PRIOR_BOUNDS["w0"]
+                if prior_profile == CENTERED_LCDM_PRIOR_PROFILE
+                else (-3.0, 1.0),
+            ),
+            (
+                "wa",
+                CENTERED_LCDM_PRIOR_BOUNDS["wa"]
+                if prior_profile == CENTERED_LCDM_PRIOR_PROFILE
+                else (-30, 1),
+            ),
         ])
     elif cosmo_model == 'FlatwpwaCDM':
         priors |= OrderedDict([

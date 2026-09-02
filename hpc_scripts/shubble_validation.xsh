@@ -22,6 +22,7 @@ python_bin = hpc_home / ".conda/envs/jaxcpu2/bin/python"
 output_root = repo_dir / "results/hubble_validation"
 
 speed = "quick"
+prior_profile = "default"
 num_agns = 2000
 num_runs = 64
 campaign = f"fixed_truth_nagns{num_agns}_nruns{num_runs}_{speed}"
@@ -80,6 +81,7 @@ ARM_CHOICES = (
     "selected_estimated",
 )
 SPEED_CHOICES = ("fastest", "quick", "standard", "production")
+PRIOR_PROFILE_CHOICES = ("default", "centered_lcdm")
 
 
 def parse_args(argv=None):
@@ -96,6 +98,11 @@ def parse_args(argv=None):
     parser.add_argument("--seed-start", type=int, default=seed_start)
     parser.add_argument("--master-seed", type=int, default=master_seed)
     parser.add_argument("--speed", choices=SPEED_CHOICES, default=speed)
+    parser.add_argument(
+        "--prior-profile",
+        choices=PRIOR_PROFILE_CHOICES,
+        default=prior_profile,
+    )
     parser.add_argument("--calibration-size", type=int, default=calibration_size)
     parser.add_argument("--arms", nargs="+", choices=ARM_CHOICES, default=arms)
     parser.add_argument("--partition", default=partition)
@@ -163,6 +170,11 @@ def runner_arguments(args):
         "--selection-width", str(selection_width),
         "--speed", args.speed,
         "--arms", *args.arms,
+        *(
+            ["--prior-profile", args.prior_profile]
+            if args.prior_profile != "default"
+            else []
+        ),
         *[str(value) for value in extra_runner_args],
     ]
 
@@ -373,6 +385,7 @@ def main(argv=None):
         "seed_start": args.seed_start,
         "master_seed": args.master_seed,
         "speed": args.speed,
+        "prior_profile": args.prior_profile,
         "calibration_size": args.calibration_size,
         "arms": list(args.arms),
         "retry_failed": bool(args.retry_failed),

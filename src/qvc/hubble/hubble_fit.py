@@ -126,6 +126,8 @@ from qvc.hubble.hubble_plotting import (
 from qvc.hubble.tex_utils import make_agn_csv_table, make_agn_latex_table
 from qvc.hubble.hubble_model import (
     AGN_LOGF_Z_PARAM,
+    DEFAULT_PRIOR_PROFILE,
+    PRIOR_PROFILE_CHOICES,
     AgnPivotContext,
     agn_model_pack_obs,
     agn_model_pack_params,
@@ -135,6 +137,7 @@ from qvc.hubble.hubble_model import (
     get_model_params,
     M_model_agn,
     M_model_agn_err,
+    normalize_prior_profile,
     resolve_model_option_flags,
 )
 from qvc.hubble.hubble_completeness_refactored import (
@@ -664,6 +667,7 @@ def make_run_tag(
     disable_ceph_dist_calibration=False,
     use_planck_h0_prior=False,
     use_planck_om_prior=False,
+    prior_profile=DEFAULT_PRIOR_PROFILE,
     fixed_h0=None,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
@@ -674,6 +678,7 @@ def make_run_tag(
     light_curve_uncertainty_mode="covariance",
 ):
     speed = normalize_speed(speed)
+    prior_profile = normalize_prior_profile(prior_profile)
     zmin, zmax = z_range
     n_tag = "all" if N is None else f"N{N}"
     z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
@@ -689,6 +694,10 @@ def make_run_tag(
     planck_h0_tag = "_planckh0" if use_planck_h0_prior and not disable_ceph_dist_calibration else ""
     fixed_h0_tag = "" if fixed_h0 is None else f"_fixedh0-{float(fixed_h0):g}"
     planck_om_tag = "_planckom" if use_planck_om_prior else ""
+    prior_profile_tag = (
+        "" if prior_profile == DEFAULT_PRIOR_PROFILE
+        else f"_prior-{prior_profile}"
+    )
     alpha_tag = "_alphaLam" if use_alpha_lambda_term else ""
     eta_sigma_tag = "_etaSigma" if use_eta_sigma_term else ""
     fagn_sigmoid_tag = (
@@ -717,8 +726,21 @@ def make_run_tag(
     return (
         f"{cosmo_model}_{_fit_mode_label(only_sna, only_agn)}_{speed}_{n_tag}_{z_tag}"
         f"{completeness_tag}{attenuation_tag}{light_curve_uncertainty_tag}"
-        f"{ceph_tag}{planck_h0_tag}{fixed_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}"
+        f"{ceph_tag}{planck_h0_tag}{fixed_h0_tag}{planck_om_tag}{prior_profile_tag}{alpha_tag}{eta_sigma_tag}"
         f"{fagn_sigmoid_tag}{fagn_flux_fraction_tag}{logf_tag}"
+    )
+
+
+def canonical_prior_bounds_json(priors):
+    """Serialize resolved top-hat bounds for checkpoint provenance."""
+
+    return json.dumps(
+        {
+            str(name): [float(bounds[0]), float(bounds[1])]
+            for name, bounds in priors.items()
+        },
+        sort_keys=True,
+        separators=(",", ":"),
     )
 
 
@@ -805,6 +827,65 @@ def _checkpoint_scalar_string(value, *, field_name, checkpoint_file):
             f"Checkpoint '{checkpoint_file}' field {field_name!r} must be scalar."
         )
     return values[0]
+
+
+def _validate_checkpoint_prior_metadata(
+    results,
+    checkpoint_file,
+    *,
+    expected_prior_profile=DEFAULT_PRIOR_PROFILE,
+    expected_prior_bounds_json=None,
+    expected_early_de_guard=False,
+):
+    """Reject resume files produced with incompatible effective priors."""
+
+    expected_prior_profile = normalize_prior_profile(expected_prior_profile)
+    has_profile = "prior_profile" in results
+    has_bounds = "prior_bounds_json" in results
+    if not has_profile and not has_bounds:
+        if expected_prior_profile != DEFAULT_PRIOR_PROFILE:
+            raise RuntimeError(
+                f"Checkpoint '{checkpoint_file}' predates prior-profile metadata "
+                f"and cannot be resumed with {expected_prior_profile!r}."
+            )
+    elif not has_profile or not has_bounds:
+        raise RuntimeError(
+            f"Checkpoint '{checkpoint_file}' has incomplete prior-profile metadata."
+        )
+    else:
+        stored_profile = normalize_prior_profile(
+            _checkpoint_scalar_string(
+                results["prior_profile"],
+                field_name="prior_profile",
+                checkpoint_file=checkpoint_file,
+            )
+        )
+        if stored_profile != expected_prior_profile:
+            raise RuntimeError(
+                f"Checkpoint '{checkpoint_file}' uses prior profile "
+                f"{stored_profile!r}; expected {expected_prior_profile!r}."
+            )
+        stored_bounds = _checkpoint_scalar_string(
+            results["prior_bounds_json"],
+            field_name="prior_bounds_json",
+            checkpoint_file=checkpoint_file,
+        )
+        if (
+            expected_prior_bounds_json is not None
+            and stored_bounds != str(expected_prior_bounds_json)
+        ):
+            raise RuntimeError(
+                f"Checkpoint '{checkpoint_file}' uses incompatible resolved prior bounds."
+            )
+
+    stored_early_de_guard = bool(
+        np.asarray(results.get("early_de_guard", False)).reshape(()).item()
+    )
+    if stored_early_de_guard != bool(expected_early_de_guard):
+        raise RuntimeError(
+            f"Checkpoint '{checkpoint_file}' uses early_de_guard="
+            f"{stored_early_de_guard}; expected {bool(expected_early_de_guard)}."
+        )
 
 
 def _checkpoint_reference_object_id_tuple(
@@ -991,6 +1072,9 @@ def validate_resume_checkpoint(
     expected_z_range_semantics=None,
     expected_use_f_agn_psf_2500_sigmoid_term=False,
     expected_use_f_agn_psf_2500_flux_fraction_term=False,
+    expected_prior_profile=DEFAULT_PRIOR_PROFILE,
+    expected_prior_bounds_json=None,
+    expected_early_de_guard=False,
 ):
     _validate_strict_padded_checkpoint_metadata(
         results, checkpoint_file, expected_cut_configuration_json
@@ -1010,6 +1094,13 @@ def validate_resume_checkpoint(
             "This usually means the file is stale or was written by an older pipeline version. "
             "Delete it or pass resume=False to start a fresh run."
         )
+    _validate_checkpoint_prior_metadata(
+        results,
+        checkpoint_file,
+        expected_prior_profile=expected_prior_profile,
+        expected_prior_bounds_json=expected_prior_bounds_json,
+        expected_early_de_guard=expected_early_de_guard,
+    )
 
     flat_samples = np.asarray(results["flat_samples"])
     if flat_samples.ndim != 2:
@@ -1155,6 +1246,9 @@ def _validate_resume_replot_checkpoint_params(
     expected_z_range_semantics=None,
     expected_use_f_agn_psf_2500_sigmoid_term=False,
     expected_use_f_agn_psf_2500_flux_fraction_term=False,
+    expected_prior_profile=DEFAULT_PRIOR_PROFILE,
+    expected_prior_bounds_json=None,
+    expected_early_de_guard=False,
 ):
     _validate_strict_padded_checkpoint_metadata(
         results, checkpoint_file, expected_cut_configuration_json
@@ -1174,6 +1268,13 @@ def _validate_resume_replot_checkpoint_params(
             f"Resume-replot checkpoint '{checkpoint_file}' was created for a different parameterization: "
             f"flat_samples has {flat_samples.shape[1]} columns, but the current model expects {ndim}."
         )
+    _validate_checkpoint_prior_metadata(
+        results,
+        checkpoint_file,
+        expected_prior_profile=expected_prior_profile,
+        expected_prior_bounds_json=expected_prior_bounds_json,
+        expected_early_de_guard=expected_early_de_guard,
+    )
     if expected_cut_tier is not None:
         if "cut_tier" not in results or "cut_configuration_json" not in results:
             raise RuntimeError(
@@ -1268,6 +1369,9 @@ def _remap_resume_replot_checkpoint(
     expected_z_range_semantics=None,
     expected_use_f_agn_psf_2500_sigmoid_term=False,
     expected_use_f_agn_psf_2500_flux_fraction_term=False,
+    expected_prior_profile=DEFAULT_PRIOR_PROFILE,
+    expected_prior_bounds_json=None,
+    expected_early_de_guard=False,
 ):
     """Return checkpoint payload remapped to the current cut AGN fit selection."""
 
@@ -1288,6 +1392,9 @@ def _remap_resume_replot_checkpoint(
         expected_use_f_agn_psf_2500_flux_fraction_term=(
             expected_use_f_agn_psf_2500_flux_fraction_term
         ),
+        expected_prior_profile=expected_prior_profile,
+        expected_prior_bounds_json=expected_prior_bounds_json,
+        expected_early_de_guard=expected_early_de_guard,
     )
     if "object_id_fit_selection" not in results:
         raise RuntimeError(
@@ -1978,6 +2085,7 @@ def _prepare_shared_agn_pivot_context(
     disable_ceph_dist_calibration,
     use_planck_h0_prior,
     use_planck_om_prior,
+    prior_profile,
     use_alpha_lambda_term,
     use_eta_sigma_term,
     use_f_agn_psf_2500_sigmoid_term,
@@ -2021,6 +2129,7 @@ def _prepare_shared_agn_pivot_context(
             disable_ceph_dist_calibration=disable_ceph_dist_calibration,
             use_planck_h0_prior=use_planck_h0_prior,
             use_planck_om_prior=use_planck_om_prior,
+            prior_profile=prior_profile,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
@@ -2614,6 +2723,7 @@ def _run_fit_stage(
     disable_ceph_dist_calibration,
     use_planck_h0_prior,
     use_planck_om_prior,
+    prior_profile,
     use_alpha_lambda_term,
     use_eta_sigma_term,
     use_f_agn_psf_2500_sigmoid_term,
@@ -2671,6 +2781,7 @@ def _run_fit_stage(
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        prior_profile=prior_profile,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
@@ -2859,6 +2970,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       disable_ceph_dist_calibration=False,
                       use_planck_h0_prior=False,
                       use_planck_om_prior=False,
+                      prior_profile=DEFAULT_PRIOR_PROFILE,
                       fixed_h0=None,
                       rng_seed=None,
                       use_alpha_lambda_term=False,
@@ -2911,6 +3023,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             completeness_magnitude,
         )
     speed = normalize_speed(speed)
+    prior_profile = normalize_prior_profile(prior_profile)
     if completeness_z_range is None and completeness and df_agn_completeness is not None:
         completeness_z_range = resolve_completeness_redshift_support(
             df_agn_completeness, z_range
@@ -2953,6 +3066,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        prior_profile=prior_profile,
         fixed_h0=fixed_h0,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
@@ -2971,6 +3085,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         only_agn=only_agn,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        prior_profile=prior_profile,
         fixed_h0=fixed_h0,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
@@ -2978,6 +3093,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
+    prior_bounds_json = canonical_prior_bounds_json(priors)
     ndim = len(model_labels)
     print(f"Running sampling with {ndim} parameters for cosmological model: {cosmo_model}")
     if resume_replot_with_cuts and not resume:
@@ -3202,6 +3318,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     expected_use_f_agn_psf_2500_flux_fraction_term=(
                         use_f_agn_psf_2500_flux_fraction_term
                     ),
+                    expected_prior_profile=prior_profile,
+                    expected_prior_bounds_json=prior_bounds_json,
+                    expected_early_de_guard=early_de_guard,
                 )
                 print(
                     "Resume-replot with cuts: loaded posterior samples and remapped "
@@ -3232,6 +3351,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     expected_use_f_agn_psf_2500_flux_fraction_term=(
                         use_f_agn_psf_2500_flux_fraction_term
                     ),
+                    expected_prior_profile=prior_profile,
+                    expected_prior_bounds_json=prior_bounds_json,
+                    expected_early_de_guard=early_de_guard,
                 )
             if not only_sna:
                 if stored_pivot_context != agn_pivot_context:
@@ -3465,6 +3587,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         checkpoint_payload = dict(
             flat_samples=flat_samples,
             model_labels=np.asarray(model_labels, dtype=str),
+            prior_profile=prior_profile,
+            prior_bounds_json=prior_bounds_json,
+            early_de_guard=bool(early_de_guard),
             fixed_h0=np.nan if fixed_h0 is None else float(fixed_h0),
             rng_seed=-1 if rng_seed is None else int(rng_seed),
             dmi_max_w=dmi_max_w,
@@ -3572,6 +3697,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                disable_ceph_dist_calibration=False,
                use_planck_h0_prior=False,
                use_planck_om_prior=False,
+               prior_profile=DEFAULT_PRIOR_PROFILE,
                use_alpha_lambda_term=False,
                use_eta_sigma_term=False,
                use_f_agn_psf_2500_sigmoid_term=False,
@@ -3642,6 +3768,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             redshift_support=completeness_z_range,
         )
     speed = normalize_speed(speed)
+    prior_profile = normalize_prior_profile(prior_profile)
     _fit_mode_label(only_sna, only_agn)
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
     sigma_clip_second_pass_mode = normalize_sigma_clip_second_pass_mode(sigma_clip_second_pass_mode)
@@ -3658,6 +3785,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        prior_profile=prior_profile,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
@@ -3920,6 +4048,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 disable_ceph_dist_calibration=disable_ceph_dist_calibration,
                 use_planck_h0_prior=use_planck_h0_prior,
                 use_planck_om_prior=use_planck_om_prior,
+                prior_profile=prior_profile,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
                 use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
@@ -4122,21 +4251,23 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                         f"Cannot warm-start sigma-clipped pass 2 from '{selected_resume_checkpoint}' "
                         "because its pass-1 object_id_fit_selection does not match the current pass-1 fit selection."
                     )
-                validate_resume_checkpoint(
-                    selected_resume_results,
-                    checkpoint_file=selected_resume_checkpoint,
-                    ndim=len(get_model_params(
+                expected_resume_priors, expected_resume_labels, _ = get_model_params(
                         cosmo_model,
                         only_sna=only_sna,
                         only_agn=only_agn,
                         use_planck_h0_prior=use_planck_h0_prior,
                         use_planck_om_prior=use_planck_om_prior,
+                        prior_profile=prior_profile,
                         use_alpha_lambda_term=use_alpha_lambda_term,
                         use_eta_sigma_term=use_eta_sigma_term,
                         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                         use_redshift_log_f_term=use_redshift_log_f_term,
-                    )[1]),
+                    )
+                validate_resume_checkpoint(
+                    selected_resume_results,
+                    checkpoint_file=selected_resume_checkpoint,
+                    ndim=len(expected_resume_labels),
                     n_agn=len(expected_pass1_fit_selection),
                     expected_selection_attenuation_mode=selection_attenuation_mode,
                     expected_light_curve_uncertainty_mode=(
@@ -4157,6 +4288,11 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     expected_use_f_agn_psf_2500_flux_fraction_term=(
                         use_f_agn_psf_2500_flux_fraction_term
                     ),
+                    expected_prior_profile=prior_profile,
+                    expected_prior_bounds_json=canonical_prior_bounds_json(
+                        expected_resume_priors
+                    ),
+                    expected_early_de_guard=early_de_guard,
                 )
                 pass2_warm_start_flat_samples = selected_resume_results["flat_samples"]
             _write_sigma_clip_diagnostics(
@@ -4271,6 +4407,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        prior_profile=prior_profile,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
@@ -5141,6 +5278,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             disable_ceph_dist_calibration=False,
             use_planck_h0_prior=False,
             use_planck_om_prior=False,
+            prior_profile=DEFAULT_PRIOR_PROFILE,
             only_agn=False,
             use_alpha_lambda_term=False,
             use_eta_sigma_term=False,
@@ -5155,6 +5293,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         completeness_magnitude
     )
     speed = normalize_speed(speed)
+    prior_profile = normalize_prior_profile(prior_profile)
     if only_agn:
         print("Running full model comparison in AGN-only mode; SNe-only comparison branch is disabled.")
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
@@ -5170,8 +5309,12 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     ceph_tag = "_nocephdist_planckh0" if disable_ceph_dist_calibration else ""
     planck_h0_tag = "_planckh0" if use_planck_h0_prior and not disable_ceph_dist_calibration else ""
     planck_om_tag = "_planckom" if use_planck_om_prior else ""
+    prior_profile_tag = (
+        "" if prior_profile == DEFAULT_PRIOR_PROFILE
+        else f"_prior-{prior_profile}"
+    )
     mode_tag = _fit_mode_label(False, only_agn)
-    compare_run_tag = f"model_compare_{mode_tag}_{speed}_{n_tag}_{z_tag}{completeness_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}"
+    compare_run_tag = f"model_compare_{mode_tag}_{speed}_{n_tag}_{z_tag}{completeness_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{prior_profile_tag}"
     if use_alpha_lambda_term:
         compare_run_tag += "_alphaLam"
     if use_eta_sigma_term:
@@ -5207,6 +5350,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        prior_profile=prior_profile,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
@@ -5241,6 +5385,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        disable_ceph_dist_calibration=disable_ceph_dist_calibration,
                        use_planck_h0_prior=use_planck_h0_prior,
                        use_planck_om_prior=use_planck_om_prior,
+                       prior_profile=prior_profile,
                        use_alpha_lambda_term=use_alpha_lambda_term,
                        use_eta_sigma_term=use_eta_sigma_term,
                        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
@@ -5280,6 +5425,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                            disable_ceph_dist_calibration=disable_ceph_dist_calibration,
                            use_planck_h0_prior=use_planck_h0_prior,
                            use_planck_om_prior=use_planck_om_prior,
+                           prior_profile=prior_profile,
                            use_alpha_lambda_term=use_alpha_lambda_term,
                            use_eta_sigma_term=use_eta_sigma_term,
                            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
@@ -5484,6 +5630,10 @@ def render_hubble_mode_table(args):
         {"mode": "inference engine", "setting": "JAX / NumPyro" if args.use_jax else "NumPy / Dynesty"},
         {"mode": "sample", "setting": sample},
         {"mode": "cosmology", "setting": ", ".join(args.cosmo_models)},
+        {
+            "mode": "prior profile",
+            "setting": getattr(args, "prior_profile", DEFAULT_PRIOR_PROFILE),
+        },
         {"mode": "cumulative cut tier", "setting": args.cut_tier},
         {"mode": "Hubble m2500", "setting": args.magnitude_convention},
         {"mode": "LC sigma/tau uncertainty", "setting": light_curve_uncertainty},
@@ -5529,6 +5679,15 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help="Use the Planck 2018 top-hat Om0 prior.",
+    )
+    parser.add_argument(
+        "--prior-profile",
+        choices=PRIOR_PROFILE_CHOICES,
+        default=DEFAULT_PRIOR_PROFILE,
+        help=(
+            "Named top-hat prior profile. centered_lcdm uses "
+            "M0_agn=[-30,-10], w0=[-3,1], and wa=[-10,10] where applicable."
+        ),
     )
     parser.add_argument(
         "--early-de-guard",
@@ -5926,6 +6085,7 @@ if __name__ == "__main__":
             disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
             use_planck_h0_prior=effective_use_planck_h0_prior,
             use_planck_om_prior=args.use_planck_om_prior,
+            prior_profile=args.prior_profile,
             use_alpha_lambda_term=args.fit_alpha_lambda_term,
             use_eta_sigma_term=args.fit_eta_sigma_term,
             use_f_agn_psf_2500_sigmoid_term=args.fit_f_agn_psf_2500_sigmoid_term,
@@ -5959,6 +6119,7 @@ if __name__ == "__main__":
                 disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
                 use_planck_h0_prior=effective_use_planck_h0_prior,
                 use_planck_om_prior=args.use_planck_om_prior,
+                prior_profile=args.prior_profile,
                 use_alpha_lambda_term=args.fit_alpha_lambda_term,
                 use_eta_sigma_term=args.fit_eta_sigma_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
@@ -5984,6 +6145,7 @@ if __name__ == "__main__":
             disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
             use_planck_h0_prior=effective_use_planck_h0_prior,
             use_planck_om_prior=args.use_planck_om_prior,
+            prior_profile=args.prior_profile,
             use_alpha_lambda_term=args.fit_alpha_lambda_term,
             use_eta_sigma_term=args.fit_eta_sigma_term,
             use_f_agn_psf_2500_sigmoid_term=args.fit_f_agn_psf_2500_sigmoid_term,
@@ -6018,6 +6180,7 @@ if __name__ == "__main__":
                 disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
                 use_planck_h0_prior=effective_use_planck_h0_prior,
                 use_planck_om_prior=args.use_planck_om_prior,
+                prior_profile=args.prior_profile,
                 use_alpha_lambda_term=args.fit_alpha_lambda_term,
                 use_eta_sigma_term=args.fit_eta_sigma_term,
                 use_f_agn_psf_2500_sigmoid_term=args.fit_f_agn_psf_2500_sigmoid_term,
@@ -6042,6 +6205,10 @@ if __name__ == "__main__":
         ceph_tag = "_nocephdist_planckh0" if args.disable_ceph_dist_calibration else ""
         planck_h0_tag = "_planckh0" if effective_use_planck_h0_prior and not args.disable_ceph_dist_calibration else ""
         planck_om_tag = "_planckom" if args.use_planck_om_prior else ""
+        prior_profile_tag = (
+            "" if args.prior_profile == DEFAULT_PRIOR_PROFILE
+            else f"_prior-{args.prior_profile}"
+        )
         alpha_tag = "_alphaLam" if args.fit_alpha_lambda_term else ""
         eta_sigma_tag = "_etaSigma" if args.fit_eta_sigma_term else ""
         fagn_sigmoid_tag = (
@@ -6064,7 +6231,7 @@ if __name__ == "__main__":
         compare_path = (
             f"plots/hubble/{args.prefix}/single_compare_{mode_tag}_{args.speed}_{n_tag}_{z_tag}"
             f"{completeness_tag}{light_curve_uncertainty_tag}{ceph_tag}"
-            f"{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}"
+            f"{planck_h0_tag}{planck_om_tag}{prior_profile_tag}{alpha_tag}{eta_sigma_tag}"
             f"{fagn_sigmoid_tag}{fagn_flux_fraction_tag}{logf_tag}"
         )
         os.makedirs(compare_path, exist_ok=True)
@@ -6099,6 +6266,7 @@ if __name__ == "__main__":
                 disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
                 use_planck_h0_prior=effective_use_planck_h0_prior,
                 use_planck_om_prior=args.use_planck_om_prior,
+                prior_profile=args.prior_profile,
                 only_agn=args.only_agn,
                 use_alpha_lambda_term=args.fit_alpha_lambda_term,
                 use_eta_sigma_term=args.fit_eta_sigma_term,
