@@ -35,7 +35,7 @@ campaign = (
 seed_start = 0
 master_seed = 20260901
 calibration_size = 200000
-arms = ["all", "selected_uncorrected", "selected_oracle", "selected_estimated"]
+arms = ["selected_uncorrected", "selected_estimated"]
 
 # Fixed injected truth and catalog/selection settings.
 h0 = 70.0

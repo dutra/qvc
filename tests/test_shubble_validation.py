@@ -23,6 +23,7 @@ def test_bouchet_resource_and_campaign_defaults():
     assert values["num_agns"] == 2000
     assert values["num_runs"] == 64
     assert values["prior_profile"] == "centered_lcdm"
+    assert values["arms"] == ["selected_uncorrected", "selected_estimated"]
     assert values["campaign"].endswith("_prior-centered_lcdm")
 
 

@@ -33,6 +33,10 @@ ARM_NAMES = (
     "selected_oracle",
     "selected_estimated",
 )
+DEFAULT_ARM_NAMES = (
+    "selected_uncorrected",
+    "selected_estimated",
+)
 CORNER_PARAMETERS = ("alpha_agn", "beta_agn", "Om0", "w0", "wa")
 SEED_STREAMS = (
     "population",
@@ -709,6 +713,7 @@ def incomplete_recovery_report(recovery: pd.DataFrame, configuration: dict) -> p
 
 __all__ = [
     "ARM_NAMES",
+    "DEFAULT_ARM_NAMES",
     "CORNER_PARAMETERS",
     "AnalyticSigmoidCompleteness",
     "ValidationTruth",

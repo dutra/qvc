@@ -20,6 +20,7 @@ from qvc.hubble.cuts import COMPLETENESS_MAG_2500_MAX, COMPLETENESS_MAG_2500_MIN
 from qvc.hubble.hubble_model import get_model_params
 from qvc.hubble.hubble_validation import (
     ARM_NAMES,
+    DEFAULT_ARM_NAMES,
     ValidationTruth,
     analytic_completeness_params,
     apply_sigmoid_selection,
@@ -53,8 +54,234 @@ def _load_runner_module():
 
 def test_plot_parser_shows_points_by_default_and_accepts_no_points():
     plot_module = _load_plot_module()
-    assert plot_module._parser().parse_args(["campaign"]).no_points is False
-    assert plot_module._parser().parse_args(["campaign", "--no-points"]).no_points is True
+    default = plot_module._parser().parse_args(["campaign"])
+    assert default.no_points is False
+    assert default.single is None
+    requested = plot_module._parser().parse_args(
+        ["campaign", "--no-points", "--single", "7"]
+    )
+    assert requested.no_points is True
+    assert requested.single == 7
+
+
+def test_default_validation_arms_and_plot_styles():
+    runner = _load_runner_module()
+    plot_module = _load_plot_module()
+
+    assert DEFAULT_ARM_NAMES == ("selected_uncorrected", "selected_estimated")
+    assert runner._parser().parse_args([]).arms == list(DEFAULT_ARM_NAMES)
+    assert plot_module.ARM_STYLE["selected_uncorrected"] == {
+        "color": "tab:red",
+        "label": "no completeness correction",
+    }
+    assert plot_module.ARM_STYLE["selected_estimated"] == {
+        "color": "tab:blue",
+        "label": "with completeness correction",
+    }
+
+
+def _write_validation_posterior_checkpoint(
+    path,
+    samples,
+    *,
+    labels=("M0_agn", "alpha_agn", "beta_agn", "log_f", "H0", "Om0", "w0", "wa"),
+    pivots=(-1.0, np.log10(300.0)),
+):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as checkpoint:
+        checkpoint.create_dataset("flat_samples", data=np.asarray(samples, dtype=float))
+        checkpoint.create_dataset("model_labels", data=np.asarray(labels, dtype="S"))
+        checkpoint.create_dataset(
+            "agn_pivot_observable_names",
+            data=np.asarray(("log_sigma_uv", "log_tau_uv_rf"), dtype="S"),
+        )
+        checkpoint.create_dataset("agn_pivot_values", data=np.asarray(pivots))
+
+
+def _posterior_corner_manifest(*, n_runs=1):
+    truth = ValidationTruth(intrinsic_scatter_mag=0.2)
+    return {
+        "configuration": {
+            "truth": {
+                "m0_agn": truth.m0_agn,
+                "alpha_agn": truth.alpha_agn,
+                "beta_agn": truth.beta_agn,
+                "intrinsic_scatter_mag": truth.intrinsic_scatter_mag,
+                "log_sigma_pivot": truth.log_sigma_pivot,
+                "log_tau_pivot": truth.log_tau_pivot,
+                "om0": truth.om0,
+                "w0": truth.w0,
+                "wa": truth.wa,
+            },
+            "seed_start": 0,
+            "n_runs": n_runs,
+            "arms": ["selected_uncorrected", "selected_estimated"],
+        }
+    }
+
+
+def test_posterior_loader_references_m0_to_injected_pivots_and_omits_h0(tmp_path):
+    plot_module = _load_plot_module()
+    manifest = _posterior_corner_manifest()
+    truth = manifest["configuration"]["truth"]
+    checkpoint_pivots = (-1.0, np.log10(300.0))
+    canonical_m0 = np.array([-23.1, -23.0, -22.9])
+    alpha = np.array([6.9, 7.0, 7.1])
+    beta = np.array([-1.1, -1.0, -0.9])
+    checkpoint_m0 = canonical_m0 + alpha * (
+        checkpoint_pivots[0] - truth["log_sigma_pivot"]
+    ) + beta * (
+        checkpoint_pivots[1] - truth["log_tau_pivot"]
+    )
+    samples = np.column_stack(
+        (
+            checkpoint_m0,
+            alpha,
+            beta,
+            np.log([0.18, 0.20, 0.22]),
+            np.full(3, 70.0),
+            [0.29, 0.30, 0.31],
+            [-1.1, -1.0, -0.9],
+            [-0.2, 0.0, 0.2],
+        )
+    )
+    checkpoint = tmp_path / "posterior_selected_estimated.h5"
+    _write_validation_posterior_checkpoint(
+        checkpoint,
+        samples,
+        pivots=checkpoint_pivots,
+    )
+
+    loaded = plot_module._load_validation_posterior(checkpoint, manifest)
+
+    assert plot_module.POSTERIOR_PARAMETERS == (
+        "M0_agn",
+        "alpha_agn",
+        "beta_agn",
+        "Om0",
+        "w0",
+        "wa",
+    )
+    assert loaded.shape == (3, 6)
+    np.testing.assert_allclose(loaded[:, 0], canonical_m0, atol=1e-14, rtol=0.0)
+
+
+def test_posterior_loader_rejects_missing_parameter_label(tmp_path):
+    plot_module = _load_plot_module()
+    checkpoint = tmp_path / "posterior_selected_estimated.h5"
+    labels = ("M0_agn", "alpha_agn", "beta_agn", "log_f", "H0", "Om0", "w0")
+    _write_validation_posterior_checkpoint(
+        checkpoint,
+        np.ones((10, len(labels))),
+        labels=labels,
+    )
+    with pytest.raises(KeyError, match="wa"):
+        plot_module._load_validation_posterior(
+            checkpoint,
+            _posterior_corner_manifest(),
+        )
+
+
+def test_single_realization_outputs_use_available_posterior_arms(tmp_path):
+    plot_module = _load_plot_module()
+    manifest = _posterior_corner_manifest(n_runs=3)
+    truth = manifest["configuration"]["truth"]
+    rng = np.random.default_rng(82)
+    center = np.array(
+        [
+            truth["m0_agn"],
+            truth["alpha_agn"],
+            truth["beta_agn"],
+            np.log(truth["intrinsic_scatter_mag"]),
+            70.0,
+            truth["om0"],
+            truth["w0"],
+            truth["wa"],
+        ]
+    )
+    scale = np.array([0.1, 0.08, 0.05, 0.04, 0.0, 0.03, 0.15, 0.5])
+    campaign = tmp_path / "campaign"
+    for realization, arms in {
+        0: ("selected_uncorrected", "selected_estimated"),
+        1: ("selected_estimated",),
+    }.items():
+        for arm_index, arm in enumerate(arms):
+            samples = center + rng.normal(
+                0.0,
+                scale,
+                size=(400, center.size),
+            )
+            samples[:, 0] += 0.03 * arm_index
+            _write_validation_posterior_checkpoint(
+                campaign
+                / "runs"
+                / f"seed_{realization:04d}"
+                / f"posterior_{arm}.h5",
+                samples,
+                pivots=(truth["log_sigma_pivot"], truth["log_tau_pivot"]),
+            )
+
+    loaded = plot_module._load_realization_posteriors(
+        campaign,
+        manifest,
+        0,
+    )
+    assert set(loaded) == {"selected_uncorrected", "selected_estimated"}
+    output_dir = tmp_path / "plots" / "single_runs"
+    corner_pdf = output_dir / "posterior_corner_seed_0000.pdf"
+    hubble_pdf = output_dir / "hubble_diagram_seed_0000.pdf"
+    plot_module.plot_realization_posterior_corner(
+        loaded,
+        plot_module._posterior_truth_from_manifest(manifest),
+        corner_pdf,
+        output_png=corner_pdf.with_suffix(".png"),
+        dpi=80,
+    )
+    plot_module.plot_single_realization_hubble(
+        loaded,
+        manifest,
+        hubble_pdf,
+        output_png=hubble_pdf.with_suffix(".png"),
+        dpi=80,
+    )
+
+    for pdf in (corner_pdf, hubble_pdf):
+        assert pdf.is_file() and pdf.stat().st_size > 0
+        png = pdf.with_suffix(".png")
+        assert png.is_file() and png.stat().st_size > 0
+    with pytest.warns(RuntimeWarning, match="missing arms"):
+        seed_one = plot_module._load_realization_posteriors(
+            campaign,
+            manifest,
+            1,
+        )
+    assert set(seed_one) == {"selected_estimated"}
+    with pytest.raises(ValueError, match="no usable posterior"):
+        plot_module._load_realization_posteriors(campaign, manifest, 2)
+    with pytest.raises(ValueError, match="outside the configured range"):
+        plot_module._load_realization_posteriors(campaign, manifest, 3)
+
+
+def test_posterior_distance_curves_match_astropy_flatw0wacdm():
+    plot_module = _load_plot_module()
+    truth = {
+        "H0": 70.0,
+        "Om0": 0.3,
+        "w0": -1.0,
+        "wa": 0.0,
+    }
+    sample = np.array([[-23.0, 7.0, -1.0, 0.3, -1.0, 0.0]])
+
+    redshift, curves = plot_module._posterior_distance_modulus_curves(
+        sample,
+        truth,
+        (0.1, 4.0),
+        n_redshift=4000,
+    )
+    expected = plot_module._distance_modulus(truth, redshift)
+
+    assert curves.shape == (1, redshift.size)
+    np.testing.assert_allclose(curves[0], expected, rtol=0.0, atol=2e-5)
 
 
 def test_seed_ledger_is_reproducible_and_streams_are_distinct():

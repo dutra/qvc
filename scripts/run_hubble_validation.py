@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the fixed-truth, four-arm AGN Hubble validation campaign."""
+"""Run a fixed-truth AGN Hubble validation campaign."""
 
 from __future__ import annotations
 
@@ -41,6 +41,7 @@ from qvc.hubble.cuts import (
 from qvc.hubble.hubble_utils import load_chains
 from qvc.hubble.hubble_validation import (
     ARM_NAMES,
+    DEFAULT_ARM_NAMES,
     ValidationTruth,
     analytic_completeness_params,
     collect_recovery_fragments,
@@ -111,7 +112,11 @@ def _parser() -> argparse.ArgumentParser:
         "--arms",
         nargs="+",
         choices=ARM_NAMES,
-        default=list(ARM_NAMES),
+        default=list(DEFAULT_ARM_NAMES),
+        help=(
+            "Validation arms to fit (default: selected_uncorrected and "
+            "selected_estimated)."
+        ),
     )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--retry-failed", action="store_true")
