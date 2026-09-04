@@ -579,6 +579,149 @@ def test_completeness_effects_plot_uses_persisted_catalogs(tmp_path):
     assert output_png.is_file() and output_png.stat().st_size > 0
 
 
+def test_relative_completeness_percent_normalizes_finite_peak():
+    plot_module = _load_plot_module()
+    completeness = np.array([[0.02, 0.05], [np.nan, 0.10]])
+    relative = plot_module._relative_completeness_percent(completeness)
+    np.testing.assert_allclose(relative[0], [20.0, 50.0])
+    assert np.isnan(relative[1, 0])
+    assert relative[1, 1] == 100.0
+
+
+def test_relative_completeness_contours_use_automatic_levels():
+    plot_module = _load_plot_module()
+
+    class FakeAxis:
+        def __init__(self):
+            self.contour_call = None
+            self.clabel_call = None
+            self.labels = [
+                FakeLabel("50%", 15.0),
+                FakeLabel("75%", 205.0),
+                FakeLabel("90%", 335.0),
+            ]
+
+        def contour(self, *args, **kwargs):
+            self.contour_call = (args, kwargs)
+            return object()
+
+        def clabel(self, *args, **kwargs):
+            self.clabel_call = (args, kwargs)
+            return self.labels
+
+    class FakeLabel:
+        def __init__(self, text, rotation):
+            self.text = text
+            self.rotation = rotation
+
+        def get_text(self):
+            return self.text
+
+        def get_rotation(self):
+            return self.rotation
+
+        def set_rotation(self, rotation):
+            self.rotation = rotation
+
+    axis = FakeAxis()
+    result = plot_module._add_relative_completeness_contours(
+        axis,
+        np.array([[0.0, 25.0], [50.0, 100.0]]),
+        np.array([20.5, 21.5, 22.5]),
+        np.array([0.0, 1.0, 2.0]),
+    )
+    assert result is not None
+    contour_args, contour_kwargs = axis.contour_call
+    assert "levels" not in contour_kwargs
+    assert contour_kwargs["colors"] == "white"
+    assert np.all(np.isnan(contour_args[2][:, 0]))
+    assert np.all(np.isfinite(contour_args[2][:, 1]))
+    _, clabel_kwargs = axis.clabel_call
+    assert clabel_kwargs["fmt"](75.0) == "75%"
+    assert axis.labels[0].rotation == 15.0
+    assert axis.labels[1].rotation == 25.0
+    assert axis.labels[2].rotation == 155.0
+
+
+def test_single_completeness_effects_uses_only_requested_seed(tmp_path):
+    plot_module = _load_plot_module()
+    campaign = tmp_path / "campaign"
+    for realization, magnitude in ((0, 20.0), (1, 23.0)):
+        run_dir = campaign / "runs" / f"seed_{realization:04d}"
+        run_dir.mkdir(parents=True)
+        parent = pd.DataFrame(
+            {
+                "z": [1.0, 1.5],
+                "apparent_mag_2500": [magnitude, magnitude + 0.1],
+                "injected_detection_probability": [1.0, 0.5],
+                "injected_detected": [True, False],
+            }
+        )
+        parent.to_csv(run_dir / "all.csv", index=False)
+        parent.loc[[0], ["z", "apparent_mag_2500"]].to_csv(
+            run_dir / "selected.csv", index=False
+        )
+        write_completeness_parent_hdf5(
+            parent[["z", "apparent_mag_2500"]],
+            run_dir / "calibration_parent.h5",
+        )
+        parent.loc[[0], ["z", "apparent_mag_2500"]].to_csv(
+            run_dir / "calibration_detected.csv", index=False
+        )
+
+    parent, selected = plot_module._read_validation_catalogs(
+        campaign, realization=1
+    )
+    np.testing.assert_allclose(parent["apparent_mag_2500"], [23.0, 23.1])
+    np.testing.assert_allclose(selected["apparent_mag_2500"], [23.0])
+    realization, parent_path, detected_path, _ = (
+        plot_module._representative_calibration_paths(
+            campaign,
+            pd.DataFrame(columns=["status", "arm", "realization"]),
+            realization=1,
+        )
+    )
+    assert realization == 1
+    assert parent_path.parent.name == "seed_0001"
+    assert detected_path.parent.name == "seed_0001"
+
+
+def test_single_flag_requests_seed_specific_completeness_plot(tmp_path, monkeypatch):
+    plot_module = _load_plot_module()
+    truth = ValidationTruth()
+    campaign = tmp_path / "campaign"
+    campaign.mkdir()
+    recovery = _synthetic_recovery(truth, n_runs=1)
+    recovery.to_csv(campaign / "recovery.csv", index=False)
+    manifest = _posterior_corner_manifest(n_runs=1)
+    (campaign / "manifest.json").write_text(json.dumps(manifest))
+
+    monkeypatch.setattr(plot_module, "plot_median_recovery_corner", lambda *a, **k: None)
+    monkeypatch.setattr(plot_module, "plot_hubble_recovery", lambda *a, **k: None)
+    monkeypatch.setattr(
+        plot_module,
+        "_load_realization_posteriors",
+        lambda *a, **k: {"selected_estimated": np.zeros((2, 8))},
+    )
+    monkeypatch.setattr(plot_module, "plot_realization_posterior_corner", lambda *a, **k: None)
+    monkeypatch.setattr(plot_module, "plot_single_realization_hubble", lambda *a, **k: None)
+    calls = []
+
+    def fake_completeness(campaign, recovery, manifest, output_pdf, **kwargs):
+        calls.append((Path(output_pdf), kwargs.get("realization")))
+        return Path(output_pdf)
+
+    monkeypatch.setattr(plot_module, "plot_completeness_effects", fake_completeness)
+    assert plot_module.main([str(campaign), "--single", "0"]) == 0
+    assert calls == [
+        (campaign / "plots" / "completeness_effects.pdf", None),
+        (
+            campaign / "plots" / "single_runs" / "completeness_effects_seed_0000.pdf",
+            0,
+        ),
+    ]
+
+
 def test_plot_script_reads_persisted_campaign_without_posteriors(tmp_path):
     truth = ValidationTruth()
     recovery = _synthetic_recovery(truth, n_runs=9)

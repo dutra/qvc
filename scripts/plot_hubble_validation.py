@@ -69,6 +69,7 @@ POSTERIOR_PARAMETERS = (
     "w0",
     "wa",
 )
+COMPLETENESS_CONTOUR_MAG_MIN = 21.5
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -87,8 +88,8 @@ def _parser() -> argparse.ArgumentParser:
         type=int,
         metavar="REALIZATION",
         help=(
-            "Create posterior-corner and posterior-uncertainty Hubble plots "
-            "for one realization."
+            "Create posterior-corner, posterior-uncertainty Hubble, and "
+            "completeness-effects plots for one realization."
         ),
     )
     return parser
@@ -280,7 +281,10 @@ def plot_hubble_recovery(
     return output_pdf
 
 
-def _read_validation_catalogs(campaign: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+def _read_validation_catalogs(
+    campaign: Path,
+    realization: int | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     parent_parts = []
     selected_parts = []
     columns = [
@@ -289,7 +293,11 @@ def _read_validation_catalogs(campaign: Path) -> tuple[pd.DataFrame, pd.DataFram
         "injected_detection_probability",
         "injected_detected",
     ]
-    for run_dir in sorted((campaign / "runs").glob("seed_*")):
+    if realization is None:
+        run_dirs = sorted((campaign / "runs").glob("seed_*"))
+    else:
+        run_dirs = [campaign / "runs" / f"seed_{realization:04d}"]
+    for run_dir in run_dirs:
         parent_path = run_dir / "all.csv"
         selected_path = run_dir / "selected.csv"
         if not parent_path.is_file() or not selected_path.is_file():
@@ -305,17 +313,23 @@ def _read_validation_catalogs(campaign: Path) -> tuple[pd.DataFrame, pd.DataFram
 
 
 def _representative_calibration_paths(
-    campaign: Path, recovery: pd.DataFrame
+    campaign: Path,
+    recovery: pd.DataFrame,
+    realization: int | None = None,
 ) -> tuple[int, Path, Path, Path | None]:
     complete_estimated = recovery.loc[
         (recovery["status"] == "complete")
         & (recovery["arm"] == "selected_estimated")
     ]
-    preferred = complete_estimated["realization"].astype(int).tolist()
-    fallback = [
-        int(path.name.removeprefix("seed_"))
-        for path in sorted((campaign / "runs").glob("seed_*"))
-    ]
+    if realization is None:
+        preferred = complete_estimated["realization"].astype(int).tolist()
+        fallback = [
+            int(path.name.removeprefix("seed_"))
+            for path in sorted((campaign / "runs").glob("seed_*"))
+        ]
+    else:
+        preferred = [realization]
+        fallback = []
     for realization in [*preferred, *fallback]:
         run_dir = campaign / "runs" / f"seed_{realization:04d}"
         parent = run_dir / "calibration_parent.h5"
@@ -327,10 +341,12 @@ def _representative_calibration_paths(
 
 
 def _calibration_completeness_map(
-    campaign: Path, recovery: pd.DataFrame
+    campaign: Path,
+    recovery: pd.DataFrame,
+    realization: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     realization, parent_path, detected_path, checkpoint_path = (
-        _representative_calibration_paths(campaign, recovery)
+        _representative_calibration_paths(campaign, recovery, realization)
     )
     metadata = {
         "mag_support": (18.0, 24.5),
@@ -385,6 +401,55 @@ def _calibration_completeness_map(
     return completeness, mag_edges, z_edges, realization
 
 
+def _relative_completeness_percent(completeness: np.ndarray) -> np.ndarray:
+    """Normalize a completeness map to its finite maximum and express percent."""
+
+    completeness = np.asarray(completeness, dtype=float)
+    finite = np.isfinite(completeness)
+    if not np.any(finite):
+        return np.full_like(completeness, np.nan)
+    maximum = float(np.max(completeness[finite]))
+    if maximum <= 0.0:
+        return np.where(finite, 0.0, np.nan)
+    return 100.0 * completeness / maximum
+
+
+def _add_relative_completeness_contours(
+    axis,
+    relative_completeness: np.ndarray,
+    mag_edges: np.ndarray,
+    z_edges: np.ndarray,
+    min_magnitude: float = COMPLETENESS_CONTOUR_MAG_MIN,
+):
+    """Overlay percentage contours on the faint side of a completeness map."""
+
+    mag_centers = 0.5 * (mag_edges[:-1] + mag_edges[1:])
+    contour_values = np.array(relative_completeness, dtype=float, copy=True)
+    contour_values[mag_centers < float(min_magnitude), :] = np.nan
+    finite = contour_values[np.isfinite(contour_values)]
+    if finite.size == 0 or float(np.max(finite)) <= float(np.min(finite)):
+        return None
+    z_centers = 0.5 * (z_edges[:-1] + z_edges[1:])
+    contours = axis.contour(
+        mag_centers,
+        z_centers,
+        contour_values.T,
+        colors="white",
+        linewidths=1.3,
+    )
+    labels = axis.clabel(
+        contours,
+        inline=True,
+        fmt=lambda level: f"{level:.0f}%",
+        fontsize=7,
+    )
+    for label in labels:
+        rotation = float(label.get_rotation()) % 360.0
+        if np.sin(np.deg2rad(rotation)) < 0.0:
+            label.set_rotation((rotation + 180.0) % 360.0)
+    return contours
+
+
 def plot_completeness_effects(
     campaign: Path,
     recovery: pd.DataFrame,
@@ -393,10 +458,11 @@ def plot_completeness_effects(
     *,
     output_png: Path | None = None,
     dpi: int = 220,
+    realization: int | None = None,
 ) -> Path:
     """Show how the injected hard-supported sigmoid reshapes the LF sample."""
 
-    parent, selected = _read_validation_catalogs(campaign)
+    parent, selected = _read_validation_catalogs(campaign, realization)
     configuration = manifest["configuration"]
     m50 = float(configuration["selection"]["m50"])
     width = float(configuration["selection"]["width"])
@@ -406,8 +472,9 @@ def plot_completeness_effects(
     support = tuple(float(value) for value in support)
     z_range = tuple(float(value) for value in configuration.get("z_range", [0.1, 4.0]))
     completeness, mag_edges, z_edges, _ = _calibration_completeness_map(
-        campaign, recovery
+        campaign, recovery, realization
     )
+    relative_completeness = _relative_completeness_percent(completeness)
 
     figure, axes = plt.subplots(2, 2, figsize=(11.0, 8.2))
     ax_mag, ax_z, ax_sigmoid, ax_map = axes.ravel()
@@ -496,15 +563,21 @@ def plot_completeness_effects(
     image = ax_map.pcolormesh(
         mag_edges,
         z_edges,
-        completeness.T,
+        relative_completeness.T,
         shading="auto",
         vmin=0.0,
-        vmax=1.0,
+        vmax=100.0,
         cmap="viridis",
         edgecolors="none",
         linewidth=0.0,
         antialiased=False,
         rasterized=True,
+    )
+    _add_relative_completeness_contours(
+        ax_map,
+        relative_completeness,
+        mag_edges,
+        z_edges,
     )
     ax_map.grid(False, which="both")
     ax_map.xaxis.grid(False, which="both")
@@ -512,7 +585,7 @@ def plot_completeness_effects(
     ax_map.set_xlabel(r"Apparent $m_{2500}$ (mag)")
     ax_map.set_ylabel("Redshift")
     colorbar = figure.colorbar(image, ax=ax_map, pad=0.02)
-    colorbar.set_label(r"Estimated $p_{\rm det}(m,z)$")
+    colorbar.set_label("Relative completeness (%)")
 
     figure.legend(
         distribution_handles + selection_handles,
@@ -1335,6 +1408,7 @@ def main(argv=None) -> int:
         )
     single_corner_plot = None
     single_hubble_plot = None
+    single_completeness_plot = None
     if args.single is not None:
         arm_samples = _load_realization_posteriors(
             campaign,
@@ -1362,6 +1436,26 @@ def main(argv=None) -> int:
             output_png=single_hubble_plot.with_suffix(".png"),
             dpi=args.dpi,
         )
+        single_completeness_plot = (
+            single_output_dir / f"completeness_effects_seed_{args.single:04d}.pdf"
+        )
+        try:
+            plot_completeness_effects(
+                campaign,
+                recovery,
+                manifest,
+                single_completeness_plot,
+                output_png=single_completeness_plot.with_suffix(".png"),
+                dpi=args.dpi,
+                realization=args.single,
+            )
+        except FileNotFoundError as exc:
+            warnings.warn(
+                "Skipping single-run completeness-effects plot because catalog "
+                f"artifacts are absent: {exc}",
+                RuntimeWarning,
+            )
+            single_completeness_plot = None
     print(f"Validation plot: {output_dir / 'median_recovery_corner.pdf'}")
     print(f"Hubble recovery plot: {output_dir / 'hubble_diagram_recovery.pdf'}")
     if completeness_plot.is_file():
@@ -1369,6 +1463,8 @@ def main(argv=None) -> int:
     if single_corner_plot is not None:
         print(f"Single-run posterior corner: {single_corner_plot}")
         print(f"Single-run Hubble plot: {single_hubble_plot}")
+        if single_completeness_plot is not None:
+            print(f"Single-run completeness-effects plot: {single_completeness_plot}")
     print(f"Ensemble summary: {campaign / 'ensemble_summary.csv'}")
     print(f"Incomplete fits: {campaign / 'incomplete_fits.csv'} ({len(incomplete)} rows)")
     return 0
