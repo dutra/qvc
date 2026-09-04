@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import types
@@ -23,11 +24,17 @@ from qvc.hubble.completeness_mock_catalog import (
     AB_ABSOLUTE_MAG_ZEROPOINT,
     LOG10_MAG_JACOBIAN,
     NU_2500_HZ,
+    SHEN_DEFAULT_LF_MODE,
     SHEN_GLOBAL_FIT,
+    SHEN_LF_MODES,
+    _build_shen_type1_lf_at_redshift,
     _configure_shen_paths,
     build_shen_lf,
     log_nu_lnu_to_ab_absolute_magnitude,
+    normalize_shen_lf_mode,
     save_mock_catalog,
+    shen_lf_expected_completeness_magnitude,
+    shen_type1_fraction,
 )
 from qvc.hubble.hubble_likelihood import (
     completeness_loglike,
@@ -82,6 +89,149 @@ def test_build_shen_lf_uses_global_fit_a_extinction_convolved_2500_channel(
         AB_ABSOLUTE_MAG_ZEROPOINT
         - 2.5 * (log_nu_lnu - np.log10(NU_2500_HZ)),
     )
+
+
+def test_shen_lf_modes_and_magnitude_states_are_explicit():
+    assert SHEN_LF_MODES == (
+        "all_nh_attenuated",
+        "type1_intrinsic",
+        "type1_attenuated",
+    )
+    assert normalize_shen_lf_mode("TYPE1-ATTENUATED") == "type1_attenuated"
+    assert shen_lf_expected_completeness_magnitude(
+        "type1_intrinsic"
+    ) == "dereddened"
+    assert shen_lf_expected_completeness_magnitude(
+        SHEN_DEFAULT_LF_MODE
+    ) == "attenuated"
+    with pytest.raises(ValueError, match="Unknown Shen LF mode"):
+        normalize_shen_lf_mode("type2")
+
+
+def test_shen_type1_fraction_is_bounded_and_decreases_with_absorption():
+    log_lx = np.array([43.0, 44.0, 45.0])
+    fraction = shen_type1_fraction(log_lx, redshift=1.0)
+
+    assert np.all((fraction > 0.0) & (fraction < 1.0))
+    assert np.all(np.diff(fraction) > 0.0)
+
+
+def test_shen_type1_attenuation_shifts_the_uv_lf_fainter():
+    class Backend:
+        def l_band(self, log_lbol_lsun, frequency):
+            offset = 0.8 if frequency == NU_2500_HZ else 1.5
+            return 10.0 ** (log_lbol_lsun - offset)
+
+        def l_band_dispersion(self, log_lbol_lsun, frequency):
+            return 0.2
+
+        def return_tau(self, log_nh, frequency, dust_to_gas):
+            return 0.8
+
+    def return_bolometric_qlf(redshift, model):
+        return np.linspace(44.0, 47.0, 80), np.linspace(-7.0, -5.0, 80)
+
+    intrinsic_grid, intrinsic_phi = _build_shen_type1_lf_at_redshift(
+        1.0,
+        return_bolometric_qlf=return_bolometric_qlf,
+        return_dtg=lambda redshift: 1.0,
+        backend=Backend(),
+        attenuated=False,
+    )
+    attenuated_grid, attenuated_phi = _build_shen_type1_lf_at_redshift(
+        1.0,
+        return_bolometric_qlf=return_bolometric_qlf,
+        return_dtg=lambda redshift: 1.0,
+        backend=Backend(),
+        attenuated=True,
+    )
+
+    np.testing.assert_allclose(attenuated_grid, intrinsic_grid)
+    intrinsic_mean = np.average(intrinsic_grid, weights=intrinsic_phi)
+    attenuated_mean = np.average(attenuated_grid, weights=attenuated_phi)
+    assert attenuated_mean < intrinsic_mean
+
+
+@pytest.mark.parametrize(
+    ("mode", "magnitude", "filename"),
+    [
+        (
+            "all_nh_attenuated",
+            "attenuated",
+            "mock_completeness_catalog_fresh.h5",
+        ),
+        (
+            "type1_intrinsic",
+            "dereddened",
+            "mock_completeness_catalog_fresh_shen_type1_intrinsic.h5",
+        ),
+        (
+            "type1_attenuated",
+            "attenuated",
+            "mock_completeness_catalog_fresh_shen_type1_attenuated.h5",
+        ),
+    ],
+)
+def test_fresh_shen_mock_filename_and_provenance(
+    tmp_path, monkeypatch, mode, magnitude, filename
+):
+    calls = []
+
+    def fake_build_shen_lf(pubtools_path, *, mode=SHEN_DEFAULT_LF_MODE):
+        calls.append(mode)
+        return np.zeros((2, 2)), np.array([-25.0, -24.0]), np.array([0.5, 1.5])
+
+    def fake_mock_m_per_zbin(*args, **kwargs):
+        z = np.array([0.8, 1.2])
+        apparent = np.array([20.0, 21.0])
+        alpha_lambda = np.array([-1.5, -1.4])
+        return (
+            [apparent],
+            np.array([2.0]),
+            [z],
+            np.array([2]),
+            z,
+            apparent,
+            apparent,
+            np.array([0, 0]),
+            alpha_lambda,
+        )
+
+    monkeypatch.setenv(hubble_fit.SHEN_LF_MODE_ENV, mode)
+    monkeypatch.setattr(hubble_fit, "build_shen_lf", fake_build_shen_lf)
+    monkeypatch.setattr(hubble_fit, "mock_m_per_zbin", fake_mock_m_per_zbin)
+
+    output = Path(
+        hubble_fit.generate_fresh_completeness_sim_file(
+            tmp_path,
+            area_deg2=10.0,
+            completeness_magnitude=magnitude,
+            lf_model="shen",
+        )
+    )
+
+    assert output.name == filename
+    assert calls == [mode]
+    with h5py.File(output, "r") as handle:
+        assert handle.attrs["lf_model"] == "shen"
+        assert handle.attrs["shen_lf_mode"] == mode
+        assert handle.attrs["completeness_magnitude_state"] == magnitude
+    checkpoint = hubble_fit.completeness_checkpoint_metadata(output)
+    provenance = json.loads(checkpoint["completeness_mock_provenance_json"])
+    assert provenance["shen_lf_mode"] == mode
+    assert provenance["completeness_magnitude_state"] == magnitude
+
+
+def test_fresh_shen_mock_rejects_magnitude_state_mismatch(tmp_path, monkeypatch):
+    monkeypatch.setenv(hubble_fit.SHEN_LF_MODE_ENV, "type1_intrinsic")
+
+    with pytest.raises(ValueError, match="requires.*dereddened"):
+        hubble_fit.generate_fresh_completeness_sim_file(
+            tmp_path,
+            area_deg2=10.0,
+            completeness_magnitude="attenuated",
+            lf_model="shen",
+        )
 
 
 def test_log_nu_lnu_to_ab_absolute_magnitude_gold_value():

@@ -166,16 +166,20 @@ from qvc.hubble.completeness_mock_catalog import (
     COMPLETENESS_LF_MODELS,
     COSMO as COMPLETENESS_MOCK_COSMO,
     DEFAULT_M2500_SUPPORT,
+    SHEN_DEFAULT_LF_MODE,
     build_completeness_lf,
     build_shen_lf,
     mock_lf_grid_per_zbin,
     mock_m_per_zbin,
+    normalize_shen_lf_mode,
     save_mock_catalog,
+    shen_lf_expected_completeness_magnitude,
 )
 
 VALID_COMPLETENESS_MODES = ("2d", "3d_fhost", "4d_fhost_alpha")
 SPEED_CHOICES = ("fastest", "quick", "standard", "production")
 SIGMA_CLIP_SECOND_PASS_MODES = ("warm", "fresh")
+SHEN_LF_MODE_ENV = "QVC_HUBBLE_SHEN_LF_MODE"
 AGN_PIVOT_CHECKPOINT_KEYS = (
     "agn_pivot_observable_names",
     "agn_pivot_values",
@@ -2036,6 +2040,8 @@ def completeness_checkpoint_metadata(
             with h5py.File(resolved, "r") as handle:
                 for key in (
                     "lf_model",
+                    "shen_lf_mode",
+                    "completeness_magnitude_state",
                     "mock_redshift_min",
                     "mock_redshift_max",
                     "requested_redshift_min",
@@ -3027,21 +3033,46 @@ def generate_fresh_completeness_sim_file(
             f"Unknown completeness LF model {lf_model!r}; expected one of "
             f"{COMPLETENESS_LF_MODELS}."
         )
-    if lf_model != "shen" and completeness_magnitude != "attenuated":
+    shen_lf_mode = (
+        normalize_shen_lf_mode(
+            os.environ.get(SHEN_LF_MODE_ENV, SHEN_DEFAULT_LF_MODE)
+        )
+        if lf_model == "shen"
+        else None
+    )
+    expected_magnitude = (
+        shen_lf_expected_completeness_magnitude(shen_lf_mode)
+        if shen_lf_mode is not None
+        else "attenuated"
+    )
+    if (
+        completeness_magnitude != expected_magnitude
+        and shen_lf_mode != SHEN_DEFAULT_LF_MODE
+    ):
+        if shen_lf_mode is None:
+            raise ValueError(
+                "Empirical Type-1 LFs retain their samples' implicit internal "
+                "attenuation and therefore require "
+                "completeness_magnitude='attenuated'."
+            )
+        descriptor = (
+            f"shen/{shen_lf_mode}" if shen_lf_mode is not None else lf_model
+        )
         raise ValueError(
-            "Empirical Type-1 LFs retain their samples' implicit internal "
-            "attenuation and therefore require completeness_magnitude='attenuated'."
+            f"Completeness LF {descriptor!r} requires "
+            f"completeness_magnitude={expected_magnitude!r}."
         )
     z_range = tuple(float(value) for value in z_range)
     if len(z_range) != 2 or z_range[0] < 0.0 or z_range[0] >= z_range[1]:
         raise ValueError("Completeness mock z_range must be increasing and non-negative.")
     completeness_dir = Path(plot_path) / "completeness"
     completeness_dir.mkdir(parents=True, exist_ok=True)
-    output_name = (
-        "mock_completeness_catalog_fresh.h5"
-        if lf_model == "shen"
-        else f"mock_completeness_catalog_fresh_{lf_model}.h5"
-    )
+    if lf_model == "shen" and shen_lf_mode == SHEN_DEFAULT_LF_MODE:
+        output_name = "mock_completeness_catalog_fresh.h5"
+    elif lf_model == "shen":
+        output_name = f"mock_completeness_catalog_fresh_shen_{shen_lf_mode}.h5"
+    else:
+        output_name = f"mock_completeness_catalog_fresh_{lf_model}.h5"
     output_path = completeness_dir / output_name
     thinning_probability = 1.0
 
@@ -3050,7 +3081,12 @@ def generate_fresh_completeness_sim_file(
     alpha_nu_parent_sigma = 0.3
     lf_grid = None
     if lf_model == "shen":
-        phi_log10, m_grid, z_bins = build_shen_lf(None)
+        if shen_lf_mode == SHEN_DEFAULT_LF_MODE:
+            phi_log10, m_grid, z_bins = build_shen_lf(None)
+        else:
+            phi_log10, m_grid, z_bins = build_shen_lf(
+                None, mode=shen_lf_mode
+            )
         _, _, _, _, z_all, m_all, m_rest_all, _, alpha_lambda_all = mock_m_per_zbin(
             phi_log10,
             m_grid,
@@ -3114,6 +3150,9 @@ def generate_fresh_completeness_sim_file(
     finite_z = finite_z[np.isfinite(finite_z)]
     with h5py.File(output_path, "a") as handle:
         handle.attrs["lf_model"] = lf_model
+        if shen_lf_mode is not None:
+            handle.attrs["shen_lf_mode"] = shen_lf_mode
+        handle.attrs["completeness_magnitude_state"] = completeness_magnitude
         handle.attrs["mock_redshift_min"] = float(np.min(finite_z))
         handle.attrs["mock_redshift_max"] = float(np.max(finite_z))
         handle.attrs["requested_redshift_min"] = z_range[0]
@@ -3924,10 +3963,33 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             f"Unknown completeness LF model {completeness_lf_model!r}; "
             f"expected one of {COMPLETENESS_LF_MODELS}."
         )
-    if completeness_lf_model != "shen" and completeness_magnitude != "attenuated":
+    shen_lf_mode = (
+        normalize_shen_lf_mode(
+            os.environ.get(SHEN_LF_MODE_ENV, SHEN_DEFAULT_LF_MODE)
+        )
+        if completeness_lf_model == "shen"
+        else None
+    )
+    expected_magnitude = (
+        shen_lf_expected_completeness_magnitude(shen_lf_mode)
+        if shen_lf_mode is not None
+        else "attenuated"
+    )
+    if (
+        completeness_magnitude != expected_magnitude
+        and shen_lf_mode != SHEN_DEFAULT_LF_MODE
+    ):
+        if shen_lf_mode is None:
+            raise ValueError(
+                "Empirical Type-1 completeness LFs require "
+                "completeness_magnitude='attenuated'."
+            )
         raise ValueError(
-            "Empirical Type-1 completeness LFs require "
-            "completeness_magnitude='attenuated'."
+            f"Completeness LF {completeness_lf_model!r}"
+            + (
+                f"/{shen_lf_mode!s}" if shen_lf_mode is not None else ""
+            )
+            + f" requires completeness_magnitude={expected_magnitude!r}."
         )
     df_agn = prepare_completeness_magnitude_columns(
         df_agn,

@@ -5,7 +5,7 @@ Each child run delegates to ``run_hubble.xonsh`` with the minimal plot set.
 The resulting debiased Hubble diagrams are assembled into a labeled, single-
 tightly cropped, single-page PDF without rasterizing the source figures, with
 a matching PNG rendering written alongside it. Paired residual and selection-
-correction diagnostics are then generated from the six residual tables and
+correction diagnostics are then generated from the eight residual tables and
 posterior checkpoints.
 """
 
@@ -19,6 +19,7 @@ import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import NamedTuple
 
 import matplotlib.pyplot as plt
 from pypdf import PageObject, PdfReader, PdfWriter, Transformation
@@ -29,8 +30,8 @@ SRC = REPO_ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from qvc.hubble.completeness_mock_catalog import COMPLETENESS_LF_MODELS
 from qvc.hubble.lf_comparison_diagnostics import (
+    generate_lf_parameter_comparison,
     generate_lf_comparison_diagnostics,
 )
 
@@ -46,12 +47,49 @@ COMPARISON_COLUMN_GAP_PT = 6.0
 COMPARISON_ROW_GAP_PT = 4.0
 LF_LABELS = {
     "shen": "Shen et al. (2020)",
+    "shen_type1_intrinsic": "Shen et al. (2020), Type 1 intrinsic",
+    "shen_type1_attenuated": "Shen et al. (2020), Type 1 attenuated",
     "wang2026_type1_lade_a": "Wang et al. (2026), LADE-A",
     "palanque2016_ple_lede": "Palanque-Delabrouille et al. (2016), PLE+LEDE",
     "kulkarni2019_type1_model1": "Kulkarni et al. (2019), Model 1",
     "kulkarni2019_type1_model2": "Kulkarni et al. (2019), Model 2",
     "kulkarni2019_type1_model3": "Kulkarni et al. (2019), Model 3",
 }
+
+
+class LFRun(NamedTuple):
+    key: str
+    lf_model: str
+    shen_lf_mode: str | None
+    completeness_magnitude: str
+
+
+LF_RUNS = (
+    LFRun("shen", "shen", "all_nh_attenuated", "attenuated"),
+    LFRun("shen_type1_intrinsic", "shen", "type1_intrinsic", "dereddened"),
+    LFRun("shen_type1_attenuated", "shen", "type1_attenuated", "attenuated"),
+    LFRun("wang2026_type1_lade_a", "wang2026_type1_lade_a", None, "attenuated"),
+    LFRun("palanque2016_ple_lede", "palanque2016_ple_lede", None, "attenuated"),
+    LFRun(
+        "kulkarni2019_type1_model1",
+        "kulkarni2019_type1_model1",
+        None,
+        "attenuated",
+    ),
+    LFRun(
+        "kulkarni2019_type1_model2",
+        "kulkarni2019_type1_model2",
+        None,
+        "attenuated",
+    ),
+    LFRun(
+        "kulkarni2019_type1_model3",
+        "kulkarni2019_type1_model3",
+        None,
+        "attenuated",
+    ),
+)
+LF_RUN_IDS = tuple(run.key for run in LF_RUNS)
 
 
 def _validate_model_labels(models: Sequence[str]) -> None:
@@ -72,18 +110,22 @@ def _validate_prefix(prefix: str) -> str:
 
 
 def build_child_environment(
-    base_environment: Mapping[str, str], model: str, model_prefix: str
+    base_environment: Mapping[str, str], run: LFRun, model_prefix: str
 ) -> dict[str, str]:
     """Return a child environment differing only in sweep-specific settings."""
     environment = dict(base_environment)
     environment.update(
         {
-            "QVC_HUBBLE_COMPLETENESS_LF_MODEL": model,
+            "QVC_HUBBLE_COMPLETENESS_LF_MODEL": run.lf_model,
             "QVC_HUBBLE_MINIMAL_PLOTS": "true",
-            "QVC_HUBBLE_COMPLETENESS_MAGNITUDE": "attenuated",
+            "QVC_HUBBLE_COMPLETENESS_MAGNITUDE": run.completeness_magnitude,
             "QVC_HUBBLE_PREFIX": model_prefix,
         }
     )
+    if run.shen_lf_mode is None:
+        environment.pop("QVC_HUBBLE_SHEN_LF_MODE", None)
+    else:
+        environment["QVC_HUBBLE_SHEN_LF_MODE"] = run.shen_lf_mode
     return environment
 
 
@@ -106,17 +148,19 @@ def run_luminosity_function_sweep(
     base_environment: Mapping[str, str] | None = None,
 ) -> list[tuple[str, Path]]:
     """Run ``run_hubble.xonsh`` once for every canonical LF model."""
-    models = tuple(COMPLETENESS_LF_MODELS)
-    _validate_model_labels(models)
+    _validate_model_labels(LF_RUN_IDS)
     base_environment = os.environ if base_environment is None else base_environment
     diagrams: list[tuple[str, Path]] = []
 
-    for index, model in enumerate(models, start=1):
-        model_prefix = f"{base_prefix}_{model}"
+    for index, run in enumerate(LF_RUNS, start=1):
+        model_prefix = f"{base_prefix}_{run.key}"
         environment = build_child_environment(
-            base_environment, model=model, model_prefix=model_prefix
+            base_environment, run=run, model_prefix=model_prefix
         )
-        print(f"[{index}/{len(models)}] Running luminosity function: {model}", flush=True)
+        print(
+            f"[{index}/{len(LF_RUNS)}] Running luminosity function: {run.key}",
+            flush=True,
+        )
         try:
             subprocess.run(
                 [xonsh_path, str(RUN_HUBBLE)],
@@ -126,10 +170,10 @@ def run_luminosity_function_sweep(
             )
         except subprocess.CalledProcessError as error:
             raise RuntimeError(
-                f"run_hubble.xonsh failed for luminosity function {model!r} "
+                f"run_hubble.xonsh failed for luminosity function {run.key!r} "
                 f"with exit code {error.returncode}."
             ) from error
-        diagrams.append((model, find_debiased_hubble_diagram(model_prefix)))
+        diagrams.append((run.key, find_debiased_hubble_diagram(model_prefix)))
 
     return diagrams
 
@@ -138,9 +182,9 @@ def assemble_comparison_pdf(
     diagrams: Sequence[tuple[str, Path]],
     output_path: Path,
 ) -> Path:
-    """Compose six source PDFs onto one zero-margin vector 2-by-3 page."""
+    """Compose all source PDFs onto one zero-margin, two-column vector page."""
     models = [model for model, _ in diagrams]
-    if tuple(models) != tuple(COMPLETENESS_LF_MODELS):
+    if tuple(models) != LF_RUN_IDS:
         raise ValueError(
             "Diagrams must contain every supported luminosity function exactly "
             "once and in canonical order."
@@ -168,8 +212,11 @@ def assemble_comparison_pdf(
     ]
     source_region_height = max(source_heights)
     panel_height = source_region_height + COMPARISON_LABEL_HEIGHT_PT
+    n_rows = (len(source_pages) + 1) // 2
     page_width = 2 * COMPARISON_PANEL_WIDTH_PT + COMPARISON_COLUMN_GAP_PT
-    page_height = 3 * panel_height + 2 * COMPARISON_ROW_GAP_PT
+    page_height = (
+        n_rows * panel_height + (n_rows - 1) * COMPARISON_ROW_GAP_PT
+    )
     composite = PageObject.create_blank_page(width=page_width, height=page_height)
 
     label_buffer = BytesIO()
@@ -337,6 +384,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             diagrams,
             output_path.parent,
         )
+        parameter_paths = generate_lf_parameter_comparison(
+            prefix,
+            output_path.parent,
+            models=LF_RUN_IDS,
+        )
     except (FileNotFoundError, RuntimeError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
@@ -345,6 +397,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"Wrote luminosity-function comparison PNG: {png_result}")
     for name, path in diagnostic_paths.items():
         print(f"Wrote LF diagnostic {name}: {path}")
+    for name, path in parameter_paths.items():
+        print(f"Wrote LF parameter comparison {name}: {path}")
     return 0
 
 

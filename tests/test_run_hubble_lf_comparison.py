@@ -12,7 +12,9 @@ import pandas as pd
 import pytest
 from pypdf import PdfReader
 
+from qvc.hubble import lf_comparison_diagnostics
 from qvc.hubble.completeness_mock_catalog import COMPLETENESS_LF_MODELS
+from qvc.hubble.hubble_model import get_model_params
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,7 +41,17 @@ def test_models_and_labels_follow_the_canonical_supported_order():
         "kulkarni2019_type1_model2",
         "kulkarni2019_type1_model3",
     )
-    assert tuple(comparison.LF_LABELS) == tuple(COMPLETENESS_LF_MODELS)
+    assert comparison.LF_RUN_IDS == (
+        "shen",
+        "shen_type1_intrinsic",
+        "shen_type1_attenuated",
+        "wang2026_type1_lade_a",
+        "palanque2016_ple_lede",
+        "kulkarni2019_type1_model1",
+        "kulkarni2019_type1_model2",
+        "kulkarni2019_type1_model3",
+    )
+    assert tuple(comparison.LF_LABELS) == comparison.LF_RUN_IDS
 
 
 def test_sweep_runs_every_model_with_only_the_intended_environment_changes(
@@ -51,6 +63,7 @@ def test_sweep_runs_every_model_with_only_the_intended_environment_changes(
         "QVC_HUBBLE_SPEED": "fastest",
         "UNCHANGED_SETTING": "sentinel",
         "QVC_HUBBLE_MINIMAL_PLOTS": "false",
+        "QVC_HUBBLE_SHEN_LF_MODE": "stale",
     }
     calls = []
 
@@ -73,18 +86,22 @@ def test_sweep_runs_every_model_with_only_the_intended_environment_changes(
         "comparison", xonsh_path="/usr/bin/xonsh", base_environment=baseline
     )
 
-    assert [model for model, _ in diagrams] == list(COMPLETENESS_LF_MODELS)
-    assert len(calls) == len(COMPLETENESS_LF_MODELS)
-    for (command, cwd, environment, check), model in zip(
-        calls, COMPLETENESS_LF_MODELS, strict=True
+    assert [model for model, _ in diagrams] == list(comparison.LF_RUN_IDS)
+    assert len(calls) == len(comparison.LF_RUNS)
+    for (command, cwd, environment, check), run in zip(
+        calls, comparison.LF_RUNS, strict=True
     ):
-        model_prefix = f"comparison_{model}"
+        model_prefix = f"comparison_{run.key}"
         expected_environment = baseline | {
-            "QVC_HUBBLE_COMPLETENESS_LF_MODEL": model,
+            "QVC_HUBBLE_COMPLETENESS_LF_MODEL": run.lf_model,
             "QVC_HUBBLE_MINIMAL_PLOTS": "true",
-            "QVC_HUBBLE_COMPLETENESS_MAGNITUDE": "attenuated",
+            "QVC_HUBBLE_COMPLETENESS_MAGNITUDE": run.completeness_magnitude,
             "QVC_HUBBLE_PREFIX": model_prefix,
         }
+        if run.shen_lf_mode is not None:
+            expected_environment["QVC_HUBBLE_SHEN_LF_MODE"] = run.shen_lf_mode
+        else:
+            expected_environment.pop("QVC_HUBBLE_SHEN_LF_MODE")
         assert command == ["/usr/bin/xonsh", str(comparison.RUN_HUBBLE)]
         assert cwd == tmp_path
         assert environment == expected_environment
@@ -125,9 +142,9 @@ def test_diagram_discovery_requires_exactly_one_match(monkeypatch, tmp_path, cou
         comparison.find_debiased_hubble_diagram("model-prefix")
 
 
-def test_assembly_creates_one_page_with_all_six_labels(tmp_path):
+def test_assembly_creates_one_page_with_all_eight_labels(tmp_path):
     diagrams = []
-    for index, model in enumerate(COMPLETENESS_LF_MODELS):
+    for index, model in enumerate(comparison.LF_RUN_IDS):
         source = tmp_path / f"source-{index}.pdf"
         _write_pdf(source, f"Panel {index + 1}")
         diagrams.append((model, source))
@@ -147,8 +164,8 @@ def test_assembly_creates_one_page_with_all_six_labels(tmp_path):
         / float(source_page.cropbox.width)
     )
     expected_page_height = (
-        3 * (expected_source_height + comparison.COMPARISON_LABEL_HEIGHT_PT)
-        + 2 * comparison.COMPARISON_ROW_GAP_PT
+        4 * (expected_source_height + comparison.COMPARISON_LABEL_HEIGHT_PT)
+        + 3 * comparison.COMPARISON_ROW_GAP_PT
     )
     assert float(page.mediabox.width) == pytest.approx(
         2 * comparison.COMPARISON_PANEL_WIDTH_PT
@@ -182,11 +199,13 @@ def test_comparison_png_is_rendered_from_pdf(tmp_path):
     assert output.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
-def _write_diagnostic_inputs(tmp_path: Path, base_prefix: str):
+def _write_diagnostic_inputs(
+    tmp_path: Path, base_prefix: str, models=COMPLETENESS_LF_MODELS
+):
     diagrams = []
     object_ids = np.asarray([f"object-{index:02d}" for index in range(18)])
     redshift = np.repeat([0.6, 1.0, 1.4, 1.8, 2.2, 2.8], 3)
-    for model_index, model in enumerate(COMPLETENESS_LF_MODELS):
+    for model_index, model in enumerate(models):
         run_directory = (
             tmp_path
             / "plots"
@@ -233,8 +252,124 @@ def _write_diagnostic_inputs(tmp_path: Path, base_prefix: str):
     return diagrams
 
 
+def _write_parameter_posteriors(
+    tmp_path: Path, base_prefix: str, models=COMPLETENESS_LF_MODELS
+):
+    _, parameter_names, _ = get_model_params("Flatw0waCDM")
+    for model_index, model in enumerate(models):
+        posterior_directory = (
+            tmp_path
+            / "results"
+            / "hubble_posteriors"
+            / f"{base_prefix}_{model}"
+        )
+        posterior_directory.mkdir(parents=True)
+        samples = np.empty((5, len(parameter_names)), dtype=float)
+        for parameter_index in range(len(parameter_names)):
+            samples[:, parameter_index] = (
+                100.0 * model_index
+                + 10.0 * parameter_index
+                + np.arange(5, dtype=float)
+            )
+        with h5py.File(posterior_directory / "posterior.h5", "w") as handle:
+            handle.create_dataset("flat_samples", data=samples)
+    return parameter_names
+
+
+def test_parameter_summaries_use_named_columns_and_canonical_model_order(tmp_path):
+    parameter_names = _write_parameter_posteriors(tmp_path, "comparison")
+
+    summaries = lf_comparison_diagnostics.load_lf_parameter_summaries(
+        "comparison", repo_root=tmp_path
+    )
+
+    expected_pairs = [
+        (model, parameter)
+        for model in COMPLETENESS_LF_MODELS
+        for parameter in lf_comparison_diagnostics.PARAMETER_COMPARISON_NAMES
+    ]
+    assert list(zip(summaries["model"], summaries["parameter"])) == expected_pairs
+    for model_index, model in enumerate(COMPLETENESS_LF_MODELS):
+        for parameter in lf_comparison_diagnostics.PARAMETER_COMPARISON_NAMES:
+            parameter_index = parameter_names.index(parameter)
+            row = summaries.loc[
+                summaries["model"].eq(model)
+                & summaries["parameter"].eq(parameter)
+            ].iloc[0]
+            values = (
+                100.0 * model_index
+                + 10.0 * parameter_index
+                + np.arange(5, dtype=float)
+            )
+            expected = np.quantile(values, [0.16, 0.50, 0.84])
+            assert row[["interval_16", "median", "interval_84"]].to_numpy(
+                dtype=float
+            ) == pytest.approx(expected)
+
+
+def test_parameter_comparison_writes_single_page_pdf_and_png(tmp_path):
+    _write_parameter_posteriors(
+        tmp_path, "comparison", models=comparison.LF_RUN_IDS
+    )
+    output_directory = tmp_path / "plots" / "hubble" / "comparison"
+
+    outputs = comparison.generate_lf_parameter_comparison(
+        "comparison",
+        output_directory,
+        repo_root=tmp_path,
+        models=comparison.LF_RUN_IDS,
+    )
+
+    assert set(outputs) == {"parameter_pdf", "parameter_png"}
+    assert all(
+        path.is_file() and path.stat().st_size > 0 for path in outputs.values()
+    )
+    assert len(PdfReader(outputs["parameter_pdf"]).pages) == 1
+    assert outputs["parameter_png"].read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_parameter_summaries_require_exactly_one_posterior(tmp_path):
+    _write_parameter_posteriors(tmp_path, "comparison")
+    shen_directory = (
+        tmp_path / "results" / "hubble_posteriors" / "comparison_shen"
+    )
+    (shen_directory / "second.h5").write_bytes(b"")
+
+    with pytest.raises(RuntimeError, match="found 2"):
+        lf_comparison_diagnostics.load_lf_parameter_summaries(
+            "comparison", repo_root=tmp_path
+        )
+
+
+def test_parameter_summaries_reject_missing_posterior(tmp_path):
+    with pytest.raises(RuntimeError, match="found 0"):
+        lf_comparison_diagnostics.load_lf_parameter_summaries(
+            "comparison", repo_root=tmp_path
+        )
+
+
+def test_parameter_summaries_reject_incompatible_sample_shape(tmp_path):
+    _write_parameter_posteriors(tmp_path, "comparison")
+    shen_path = (
+        tmp_path
+        / "results"
+        / "hubble_posteriors"
+        / "comparison_shen"
+        / "posterior.h5"
+    )
+    with h5py.File(shen_path, "w") as handle:
+        handle.create_dataset("flat_samples", data=np.zeros((5, 2)))
+
+    with pytest.raises(ValueError, match=r"expected \(\*, 9\)"):
+        lf_comparison_diagnostics.load_lf_parameter_summaries(
+            "comparison", repo_root=tmp_path
+        )
+
+
 def test_diagnostics_generate_paired_figures_and_tables(tmp_path):
-    diagrams = _write_diagnostic_inputs(tmp_path, "comparison")
+    diagrams = _write_diagnostic_inputs(
+        tmp_path, "comparison", models=comparison.LF_RUN_IDS
+    )
     output_directory = tmp_path / "plots" / "hubble" / "comparison"
 
     outputs = comparison.generate_lf_comparison_diagnostics(
@@ -254,7 +389,7 @@ def test_diagnostics_generate_paired_figures_and_tables(tmp_path):
     }
     assert all(path.is_file() and path.stat().st_size > 0 for path in outputs.values())
     summary = pd.read_csv(outputs["summary_csv"])
-    assert summary["model"].tolist() == list(COMPLETENESS_LF_MODELS)
+    assert summary["model"].tolist() == list(comparison.LF_RUN_IDS)
     assert set(summary["n_paired"]) == {18}
     assert np.allclose(summary["median_delta_dmi_plus_delta_M0_mag"], 0.0)
     binned = pd.read_csv(outputs["binned_csv"])
@@ -288,7 +423,9 @@ def test_diagnostics_generate_paired_figures_and_tables(tmp_path):
 def test_main_generates_diagnostics_after_comparison_pdf(monkeypatch, tmp_path):
     monkeypatch.setattr(comparison, "REPO_ROOT", tmp_path)
     monkeypatch.setattr(comparison, "_required_executable", lambda name: name)
-    diagrams = [(model, tmp_path / f"{model}.pdf") for model in COMPLETENESS_LF_MODELS]
+    diagrams = [
+        (model, tmp_path / f"{model}.pdf") for model in comparison.LF_RUN_IDS
+    ]
     monkeypatch.setattr(
         comparison,
         "run_luminosity_function_sweep",
@@ -323,10 +460,25 @@ def test_main_generates_diagnostics_after_comparison_pdf(monkeypatch, tmp_path):
     monkeypatch.setattr(
         comparison, "generate_lf_comparison_diagnostics", fake_diagnostics
     )
+    parameter_calls = []
+
+    def fake_parameter_comparison(prefix, output_directory, *, models):
+        parameter_calls.append((prefix, output_directory, models))
+        return {
+            "parameter_pdf": output_directory / "lf_parameter_comparison.pdf",
+            "parameter_png": output_directory / "lf_parameter_comparison.png",
+        }
+
+    monkeypatch.setattr(
+        comparison, "generate_lf_parameter_comparison", fake_parameter_comparison
+    )
 
     assert comparison.main(["--prefix", "comparison"]) == 0
     expected_directory = tmp_path / "plots" / "hubble" / "comparison"
     assert calls == [("comparison", diagrams, expected_directory)]
+    assert parameter_calls == [
+        ("comparison", expected_directory, comparison.LF_RUN_IDS)
+    ]
     expected_pdf = expected_directory / comparison.COMPARISON_FILENAME
     assert rendered == [
         (expected_pdf.resolve(), expected_pdf.with_suffix(".png"), "pdftoppm")

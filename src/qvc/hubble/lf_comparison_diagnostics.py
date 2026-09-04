@@ -17,6 +17,7 @@ from qvc.hubble.hubble_model import get_model_params
 REPO_ROOT = Path(__file__).resolve().parents[3]
 STYLE_PATH = Path(__file__).with_name("style.mplstyle")
 DIAGNOSTIC_FIGURE_STEM = "lf_selection_correction_and_hubble_residuals"
+PARAMETER_FIGURE_STEM = "lf_parameter_comparison"
 SUMMARY_FILENAME = "lf_residual_sensitivity_summary.csv"
 BINNED_FILENAME = "lf_residual_sensitivity_binned.csv"
 README_FILENAME = "lf_residual_sensitivity_README.txt"
@@ -24,6 +25,8 @@ Z_EDGES = np.array([0.44, 0.80, 1.20, 1.60, 2.00, 2.50, 3.16])
 Z_CENTERS = 0.5 * (Z_EDGES[:-1] + Z_EDGES[1:])
 DIAGNOSTIC_LABELS = {
     "shen": "Shen et al. (2020)",
+    "shen_type1_intrinsic": "Shen et al. (2020), Type 1 intrinsic",
+    "shen_type1_attenuated": "Shen et al. (2020), Type 1 attenuated",
     "wang2026_type1_lade_a": "Wang et al. (2026)",
     "palanque2016_ple_lede": "Palanque-Delabrouille et al. (2016)",
     "kulkarni2019_type1_model1": "Kulkarni et al. (2019), M1",
@@ -32,6 +35,8 @@ DIAGNOSTIC_LABELS = {
 }
 COLORS = {
     "shen": "#000000",
+    "shen_type1_intrinsic": "#999999",
+    "shen_type1_attenuated": "#56B4E9",
     "wang2026_type1_lade_a": "#0072B2",
     "palanque2016_ple_lede": "#E69F00",
     "kulkarni2019_type1_model1": "#009E73",
@@ -40,11 +45,41 @@ COLORS = {
 }
 MARKERS = {
     "shen": "o",
+    "shen_type1_intrinsic": "X",
+    "shen_type1_attenuated": "*",
     "wang2026_type1_lade_a": "s",
     "palanque2016_ple_lede": "^",
     "kulkarni2019_type1_model1": "D",
     "kulkarni2019_type1_model2": "v",
     "kulkarni2019_type1_model3": "P",
+}
+PARAMETER_COMPARISON_NAMES = (
+    "alpha_agn",
+    "beta_agn",
+    "M0_agn",
+    "H0",
+    "Om0",
+    "w0",
+    "wa",
+)
+PARAMETER_COMPARISON_LABELS = {
+    "alpha_agn": r"$\alpha_{\rm AGN}$",
+    "beta_agn": r"$\beta_{\rm AGN}$",
+    "M0_agn": r"$M^0_{\rm AGN}$",
+    "H0": r"$H_0$",
+    "Om0": r"$\Omega_{m,0}$",
+    "w0": r"$w_0$",
+    "wa": r"$w_a$",
+}
+PARAMETER_COMPARISON_LF_LABELS = {
+    "shen": "Shen+20",
+    "shen_type1_intrinsic": "Shen+20, Type 1 intrinsic",
+    "shen_type1_attenuated": "Shen+20, Type 1 attenuated",
+    "wang2026_type1_lade_a": "Wang+26, LADE-A",
+    "palanque2016_ple_lede": "Palanque+16, PLE+LEDE",
+    "kulkarni2019_type1_model1": "Kulkarni+19, M1",
+    "kulkarni2019_type1_model2": "Kulkarni+19, M2",
+    "kulkarni2019_type1_model3": "Kulkarni+19, M3",
 }
 
 
@@ -128,9 +163,18 @@ def _load_sweep_data(
     repo_root: Path,
 ):
     diagram_paths = dict(diagrams)
-    expected_models = tuple(COMPLETENESS_LF_MODELS)
-    if tuple(diagram_paths) != expected_models:
-        raise ValueError("Diagnostic diagrams must be in canonical LF-model order.")
+    expected_models = tuple(model for model, _ in diagrams)
+    if len(diagram_paths) != len(expected_models):
+        raise ValueError("Diagnostic run identifiers must be unique.")
+    if not expected_models or expected_models[0] != "shen":
+        raise ValueError("Diagnostic diagrams must start with the Shen reference run.")
+    missing_labels = [
+        model for model in expected_models if model not in DIAGNOSTIC_LABELS
+    ]
+    if missing_labels:
+        raise ValueError(
+            "Diagnostic labels are missing for runs: " + ", ".join(missing_labels)
+        )
 
     residuals = {}
     corrections = {}
@@ -219,6 +263,156 @@ def _save_figure(fig, output_directory: Path, stem: str) -> tuple[Path, Path]:
     return pdf_path, png_path
 
 
+def load_lf_parameter_summaries(
+    base_prefix: str,
+    *,
+    repo_root: Path = REPO_ROOT,
+    models: Sequence[str] = COMPLETENESS_LF_MODELS,
+) -> pd.DataFrame:
+    """Load median and central-68% summaries for each LF posterior."""
+    _, model_labels, _ = get_model_params("Flatw0waCDM")
+    missing_parameters = [
+        name for name in PARAMETER_COMPARISON_NAMES if name not in model_labels
+    ]
+    if missing_parameters:
+        raise RuntimeError(
+            "Flatw0waCDM parameterization lacks requested parameters: "
+            + ", ".join(missing_parameters)
+        )
+    parameter_indices = {
+        name: model_labels.index(name) for name in PARAMETER_COMPARISON_NAMES
+    }
+
+    models = tuple(models)
+    if not models or models[0] != "shen" or len(set(models)) != len(models):
+        raise ValueError(
+            "Parameter-comparison runs must be unique and start with 'shen'."
+        )
+    missing_labels = [
+        model for model in models if model not in PARAMETER_COMPARISON_LF_LABELS
+    ]
+    if missing_labels:
+        raise ValueError(
+            "Parameter-comparison labels are missing for runs: "
+            + ", ".join(missing_labels)
+        )
+
+    rows = []
+    for model in models:
+        posterior_directory = (
+            Path(repo_root)
+            / "results"
+            / "hubble_posteriors"
+            / f"{base_prefix}_{model}"
+        )
+        posterior_path = _sole_match(
+            posterior_directory, "*.h5", description="posterior H5 file"
+        )
+        with h5py.File(posterior_path, "r") as handle:
+            if "flat_samples" not in handle:
+                raise ValueError(
+                    f"Posterior file {posterior_path} lacks dataset 'flat_samples'."
+                )
+            samples = np.asarray(handle["flat_samples"][:], dtype=float)
+        if samples.ndim != 2 or samples.shape[1] != len(model_labels):
+            raise ValueError(
+                f"Posterior file {posterior_path} has flat_samples shape "
+                f"{samples.shape}; expected (*, {len(model_labels)})."
+            )
+        if samples.shape[0] == 0:
+            raise ValueError(f"Posterior file {posterior_path} has no samples.")
+
+        for parameter, index in parameter_indices.items():
+            values = samples[:, index]
+            if not np.all(np.isfinite(values)):
+                raise ValueError(
+                    f"Posterior file {posterior_path} has non-finite samples "
+                    f"for {parameter!r}."
+                )
+            lower, median, upper = np.quantile(values, [0.16, 0.50, 0.84])
+            rows.append(
+                {
+                    "model": model,
+                    "parameter": parameter,
+                    "median": median,
+                    "interval_16": lower,
+                    "interval_84": upper,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def generate_lf_parameter_comparison(
+    base_prefix: str,
+    output_directory: Path,
+    *,
+    repo_root: Path = REPO_ROOT,
+    models: Sequence[str] = COMPLETENESS_LF_MODELS,
+) -> Mapping[str, Path]:
+    """Plot fitted parameters across LF choices with Shen as the reference."""
+    output_directory = Path(output_directory).resolve()
+    output_directory.mkdir(parents=True, exist_ok=True)
+    summaries = load_lf_parameter_summaries(
+        base_prefix, repo_root=Path(repo_root), models=models
+    )
+    models = tuple(models)
+    x = np.arange(len(models))
+
+    with plt.style.context(STYLE_PATH):
+        figure, axes = plt.subplots(
+            len(PARAMETER_COMPARISON_NAMES),
+            1,
+            figsize=(8.0, 13.5),
+            sharex=True,
+            constrained_layout=True,
+        )
+        for axis, parameter in zip(
+            axes, PARAMETER_COMPARISON_NAMES, strict=True
+        ):
+            parameter_rows = summaries.loc[
+                summaries["parameter"].eq(parameter)
+            ].set_index("model").loc[list(models)]
+            medians = parameter_rows["median"].to_numpy(dtype=float)
+            lower = parameter_rows["interval_16"].to_numpy(dtype=float)
+            upper = parameter_rows["interval_84"].to_numpy(dtype=float)
+            shen_median = float(parameter_rows.loc["shen", "median"])
+            axis.axhline(
+                shen_median,
+                color="black",
+                linestyle="--",
+                linewidth=1.5,
+                zorder=1,
+            )
+            axis.errorbar(
+                x,
+                medians,
+                yerr=np.vstack((medians - lower, upper - medians)),
+                fmt="o",
+                color="#0072B2",
+                markersize=6,
+                linewidth=1.5,
+                capsize=3,
+                zorder=2,
+            )
+            axis.set_ylabel(PARAMETER_COMPARISON_LABELS[parameter])
+            axis.margins(x=0.05, y=0.16)
+
+        axes[-1].set_xticks(
+            x,
+            [PARAMETER_COMPARISON_LF_LABELS[model] for model in models],
+            rotation=45,
+            ha="right",
+            rotation_mode="anchor",
+        )
+        parameter_pdf, parameter_png = _save_figure(
+            figure, output_directory, PARAMETER_FIGURE_STEM
+        )
+    return {
+        "parameter_pdf": parameter_pdf,
+        "parameter_png": parameter_png,
+    }
+
+
 def _append_binned_rows(
     rows, *, model, quantity, stats, interval_kind="bootstrap_median"
 ):
@@ -248,18 +442,17 @@ def _selection_correction_and_residual_figure(
     binned_rows,
     *,
     bootstrap_draws,
+    models,
 ):
     reference_frame = residuals["shen"].loc[ids]
     z = reference_frame["z"].to_numpy(float)
     reference_dmi = corrections["shen"].loc[ids].to_numpy(float)
     reference_residual = reference_frame["residuals"].to_numpy(float)
     fig, axes = plt.subplots(4, 1, figsize=(10, 16), constrained_layout=True)
-    absolute_offsets = np.linspace(
-        -0.035, 0.035, len(COMPLETENESS_LF_MODELS)
-    )
-    offsets = np.linspace(-0.03, 0.03, len(COMPLETENESS_LF_MODELS) - 1)
+    absolute_offsets = np.linspace(-0.035, 0.035, len(models))
+    offsets = np.linspace(-0.03, 0.03, len(models) - 1)
 
-    for offset, model in zip(absolute_offsets, COMPLETENESS_LF_MODELS):
+    for offset, model in zip(absolute_offsets, models):
         dmi = corrections[model].loc[ids].to_numpy(float)
         stats = _binned_medians(
             z,
@@ -288,7 +481,7 @@ def _selection_correction_and_residual_figure(
             interval_kind="object_distribution",
         )
 
-    for offset, model in zip(offsets, COMPLETENESS_LF_MODELS[1:]):
+    for offset, model in zip(offsets, models[1:]):
         delta_dmi = corrections[model].loc[ids].to_numpy(float) - reference_dmi
         stats = _binned_medians(
             z,
@@ -406,11 +599,13 @@ def _selection_correction_and_residual_figure(
     return _save_figure(fig, output_directory, DIAGNOSTIC_FIGURE_STEM)
 
 
-def _write_summary(residuals, corrections, m0_agn, ids, output_directory):
+def _write_summary(
+    residuals, corrections, m0_agn, ids, output_directory, *, models
+):
     reference_residual = residuals["shen"].loc[ids, "residuals"].to_numpy(float)
     reference_dmi = corrections["shen"].loc[ids].to_numpy(float)
     rows = []
-    for model in COMPLETENESS_LF_MODELS:
+    for model in models:
         values = residuals[model].loc[ids, "residuals"].to_numpy(float)
         delta_residual = values - reference_residual
         delta_dmi = corrections[model].loc[ids].to_numpy(float) - reference_dmi
@@ -462,6 +657,7 @@ def generate_lf_comparison_diagnostics(
     residuals, corrections, m0_agn, ids = _load_sweep_data(
         base_prefix, diagrams, repo_root=Path(repo_root)
     )
+    models = tuple(model for model, _ in diagrams)
     rng = np.random.default_rng(20260831)
     binned_rows = []
     with plt.style.context(STYLE_PATH):
@@ -474,9 +670,15 @@ def generate_lf_comparison_diagnostics(
             rng,
             binned_rows,
             bootstrap_draws=bootstrap_draws,
+            models=models,
         )
     summary_path = _write_summary(
-        residuals, corrections, m0_agn, ids, output_directory
+        residuals,
+        corrections,
+        m0_agn,
+        ids,
+        output_directory,
+        models=models,
     )
     binned_path = output_directory / BINNED_FILENAME
     pd.DataFrame(binned_rows).to_csv(binned_path, index=False)

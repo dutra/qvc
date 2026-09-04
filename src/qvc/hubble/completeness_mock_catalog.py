@@ -1,4 +1,5 @@
 import argparse
+import ctypes
 import gzip
 import importlib
 import io
@@ -35,6 +36,17 @@ LOG10_MAG_JACOBIAN = np.log10(0.4)
 NU_2500_HZ = 2.99792458e18 / 2500.0
 AB_ABSOLUTE_MAG_ZEROPOINT = 51.59477721004232
 SHEN_GLOBAL_FIT = "A"
+SHEN_DEFAULT_LF_MODE = "all_nh_attenuated"
+SHEN_LF_MODES = (
+    SHEN_DEFAULT_LF_MODE,
+    "type1_intrinsic",
+    "type1_attenuated",
+)
+SHEN_L_SUN_ERG_S = 3.9e33
+SHEN_TYPE1_NH_MIN = 20.0
+SHEN_TYPE1_NH_SPLIT = 21.0
+SHEN_TYPE1_NH_MAX = 22.0
+SHEN_TYPE1_NH_SAMPLES_PER_DEX = 64
 COMPLETENESS_LF_MODELS = ("shen", *EMPIRICAL_LF_MODEL_IDS)
 EMPIRICAL_LF_NATIVE_MAGNITUDE_GRID = np.linspace(-33.0, -16.0, 341)
 EMPIRICAL_LF_REDSHIFT_STEP = 0.05
@@ -134,8 +146,200 @@ def lbol_from_loglx_shen20(loglx_array):
     return np.log10(lbol_array), lbol_array
 
 
-def build_shen_lf(pubtools_path):
-    """Build the observed 2500 A luminosity function from Shen global fit A."""
+def normalize_shen_lf_mode(mode):
+    """Return a canonical Shen population-mode identifier."""
+
+    normalized = str(mode).strip().lower().replace("-", "_")
+    if normalized not in SHEN_LF_MODES:
+        raise ValueError(
+            f"Unknown Shen LF mode {mode!r}; expected one of {SHEN_LF_MODES}."
+        )
+    return normalized
+
+
+def shen_lf_expected_completeness_magnitude(mode):
+    """Return the observed-data magnitude state matching a Shen LF mode."""
+
+    mode = normalize_shen_lf_mode(mode)
+    return "dereddened" if mode == "type1_intrinsic" else "attenuated"
+
+
+def shen_absorbed_fraction(log_lx_erg_s, redshift):
+    """Return Shen/Ueda absorbed Compton-thin fraction psi(L_X, z)."""
+
+    log_lx = np.asarray(log_lx_erg_s, dtype=float)
+    z_capped = min(max(float(redshift), 0.0), 2.0)
+    psi_43_75 = 0.43 * (1.0 + z_capped) ** 0.48
+    return np.clip(psi_43_75 - 0.24 * (log_lx - 43.75), 0.20, 0.84)
+
+
+def shen_type1_fraction(log_lx_erg_s, redshift, *, f_ctk=1.0):
+    """Return the N_H < 1e22 fraction of Shen's total AGN population."""
+
+    psi = shen_absorbed_fraction(log_lx_erg_s, redshift)
+    return (1.0 - psi) / (1.0 + float(f_ctk) * psi)
+
+
+def _shen_type1_nh_bin_fractions(log_lx_erg_s, redshift):
+    """Return total-population weights in the 20--21 and 21--22 N_H bins."""
+
+    psi = shen_absorbed_fraction(log_lx_erg_s, redshift)
+    epsilon = 1.7
+    threshold = (1.0 + epsilon) / (3.0 + epsilon)
+    low_branch = psi < threshold
+    f1 = np.where(
+        low_branch,
+        1.0 - ((2.0 + epsilon) / (1.0 + epsilon)) * psi,
+        2.0 / 3.0 - ((3.0 + 2.0 * epsilon) / (3.0 + 3.0 * epsilon)) * psi,
+    )
+    f2 = np.where(
+        low_branch,
+        psi / (1.0 + epsilon),
+        1.0 / 3.0 - (epsilon / (3.0 + 3.0 * epsilon)) * psi,
+    )
+    normalization = 1.0 + psi
+    f1 = f1 / normalization
+    f2 = f2 / normalization
+    expected = shen_type1_fraction(log_lx_erg_s, redshift)
+    if not np.allclose(f1 + f2, expected, rtol=1e-12, atol=1e-14):
+        raise RuntimeError("Shen Type-1 N_H weights do not reproduce f_Type1.")
+    return f1, f2
+
+
+def _load_shen_c_backend(pubtools_path):
+    library_path = Path(pubtools_path) / "clib" / "convolve.so"
+    if not library_path.is_file():
+        raise FileNotFoundError(
+            f"Shen convolution library not found: {library_path}. "
+            "Compile the released pubtools C extension first."
+        )
+    library = ctypes.CDLL(str(library_path))
+    library.l_band.argtypes = [ctypes.c_double, ctypes.c_double]
+    library.l_band.restype = ctypes.c_double
+    library.l_band_dispersion.argtypes = [ctypes.c_double, ctypes.c_double]
+    library.l_band_dispersion.restype = ctypes.c_double
+    library.return_tau.argtypes = [
+        ctypes.c_double,
+        ctypes.c_double,
+        ctypes.c_double,
+    ]
+    library.return_tau.restype = ctypes.c_double
+    return library
+
+
+def _normal_density_grid(grid, means, sigmas):
+    delta = (grid[:, None] - means[None, :]) / sigmas[None, :]
+    return np.exp(-0.5 * delta**2) / (
+        np.sqrt(2.0 * np.pi) * sigmas[None, :]
+    )
+
+
+def _build_shen_type1_lf_at_redshift(
+    redshift,
+    *,
+    return_bolometric_qlf,
+    return_dtg,
+    backend,
+    attenuated,
+):
+    """Numerically convolve Shen's bolometric LF into a Type-1 UV LF."""
+
+    log_lbol_erg_s, log_phi_bol = return_bolometric_qlf(
+        redshift, model=SHEN_GLOBAL_FIT
+    )
+    log_lbol_erg_s = np.asarray(log_lbol_erg_s, dtype=float)
+    log_phi_bol = np.asarray(log_phi_bol, dtype=float)
+    if (
+        log_lbol_erg_s.ndim != 1
+        or log_phi_bol.shape != log_lbol_erg_s.shape
+        or log_lbol_erg_s.size < 2
+        or not np.all(np.isfinite(log_lbol_erg_s))
+        or not np.all(np.isfinite(log_phi_bol))
+    ):
+        raise ValueError("Shen bolometric LF returned an invalid grid.")
+
+    log_lsun = np.log10(SHEN_L_SUN_ERG_S)
+    log_lbol_lsun = log_lbol_erg_s - log_lsun
+    mean_log_uv = np.asarray(
+        [
+            np.log10(backend.l_band(value, NU_2500_HZ)) + log_lsun
+            for value in log_lbol_lsun
+        ],
+        dtype=float,
+    )
+    sigma_log_uv = np.asarray(
+        [
+            backend.l_band_dispersion(value, NU_2500_HZ)
+            for value in log_lbol_lsun
+        ],
+        dtype=float,
+    )
+    log_lx = np.asarray(
+        [
+            np.log10(backend.l_band(value, -4.0)) + log_lsun
+            for value in log_lbol_lsun
+        ],
+        dtype=float,
+    )
+    if (
+        not np.all(np.isfinite(mean_log_uv))
+        or not np.all(np.isfinite(sigma_log_uv))
+        or np.any(sigma_log_uv <= 0.0)
+        or not np.all(np.isfinite(log_lx))
+    ):
+        raise ValueError("Shen band conversion returned invalid UV or X-ray values.")
+
+    log_uv_grid = np.linspace(
+        float(np.min(mean_log_uv)),
+        float(np.max(mean_log_uv)),
+        log_lbol_erg_s.size,
+    )
+    integration_weight = 10.0**log_phi_bol * np.gradient(log_lbol_erg_s)
+
+    if not attenuated:
+        phi_uv = _normal_density_grid(
+            log_uv_grid, mean_log_uv, sigma_log_uv
+        ) @ (integration_weight * shen_type1_fraction(log_lx, redshift))
+        return log_uv_grid, phi_uv
+
+    f_nh_20_21, f_nh_21_22 = _shen_type1_nh_bin_fractions(
+        log_lx, redshift
+    )
+    n_nh = SHEN_TYPE1_NH_SAMPLES_PER_DEX
+    nh_20_21 = np.linspace(
+        SHEN_TYPE1_NH_MIN,
+        SHEN_TYPE1_NH_SPLIT,
+        n_nh,
+        endpoint=False,
+    ) + 0.5 / n_nh
+    nh_21_22 = np.linspace(
+        SHEN_TYPE1_NH_SPLIT,
+        SHEN_TYPE1_NH_MAX,
+        n_nh,
+        endpoint=False,
+    ) + 0.5 / n_nh
+    dust_to_gas = float(return_dtg(redshift))
+    phi_uv = np.zeros_like(log_uv_grid)
+    for nh_grid, bin_weight in (
+        (nh_20_21, f_nh_20_21),
+        (nh_21_22, f_nh_21_22),
+    ):
+        weighted_bolometric = integration_weight * bin_weight / len(nh_grid)
+        for log_nh in nh_grid:
+            tau = float(
+                backend.return_tau(log_nh, NU_2500_HZ, dust_to_gas)
+            )
+            attenuated_mean = mean_log_uv - tau / np.log(10.0)
+            phi_uv += _normal_density_grid(
+                log_uv_grid, attenuated_mean, sigma_log_uv
+            ) @ weighted_bolometric
+    return log_uv_grid, phi_uv
+
+
+def build_shen_lf(pubtools_path, mode=SHEN_DEFAULT_LF_MODE):
+    """Build an explicit Shen global-fit-A 2500 A population mode."""
+
+    mode = normalize_shen_lf_mode(mode)
 
     if pubtools_path is None:
         pubtools_path = default_shen_pubtools_path()
@@ -161,17 +365,32 @@ def build_shen_lf(pubtools_path):
                         pubtools_path,
                     )
                     sys.path.insert(0, added_obdata_path)
-                from utilities import return_qlf_in_band
+                shen_utilities = importlib.import_module("utilities")
 
                 z_bins = np.linspace(0.0, 8.0, 40)
-                qlf_values = [
-                    return_qlf_in_band(
-                        redshift=z,
-                        nu=NU_2500_HZ,
-                        model=SHEN_GLOBAL_FIT,
-                    )
-                    for z in z_bins
-                ]
+                if mode == SHEN_DEFAULT_LF_MODE:
+                    qlf_values = [
+                        shen_utilities.return_qlf_in_band(
+                            redshift=z,
+                            nu=NU_2500_HZ,
+                            model=SHEN_GLOBAL_FIT,
+                        )
+                        for z in z_bins
+                    ]
+                else:
+                    backend = _load_shen_c_backend(pubtools_path)
+                    qlf_values = [
+                        _build_shen_type1_lf_at_redshift(
+                            z,
+                            return_bolometric_qlf=(
+                                shen_utilities.return_bolometric_qlf
+                            ),
+                            return_dtg=shen_utilities.return_dtg,
+                            backend=backend,
+                            attenuated=mode == "type1_attenuated",
+                        )
+                        for z in z_bins
+                    ]
     finally:
         if added_obdata_path is not None:
             try:
@@ -183,12 +402,31 @@ def build_shen_lf(pubtools_path):
         except ValueError:
             pass
 
-    luminosities = np.asarray(qlf_values[0][0], dtype=float)
-    phi_log10 = np.asarray([qlf[1] for qlf in qlf_values], dtype=float) + LOG10_MAG_JACOBIAN
-    # Evaluate the physical 2500 A channel rather than Shen's nu=0 identity
-    # channel.  This includes the SED/bolometric-correction scatter and the
-    # N_H-dependent extinction model, so the mock parent is the optically
-    # detectable population rather than the total intrinsic bolometric QLF.
+    luminosity_grids = np.asarray([qlf[0] for qlf in qlf_values], dtype=float)
+    if (
+        luminosity_grids.ndim != 2
+        or np.any(~np.isfinite(luminosity_grids))
+        or not np.allclose(
+            luminosity_grids,
+            luminosity_grids[0],
+            rtol=1e-12,
+            atol=1e-12,
+        )
+    ):
+        raise ValueError(f"Shen {mode} returned inconsistent luminosity grids.")
+    luminosities = luminosity_grids[0]
+    phi_values = np.asarray([qlf[1] for qlf in qlf_values], dtype=float)
+    if mode == SHEN_DEFAULT_LF_MODE:
+        phi_log10 = phi_values + LOG10_MAG_JACOBIAN
+    else:
+        if np.any(~np.isfinite(phi_values)) or np.any(phi_values < 0.0):
+            raise ValueError(f"Shen {mode} convolution returned invalid densities.")
+        with np.errstate(divide="ignore"):
+            phi_log10 = np.log10(phi_values) + LOG10_MAG_JACOBIAN
+
+    # all_nh_attenuated uses the physical 2500 A channel and full N_H model.
+    # type1_intrinsic applies the N_H<1e22 population weight before the UV
+    # convolution. type1_attenuated also integrates attenuation over N_H<1e22.
     # m_grid is monochromatic rest-frame absolute AB M_2500, converted from
     # Shen's nu*L_nu(2500 A); it is not apparent, bolometric, or band-integrated.
     m_grid = log_nu_lnu_to_ab_absolute_magnitude(luminosities, NU_2500_HZ)
@@ -210,6 +448,7 @@ def normalize_completeness_lf_model(model):
 def build_completeness_lf(
     lf_model,
     *,
+    shen_lf_mode=SHEN_DEFAULT_LF_MODE,
     z_range=(0.44, 3.16),
     shen_pubtools_path=None,
     target_cosmology=COSMO,
@@ -235,9 +474,34 @@ def build_completeness_lf(
                 "The Shen grid is native to H0=70, Om0=0.3; cosmology "
                 "remapping is currently implemented only for empirical LFs."
             )
+        shen_lf_mode = normalize_shen_lf_mode(shen_lf_mode)
         phi_log10, magnitude_grid, redshift_grid = build_shen_lf(
-            shen_pubtools_path
+            shen_pubtools_path, mode=shen_lf_mode
         )
+        if shen_lf_mode == "type1_intrinsic":
+            reddening_semantics = ReddeningSemantics(
+                luminosity_semantics="shen_nh_lt22_intrinsic_2500A",
+                galactic_extinction="not_in_model",
+                internal_extinction="none",
+                selection_dust_treatment="type1_intrinsic",
+                apply_additional_internal_extinction=False,
+            )
+        elif shen_lf_mode == "type1_attenuated":
+            reddening_semantics = ReddeningSemantics(
+                luminosity_semantics="shen_nh_lt22_attenuated_2500A",
+                galactic_extinction="not_in_model",
+                internal_extinction="modeled_over_shen_nh20_22",
+                selection_dust_treatment="type1_attenuated",
+                apply_additional_internal_extinction=False,
+            )
+        else:
+            reddening_semantics = ReddeningSemantics(
+                luminosity_semantics="shen_nh_attenuated_observed_2500A",
+                galactic_extinction="not_in_model",
+                internal_extinction="modeled_by_shen_nh_distribution",
+                selection_dust_treatment="all_nh_attenuated",
+                apply_additional_internal_extinction=False,
+            )
         return LFGrid(
             model_id="shen",
             phi_log10=phi_log10,
@@ -249,14 +513,8 @@ def build_completeness_lf(
             source_cosmology=COSMO,
             target_cosmology=target_cosmology,
             calibration_redshift_range=(0.0, 7.0),
-            formula_version="shen2020_global_fit_a_observed_2500A",
-            reddening_semantics=ReddeningSemantics(
-                luminosity_semantics="shen_nh_attenuated_observed_2500A",
-                galactic_extinction="not_in_model",
-                internal_extinction="modeled_by_shen_nh_distribution",
-                selection_dust_treatment="all_nh_attenuated",
-                apply_additional_internal_extinction=False,
-            ),
+            formula_version=f"shen2020_global_fit_a_{shen_lf_mode}",
+            reddening_semantics=reddening_semantics,
         )
 
     n_redshift = max(
