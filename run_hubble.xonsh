@@ -150,6 +150,7 @@ python -m qvc.hubble.hubble_fit \
     --disable_sigma_clip_pass \
     --sigma_clip_threshold 3.0 \
     --prior-profile centered_lcdm \
+    --disable-pivot-rounding \
     @(h5_file)
 
 

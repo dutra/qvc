@@ -134,6 +134,8 @@ from qvc.hubble.hubble_plotting import (
 from qvc.hubble.tex_utils import make_agn_csv_table, make_agn_latex_table
 from qvc.hubble.hubble_model import (
     AGN_LOGF_Z_PARAM,
+    AGN_PIVOT_RULE,
+    AGN_UNROUNDED_PIVOT_RULE,
     DEFAULT_PRIOR_PROFILE,
     PRIOR_PROFILE_CHOICES,
     AgnPivotContext,
@@ -689,6 +691,7 @@ def make_run_tag(
     use_redshift_log_f_term=False,
     selection_attenuation_mode="fixed-offset",
     light_curve_uncertainty_mode="covariance",
+    pivot_rule=AGN_PIVOT_RULE,
 ):
     speed = normalize_speed(speed)
     prior_profile = normalize_prior_profile(prior_profile)
@@ -746,11 +749,16 @@ def make_run_tag(
         == "posterior-draws"
         else ""
     )
+    if pivot_rule not in (AGN_PIVOT_RULE, AGN_UNROUNDED_PIVOT_RULE):
+        raise ValueError(f"Unsupported AGN pivot rule {pivot_rule!r}.")
+    pivot_tag = (
+        "_pivots-median" if pivot_rule == AGN_UNROUNDED_PIVOT_RULE else ""
+    )
     return (
         f"{cosmo_model}_{_fit_mode_label(only_sna, only_agn)}_{speed}_{n_tag}_{z_tag}"
         f"{completeness_tag}{completeness_support_tag}{attenuation_tag}{light_curve_uncertainty_tag}"
         f"{ceph_tag}{planck_h0_tag}{fixed_h0_tag}{planck_om_tag}{prior_profile_tag}{alpha_tag}{eta_sigma_tag}"
-        f"{fagn_sigmoid_tag}{fagn_flux_fraction_tag}{logf_tag}"
+        f"{fagn_sigmoid_tag}{fagn_flux_fraction_tag}{logf_tag}{pivot_tag}"
     )
 
 
@@ -2253,11 +2261,11 @@ def _prepare_shared_agn_pivot_context(
     disable_ceph_dist_calibration,
     use_planck_h0_prior,
     use_planck_om_prior,
-    prior_profile,
+    prior_profile=DEFAULT_PRIOR_PROFILE,
     use_alpha_lambda_term,
     use_eta_sigma_term,
-    use_f_agn_psf_2500_sigmoid_term,
-    use_f_agn_psf_2500_flux_fraction_term,
+    use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
     use_redshift_log_f_term,
     disable_sigma_clip_pass,
     resume_stage,
@@ -2265,6 +2273,7 @@ def _prepare_shared_agn_pivot_context(
     completeness_magnitude="dereddened",
     light_curve_uncertainty_mode="covariance",
     resume_replot_with_cuts=False,
+    round_pivots=True,
 ):
     """Build once, or strictly load once, for cosmologies sharing a fit sample."""
 
@@ -2278,6 +2287,9 @@ def _prepare_shared_agn_pivot_context(
         uniform_redshift_distribution=(
             False if resume_replot_with_cuts else uniform_redshift_distribution
         ),
+    )
+    expected_pivot_rule = (
+        AGN_PIVOT_RULE if round_pivots else AGN_UNROUNDED_PIVOT_RULE
     )
     loaded_contexts = []
     for cosmo_model in cosmo_models:
@@ -2307,6 +2319,7 @@ def _prepare_shared_agn_pivot_context(
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
             light_curve_uncertainty_mode=light_curve_uncertainty_mode,
+            pivot_rule=expected_pivot_rule,
         )
         checkpoint_paths = _build_checkpoint_paths(prefix, run_tag)
         apply_two_pass = (
@@ -2333,6 +2346,12 @@ def _prepare_shared_agn_pivot_context(
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         )
+        if context.rule != expected_pivot_rule:
+            raise RuntimeError(
+                f"AGN checkpoint '{checkpoint_file}' uses pivot rule "
+                f"{context.rule!r}; expected {expected_pivot_rule!r}. Match "
+                "the original pivot-rounding option when resuming."
+            )
         _validate_agn_pivot_checkpoint_reference_provenance(
             context,
             results,
@@ -2371,6 +2390,7 @@ def _prepare_shared_agn_pivot_context(
         use_eta_sigma_term=use_eta_sigma_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
+        round_pivots=round_pivots,
     )
 
 
@@ -3296,6 +3316,11 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         use_redshift_log_f_term=use_redshift_log_f_term,
         selection_attenuation_mode=selection_attenuation_mode,
         light_curve_uncertainty_mode=light_curve_uncertainty_mode,
+        pivot_rule=(
+            agn_pivot_context.rule
+            if agn_pivot_context is not None
+            else AGN_PIVOT_RULE
+        ),
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -5561,7 +5586,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     use_f_agn_psf_2500_flux_fraction_term=False,
             use_redshift_log_f_term=False,
             early_de_guard=False,
-            light_curve_uncertainty_mode="covariance"):
+            light_curve_uncertainty_mode="covariance",
+            round_pivots=True):
 
     validate_completeness_mode(completeness_mode)
     completeness_magnitude = normalize_completeness_magnitude(
@@ -5590,6 +5616,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     )
     mode_tag = _fit_mode_label(False, only_agn)
     compare_run_tag = f"model_compare_{mode_tag}_{speed}_{n_tag}_{z_tag}{completeness_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{prior_profile_tag}"
+    if not round_pivots:
+        compare_run_tag += "_pivots-median"
     if use_alpha_lambda_term:
         compare_run_tag += "_alphaLam"
     if use_eta_sigma_term:
@@ -5635,6 +5663,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         resume_stage=resume_stage,
         prefix=prefix,
         light_curve_uncertainty_mode=light_curve_uncertainty_mode,
+        round_pivots=round_pivots,
     )
     for cosmo_model in cosmo_models:
         model_resume = resume_by_model[cosmo_model]
@@ -5857,6 +5886,7 @@ def render_hubble_mode_table(args):
         sigma_host_correction = agn_inactive
         standardization = agn_inactive
         intrinsic_scatter = agn_inactive
+        pivot_rule = agn_inactive
     else:
         light_curve_uncertainty = args.light_curve_uncertainty_mode
         sigma_host_correction = (
@@ -5876,6 +5906,11 @@ def render_hubble_mode_table(args):
             "redshift-dependent log_f(z)"
             if args.fit_redshift_log_f_term
             else "constant log_f"
+        )
+        pivot_rule = (
+            "exact log-space medians"
+            if getattr(args, "disable_pivot_rounding", False)
+            else "rounded sigma/tau medians"
         )
 
     if args.disable_completeness:
@@ -5915,6 +5950,7 @@ def render_hubble_mode_table(args):
         {"mode": "LC sigma/tau uncertainty", "setting": light_curve_uncertainty},
         {"mode": "post-hoc sigma host correction", "setting": sigma_host_correction},
         {"mode": "AGN standardization", "setting": standardization},
+        {"mode": "AGN observable pivots", "setting": pivot_rule},
         {"mode": "intrinsic scatter", "setting": intrinsic_scatter},
         {"mode": "completeness", "setting": completeness},
         {"mode": "selection attenuation", "setting": selection_attenuation},
@@ -6110,6 +6146,15 @@ if __name__ == "__main__":
     parser.add_argument("--z_range", type=float, nargs=2, default=[0.44, 3.16], 
                         help="Redshift range for AGN data (default: [0.44, 3.16])")
     parser.add_argument("--uniform_redshift_distribution", action="store_true", default=False, help="Select AGN subset with uniform redshift distribution (default: False)")
+    parser.add_argument(
+        "--disable-pivot-rounding",
+        action="store_true",
+        default=False,
+        help=(
+            "Use the exact median of each fitted AGN observable as its pivot. "
+            "By default, the sigma and tau medians are rounded in linear units."
+        ),
+    )
     parser.add_argument(
         "--completeness_sim_file",
         type=str,
@@ -6383,6 +6428,7 @@ if __name__ == "__main__":
             resume_stage="both",
             prefix=args.prefix,
             light_curve_uncertainty_mode="covariance",
+            round_pivots=not args.disable_pivot_rounding,
         )
         for cosmo_model in args.cosmo_models:
             run_single_jax(
@@ -6444,6 +6490,7 @@ if __name__ == "__main__":
             prefix=args.prefix,
             light_curve_uncertainty_mode=args.light_curve_uncertainty_mode,
             resume_replot_with_cuts=args.resume_replot_with_cuts,
+            round_pivots=not args.disable_pivot_rounding,
         )
         for cosmo_model in args.cosmo_models:
             r = run_single(df_agn=df_agn, df_agn_all=df_agn_all, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 
@@ -6515,12 +6562,17 @@ if __name__ == "__main__":
             if args.light_curve_uncertainty_mode == "posterior-draws"
             else ""
         )
+        pivot_tag = (
+            "_pivots-median"
+            if args.disable_pivot_rounding and not args.only_sna
+            else ""
+        )
         mode_tag = _fit_mode_label(args.only_sna, args.only_agn)
         compare_path = (
             f"plots/hubble/{args.prefix}/single_compare_{mode_tag}_{args.speed}_{n_tag}_{z_tag}"
             f"{completeness_tag}{light_curve_uncertainty_tag}{ceph_tag}"
             f"{planck_h0_tag}{planck_om_tag}{prior_profile_tag}{alpha_tag}{eta_sigma_tag}"
-            f"{fagn_sigmoid_tag}{fagn_flux_fraction_tag}{logf_tag}"
+            f"{fagn_sigmoid_tag}{fagn_flux_fraction_tag}{logf_tag}{pivot_tag}"
         )
         os.makedirs(compare_path, exist_ok=True)
         if len(cosmo_models_dict) >= 2:
@@ -6562,6 +6614,7 @@ if __name__ == "__main__":
             use_f_agn_psf_2500_flux_fraction_term=args.fit_f_agn_psf_2500_flux_fraction_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
                 light_curve_uncertainty_mode=args.light_curve_uncertainty_mode,
-                early_de_guard=args.early_de_guard)
+                early_de_guard=args.early_de_guard,
+                round_pivots=not args.disable_pivot_rounding)
     
     print(f"Finished running Hubble fit pipeline for {args.cosmo_models}")

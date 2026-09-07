@@ -97,6 +97,7 @@ from qvc.hubble.hubble_likelihood import (
     log_likelihood,
 )
 from qvc.hubble.hubble_model import (
+    AGN_PIVOT_RULE,
     DEFAULT_PRIOR_PROFILE,
     PRIOR_PROFILE_CHOICES,
     AgnPivotContext,
@@ -982,6 +983,11 @@ def run_single_jax(
         prior_profile=prior_profile,
         use_alpha_lambda_term=False,
         use_eta_sigma_term=False,
+        pivot_rule=(
+            agn_pivot_context.rule
+            if agn_pivot_context is not None
+            else AGN_PIVOT_RULE
+        ),
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)

@@ -6,6 +6,7 @@ import pytest
 
 from qvc.hubble.hubble_model import (
     AGN_PIVOT_RULE,
+    AGN_UNROUNDED_PIVOT_RULE,
     AgnPivotContext,
     agn_model_pack_obs,
     build_agn_pivot_context,
@@ -69,6 +70,26 @@ def test_builder_preserves_rounded_sigma_tau_and_optional_medians():
     assert context.z_range == (0.2, 1.0)
     assert context.reference_object_ids == ("left", "middle", "right")
     assert context.rule == AGN_PIVOT_RULE
+
+
+def test_builder_can_preserve_exact_unrounded_medians():
+    frame = _pivot_frame()
+
+    context = build_agn_pivot_context(
+        frame,
+        (0.2, 1.0),
+        use_alpha_lambda_term=True,
+        use_eta_sigma_term=True,
+        round_pivots=False,
+    )
+
+    np.testing.assert_allclose(
+        context.values,
+        [np.log10(0.26), np.log10(251.0), -1.5, 0.6],
+        rtol=0.0,
+        atol=1e-14,
+    )
+    assert context.rule == AGN_UNROUNDED_PIVOT_RULE
 
 
 @pytest.mark.parametrize(

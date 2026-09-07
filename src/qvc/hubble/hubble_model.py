@@ -28,6 +28,8 @@ AGN_LOG_F_PRIOR = (
 PLANCK_H0_PRIOR = (67.37 - 0.54, 67.37 + 0.54)
 PLANCK_OM0_PRIOR = (0.315 - 0.007, 0.315 + 0.007)
 AGN_PIVOT_RULE = "rounded_median_v1"
+AGN_UNROUNDED_PIVOT_RULE = "median_v1"
+AGN_PIVOT_RULES = (AGN_PIVOT_RULE, AGN_UNROUNDED_PIVOT_RULE)
 DEFAULT_PRIOR_PROFILE = "default"
 CENTERED_LCDM_PRIOR_PROFILE = "centered_lcdm"
 PRIOR_PROFILE_CHOICES = (
@@ -365,8 +367,10 @@ def agn_model_pack_params(
     return params
 
 
-def _fixed_pivot_from_observable(key, values):
+def _fixed_pivot_from_observable(key, values, *, round_pivots=True):
     pivot = float(np.nanmedian(np.asarray(values, dtype=float)))
+    if not round_pivots:
+        return pivot
     if key == "log_sigma_uv":
         with np.errstate(over="ignore", under="ignore", invalid="ignore"):
             rounded_linear_pivot = np.round(np.power(10.0, pivot), 1)
@@ -452,9 +456,10 @@ class AgnPivotContext:
                 "AgnPivotContext.z_range must be ordered as (minimum, maximum); "
                 f"got {z_range!r}."
             )
-        if rule != AGN_PIVOT_RULE:
+        if rule not in AGN_PIVOT_RULES:
             raise ValueError(
-                f"Unsupported AGN pivot rule {rule!r}; expected {AGN_PIVOT_RULE!r}."
+                f"Unsupported AGN pivot rule {rule!r}; expected one of "
+                f"{AGN_PIVOT_RULES!r}."
             )
 
         object.__setattr__(self, "observable_names", names)
@@ -498,6 +503,7 @@ def build_agn_pivot_context(
     use_eta_sigma_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
+    round_pivots=True,
 ):
     """Compute the one AGN observable pivot context used by an entire fit."""
 
@@ -561,7 +567,11 @@ def build_agn_pivot_context(
                     f"{interval}; found {int(np.count_nonzero(invalid_fraction))} "
                     "invalid fitted value(s)."
                 )
-        pivot = _fixed_pivot_from_observable(name, values)
+        pivot = _fixed_pivot_from_observable(
+            name,
+            values,
+            round_pivots=round_pivots,
+        )
         if not np.isfinite(pivot):
             raise ValueError(
                 f"Computed nonfinite AGN pivot for observable {name!r}."
@@ -577,6 +587,7 @@ def build_agn_pivot_context(
         values=tuple(pivot_values),
         z_range=z_range,
         reference_object_ids=object_ids,
+        rule=(AGN_PIVOT_RULE if round_pivots else AGN_UNROUNDED_PIVOT_RULE),
     )
 
 

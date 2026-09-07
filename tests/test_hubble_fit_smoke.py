@@ -227,6 +227,24 @@ def test_light_curve_posterior_draw_mode_changes_run_tag_only_when_requested():
     assert "_lcpost64" in posterior_draw_tag
 
 
+def test_unrounded_pivot_rule_changes_run_tag_only_when_requested():
+    common = ("FlatLambdaCDM", False, "fastest", None, (0.44, 3.16))
+
+    default_tag = hubble_fit.make_run_tag(*common)
+    explicit_default_tag = hubble_fit.make_run_tag(
+        *common,
+        pivot_rule="rounded_median_v1",
+    )
+    unrounded_tag = hubble_fit.make_run_tag(
+        *common,
+        pivot_rule="median_v1",
+    )
+
+    assert default_tag == explicit_default_tag
+    assert "_pivots-median" not in default_tag
+    assert "_pivots-median" in unrounded_tag
+
+
 def test_centered_lcdm_prior_profile_changes_run_tag_only_when_requested():
     common = ("Flatw0waCDM", False, "fastest", None, (0.44, 3.16))
 
@@ -334,6 +352,7 @@ def test_hubble_mode_table_highlights_active_scientific_modes():
         cosmo_models=["Flatw0waCDM"],
         cut_tier="2",
         magnitude_convention="dereddened",
+        disable_pivot_rounding=True,
     )
 
     table = hubble_fit.render_hubble_mode_table(args)
@@ -342,6 +361,8 @@ def test_hubble_mode_table_highlights_active_scientific_modes():
     assert "| LC sigma/tau uncertainty" in table
     assert "| posterior-draws" in table
     assert "log_sigma_uv + log_tau_uv_rf + alpha_lambda" in table
+    assert "| AGN observable pivots" in table
+    assert "| exact log-space medians" in table
     assert "f_AGN_psf_2500 sigmoid" in table
     assert "2d; m2500=attenuated; LF=wang2026_type1_lade_a" in table
     assert "| sigma clipping" in table
