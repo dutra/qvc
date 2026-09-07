@@ -31,11 +31,13 @@ try:
     import jax.numpy as jnp
     from jax import config as jax_config
     from jax.scipy.linalg import solve_triangular
+    from jax.scipy.special import ndtr as jax_ndtr
 except Exception:  # pragma: no cover - optional dependency
     jax = None
     jnp = None
     jax_config = None
     solve_triangular = None
+    jax_ndtr = None
 
 try:  # pragma: no cover - optional dependency
     import jax_cosmo as jc
@@ -75,11 +77,13 @@ from qvc.hubble.hubble_fit import (
     _compute_direct_full_sample_completeness_summaries,
     _select_agn_fit_selection,
     completeness_checkpoint_metadata,
+    canonical_prior_bounds_json,
     estimate_sky_box_area_deg2,
     generate_fresh_completeness_sim_file,
     make_run_tag,
     normalize_speed,
     record_completeness_support_metadata,
+    record_completeness_tail_metadata,
     resolve_completeness_redshift_support,
     _validate_agn_pivot_context_for_reference,
     validate_completeness_mode,
@@ -87,17 +91,22 @@ from qvc.hubble.hubble_fit import (
     z_pivot_sna,
 )
 from qvc.hubble.hubble_likelihood import (
+    _cached_magnitude_integration_grid,
     _magnitude_integration_grid,
     _validate_observed_magnitude_support,
     log_likelihood,
 )
 from qvc.hubble.hubble_model import (
+    AGN_PIVOT_RULE,
+    DEFAULT_PRIOR_PROFILE,
+    PRIOR_PROFILE_CHOICES,
     AgnPivotContext,
     agn_model_req_errs,
     agn_model_req_obs,
     agn_model_req_params,
     build_agn_pivot_context,
     get_model_params,
+    normalize_prior_profile,
     validate_agn_observable_uncertainties,
 )
 from qvc.hubble.hubble_plotting import (
@@ -107,7 +116,7 @@ from qvc.hubble.hubble_plotting import (
     plot_completeness_diagnostics,
     plot_cosmo_corner,
     plot_delta_m_flux_recal_vs_redshift,
-    plot_full_residuals,
+    plot_full_residuals_debiased_partial_controls,
     plot_hubble,
     plot_L2500_vs_sigma_tau_separate,
     plot_catalog_quantity_vs_sigma_tau_separate,
@@ -116,8 +125,12 @@ from qvc.hubble.hubble_plotting import (
     plot_sigma_uv_mpred_correction,
 )
 from qvc.hubble.cuts import (
+    COMPLETENESS_MAGNITUDE_SUPPORT_MODES,
+    DEFAULT_COMPLETENESS_MAGNITUDE_SUPPORT_MODE,
     COMPLETENESS_MAG_2500_MAX,
     COMPLETENESS_MAG_2500_MIN,
+    COMPLETENESS_Z_MAX,
+    COMPLETENESS_Z_MIN,
     CUT_TIER_CHOICES,
     SDSS_TARGET_SELECTION_CHOICES,
     normalize_cut_tier,
@@ -274,8 +287,8 @@ def _prepare_completeness_for_jax(
         "magnitude_support",
         (float(magnitude_grid[0]), float(magnitude_grid[-1])),
     )
-    integration_grid = _magnitude_integration_grid(
-        magnitude_grid, magnitude_support
+    integration_grid = _cached_magnitude_integration_grid(
+        model, magnitude_grid, magnitude_support
     )
     if selection_magnitude is not None:
         _validate_observed_magnitude_support(selection_magnitude, magnitude_support)
@@ -295,6 +308,15 @@ def _prepare_completeness_for_jax(
             getattr(model, "redshift_support", (model.z_centers[0], model.z_centers[-1]))
         ),
         "integration_mag_grid": jnp.asarray(integration_grid),
+        "map_magnitude_bounds": jnp.asarray([model.mag_min, model.mag_max]),
+        "faint_tail_decay": jnp.asarray(
+            model.faint_tail_decay
+            if getattr(model, "faint_tail_decay", None) is not None
+            else np.zeros_like(model.z_centers, dtype=float)
+        ),
+        "has_magnitude_tails": bool(
+            getattr(model, "magnitude_support_mode", "hard-cut") == "tails"
+        ),
     }
     if isinstance(model, Completeness3D):
         cube = jnp.asarray(model._interp.values)
@@ -482,6 +504,52 @@ def _completeness_loglike_jax(m_model, mu_err, z, completeness, f_host_2500_psf,
         )
     pdf_model = jnp.exp(_normal_logpdf(m_grid[None, :], m_model[:, None], sig))
     Z = _trapz_jax(pdf_model * p_det, m_grid, axis=1)
+    if completeness.get("has_magnitude_tails", False):
+        support = completeness["magnitude_support"]
+        map_bounds = completeness["map_magnitude_bounds"]
+        edge_magnitudes = map_bounds[None, :]
+        if completeness["mode"] == "4d_fhost_alpha":
+            edge_probability = _interp_regular_4d(
+                edge_magnitudes,
+                z[:, None],
+                f_host_2500_psf[:, None],
+                alpha_lambda[:, None],
+                completeness["mag_centers"], completeness["z_centers"],
+                completeness["fhost_centers"], completeness["alpha_centers"],
+                completeness["cube"],
+            )
+        elif completeness["mode"] == "3d_fhost":
+            edge_probability = _interp_regular_3d(
+                edge_magnitudes,
+                z[:, None],
+                f_host_2500_psf[:, None],
+                completeness["mag_centers"], completeness["z_centers"],
+                completeness["fhost_centers"], completeness["cube"],
+            )
+        else:
+            edge_probability = _interp_regular_2d(
+                edge_magnitudes,
+                z[:, None],
+                completeness["mag_centers"], completeness["z_centers"],
+                completeness["cube"],
+            )
+        sigma_1d = jnp.sqrt(mu_err**2 + completeness["sigma"] ** 2)
+        a = (support[0] - m_model) / sigma_1d
+        b = (map_bounds[0] - m_model) / sigma_1d
+        Z = Z + edge_probability[:, 0] * (jax_ndtr(b) - jax_ndtr(a))
+        decay = jnp.interp(z, completeness["z_centers"], completeness["faint_tail_decay"])
+        shifted = m_model - decay * sigma_1d**2
+        amplitude = edge_probability[:, 1] * jnp.exp(
+            jnp.clip(
+                decay * (map_bounds[1] - m_model)
+                + 0.5 * (decay * sigma_1d) ** 2,
+                -700.0,
+                700.0,
+            )
+        )
+        faint_a = (map_bounds[1] - shifted) / sigma_1d
+        faint_b = (support[1] - shifted) / sigma_1d
+        Z = Z + amplitude * (jax_ndtr(faint_b) - jax_ndtr(faint_a))
     return jnp.sum(jnp.log(jnp.clip(Z, 1e-300)))
 
 
@@ -804,6 +872,7 @@ def _compute_numpy_blobs_from_samples(
     disable_ceph_dist_calibration,
     use_planck_h0_prior,
     use_planck_om_prior,
+    prior_profile=DEFAULT_PRIOR_PROFILE,
     early_de_guard=False,
 ):
     logls = []
@@ -823,6 +892,7 @@ def _compute_numpy_blobs_from_samples(
             agn_calibrators_data=None,
             use_planck_h0_prior=use_planck_h0_prior,
             use_planck_om_prior=use_planck_om_prior,
+            prior_profile=prior_profile,
             use_ceph_dist_calibration=not disable_ceph_dist_calibration,
             early_de_guard=early_de_guard,
             only_sna=only_sna,
@@ -858,6 +928,7 @@ def run_single_jax(
     disable_ceph_dist_calibration=False,
     use_planck_h0_prior=False,
     use_planck_om_prior=False,
+    prior_profile=DEFAULT_PRIOR_PROFILE,
     only_agn=False,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
@@ -888,6 +959,7 @@ def run_single_jax(
             completeness_magnitude,
         )
     speed = normalize_speed(speed)
+    prior_profile = normalize_prior_profile(prior_profile)
     if only_sna and only_agn:
         raise ValueError("only_sna and only_agn cannot both be True.")
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
@@ -902,11 +974,20 @@ def run_single_jax(
         completeness=completeness,
         completeness_mode=completeness_mode,
         completeness_magnitude=completeness_magnitude,
+        completeness_magnitude_support_mode=df_agn.attrs.get(
+            "completeness_magnitude_support_mode", "hard-cut"
+        ),
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        prior_profile=prior_profile,
         use_alpha_lambda_term=False,
         use_eta_sigma_term=False,
+        pivot_rule=(
+            agn_pivot_context.rule
+            if agn_pivot_context is not None
+            else AGN_PIVOT_RULE
+        ),
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -943,7 +1024,7 @@ def run_single_jax(
                 COMPLETENESS_MAG_2500_MIN,
                 COMPLETENESS_MAG_2500_MAX,
             ),
-            redshift_support=completeness_z_range,
+            redshift_support=(COMPLETENESS_Z_MIN, COMPLETENESS_Z_MAX),
         )
     if uniform_redshift_distribution:
         plot_redshift_histograms(df_pantheon, df_agn_fit, xscale="linear", plot_path=plot_path, only_agn=only_agn)
@@ -974,6 +1055,9 @@ def run_single_jax(
         report_pivots(df_agn_fit, agn_pivot_context=agn_pivot_context)
 
     if completeness:
+        magnitude_support_mode = df_agn.attrs.get(
+            "completeness_magnitude_support_mode", "hard-cut"
+        )
         if completeness_sim_file is None:
             completeness_area_deg2 = estimate_sky_box_area_deg2(df_agn_all)
             completeness_sim_file = generate_fresh_completeness_sim_file(
@@ -991,6 +1075,7 @@ def run_single_jax(
                 plot_path=plot_path,
                 df_agn_fhost_population=df_agn_all,
                 z_range=completeness_z_range,
+                magnitude_support_mode=magnitude_support_mode,
             )
         elif completeness_mode == "3d_fhost":
             completeness_params = get_completeness_function_3d_fhost(
@@ -1000,6 +1085,7 @@ def run_single_jax(
                 plot_path=plot_path,
                 df_agn_fhost_population=df_agn_all,
                 z_range=completeness_z_range,
+                magnitude_support_mode=magnitude_support_mode,
             )
         else:
             completeness_params = get_completeness_function_2d(
@@ -1008,7 +1094,12 @@ def run_single_jax(
                 plot=True,
                 plot_path=plot_path,
                 z_range=completeness_z_range,
+                magnitude_support_mode=magnitude_support_mode,
             )
+        record_completeness_tail_metadata(
+            (df_agn, df_agn_all, df_agn_completeness_parent),
+            completeness_params[0],
+        )
     else:
         completeness_params = None
 
@@ -1049,7 +1140,9 @@ def run_single_jax(
         only_agn=only_agn,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        prior_profile=prior_profile,
     )
+    prior_bounds_json = canonical_prior_bounds_json(priors)
     loglike_fn = jax.jit(
         lambda theta: _log_likelihood_jax(
             theta,
@@ -1097,6 +1190,7 @@ def run_single_jax(
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        prior_profile=prior_profile,
         early_de_guard=early_de_guard,
     )
     idx_max_weight = int(np.argmax(logls))
@@ -1126,6 +1220,10 @@ def run_single_jax(
     checkpoint_file = str(checkpoint_folder / f"posteriors_{run_tag}_jax.h5")
     checkpoint_payload = dict(
         flat_samples=flat_samples,
+        model_labels=np.asarray(model_labels, dtype=str),
+        prior_profile=prior_profile,
+        prior_bounds_json=prior_bounds_json,
+        early_de_guard=bool(early_de_guard),
         dmi_max_w=dmi_max_w,
         dmi_posterior_median=dmi_posterior_median,
         dmi_posterior_sigma=dmi_posterior_sigma,
@@ -1357,23 +1455,6 @@ def run_single_jax(
         n_params=len(model_labels) - 1,
     )
     print(f"Reduced chi-squared (debiased) M2500: {chisq_red_L2500:.3f}")
-    plot_full_residuals(
-        df_agn_plot,
-        L_residuals_debiased,
-        L_pred_std_debiased,
-        flat_samples,
-        cosmo_model,
-        z_pivot_agn,
-        debias=True,
-        dm_interp=dm_interp,
-        dmi_values=dmi_posterior_median_full,
-        show=False,
-        plot_path=plot_path,
-        z_range=z_range,
-        residual_label="L2500_sigma_tau_residuals",
-        output_tag="full_residuals_l2500_sigma_tau",
-    )
-
     r = plot_hubble(
         flat_samples,
         df_agn_plot,
@@ -1405,6 +1486,13 @@ def run_single_jax(
         mu_pred_std_debiased,
         mu_pred_std_debiased_with_scatter,
     ) = r
+    plot_full_residuals_debiased_partial_controls(
+        df_agn_plot,
+        debiased_residuals,
+        plot_path=plot_path,
+        z_range=z_range,
+        show=False,
+    )
     n_agn_params = sum(label != "M0_sn" for label in model_labels)
     hubble_chi2_mask = (
         df_agn_plot["is_fit_selection"].to_numpy(dtype=bool)
@@ -1498,6 +1586,15 @@ def main():
     parser.add_argument("--use_planck_h0_prior", action="store_true", default=False)
     parser.add_argument("--use_planck_om_prior", action="store_true", default=False)
     parser.add_argument(
+        "--prior-profile",
+        choices=PRIOR_PROFILE_CHOICES,
+        default=DEFAULT_PRIOR_PROFILE,
+        help=(
+            "Named top-hat prior profile. centered_lcdm uses "
+            "M0_agn=[-26,-18], w0=[-3,1], and wa=[-10,10] where applicable."
+        ),
+    )
+    parser.add_argument(
         "--early-de-guard",
         action="store_true",
         default=False,
@@ -1515,6 +1612,11 @@ def main():
         type=str,
         choices=list(VALID_COMPLETENESS_MAGNITUDES),
         default="dereddened",
+    )
+    parser.add_argument(
+        "--completeness-magnitude-support-mode",
+        choices=list(COMPLETENESS_MAGNITUDE_SUPPORT_MODES),
+        default=DEFAULT_COMPLETENESS_MAGNITUDE_SUPPORT_MODE,
     )
     parser.add_argument("--correct-sigma-uv-host", action="store_true", default=False)
     parser.add_argument(
@@ -1546,6 +1648,9 @@ def main():
         sdss_target_selection=args.sdss_target_selection,
         magnitude_convention=args.magnitude_convention,
         completeness_magnitude=args.completeness_magnitude,
+        completeness_magnitude_support_mode=(
+            args.completeness_magnitude_support_mode
+        ),
         correct_sigma_uv_host=args.correct_sigma_uv_host,
         enforce_completeness_support=not args.disable_completeness,
         return_completeness_parent=not args.disable_completeness,
@@ -1579,6 +1684,7 @@ def main():
         disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
         use_planck_h0_prior=effective_use_planck_h0_prior,
         use_planck_om_prior=args.use_planck_om_prior,
+        prior_profile=args.prior_profile,
         early_de_guard=args.early_de_guard,
         seed=args.seed,
         df_agn_completeness_parent=df_agn_completeness_parent,

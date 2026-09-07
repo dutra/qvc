@@ -22,8 +22,11 @@ from qvc.hubble.cuts import (
     COMPLETENESS_MAG_EDGE_MIN,
     COMPLETENESS_MAG_2500_MAX,
     COMPLETENESS_MAG_2500_MIN,
+    COMPLETENESS_TAIL_MAG_2500_MAX,
+    COMPLETENESS_TAIL_MAG_2500_MIN,
     COMPLETENESS_N_MAG_BINS,
     COMPLETENESS_N_Z_BINS,
+    normalize_completeness_magnitude_support_mode,
 )
 
 
@@ -37,6 +40,22 @@ DEFAULT_COMPLETENESS_SMOOTH_SIGMA_MAG = 0.10
 DEFAULT_COMPLETENESS_SMOOTH_SIGMA_Z = 0.30
 COMPLETENESS_SMOOTH_SIGMA_MAG_ENV = "QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG"
 COMPLETENESS_SMOOTH_SIGMA_Z_ENV = "QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z"
+RELATIVE_COMPLETENESS_REFERENCE_PERCENTILE = 99.0
+RELATIVE_COMPLETENESS_MIN_PARENT_COUNT = 20.0
+RELATIVE_COMPLETENESS_CONTOUR_LEVELS = (10.0, 25.0, 50.0, 75.0, 90.0, 95.0, 99.0)
+FAINT_TAIL_FIT_WIDTH_MAG = 0.75
+FAINT_TAIL_MAX_FIT_WIDTH_MAG = 2.0
+FAINT_TAIL_DECAY_MIN = 0.02
+FAINT_TAIL_DECAY_MAX = 2.0
+FAINT_TAIL_SHRINKAGE = 4.0
+FAINT_TAIL_SMOOTH_SIGMA_Z = 0.2
+FAINT_TAIL_SUPPORT_Z_HALF_WIDTH = 0.2
+FAINT_TAIL_MIN_PARENT_COUNT = 20.0
+FAINT_TAIL_MIN_OBSERVED_COUNT = 3.0
+FAINT_TAIL_MIN_ENDPOINT_OBSERVED_COUNT = 1.0
+FAINT_TAIL_TRANSITION_RELATIVE_MIN = 0.02
+FAINT_TAIL_TRANSITION_RELATIVE_MAX = 0.95
+FAINT_TAIL_MIN_FIT_BINS = 3
 _COMPLETENESS_MAGNITUDE_SOURCES = {
     "dereddened": ("m_2500_dereddened", "m_2500_dereddened_err"),
     "attenuated": (
@@ -482,19 +501,238 @@ def _normalize_physical_support(centers, support, *, name):
     return lower, upper
 
 
-def _normalize_selection_support(support, map_support):
+def _normalize_selection_support(support, map_support, *, support_mode="hard-cut"):
+    support_mode = normalize_completeness_magnitude_support_mode(support_mode)
     if support is None:
         return tuple(map_support)
     values = np.asarray(support, dtype=float)
     if values.shape != (2,) or not np.all(np.isfinite(values)):
         raise ValueError("selection_magnitude_support must contain two finite bounds.")
     lower, upper = (float(value) for value in values)
-    if lower >= upper or lower < map_support[0] or upper > map_support[1]:
+    outside_map = lower < map_support[0] or upper > map_support[1]
+    if lower >= upper or (support_mode == "hard-cut" and outside_map):
         raise ValueError(
-            "selection_magnitude_support must be increasing and lie within "
-            f"map support {map_support}; got ({lower}, {upper})."
+            "selection_magnitude_support must be increasing"
+            + (" and lie within map support " + str(map_support) if support_mode == "hard-cut" else "")
+            + f"; got ({lower}, {upper})."
         )
     return lower, upper
+
+
+def _estimate_regularized_faint_tail_decay(
+    mag_grid,
+    z_grid,
+    completeness_2d,
+    *,
+    fit_width=FAINT_TAIL_FIT_WIDTH_MAG,
+    max_fit_width=FAINT_TAIL_MAX_FIT_WIDTH_MAG,
+    decay_floor=FAINT_TAIL_DECAY_MIN,
+    decay_ceiling=FAINT_TAIL_DECAY_MAX,
+    shrinkage=FAINT_TAIL_SHRINKAGE,
+    smooth_sigma_z=FAINT_TAIL_SMOOTH_SIGMA_Z,
+    parent_counts_2d=None,
+    observed_counts_2d=None,
+    support_z_half_width=FAINT_TAIL_SUPPORT_Z_HALF_WIDTH,
+    min_parent_count=FAINT_TAIL_MIN_PARENT_COUNT,
+    min_observed_count=FAINT_TAIL_MIN_OBSERVED_COUNT,
+    min_endpoint_observed_count=FAINT_TAIL_MIN_ENDPOINT_OBSERVED_COUNT,
+    transition_relative_min=FAINT_TAIL_TRANSITION_RELATIVE_MIN,
+    transition_relative_max=FAINT_TAIL_TRANSITION_RELATIVE_MAX,
+    min_fit_bins=FAINT_TAIL_MIN_FIT_BINS,
+):
+    """Estimate the faint continuation from the last count-supported transition."""
+    mag = np.asarray(mag_grid, dtype=float)
+    redshift = np.asarray(z_grid, dtype=float)
+    values = np.asarray(completeness_2d, dtype=float)
+    if values.shape != (mag.size, redshift.size):
+        raise ValueError("Faint-tail completeness array must align with magnitude and redshift.")
+    if not (0.0 < transition_relative_min < transition_relative_max <= 1.0):
+        raise ValueError("Faint-tail relative transition bounds must satisfy 0 < min < max <= 1.")
+    if max_fit_width < fit_width:
+        raise ValueError("Faint-tail maximum fit width must be at least the support width.")
+    counts_supplied = parent_counts_2d is not None or observed_counts_2d is not None
+    if counts_supplied:
+        if parent_counts_2d is None or observed_counts_2d is None:
+            raise ValueError("Faint-tail parent and observed counts must be supplied together.")
+        parent_counts = np.asarray(parent_counts_2d, dtype=float)
+        observed_counts = np.asarray(observed_counts_2d, dtype=float)
+        if parent_counts.shape != values.shape or observed_counts.shape != values.shape:
+            raise ValueError("Faint-tail count arrays must align with the 2D completeness map.")
+    else:
+        parent_counts = observed_counts = None
+
+    raw = np.full(redshift.size, np.nan, dtype=float)
+    fit_start = np.full(redshift.size, np.nan, dtype=float)
+    fit_end = np.full(redshift.size, np.nan, dtype=float)
+    fit_n_bins = np.zeros(redshift.size, dtype=int)
+    supported_parent_count = np.full(redshift.size, np.nan, dtype=float)
+    supported_observed_count = np.full(redshift.size, np.nan, dtype=float)
+    for index in range(redshift.size):
+        column = values[:, index]
+        finite_positive = np.isfinite(column) & (column > 1e-8)
+        if not np.any(finite_positive):
+            continue
+        plateau = float(np.nanmax(column[finite_positive]))
+        relative = column / plateau
+
+        if counts_supplied:
+            z_support = np.abs(redshift - redshift[index]) <= (
+                float(support_z_half_width) + 1e-12
+            )
+            parent_by_mag = np.sum(parent_counts[:, z_support], axis=1)
+            observed_by_mag = np.sum(observed_counts[:, z_support], axis=1)
+        else:
+            parent_by_mag = observed_by_mag = None
+
+        candidates = []
+        candidate_counts = {}
+        for endpoint in range(1, mag.size):
+            support_window = (
+                (mag >= mag[endpoint] - float(fit_width))
+                & (mag <= mag[endpoint])
+            )
+            in_transition = (
+                np.isfinite(relative[endpoint])
+                and transition_relative_min <= relative[endpoint] <= transition_relative_max
+            )
+            if not in_transition:
+                continue
+            if counts_supplied:
+                parent_total = float(np.sum(parent_by_mag[support_window]))
+                observed_total = float(np.sum(observed_by_mag[support_window]))
+                if (
+                    parent_total < min_parent_count
+                    or observed_total < min_observed_count
+                    or observed_by_mag[endpoint] < min_endpoint_observed_count
+                ):
+                    continue
+                candidate_counts[endpoint] = (parent_total, observed_total)
+            candidates.append(endpoint)
+        if not candidates:
+            continue
+
+        endpoint = candidates[-1]
+        fit_mask = (
+            (mag >= mag[endpoint] - float(max_fit_width))
+            & (mag <= mag[endpoint])
+            & finite_positive
+            & (relative >= transition_relative_min)
+            & (relative <= transition_relative_max)
+        )
+        if np.count_nonzero(fit_mask) < int(min_fit_bins):
+            fit_mask = (
+                (mag >= mag[endpoint] - float(fit_width))
+                & (mag <= mag[endpoint])
+                & finite_positive
+            )
+        if np.count_nonzero(fit_mask) < int(min_fit_bins):
+            continue
+        fit_mag = mag[fit_mask]
+        fit_log_probability = np.log(column[fit_mask])
+        slope = -float(np.polyfit(fit_mag, fit_log_probability, 1)[0])
+        if not np.isfinite(slope) or slope <= 0.0:
+            continue
+        raw[index] = slope
+        fit_start[index] = float(fit_mag[0])
+        fit_end[index] = float(fit_mag[-1])
+        fit_n_bins[index] = int(fit_mag.size)
+        if counts_supplied:
+            supported_parent_count[index], supported_observed_count[index] = (
+                candidate_counts[endpoint]
+            )
+
+    informative = np.isfinite(raw) & (raw > decay_floor)
+    raw_target = float(np.median(raw[informative])) if np.any(informative) else float(decay_floor)
+    target = float(np.clip(raw_target, decay_floor, decay_ceiling))
+    bounded_raw = np.clip(raw, decay_floor, decay_ceiling)
+    filled = np.where(np.isfinite(bounded_raw), bounded_raw, target)
+    regularized = (filled + float(shrinkage) * target) / (1.0 + float(shrinkage))
+    if redshift.size > 1 and smooth_sigma_z > 0.0:
+        dz = float(np.median(np.diff(redshift)))
+        regularized = gaussian_filter1d(
+            regularized,
+            sigma=max(float(smooth_sigma_z) / dz, 1e-6),
+            mode="nearest",
+        )
+    regularized = np.clip(regularized, decay_floor, decay_ceiling)
+    return regularized, {
+        "raw_decay": raw,
+        "raw_target_decay": raw_target,
+        "target_decay": target,
+        "fit_width_mag": float(fit_width),
+        "max_fit_width_mag": float(max_fit_width),
+        "fit_start_magnitude": fit_start,
+        "fit_end_magnitude": fit_end,
+        "fit_n_bins": fit_n_bins,
+        "supported_parent_count": supported_parent_count,
+        "supported_observed_count": supported_observed_count,
+        "support_source": "raw_count_supported_transition" if counts_supplied else "completeness_transition_only",
+        "support_z_half_width": float(support_z_half_width),
+        "min_parent_count": float(min_parent_count),
+        "min_observed_count": float(min_observed_count),
+        "min_endpoint_observed_count": float(min_endpoint_observed_count),
+        "transition_relative_bounds": (
+            float(transition_relative_min), float(transition_relative_max)
+        ),
+        "min_fit_bins": int(min_fit_bins),
+        "shrinkage": float(shrinkage),
+        "decay_bounds": (float(decay_floor), float(decay_ceiling)),
+        "fallback_count": int(np.count_nonzero(~np.isfinite(raw))),
+    }
+
+
+def _configure_magnitude_tails(
+    model,
+    completeness_2d,
+    *,
+    support_mode,
+    parent_counts_2d=None,
+    observed_counts_2d=None,
+):
+    mode = normalize_completeness_magnitude_support_mode(support_mode)
+    model.magnitude_support_mode = mode
+    model.faint_tail_decay = None
+    model.faint_tail_diagnostics = None
+    if mode == "tails":
+        model.faint_tail_decay, model.faint_tail_diagnostics = (
+            _estimate_regularized_faint_tail_decay(
+                model.mag_centers,
+                model.z_centers,
+                completeness_2d,
+                parent_counts_2d=parent_counts_2d,
+                observed_counts_2d=observed_counts_2d,
+            )
+        )
+        fallback_count = model.faint_tail_diagnostics["fallback_count"]
+        at_bounds = np.count_nonzero(
+            (model.faint_tail_decay <= FAINT_TAIL_DECAY_MIN)
+            | (model.faint_tail_decay >= FAINT_TAIL_DECAY_MAX)
+        )
+        if fallback_count or at_bounds:
+            print(
+                "[WARNING] Faint-tail decay regularization: "
+                f"uninformative_z_bins={fallback_count}, bounded_z_bins={int(at_bounds)}, "
+                f"raw_target={model.faint_tail_diagnostics['raw_target_decay']:.4g}, "
+                f"target={model.faint_tail_diagnostics['target_decay']:.4g} mag^-1."
+            )
+
+
+def _apply_magnitude_tails(model, raw_magnitude, redshift, core_values):
+    if model.magnitude_support_mode != "tails":
+        return core_values
+    magnitude, redshift, values = np.broadcast_arrays(
+        np.asarray(raw_magnitude, dtype=float),
+        np.asarray(redshift, dtype=float),
+        np.asarray(core_values, dtype=float),
+    )
+    output = values.copy()
+    faint = magnitude > model.mag_max
+    if np.any(faint):
+        decay = np.interp(redshift[faint], model.z_centers, model.faint_tail_decay)
+        output[faint] *= np.exp(-decay * (magnitude[faint] - model.mag_max))
+    lower, upper = model.magnitude_support
+    output[(magnitude < lower) | (magnitude > upper) | ~np.isfinite(magnitude)] = 0.0
+    return output
 
 
 def _strict_interpolation_coordinates(values, centers, *, name):
@@ -578,6 +816,10 @@ class Completeness2D:
         magnitude_support=None,
         redshift_support=None,
         selection_magnitude_support=None,
+        magnitude_support_mode="hard-cut",
+        tail_completeness_2d=None,
+        tail_parent_counts_2d=None,
+        tail_observed_counts_2d=None,
     ):
         self.mag_centers = np.asarray(mag_centers)
         self.z_centers   = np.asarray(z_centers)
@@ -585,7 +827,9 @@ class Completeness2D:
             self.mag_centers, magnitude_support, name="magnitude"
         )
         self.magnitude_support = _normalize_selection_support(
-            selection_magnitude_support, self.map_magnitude_support
+            selection_magnitude_support,
+            self.map_magnitude_support,
+            support_mode=magnitude_support_mode,
         )
         self.redshift_support = _normalize_physical_support(
             self.z_centers, redshift_support, name="redshift"
@@ -604,9 +848,20 @@ class Completeness2D:
             bounds_error=False,
             fill_value=np.nan,
         )
+        _configure_magnitude_tails(
+            self,
+            C if tail_completeness_2d is None else tail_completeness_2d,
+            support_mode=magnitude_support_mode,
+            parent_counts_2d=tail_parent_counts_2d,
+            observed_counts_2d=tail_observed_counts_2d,
+        )
 
     def __call__(self, mag, z):
-        mag = _strict_interpolation_coordinates(mag, self.mag_centers, name="magnitude")
+        raw_mag = np.asarray(mag, dtype=float)
+        if self.magnitude_support_mode == "tails":
+            mag = np.clip(raw_mag, self.mag_min, self.mag_max)
+        else:
+            mag = _strict_interpolation_coordinates(raw_mag, self.mag_centers, name="magnitude")
         z = _strict_interpolation_coordinates(z, self.z_centers, name="redshift")
         m_b, z_b = np.broadcast_arrays(mag, z)
         pts = np.column_stack([m_b.ravel(), z_b.ravel()])
@@ -614,7 +869,8 @@ class Completeness2D:
         vals = np.zeros(pts.shape[0], dtype=float)
         if np.any(finite):
             vals[finite] = np.clip(self._interp(pts[finite]), 0.0, 1.0)
-        return vals.reshape(m_b.shape)
+        vals = vals.reshape(m_b.shape)
+        return _apply_magnitude_tails(self, raw_mag, z, vals)
 
     @property
     def grid(self):
@@ -624,6 +880,8 @@ class Completeness2D:
             magnitude_support=self.magnitude_support,
             map_magnitude_support=self.map_magnitude_support,
             redshift_support=self.redshift_support,
+            magnitude_support_mode=self.magnitude_support_mode,
+            faint_tail_decay=self.faint_tail_decay,
         )
 
     @property
@@ -648,6 +906,10 @@ class Completeness3D:
         magnitude_support=None,
         redshift_support=None,
         selection_magnitude_support=None,
+        magnitude_support_mode="hard-cut",
+        tail_completeness_2d=None,
+        tail_parent_counts_2d=None,
+        tail_observed_counts_2d=None,
     ):
         self.mag_centers = np.asarray(mag_centers)
         self.z_centers = np.asarray(z_centers)
@@ -656,7 +918,9 @@ class Completeness3D:
             self.mag_centers, magnitude_support, name="magnitude"
         )
         self.magnitude_support = _normalize_selection_support(
-            selection_magnitude_support, self.map_magnitude_support
+            selection_magnitude_support,
+            self.map_magnitude_support,
+            support_mode=magnitude_support_mode,
         )
         self.redshift_support = _normalize_physical_support(
             self.z_centers, redshift_support, name="redshift"
@@ -675,9 +939,20 @@ class Completeness3D:
             bounds_error=False,
             fill_value=np.nan,
         )
+        _configure_magnitude_tails(
+            self,
+            np.mean(C, axis=2) if tail_completeness_2d is None else tail_completeness_2d,
+            support_mode=magnitude_support_mode,
+            parent_counts_2d=tail_parent_counts_2d,
+            observed_counts_2d=tail_observed_counts_2d,
+        )
 
     def __call__(self, mag, z, f_host):
-        mag = _strict_interpolation_coordinates(mag, self.mag_centers, name="magnitude")
+        raw_mag = np.asarray(mag, dtype=float)
+        if self.magnitude_support_mode == "tails":
+            mag = np.clip(raw_mag, self.mag_min, self.mag_max)
+        else:
+            mag = _strict_interpolation_coordinates(raw_mag, self.mag_centers, name="magnitude")
         z = _strict_interpolation_coordinates(z, self.z_centers, name="redshift")
         f_host = np.asarray(f_host)
         # The completeness cube is defined on bin centers, but f_host is a
@@ -691,7 +966,8 @@ class Completeness3D:
         vals = np.zeros(pts.shape[0], dtype=float)
         if np.any(finite):
             vals[finite] = np.clip(self._interp(pts[finite]), 0.0, 1.0)
-        return vals.reshape(m_b.shape)
+        vals = vals.reshape(m_b.shape)
+        return _apply_magnitude_tails(self, raw_mag, z, vals)
 
     @property
     def grid(self):
@@ -702,6 +978,8 @@ class Completeness3D:
             magnitude_support=self.magnitude_support,
             map_magnitude_support=self.map_magnitude_support,
             redshift_support=self.redshift_support,
+            magnitude_support_mode=self.magnitude_support_mode,
+            faint_tail_decay=self.faint_tail_decay,
         )
 
     @property
@@ -727,6 +1005,10 @@ class Completeness4D:
         magnitude_support=None,
         redshift_support=None,
         selection_magnitude_support=None,
+        magnitude_support_mode="hard-cut",
+        tail_completeness_2d=None,
+        tail_parent_counts_2d=None,
+        tail_observed_counts_2d=None,
     ):
         self.mag_centers = np.asarray(mag_centers)
         self.z_centers = np.asarray(z_centers)
@@ -736,7 +1018,9 @@ class Completeness4D:
             self.mag_centers, magnitude_support, name="magnitude"
         )
         self.magnitude_support = _normalize_selection_support(
-            selection_magnitude_support, self.map_magnitude_support
+            selection_magnitude_support,
+            self.map_magnitude_support,
+            support_mode=magnitude_support_mode,
         )
         self.redshift_support = _normalize_physical_support(
             self.z_centers, redshift_support, name="redshift"
@@ -756,9 +1040,20 @@ class Completeness4D:
             bounds_error=False,
             fill_value=np.nan,
         )
+        _configure_magnitude_tails(
+            self,
+            np.mean(C, axis=(2, 3)) if tail_completeness_2d is None else tail_completeness_2d,
+            support_mode=magnitude_support_mode,
+            parent_counts_2d=tail_parent_counts_2d,
+            observed_counts_2d=tail_observed_counts_2d,
+        )
 
     def __call__(self, mag, z, f_host, alpha_lambda):
-        mag = _strict_interpolation_coordinates(mag, self.mag_centers, name="magnitude")
+        raw_mag = np.asarray(mag, dtype=float)
+        if self.magnitude_support_mode == "tails":
+            mag = np.clip(raw_mag, self.mag_min, self.mag_max)
+        else:
+            mag = _strict_interpolation_coordinates(raw_mag, self.mag_centers, name="magnitude")
         z = _strict_interpolation_coordinates(z, self.z_centers, name="redshift")
         f_host = np.asarray(f_host)
         alpha_lambda = np.asarray(alpha_lambda)
@@ -770,7 +1065,8 @@ class Completeness4D:
         vals = np.zeros(pts.shape[0], dtype=float)
         if np.any(finite):
             vals[finite] = np.clip(self._interp(pts[finite]), 0.0, 1.0)
-        return vals.reshape(m_b.shape)
+        vals = vals.reshape(m_b.shape)
+        return _apply_magnitude_tails(self, raw_mag, z, vals)
 
     @property
     def grid(self):
@@ -782,11 +1078,73 @@ class Completeness4D:
             magnitude_support=self.magnitude_support,
             map_magnitude_support=self.map_magnitude_support,
             redshift_support=self.redshift_support,
+            magnitude_support_mode=self.magnitude_support_mode,
+            faint_tail_decay=self.faint_tail_decay,
         )
 
     @property
     def mode(self):
         return "4d_fhost_alpha"
+
+
+def _plot_magnitude_tail_diagnostics(model, plot_dir):
+    """Plot the calibrated core and extrapolated wings for representative redshifts."""
+    if model.magnitude_support_mode != "tails":
+        return
+    import matplotlib.pyplot as plt
+    os.makedirs(plot_dir, exist_ok=True)
+
+    lower, upper = model.magnitude_support
+    magnitude = np.linspace(lower, upper, 600)
+    fig, ax = plt.subplots(figsize=(7, 5))
+    for z0 in (0.5, 1.5, 2.5):
+        redshift = np.full_like(magnitude, np.clip(z0, model.z_min, model.z_max))
+        if model.mode == "4d_fhost_alpha":
+            probability = model(
+                magnitude,
+                redshift,
+                np.full_like(magnitude, np.median(model.fhost_centers)),
+                np.full_like(magnitude, np.median(model.alpha_centers)),
+            )
+        elif model.mode == "3d_fhost":
+            probability = model(
+                magnitude,
+                redshift,
+                np.full_like(magnitude, np.median(model.fhost_centers)),
+            )
+        else:
+            probability = model(magnitude, redshift)
+        ax.semilogy(magnitude, np.clip(probability, 1e-12, 1.0), label=fr"$z={z0:.1f}$")
+    ax.axvspan(
+        model.mag_min,
+        model.mag_max,
+        color="0.85",
+        alpha=0.35,
+        zorder=0,
+        label="calibrated map",
+    )
+    ax.axvline(model.mag_min, color="k", ls="--", lw=1)
+    ax.axvline(model.mag_max, color="k", ls="--", lw=1)
+    ax.set(xlabel=r"$m_{2500}$ (mag)", ylabel=r"$p(\mathrm{detect})$", xlim=(lower, upper))
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    fig.savefig(os.path.join(plot_dir, "completeness_magnitude_tails.pdf"), dpi=300)
+    plt.close(fig)
+    diagnostics = dict(model.faint_tail_diagnostics or {})
+    diagnostics.update(
+        support_mode=model.magnitude_support_mode,
+        selection_support=[float(lower), float(upper)],
+        map_center_support=[float(model.mag_min), float(model.mag_max)],
+        redshift_grid=np.asarray(model.z_centers, dtype=float).tolist(),
+        faint_tail_decay=np.asarray(model.faint_tail_decay, dtype=float).tolist(),
+    )
+    for key, value in list(diagnostics.items()):
+        if isinstance(value, np.ndarray):
+            diagnostics[key] = value.tolist()
+        elif isinstance(value, tuple):
+            diagnostics[key] = list(value)
+    with open(os.path.join(plot_dir, "completeness_magnitude_tails.json"), "w") as handle:
+        json.dump(diagnostics, handle, indent=2, sort_keys=True)
 
 
 _FHOST_CLIP_EPS = 1e-3
@@ -1052,6 +1410,109 @@ def predicted_new_loglbol(df_agn, loglbol):
     predicted_loglbol = predict_log_lbol(loglbol)
     return predicted_loglbol
 
+
+def _relative_completeness_percent(
+    displayed_completeness,
+    parent_counts,
+    *,
+    reference_percentile=RELATIVE_COMPLETENESS_REFERENCE_PERCENTILE,
+    min_parent_count=RELATIVE_COMPLETENESS_MIN_PARENT_COUNT,
+):
+    """Normalize a displayed map to a robust, count-supported completeness peak."""
+    values = np.asarray(displayed_completeness, dtype=float)
+    parent = np.asarray(parent_counts, dtype=float)
+    if values.shape != parent.shape:
+        raise ValueError("Relative completeness and parent-count maps must align.")
+    if not (0.0 < float(reference_percentile) <= 100.0):
+        raise ValueError("Relative-completeness reference percentile must lie in (0, 100].")
+    if not np.isfinite(min_parent_count) or float(min_parent_count) < 0.0:
+        raise ValueError("Relative-completeness minimum parent count must be non-negative.")
+
+    finite_positive = np.isfinite(values) & (values > 0.0)
+    supported = finite_positive & np.isfinite(parent) & (parent >= float(min_parent_count))
+    reference_values = values[supported]
+    if reference_values.size == 0:
+        reference_values = values[finite_positive]
+    if reference_values.size == 0:
+        return np.zeros_like(values), 1.0, 0
+
+    reference = float(np.percentile(reference_values, float(reference_percentile)))
+    if not np.isfinite(reference) or reference <= 0.0:
+        return np.zeros_like(values), 1.0, int(reference_values.size)
+    relative_percent = 100.0 * np.clip(values / reference, 0.0, 1.0)
+    relative_percent[~np.isfinite(relative_percent)] = 0.0
+    return relative_percent, reference, int(reference_values.size)
+
+
+def _plot_relative_completeness_percent(
+    C_plot,
+    H_true_s,
+    mag_centers,
+    z_centers,
+    mag_edges,
+    z_edges,
+    plot_dir,
+):
+    """Plot robustly normalized relative completeness with percentage contours."""
+    import matplotlib.pyplot as plt
+
+    relative_percent, reference, n_reference_bins = _relative_completeness_percent(
+        C_plot,
+        H_true_s,
+    )
+    fig, ax = plt.subplots(figsize=(7, 5))
+    im = ax.imshow(
+        relative_percent.T,
+        origin="lower",
+        aspect="auto",
+        extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
+        cmap="viridis",
+        vmin=0.0,
+        vmax=100.0,
+    )
+    data_min = float(np.nanmin(relative_percent))
+    data_max = float(np.nanmax(relative_percent))
+    contour_levels = [
+        level
+        for level in RELATIVE_COMPLETENESS_CONTOUR_LEVELS
+        if data_min < level < data_max
+    ]
+    if contour_levels:
+        contours = ax.contour(
+            mag_centers,
+            z_centers,
+            relative_percent.T,
+            levels=contour_levels,
+            colors="white",
+            linewidths=1.3,
+        )
+        ax.clabel(
+            contours,
+            inline=True,
+            fmt=lambda level: f"{level:.0f}%",
+            fontsize=7,
+        )
+    ax.set_ylabel(r"$z$")
+    ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("Relative completeness (%)")
+    fig.tight_layout()
+    output_path = os.path.join(
+        plot_dir,
+        "completeness_map_with_relative_percent_contours.pdf",
+    )
+    fig.savefig(output_path, dpi=600)
+    plt.close(fig)
+    print(
+        "Relative completeness display: "
+        f"{RELATIVE_COMPLETENESS_REFERENCE_PERCENTILE:g}th percentile of "
+        f"{n_reference_bins} bins with smoothed parent count >= "
+        f"{RELATIVE_COMPLETENESS_MIN_PARENT_COUNT:g} is {reference:.6g}; "
+        f"saved {output_path}."
+    )
+    return reference
+
+
 def get_completeness_function_2d(
     df_agn,
     sim_file="data/nov9_mock_mag_z_moresources.h5",
@@ -1065,6 +1526,7 @@ def get_completeness_function_2d(
     fill_along_mag=False,
     fill_along_z=False,
     z_range=None,
+    magnitude_support_mode="hard-cut",
 ):
     """
     Build p(detect | m, z)
@@ -1177,9 +1639,10 @@ def get_completeness_function_2d(
         os.makedirs(plot_dir, exist_ok=True)
         # Plot completeness map
         C_plot = gaussian_filter(C, sigma=(1, 1), mode="nearest")
+        log_C_plot = np.log10(np.clip(C_plot, 1e-12, None))
         plt.figure(figsize=(7, 5))
         im = plt.imshow(
-            np.log10(np.clip(C_plot.T, 1e-12, None)), origin="lower", aspect="auto",
+            log_C_plot.T, origin="lower", aspect="auto",
             extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]], cmap="viridis",
             vmin=-4, vmax=0
         )
@@ -1193,6 +1656,46 @@ def get_completeness_function_2d(
         plt.tight_layout()
         plt.savefig(os.path.join(plot_dir, "completeness_map.pdf"), dpi=600)
         plt.close()
+
+        # Plot the same map with automatically located log-completeness contours.
+        fig, ax = plt.subplots(figsize=(7, 5))
+        displayed_log_C = np.clip(log_C_plot, -4.0, 0.0)
+        im = ax.imshow(
+            displayed_log_C.T,
+            origin="lower",
+            aspect="auto",
+            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
+            cmap="viridis",
+            vmin=-4,
+            vmax=0,
+        )
+        contours = ax.contour(
+            mag_centers,
+            z_centers,
+            displayed_log_C.T,
+            colors="white",
+            linewidths=1.3,
+        )
+        ax.clabel(contours, inline=True, fmt="%.1f", fontsize=7)
+        ax.set_ylabel(r"$z$")
+        ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
+        cbar = fig.colorbar(im, ax=ax)
+        cbar.set_label(r"Completeness $\log\,p(I{=}1\,|\,m,z)$")
+        fig.tight_layout()
+        fig.savefig(
+            os.path.join(plot_dir, "completeness_map_with_log_contours.pdf"),
+            dpi=600,
+        )
+        plt.close(fig)
+        _plot_relative_completeness_percent(
+            C_plot,
+            H_true_s,
+            mag_centers,
+            z_centers,
+            mag_edges,
+            z_edges,
+            plot_dir,
+        )
         # Plot H_obs
         plt.figure(figsize=(7, 5))
         im = plt.imshow(
@@ -1217,14 +1720,27 @@ def get_completeness_function_2d(
         plt.tight_layout()
         plt.savefig(os.path.join(plot_dir, "H_true_map.pdf"), dpi=600)
         plt.close()
+    support_mode = normalize_completeness_magnitude_support_mode(magnitude_support_mode)
+    selection_support = (
+        (COMPLETENESS_TAIL_MAG_2500_MIN, COMPLETENESS_TAIL_MAG_2500_MAX)
+        if support_mode == "tails"
+        else (COMPLETENESS_MAG_2500_MIN, COMPLETENESS_MAG_2500_MAX)
+    )
     completeness2d = Completeness2D(
         mag_centers,
         z_centers,
         C,
         magnitude_support=(mag_min, mag_max),
         redshift_support=(z_min, z_max),
-        selection_magnitude_support=(COMPLETENESS_MAG_2500_MIN, COMPLETENESS_MAG_2500_MAX),
+        selection_magnitude_support=selection_support,
+        magnitude_support_mode=support_mode,
+        tail_parent_counts_2d=H_true,
+        tail_observed_counts_2d=H_obs,
     )
+    if plot:
+        _plot_magnitude_tail_diagnostics(
+            completeness2d, os.path.join(plot_path or "plots/hubble", "completeness")
+        )
     return completeness2d, mag_centers, z_centers, dm, dz, sigma_mag
 
 
@@ -1442,6 +1958,7 @@ def get_completeness_function_3d_fhost(
     sigma_fhost=0.05,
     df_agn_fhost_population=None,
     z_range=None,
+    magnitude_support_mode="hard-cut",
 ):
     """
     Build p(detect | m, z, f_host_2500_psf), preferring mock PSF host
@@ -1557,6 +2074,12 @@ def get_completeness_function_3d_fhost(
         eps=eps,
     )
 
+    support_mode = normalize_completeness_magnitude_support_mode(magnitude_support_mode)
+    selection_support = (
+        (COMPLETENESS_TAIL_MAG_2500_MIN, COMPLETENESS_TAIL_MAG_2500_MAX)
+        if support_mode == "tails"
+        else (COMPLETENESS_MAG_2500_MIN, COMPLETENESS_MAG_2500_MAX)
+    )
     completeness3d = Completeness3D(
         mag_centers,
         z_centers,
@@ -1564,13 +2087,23 @@ def get_completeness_function_3d_fhost(
         C,
         magnitude_support=(mag_min, mag_max),
         redshift_support=(z_min, z_max),
-        selection_magnitude_support=(COMPLETENESS_MAG_2500_MIN, COMPLETENESS_MAG_2500_MAX),
+        selection_magnitude_support=selection_support,
+        magnitude_support_mode=support_mode,
+        tail_completeness_2d=np.divide(
+            np.sum(C * H_true_s, axis=2),
+            np.sum(H_true_s, axis=2),
+            out=np.zeros(C.shape[:2], dtype=float),
+            where=np.sum(H_true_s, axis=2) > 0.0,
+        ),
+        tail_parent_counts_2d=np.sum(H_true, axis=2),
+        tail_observed_counts_2d=np.sum(H_obs, axis=2),
     )
 
     if plot:
         base_plot_path = plot_path or "plots/hubble"
         plot_dir = os.path.join(base_plot_path, "completeness")
         os.makedirs(plot_dir, exist_ok=True)
+        _plot_magnitude_tail_diagnostics(completeness3d, plot_dir)
 
         with open(os.path.join(plot_dir, "fhost_2500_psf_l2500_model.json"), "w") as handle:
             json.dump(host_model, handle, indent=2)
@@ -1651,6 +2184,7 @@ def get_completeness_function_4d_fhost_alpha(
     sigma_alpha=0.35,
     df_agn_fhost_population=None,
     z_range=None,
+    magnitude_support_mode="hard-cut",
 ):
     """
     Build p(detect | m, z, f_host_2500_psf, alpha_lambda), preferring mock
@@ -1801,6 +2335,12 @@ def get_completeness_function_4d_fhost_alpha(
         eps=eps,
     )
 
+    support_mode = normalize_completeness_magnitude_support_mode(magnitude_support_mode)
+    selection_support = (
+        (COMPLETENESS_TAIL_MAG_2500_MIN, COMPLETENESS_TAIL_MAG_2500_MAX)
+        if support_mode == "tails"
+        else (COMPLETENESS_MAG_2500_MIN, COMPLETENESS_MAG_2500_MAX)
+    )
     completeness4d = Completeness4D(
         mag_centers,
         z_centers,
@@ -1809,13 +2349,23 @@ def get_completeness_function_4d_fhost_alpha(
         C,
         magnitude_support=(mag_min, mag_max),
         redshift_support=(z_min, z_max),
-        selection_magnitude_support=(COMPLETENESS_MAG_2500_MIN, COMPLETENESS_MAG_2500_MAX),
+        selection_magnitude_support=selection_support,
+        magnitude_support_mode=support_mode,
+        tail_completeness_2d=np.divide(
+            np.sum(C * H_true_s, axis=(2, 3)),
+            np.sum(H_true_s, axis=(2, 3)),
+            out=np.zeros(C.shape[:2], dtype=float),
+            where=np.sum(H_true_s, axis=(2, 3)) > 0.0,
+        ),
+        tail_parent_counts_2d=np.sum(H_true, axis=(2, 3)),
+        tail_observed_counts_2d=np.sum(H_obs, axis=(2, 3)),
     )
 
     if plot:
         base_plot_path = plot_path or "plots/hubble"
         plot_dir = os.path.join(base_plot_path, "completeness")
         os.makedirs(plot_dir, exist_ok=True)
+        _plot_magnitude_tail_diagnostics(completeness4d, plot_dir)
 
         with open(os.path.join(plot_dir, "fhost_2500_psf_l2500_model.json"), "w") as handle:
             json.dump(host_model, handle, indent=2)

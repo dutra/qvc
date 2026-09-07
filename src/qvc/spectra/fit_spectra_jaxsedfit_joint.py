@@ -80,14 +80,57 @@ SDSS_STATIC_PSF_FWHM_ARCSEC = {
 }
 SDSS_LEGACY_FIBER_DIAMETER_ARCSEC = 3.0
 SDSS_BOSS_FIBER_DIAMETER_ARCSEC = 2.0
+BAL_MIN_REDSHIFT_EXCLUSIVE = 1.5
+BALMER_CONTINUUM_BLUE_COVERAGE_ANGSTROM = 3000.0
+BALMER_CONTINUUM_RED_COVERAGE_ANGSTROM = 4000.0
 HOST_CAPTURE_BUNDLE_ATTR = "qvc_host_capture_model"
 HOST_CAPTURE_BUNDLE_MARKER = "static_sdss_psf_fwhm"
 HOST_CAPTURE_PSF_FWHM_ATTR = "qvc_f_host_2500_psf_fwhm_arcsec"
 HOST_CAPTURE_QVC_FWHM_ATTR = "qvc_sdss_psf_fwhm_arcsec"
+TOTAL_CAPTURE_PHOTOMETRY_METHODS = frozenset(
+    {"profile", "auto", "model", "cmodel", "petrosian"}
+)
 
 
 class IncompatibleHostCaptureResumeError(RuntimeError):
     """Raised when a resume bundle uses a different host-capture model."""
+
+
+class IncompatibleBALResumeError(RuntimeError):
+    """Raised when a resume bundle disagrees with the active BAL policy."""
+
+
+class IncompatibleBalmerContinuumResumeError(RuntimeError):
+    """Raised when a resume bundle disagrees with the active BC policy."""
+
+
+def bal_enabled_for_redshift(args, redshift):
+    """Return whether BAL components are enabled for one fitted object."""
+    z = legacy.safe_float(redshift)
+    return (
+        bool(getattr(args, "fit_bal", True))
+        and np.isfinite(z)
+        and z > BAL_MIN_REDSHIFT_EXCLUSIVE
+    )
+
+
+def balmer_continuum_enabled_for_coverage(args, wavelength_rest, valid_mask=None):
+    """Return whether retained valid pixels bracket the Balmer edge."""
+    if not bool(getattr(args, "fit_bc", True)):
+        return False
+    wavelength_rest = np.asarray(wavelength_rest, dtype=float)
+    valid = np.isfinite(wavelength_rest)
+    if valid_mask is not None:
+        valid_mask = np.asarray(valid_mask, dtype=bool)
+        if valid_mask.shape != wavelength_rest.shape:
+            raise ValueError("Balmer-continuum coverage mask must match wavelengths.")
+        valid &= valid_mask
+    retained = wavelength_rest[valid]
+    return bool(
+        retained.size
+        and np.min(retained) <= BALMER_CONTINUUM_BLUE_COVERAGE_ANGSTROM
+        and np.max(retained) >= BALMER_CONTINUUM_RED_COVERAGE_ANGSTROM
+    )
 
 
 def _fits_table_scalar(hdul, column_name):
@@ -145,8 +188,9 @@ def _host_capture_resume_message(path, detail):
     return (
         f"Cannot resume spectral posterior bundle {path}: {detail}. "
         "This run requires static SDSS ugriz PSF FWHMs and JAXSEDFit's fitted "
-        "host-capture scale, without QVC missing-PSF fraction parameters. Run "
-        "fresh spectral inference when the saved model contract differs."
+        "host-capture scale, without independent missing-spatial-scale capture "
+        "fractions. Run fresh spectral inference when the saved model contract "
+        "differs."
     )
 
 
@@ -802,8 +846,9 @@ def load_saved_sed_photometry(
 
     Required columns are an object identifier, ``filter_name``, ``flux_mjy``,
     and ``flux_err_mjy``. CSV, Parquet, Feather, ECSV, and FITS tables are
-    supported. Optional ``is_upper_limit``, ``psf_fwhm_arcsec``, and
-    ``photometry_method`` columns are preserved.
+    supported. Optional ``is_upper_limit``, ``psf_fwhm_arcsec``,
+    ``aperture_diameter_arcsec``, and ``photometry_method`` columns are
+    preserved.
     """
     path = Path(path)
     suffix = path.suffix.lower()
@@ -841,7 +886,14 @@ def load_saved_sed_photometry(
     phot = phot.copy()
     phot["source_id"] = phot["source_id"].map(legacy.normalize_object_id)
     phot["filter_name"] = phot["filter_name"].astype(str).str.strip()
-    for col in ("flux_mjy", "flux_err_mjy"):
+    for col in (
+        "flux_mjy",
+        "flux_err_mjy",
+        "psf_fwhm_arcsec",
+        "aperture_diameter_arcsec",
+    ):
+        if col not in phot:
+            continue
         phot[col] = pd.to_numeric(phot[col], errors="coerce")
     if "is_upper_limit" not in phot:
         phot["is_upper_limit"] = False
@@ -870,6 +922,46 @@ def load_saved_sed_photometry(
             "must be finite and strictly positive."
         )
     return phot.loc[good].copy()
+
+
+def validate_host_capture_spatial_metadata(phot):
+    """Reject partial-flux measurements lacking a usable spatial scale."""
+    methods = phot.get(
+        "photometry_method", pd.Series("catalog", index=phot.index)
+    ).fillna("catalog")
+    methods = methods.astype(str).str.strip().str.lower()
+    psf_fwhm = pd.to_numeric(
+        phot.get("psf_fwhm_arcsec", pd.Series(np.nan, index=phot.index)),
+        errors="coerce",
+    )
+    aperture_diameter = pd.to_numeric(
+        phot.get(
+            "aperture_diameter_arcsec", pd.Series(np.nan, index=phot.index)
+        ),
+        errors="coerce",
+    )
+    has_spatial_scale = (np.isfinite(psf_fwhm) & (psf_fwhm > 0.0)) | (
+        np.isfinite(aperture_diameter) & (aperture_diameter > 0.0)
+    )
+    missing = ~methods.isin(TOTAL_CAPTURE_PHOTOMETRY_METHODS) & ~has_spatial_scale
+    if not bool(missing.any()):
+        return
+
+    columns = [
+        name
+        for name in ("catalog", "filter_name", "photometry_method")
+        if name in phot
+    ]
+    offenders = phot.loc[missing, columns].copy()
+    offenders["psf_fwhm_arcsec"] = psf_fwhm.loc[missing]
+    offenders["aperture_diameter_arcsec"] = aperture_diameter.loc[missing]
+    raise ValueError(
+        "Host-capture modeling requires every non-total photometry measurement "
+        "to provide a finite positive psf_fwhm_arcsec or "
+        "aperture_diameter_arcsec; offending rows: "
+        f"{offenders.to_dict(orient='records')[:10]}. Regenerate the saved SED "
+        "table with complete spatial metadata."
+    )
 
 
 def load_sdss_psf_photometry_overrides(path):
@@ -1038,11 +1130,13 @@ def build_joint_config(
         SpectroscopyData,
     )
     from jaxsedfit.filters import load_filter_curves
+    from jaxsedfit.spectral_defaults import build_default_bal_components
 
     del JAXSEDFit  # imported here as an early API/version check
     phot = add_qvc_psf_photometry(rec, phot)
     if len(phot) == 0:
         raise RuntimeError("No usable broadband photometry is available.")
+    validate_host_capture_spatial_metadata(phot)
 
     filter_names = phot["filter_name"].astype(str).tolist()
     spec_flux_mjy = flambda_1e17_to_mjy(lam, flux)
@@ -1057,15 +1151,31 @@ def build_joint_config(
     )
     if not np.any(spec_good):
         raise RuntimeError("No spectral pixels remain inside the rest wavelength range.")
+    fit_balmer_continuum = balmer_continuum_enabled_for_coverage(
+        args,
+        wave_rf,
+        spec_good,
+    )
 
     psf_fwhm = [
         None if not np.isfinite(legacy.safe_float(value)) else float(value)
         for value in phot.get("psf_fwhm_arcsec", pd.Series(np.nan, index=phot.index))
     ]
+    aperture_diameter = [
+        None if not np.isfinite(legacy.safe_float(value)) else float(value)
+        for value in phot.get(
+            "aperture_diameter_arcsec", pd.Series(np.nan, index=phot.index)
+        )
+    ]
     method_values = phot.get(
         "photometry_method", pd.Series("catalog", index=phot.index)
     )
     methods = [None if pd.isna(value) else str(value) for value in method_values]
+    bal_components = (
+        build_default_bal_components(spec_flux_mjy[spec_good])
+        if bal_enabled_for_redshift(args, rec["z"])
+        else None
+    )
     config = FitConfig(
         observation=Observation(
             object_id=joint_saved_name(rec),
@@ -1081,6 +1191,7 @@ def build_joint_config(
             errors=phot["flux_err_mjy"].astype(float).tolist(),
             is_upper_limit=phot["is_upper_limit"].astype(bool).tolist(),
             psf_fwhm_arcsec=psf_fwhm,
+            aperture_diameter_arcsec=aperture_diameter,
             photometry_method=methods,
         ),
         filters=FilterSet(curves=load_filter_curves(filter_names)),
@@ -1107,8 +1218,9 @@ def build_joint_config(
             tied_lines=args.fit_lines,
             use_smart_line_priors=True,
             fit_feii=args.fit_fe,
-            fit_balmer_continuum=args.fit_bc,
+            fit_balmer_continuum=fit_balmer_continuum,
             line_flux_scale_mjy=args.line_flux_scale_mjy,
+            custom_components=bal_components,
         ),
         likelihood=LikelihoodConfig(
             use_host_capture_model=True,
@@ -1991,7 +2103,7 @@ def posterior_bundle_path(directory, rec):
 
 def sed_figure_path(fig_dir, rec):
     """Return the shared fresh/resumed SED figure path."""
-    return Path(fig_dir) / f"{joint_saved_name(rec)}.png"
+    return Path(fig_dir) / f"{joint_saved_name(rec)}.pdf"
 
 
 def verify_new_posterior_bundle(path):
@@ -2047,8 +2159,8 @@ def annotate_posterior_bundle(path, args, rec, *, event_type="fit", source_path=
         if missing_path in handle:
             raise ValueError(
                 "New posterior bundle unexpectedly contains "
-                "missing_psf_host_capture_fraction samples despite static "
-                "PSF FWHMs."
+                "missing_psf_host_capture_fraction samples for photometry "
+                "without complete spatial metadata."
             )
         if scale_path not in handle:
             raise ValueError(
@@ -2117,7 +2229,8 @@ def validate_resume_host_capture_fitter(fitter, path):
         raise IncompatibleHostCaptureResumeError(
             _host_capture_resume_message(
                 path,
-                "posterior unexpectedly contains missing-PSF host-capture fractions",
+                "posterior contains independent host-capture fractions for "
+                "measurements without spatial metadata",
             )
         )
     scales = np.asarray(samples.get("log_host_capture_scale_arcsec", []))
@@ -2126,6 +2239,95 @@ def validate_resume_host_capture_fitter(fitter, path):
             _host_capture_resume_message(
                 path, "posterior lacks a finite fitted host-capture scale"
             )
+        )
+
+
+def validate_resume_bal_fitter(fitter, path, *, expected_enabled=True):
+    """Require a resume bundle to match the current redshift-aware BAL policy."""
+    agn = getattr(getattr(fitter, "config", None), "agn", None)
+    components = tuple(getattr(agn, "custom_components", ()) or ())
+    bal_names = {
+        str(getattr(component, "name", ""))
+        for component in components
+        if str(
+            (getattr(component, "metadata", {}) or {}).get("component_type", "")
+        )
+        == "bal_absorption"
+    }
+    expected = {"bal_nv", "bal_siiv", "bal_civ"}
+    if expected_enabled and not expected.issubset(bal_names):
+        missing = sorted(expected - bal_names)
+        raise IncompatibleBALResumeError(
+            f"Resume bundle {path} requires BAL fitting under the current "
+            f"z > {BAL_MIN_REDSHIFT_EXCLUSIVE:g} policy but its saved "
+            f"JAXSEDFit configuration lacks BAL components: {missing}."
+        )
+    if not expected_enabled and bal_names:
+        raise IncompatibleBALResumeError(
+            f"Resume bundle {path} contains BAL components {sorted(bal_names)} "
+            "but BAL fitting is disabled by --no-bal or by the current "
+            f"z > {BAL_MIN_REDSHIFT_EXCLUSIVE:g} policy."
+        )
+
+
+def validate_resume_balmer_continuum_fitter(
+    fitter,
+    path,
+    args,
+    *,
+    redshift,
+):
+    """Require a resume bundle to match the current spectral-coverage BC policy."""
+    config = getattr(fitter, "config", None)
+    spectroscopy = getattr(config, "spectroscopy", None)
+    if spectroscopy is None:
+        spectra = []
+    elif isinstance(spectroscopy, (list, tuple)):
+        spectra = list(spectroscopy)
+    else:
+        spectra = [spectroscopy]
+
+    retained_rest = []
+    z = legacy.safe_float(redshift)
+    if np.isfinite(z) and z > -1.0:
+        for spectrum in spectra:
+            wave_obs = np.asarray(getattr(spectrum, "wave_obs", ()), dtype=float)
+            if wave_obs.size == 0:
+                continue
+            mask = getattr(spectrum, "mask", None)
+            if mask is None:
+                valid = np.ones(wave_obs.shape, dtype=bool)
+            else:
+                valid = np.asarray(mask, dtype=bool)
+                if valid.shape != wave_obs.shape:
+                    raise IncompatibleBalmerContinuumResumeError(
+                        f"Resume bundle {path} has a spectroscopy mask whose shape "
+                        "does not match its wavelength grid."
+                    )
+            valid &= np.isfinite(wave_obs)
+            retained_rest.append(wave_obs[valid] / (1.0 + z))
+
+    wavelength_rest = (
+        np.concatenate(retained_rest) if retained_rest else np.asarray([], dtype=float)
+    )
+    expected_enabled = balmer_continuum_enabled_for_coverage(
+        args,
+        wavelength_rest,
+    )
+    agn = getattr(config, "agn", None)
+    saved_enabled = bool(getattr(agn, "fit_balmer_continuum", False))
+    if saved_enabled != expected_enabled:
+        if wavelength_rest.size:
+            coverage = (
+                f"{np.min(wavelength_rest):.1f}--{np.max(wavelength_rest):.1f} Angstrom"
+            )
+        else:
+            coverage = "no retained valid rest-frame pixels"
+        raise IncompatibleBalmerContinuumResumeError(
+            f"Resume bundle {path} has fit_balmer_continuum={saved_enabled}, but "
+            f"the current coverage policy requires {expected_enabled} for {coverage}. "
+            "BC requires retained rest-frame coverage at or below 3000 Angstrom "
+            "and at or above 4000 Angstrom, and --no-fit-bc always disables it."
         )
 
 
@@ -2186,7 +2388,9 @@ def preflight_resume_host_capture_bundles(records, args):
                     )
                 fraction_path = "samples/missing_psf_host_capture_fraction"
                 if fraction_path in handle:
-                    raise ValueError("unexpected missing-PSF host-capture samples")
+                    raise ValueError(
+                        "unexpected missing-spatial-scale host-capture samples"
+                    )
                 if "samples/log_host_capture_scale_arcsec" not in handle:
                     raise ValueError("missing fitted host-capture scale samples")
                 if unannotated_accepted:
@@ -2313,7 +2517,7 @@ def save_spectrum_figure(fitter, rec, fig_dir):
 
     fig_path = (
         Path(fig_dir)
-        / f"z{float(rec['z']):.3f}_{rec['sdss_name']}_spectrum.png"
+        / f"z{float(rec['z']):.3f}_{rec['sdss_name']}_spectrum.pdf"
     )
     fig_path.parent.mkdir(parents=True, exist_ok=True)
     fig = fitter.plot_spectrum(show_plot=False, plot_residual=False)
@@ -2329,7 +2533,12 @@ def save_spectrum_figure(fitter, rec, fig_dir):
 
 def initialization_figure_path(fig_dir, rec, stage):
     """Return the stable output path for one Optax initialization stage."""
-    return Path(fig_dir) / f"{joint_saved_name(rec)}_init_{stage}.png"
+    return Path(fig_dir) / f"{joint_saved_name(rec)}_init_{stage}.pdf"
+
+
+def initialization_spectrum_figure_path(fig_dir, rec, stage):
+    """Return the spectrum-decomposition path for one MAP stage."""
+    return Path(fig_dir) / f"{joint_saved_name(rec)}_init_{stage}_spectrum.pdf"
 
 
 def fit_with_saved_initialization_plots(fitter, rec, args):
@@ -2340,6 +2549,7 @@ def fit_with_saved_initialization_plots(fitter, rec, args):
     title_stages = {
         "Stage 1 continuum/host MAP initialization": "stage1",
         "Stage 2 smooth spectral-feature MAP initialization": "stage2",
+        "Stage 2 full MAP initialization": "stage2",
         "Stage 3 full MAP initialization": "stage3",
         "Full MAP initialization": "map",
     }
@@ -2347,18 +2557,51 @@ def fit_with_saved_initialization_plots(fitter, rec, args):
 
     def save_instead_of_showing(*call_args, **call_kwargs):
         stage = title_stages.get(str(call_kwargs.get("title", "")))
+        # JAXSEDFit requests interactive display for its internal MAP
+        # diagnostics. The batch runner must never honor that request: even an
+        # unfamiliar future stage title remains non-interactive.
+        call_kwargs["show"] = False
         if stage is None:
             return original_plot_sed(*call_args, **call_kwargs)
         output_path = initialization_figure_path(args.fig_dir, rec, stage)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         call_kwargs["output_path"] = output_path
-        call_kwargs["show"] = False
         figure = original_plot_sed(*call_args, **call_kwargs)
         if not output_path.is_file():
             raise FileNotFoundError(
                 f"Initialization figure was not written: {output_path}"
             )
         print(f"Saved initialization plot: {output_path}")
+
+        from matplotlib import pyplot as plt
+
+        spectrum_output_path = initialization_spectrum_figure_path(
+            args.fig_dir,
+            rec,
+            stage,
+        )
+        spectrum_figure = fitter.plot_spectrum(
+            show_plot=False,
+            plot_residual=False,
+        )
+        if spectrum_figure is None:
+            raise RuntimeError(
+                f"JAXSEDFit did not return the {stage} MAP spectrum figure."
+            )
+        try:
+            spectrum_figure.savefig(
+                spectrum_output_path,
+                dpi=150,
+                bbox_inches="tight",
+            )
+        finally:
+            plt.close(spectrum_figure)
+        if not spectrum_output_path.is_file():
+            raise FileNotFoundError(
+                "Initialization spectrum figure was not written: "
+                f"{spectrum_output_path}"
+            )
+        print(f"Saved initialization spectrum plot: {spectrum_output_path}")
         return figure
 
     fitter.plot_sed = save_instead_of_showing
@@ -2644,6 +2887,17 @@ def _complete_resumed_fit(rec, args, source_path, fitter):
     )
     fitter.predictive = None
     validate_resume_host_capture_fitter(fitter, source_path)
+    validate_resume_bal_fitter(
+        fitter,
+        source_path,
+        expected_enabled=bal_enabled_for_redshift(args, rec["z"]),
+    )
+    validate_resume_balmer_continuum_fitter(
+        fitter,
+        source_path,
+        args,
+        redshift=rec["z"],
+    )
     config = fitter.config
     saved_name = str(config.observation.object_id)
     expected_name = joint_saved_name(rec)
@@ -2797,7 +3051,7 @@ def _remove_incomplete_resumed_outputs(rec, args):
         posterior_bundle_path(args.output_dir, rec),
         sed_figure_path(args.fig_dir, rec),
         Path(args.fig_dir)
-        / f"z{float(rec['z']):.3f}_{rec['sdss_name']}_spectrum.png",
+        / f"z{float(rec['z']):.3f}_{rec['sdss_name']}_spectrum.pdf",
     ]
     for path in paths:
         path.unlink(missing_ok=True)
@@ -2813,7 +3067,11 @@ def run_hybrid_fit(rec, args):
 
     try:
         return _run_resumed_fit(rec, args, source_path)
-    except (IncompatibleHostCaptureResumeError, M2500ReconstructionError):
+    except (
+        IncompatibleHostCaptureResumeError,
+        IncompatibleBALResumeError,
+        M2500ReconstructionError,
+    ):
         raise
     except Exception as exc:
         resume_error = f"{type(exc).__name__}: {exc}"
@@ -3151,7 +3409,30 @@ def parse_args(argv=None):
             "summary table for every object."
         ),
     )
-    parser.set_defaults(fit_lines=True, fit_fe=True, fit_bc=True, save_fig=True, save_jaxsedfit_samples=True)
+    parser.set_defaults(
+        fit_lines=True,
+        fit_fe=True,
+        fit_bc=True,
+        fit_bal=True,
+        save_fig=True,
+        save_jaxsedfit_samples=True,
+    )
+    parser.add_argument(
+        "--fit-bal",
+        dest="fit_bal",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--no-bal",
+        dest="fit_bal",
+        action="store_false",
+        help=(
+            "Disable BAL fitting. By default, the built-in N V, Si IV, and "
+            f"C IV BAL components are fitted only for objects with z > "
+            f"{BAL_MIN_REDSHIFT_EXCLUSIVE:g}."
+        ),
+    )
     parser.add_argument("--no-fit-lines", dest="fit_lines", action="store_false")
     parser.add_argument("--no-fit-fe", dest="fit_fe", action="store_false")
     parser.add_argument("--no-fit-bc", dest="fit_bc", action="store_false")

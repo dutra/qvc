@@ -34,9 +34,15 @@ from qvc.hubble.cuts import (
     COMPLETENESS_MAP_Z_EDGE_MIN,
     COMPLETENESS_MAG_2500_MAX,
     COMPLETENESS_MAG_2500_MIN,
+    COMPLETENESS_Z_MAX,
+    COMPLETENESS_Z_MIN,
+    COMPLETENESS_TAIL_MAG_2500_MAX,
+    COMPLETENESS_TAIL_MAG_2500_MIN,
+    EBV_GAL_PLUS_EBV_AGN_COLUMN,
     EXCLUDED_SDSS_NAMES,
     LIGHT_CURVE_N_POINTS_COLUMN,
     LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
+    normalize_completeness_magnitude_support_mode,
     T_RF_OVER_TAU_UV_RF_COLUMN,
     LOG_AMP_DELTA_BC_UPPER,
     LOG_F_BC_3000_MAX,
@@ -68,12 +74,18 @@ from qvc.hubble.hubble_model import (
 )
 from qvc.hubble.sigma_tau_lambda_fit import fit_sigma_tau_lambda_broken_pl
 from qvc.light_curve.plotting_appendix import plot_sigma_tau_identity_grid
+from qvc.light_curve.posterior_draws import (
+    LIGHT_CURVE_LOG_SIGMA_DRAW_COL,
+    LIGHT_CURVE_LOG_TAU_RF_DRAW_COL,
+    LIGHT_CURVE_POSTERIOR_VALID_COUNT_COL,
+    read_light_curve_posterior_draw_group,
+)
 from qvc.spectra.catalog_hdf5 import read_spectra_catalog_hdf5
 
 PURPLE_ANSI = "\033[95m"
 RESET_ANSI = "\033[0m"
 HUBBLE_JITTER_SURVEYS = ("sdss", "ps1", "ztf")
-STRICT_UPPER_BOUND_SCALAR_CUT_COLUMNS = frozenset()
+STRICT_UPPER_BOUND_SCALAR_CUT_COLUMNS = frozenset({EBV_GAL_PLUS_EBV_AGN_COLUMN})
 
 AB_MAG_ZERO_POINT = 48.60
 XRAY_PHOTON_INDEX = 1.9
@@ -160,23 +172,15 @@ def _append_cut_report_row(
     rows.append(row)
 
 
-def _render_cut_summary_table(rows):
-    columns = (
-        ("tier", "tier"),
-        ("step", "step"),
-        ("criterion", "criterion"),
-        ("before", "before"),
-        ("removed", "removed"),
-        ("removed_z_lt_1p5", "removed z < 1.5"),
-        ("removed_z_ge_1p5", "removed z >= 1.5"),
-        ("kept", "kept"),
-        ("status", "status"),
-    )
+def render_ascii_table(rows, columns):
+    """Render dictionaries as the boxed plain-text tables used by the CLI."""
+    columns = tuple(columns)
     keys = tuple(key for key, _label in columns)
     labels = dict(columns)
-    rendered_rows = []
-    for row in rows:
-        rendered_rows.append({key: str(row[key]) for key in keys})
+    rendered_rows = [
+        {key: str(row.get(key, "")) for key in keys}
+        for row in rows
+    ]
 
     widths = {
         key: (
@@ -199,6 +203,21 @@ def _render_cut_summary_table(rows):
     lines.extend(_line(row) for row in rendered_rows)
     lines.append(border)
     return "\n".join(lines)
+
+
+def _render_cut_summary_table(rows):
+    columns = (
+        ("tier", "tier"),
+        ("step", "step"),
+        ("criterion", "criterion"),
+        ("before", "before"),
+        ("removed", "removed"),
+        ("removed_z_lt_1p5", "removed z < 1.5"),
+        ("removed_z_ge_1p5", "removed z >= 1.5"),
+        ("kept", "kept"),
+        ("status", "status"),
+    )
+    return render_ascii_table(rows, columns)
 
 
 def _wrap_text_in_purple(text):
@@ -1016,7 +1035,12 @@ def read_quasars_from_hdf5(file_path, N=None):
     return quasar_list
 
 
-def read_quasars_from_hdf5_flat(file_path, N=None):
+def read_quasars_from_hdf5_flat(
+    file_path,
+    N=None,
+    *,
+    include_light_curve_posterior_draws=False,
+):
     """
     Read a flat columnar HDF5 file (top-level datasets) into a DataFrame.
     """
@@ -1051,7 +1075,10 @@ def read_quasars_from_hdf5_flat(file_path, N=None):
         scalar_metadata = {}
         n_rows = None
         for key in keys:
-            values = hdf[key][...]
+            node = hdf[key]
+            if not isinstance(node, h5py.Dataset):
+                continue
+            values = node[...]
             arr = np.asarray(values)
             if arr.ndim == 0:
                 scalar_metadata[key] = _decode_scalar(arr.item())
@@ -1078,6 +1105,47 @@ def read_quasars_from_hdf5_flat(file_path, N=None):
 
         for meta_key, meta_value in scalar_metadata.items():
             df[meta_key] = meta_value
+
+        if include_light_curve_posterior_draws:
+            payload = read_light_curve_posterior_draw_group(hdf)
+            if payload is None:
+                raise KeyError(
+                    "Requested empirical light-curve posterior marginalization, "
+                    "but the input HDF5 file has no "
+                    "'light_curve_posterior_draws' group."
+                )
+            row_limit = len(df)
+            if len(payload["valid_count"]) < row_limit:
+                raise ValueError(
+                    "The light_curve_posterior_draws group has fewer rows than "
+                    "the flat catalog."
+                )
+            sigma_draws = np.asarray(payload["log_sigma_uv"][:row_limit])
+            tau_draws = np.asarray(payload["log_tau_uv_rf"][:row_limit])
+            df[LIGHT_CURVE_LOG_SIGMA_DRAW_COL] = [
+                row.copy() for row in sigma_draws
+            ]
+            df[LIGHT_CURVE_LOG_TAU_RF_DRAW_COL] = [
+                row.copy() for row in tau_draws
+            ]
+            df[LIGHT_CURVE_POSTERIOR_VALID_COUNT_COL] = np.asarray(
+                payload["valid_count"][:row_limit], dtype=int
+            )
+    return df
+
+
+def derive_f_agn_psf_2500_columns(df):
+    """Derive raw PSF AGN fraction columns without changing the input schema."""
+    host_name = "f_host_2500_psf"
+    host_err_name = "f_host_2500_psf_err"
+    if host_name in df.columns:
+        df["f_AGN_psf_2500"] = 1.0 - pd.to_numeric(
+            df[host_name], errors="coerce"
+        )
+    if host_err_name in df.columns:
+        df["f_AGN_psf_2500_err"] = pd.to_numeric(
+            df[host_err_name], errors="coerce"
+        )
     return df
 
 def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
@@ -1095,8 +1163,10 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                   *,
                   magnitude_convention,
                   completeness_magnitude="dereddened",
+                  completeness_magnitude_support_mode="hard-cut",
                   enforce_completeness_support=False,
                   allow_legacy_v3_host_capture_metadata=False,
+                  light_curve_uncertainty_mode="covariance",
                   return_completeness_parent=False):
     if (
         not isinstance(magnitude_convention, str)
@@ -1112,6 +1182,11 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             "completeness_magnitude must be exactly 'dereddened' or "
             f"'attenuated', got {completeness_magnitude!r}."
         )
+    completeness_magnitude_support_mode = (
+        normalize_completeness_magnitude_support_mode(
+            completeness_magnitude_support_mode
+        )
+    )
     cut_tier = normalize_cut_tier(cut_tier)
     maximum_cut_tier = cut_tier_level(cut_tier)
     apply_tier0 = maximum_cut_tier >= 0
@@ -1171,6 +1246,8 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         plot_blr_lag_vs_amp_by_band,
         plot_blr_lag_vs_redshift_by_band,
         plot_bpl_psd_vs_uv_variability,
+        plot_psd_uv_recovery_comparison,
+        plot_eta_sigma_vs_redshift_colored_by_kl,
         plot_eta_tau_sigma_vs_redshift,
         plot_fast_vs_uv_variability,
         plot_f_host_2500_vs_redshift,
@@ -1216,6 +1293,8 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         plot_blr_lag_vs_amp_by_band = _skip_diagnostic_plot
         plot_blr_lag_vs_redshift_by_band = _skip_diagnostic_plot
         plot_bpl_psd_vs_uv_variability = _skip_diagnostic_plot
+        plot_psd_uv_recovery_comparison = _skip_diagnostic_plot
+        plot_eta_sigma_vs_redshift_colored_by_kl = _skip_diagnostic_plot
         plot_eta_tau_sigma_vs_redshift = _skip_diagnostic_plot
         plot_fast_vs_uv_variability = _skip_diagnostic_plot
         plot_f_host_2500_vs_redshift = _skip_diagnostic_plot
@@ -1414,8 +1493,26 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
     if exclude_object_ids_csv:
         exclude_object_ids_csv = [resolve_qvc_data_path(path) for path in exclude_object_ids_csv]
 
+    if light_curve_uncertainty_mode not in {"covariance", "posterior-draws"}:
+        raise ValueError(
+            "light_curve_uncertainty_mode must be 'covariance' or "
+            f"'posterior-draws', got {light_curve_uncertainty_mode!r}."
+        )
+    if light_curve_uncertainty_mode == "posterior-draws" and correct_sigma_uv_host:
+        raise ValueError(
+            "Empirical light-curve posterior draws cannot currently be combined "
+            "with --correct-sigma-uv-host because the post-hoc host correction "
+            "has not been propagated through those draws."
+        )
+
     file_path = resolve_qvc_data_path(file_path)
-    df = read_quasars_from_hdf5_flat(file_path)
+    if light_curve_uncertainty_mode == "posterior-draws":
+        df = read_quasars_from_hdf5_flat(
+            file_path,
+            include_light_curve_posterior_draws=True,
+        )
+    else:
+        df = read_quasars_from_hdf5_flat(file_path)
     df = _apply_column_compatibility_shim(df)
     print("Number of quasars loaded:", len(df))
     legacy_required = [f"mags_mean_{i}" for i in range(4)]
@@ -1530,6 +1627,8 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         print("[WARNING] spectra fit catalog not provided, assuming spectral fields are in agn h5 file")
         if 'alpha_lambda' not in df.columns:
             raise ValueError("spectra fit catalog not provided and spectral fields not found in agn h5 file")
+
+    df = derive_f_agn_psf_2500_columns(df)
 
     # Targeting provenance is read from the spectra v3 catalog frame.
 
@@ -1777,6 +1876,17 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                 f"and 'log_sigma_uv_std_psd'. Missing: {missing_cols}"
             )
 
+    eta_sigma_kl_color_limits = None
+    if "eta_sigma_kl" in df.columns:
+        eta_sigma_kl_values = pd.to_numeric(
+            df["eta_sigma_kl"], errors="coerce"
+        ).to_numpy(dtype=float)
+        finite_eta_sigma_kl = eta_sigma_kl_values[np.isfinite(eta_sigma_kl_values)]
+        if finite_eta_sigma_kl.size:
+            eta_sigma_kl_color_limits = tuple(
+                np.nanpercentile(finite_eta_sigma_kl, [1.0, 99.0])
+            )
+
     plot_tier1_cuts_vs_redshift(
         df,
         plot_path=plot_path,
@@ -1886,6 +1996,15 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             plot_path=plot_path,
             show=False,
             filename="eta_tau_sigma_vs_redshift_precut.pdf",
+        )
+    if {"z", "eta_sigma", "eta_sigma_kl"}.issubset(df.columns):
+        plot_eta_sigma_vs_redshift_colored_by_kl(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="eta_sigma_vs_redshift_colored_by_kl_precut.pdf",
+            kl_color_limits=eta_sigma_kl_color_limits,
+            sample_label="Pre-cut sample",
         )
     if {"z", "linear_trend"}.issubset(df.columns):
         plot_linear_trend_vs_redshift(
@@ -2003,6 +2122,73 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             show=False,
             filename="bpl_psd_vs_uv_variability_precut.pdf",
         )
+    psd_recovery_columns = {
+        "log_sigma_ls",
+        "log_sigma_ls_err",
+        "log_tau_ls",
+        "log_tau_ls_err",
+        "alpha_high_ls",
+        "psd_ls_valid",
+        "log_sigma_ls_fixed",
+        "log_sigma_ls_fixed_err",
+        "log_tau_ls_fixed",
+        "log_tau_ls_fixed_err",
+        "psd_ls_fixed_valid",
+        "z",
+        "eta_sigma",
+        "psd_bpl_ref_band",
+        "psd_bpl_ref_lambda_rf",
+    }
+
+    psd_ref_bands = {
+        str(value).strip().lower()
+        for value in df["psd_bpl_ref_band"].dropna().unique()
+        if str(value).strip()
+    } if "psd_bpl_ref_band" in df.columns else set()
+    psd_total_tau_columns = {
+        column
+        for band in psd_ref_bands
+        for column in (
+            f"log_tau_band_{band}_RF",
+            f"log_tau_band_{band}_RF_err",
+        )
+    }
+    psd_sigma_ready = True
+    for band in psd_ref_bands:
+        current_sigma_columns = {
+            f"log_sigma_total_rms_band_{band}",
+            f"log_sigma_total_rms_band_{band}_err",
+        }
+        legacy_stems = (
+            "tau_fast_driver",
+            "tau_slow_driver",
+            f"lag_disk_{band}",
+            f"lag_blr_{band}",
+            f"amp_cont_relflux_{band}",
+            f"amp_blr_relflux_{band}",
+        )
+        legacy_sigma_columns = {
+            column
+            for stem in legacy_stems
+            for column in (stem, f"{stem}_err")
+        }
+        psd_sigma_ready &= current_sigma_columns.issubset(
+            df.columns
+        ) or legacy_sigma_columns.issubset(df.columns)
+    psd_recovery_ready = (
+        psd_recovery_columns.issubset(df.columns)
+        and bool(psd_ref_bands)
+        and psd_total_tau_columns.issubset(df.columns)
+        and psd_sigma_ready
+    )
+    if psd_recovery_ready:
+        plot_psd_uv_recovery_comparison(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="sigma_tau_psd_free_vs_fixed_precut.pdf",
+            tau_resolution_mode="filter",
+        )
     if {"z", "apparent_mag_2500"}.issubset(df.columns) and any(
         (f"log_lag_blr_{band}_RF" in df.columns) or (f"log_lag_blr2_{band}_RF" in df.columns)
         for band in ("u", "g", "r", "i", "z")
@@ -2091,6 +2277,12 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             return df, df_all, df.copy()
         return df, df_all
 
+    ebv_columns = ("ebv_gal", "ebv_agn")
+    if all(column in df.columns for column in ebv_columns):
+        ebv_gal = pd.to_numeric(df["ebv_gal"], errors="coerce")
+        ebv_agn = pd.to_numeric(df["ebv_agn"], errors="coerce")
+        df[EBV_GAL_PLUS_EBV_AGN_COLUMN] = ebv_gal + ebv_agn
+
     df['log_t_rf_length'] = np.log10(df['t_rf_length'])
 
     if {"apparent_mag_2500", "apparent_mag_2500_err"}.issubset(df.columns):
@@ -2119,6 +2311,20 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                 raise ValueError(
                     f"Tier {tier} cut requires missing column {col!r}. "
                     "Use a compatible input catalog or select a lower cut tier."
+                )
+            if (
+                str(tier) == "0"
+                and completeness_magnitude_support_mode == "tails"
+                and lower == COMPLETENESS_TAIL_MAG_2500_MIN
+                and upper == COMPLETENESS_TAIL_MAG_2500_MAX
+            ):
+                values = pd.to_numeric(frame[col], errors="coerce").to_numpy(dtype=float)
+                print(
+                    "Tier-0 extreme-magnitude guard "
+                    f"{col} in [{lower}, {upper}]: "
+                    f"below={int(np.count_nonzero(np.isfinite(values) & (values < lower)))}, "
+                    f"above={int(np.count_nonzero(np.isfinite(values) & (values > upper)))}, "
+                    f"nonfinite={int(np.count_nonzero(~np.isfinite(values)))}."
                 )
             col_mask = _scalar_parameter_cut_mask(frame, col, lower, upper)
             plot_cut_diagnostics(
@@ -2152,13 +2358,20 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
     )
 
     completeness_support_cuts = build_tier0_cuts(
-        completeness_magnitude=completeness_magnitude
+        completeness_magnitude=completeness_magnitude,
+        completeness_magnitude_support_mode=completeness_magnitude_support_mode,
     )
-    if enforce_completeness_support:
+    completeness_magnitude_support_cuts = [
+        cut for cut in completeness_support_cuts if cut[0] != "z"
+    ]
+    tier0_redshift_cuts = [
+        cut for cut in completeness_support_cuts if cut[0] == "z"
+    ]
+    if enforce_completeness_support and completeness_magnitude_support_mode == "hard-cut":
         if return_completeness_parent:
             map_support_cuts = tuple(
                 (column, COMPLETENESS_MAP_MAG_EDGE_MIN, COMPLETENESS_MAP_MAG_EDGE_MAX)
-                for column, _lower, _upper in completeness_support_cuts
+                for column, _lower, _upper in completeness_magnitude_support_cuts
             )
             df = _apply_scalar_cut_group(df, map_support_cuts, tier="map-support")
             redshift = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
@@ -2174,7 +2387,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         else:
             df = _apply_scalar_cut_group(
                 df,
-                completeness_support_cuts,
+                completeness_magnitude_support_cuts,
                 tier="support",
             )
 
@@ -2230,10 +2443,11 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                 "tier0:SDSS_RUN2D", cut_desc, df, run2d_mask, tier="0"
             )
 
+        df = _apply_scalar_cut_group(df, tier0_redshift_cuts, tier="0")
         if not enforce_completeness_support or return_completeness_parent:
             df = _apply_scalar_cut_group(
                 df,
-                completeness_support_cuts,
+                completeness_magnitude_support_cuts,
                 tier="0",
             )
         _append_cut_report_row(
@@ -2467,7 +2681,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         completeness_parent = df.copy().reset_index(drop=True)
         df = _apply_scalar_cut_group(
             df,
-            completeness_support_cuts,
+            completeness_magnitude_support_cuts,
             tier="analysis-support",
         ).reset_index(drop=True)
 
@@ -2477,10 +2691,22 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             completeness_support_cuts if enforce_completeness_support else []
         ),
         "completeness_magnitude_support": [
-            float(COMPLETENESS_MAG_2500_MIN),
-            float(COMPLETENESS_MAG_2500_MAX),
+            float(
+                COMPLETENESS_TAIL_MAG_2500_MIN
+                if completeness_magnitude_support_mode == "tails"
+                else COMPLETENESS_MAG_2500_MIN
+            ),
+            float(
+                COMPLETENESS_TAIL_MAG_2500_MAX
+                if completeness_magnitude_support_mode == "tails"
+                else COMPLETENESS_MAG_2500_MAX
+            ),
         ],
-        "completeness_redshift_support": None,
+        "completeness_magnitude_support_mode": completeness_magnitude_support_mode,
+        "completeness_redshift_support": [
+            float(COMPLETENESS_Z_MIN),
+            float(COMPLETENESS_Z_MAX),
+        ],
         "completeness_map_magnitude_support": [
             float(COMPLETENESS_MAP_MAG_EDGE_MIN),
             float(COMPLETENESS_MAP_MAG_EDGE_MAX),
@@ -2491,14 +2717,15 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         ],
         "completeness_support_enforced": bool(enforce_completeness_support),
         "completeness_interpolation_policy": (
-            "strict-padded-v1" if enforce_completeness_support else None
+            (
+                "constant-bright-supported-transition-faint-v2"
+                if completeness_magnitude_support_mode == "tails"
+                else "strict-padded-v1"
+            )
+            if enforce_completeness_support
+            else None
         ),
-        "tier0": (
-            completeness_support_cuts
-            if apply_tier0
-            and (not enforce_completeness_support or return_completeness_parent)
-            else []
-        ),
+        "tier0": completeness_support_cuts if apply_tier0 else [],
         "tier1": build_tier1_cuts() if apply_tier1 else [],
         "tier2": (
             build_tier2_cuts(completeness_magnitude=completeness_magnitude)
@@ -2529,6 +2756,9 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         if frame is None:
             continue
         frame.attrs["cut_tier"] = cut_tier
+        frame.attrs["completeness_magnitude_support_mode"] = (
+            completeness_magnitude_support_mode
+        )
         frame.attrs["cut_configuration_json"] = cut_configuration_json
 
     num_quasars_z_0_1 = len(df[(df['z'] > 0) & (df['z'] <= 1.0)])
@@ -2653,6 +2883,15 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             show=False,
             filename="eta_tau_sigma_vs_redshift_postcut.pdf",
         )
+    if {"z", "eta_sigma", "eta_sigma_kl"}.issubset(df.columns):
+        plot_eta_sigma_vs_redshift_colored_by_kl(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="eta_sigma_vs_redshift_colored_by_kl_postcut.pdf",
+            kl_color_limits=eta_sigma_kl_color_limits,
+            sample_label="Post-cut sample",
+        )
     if {"z", "linear_trend"}.issubset(df.columns):
         plot_linear_trend_vs_redshift(
             df,
@@ -2754,6 +2993,14 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             plot_path=plot_path,
             show=False,
             filename="bpl_psd_vs_uv_variability_postcut.pdf",
+        )
+    if psd_recovery_ready:
+        plot_psd_uv_recovery_comparison(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="sigma_tau_psd_free_vs_fixed_postcut.pdf",
+            tau_resolution_mode="filter",
         )
     _plot_sigma_tau_ls_identity(
         df,
@@ -3206,6 +3453,8 @@ def extract_cosmo_results_from_samples(
     value_fmt="{:.3f}",
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
+    use_f_agn_psf_2500_sigmoid_term=None,
+    use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
 ):
     """
@@ -3245,6 +3494,8 @@ def extract_cosmo_results_from_samples(
         only_agn=only_agn,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
@@ -3253,6 +3504,8 @@ def extract_cosmo_results_from_samples(
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
 
@@ -3311,6 +3564,8 @@ def display_results_summary(
     z_pivot_agn,
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
+    use_f_agn_psf_2500_sigmoid_term=None,
+    use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
     sigma_sel_posterior_median=None,
 ):
@@ -3327,17 +3582,29 @@ def display_results_summary(
         only_agn=None,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     if (
         use_alpha_lambda_term is None
         or use_eta_sigma_term is None
+        or use_f_agn_psf_2500_sigmoid_term is None
+        or use_f_agn_psf_2500_flux_fraction_term is None
         or use_redshift_log_f_term is None
     ):
         if use_alpha_lambda_term is None:
             use_alpha_lambda_term = option_flags["use_alpha_lambda_term"]
         if use_eta_sigma_term is None:
             use_eta_sigma_term = option_flags["use_eta_sigma_term"]
+        if use_f_agn_psf_2500_sigmoid_term is None:
+            use_f_agn_psf_2500_sigmoid_term = option_flags[
+                "use_f_agn_psf_2500_sigmoid_term"
+            ]
+        if use_f_agn_psf_2500_flux_fraction_term is None:
+            use_f_agn_psf_2500_flux_fraction_term = option_flags[
+                "use_f_agn_psf_2500_flux_fraction_term"
+            ]
         if use_redshift_log_f_term is None:
             use_redshift_log_f_term = option_flags["use_redshift_log_f_term"]
     _, model_labels, _ = get_model_params(
@@ -3345,6 +3612,8 @@ def display_results_summary(
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
 
@@ -3475,6 +3744,8 @@ def compute_age_universe_with_error(
     random_seed=None,
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
+    use_f_agn_psf_2500_sigmoid_term=None,
+    use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
 ):
     """
@@ -3513,6 +3784,8 @@ def compute_age_universe_with_error(
         only_agn=None,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, _ = get_model_params(
@@ -3520,6 +3793,8 @@ def compute_age_universe_with_error(
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
 
@@ -3605,6 +3880,8 @@ def compute_pivot_redshift(flat_samples, cosmo_model, z_min=0.0, z_max=4.0):
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
     idx = {name: model_labels.index(name) for name in model_labels}
@@ -3675,6 +3952,8 @@ def posterior_corr(flat_samples, cosmo_model, z_pivot_agn):
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
     flat_samples = np.asarray(flat_samples)
@@ -3827,6 +4106,8 @@ def write_results_tex_variables(
     compare_r_sna=None,
     *,
     agn_pivot_context: AgnPivotContext,
+    use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
 ):
     """
     Write key cosmological parameters AND model comparison results
@@ -3962,6 +4243,8 @@ def write_results_tex_variables(
             only_agn=option_flags["only_agn"],
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
             use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
         )
         results = {}
@@ -4002,13 +4285,22 @@ def write_results_tex_variables(
     for model_name, flat_samples in cosmo_model_joint_samples.items():
         flat_samples = np.asarray(flat_samples)
         option_flags = resolve_model_option_flags(
-            model_name, flat_samples.shape[1]
+            model_name,
+            flat_samples.shape[1],
+            use_f_agn_psf_2500_sigmoid_term=(
+                use_f_agn_psf_2500_sigmoid_term
+            ),
+            use_f_agn_psf_2500_flux_fraction_term=(
+                use_f_agn_psf_2500_flux_fraction_term
+            ),
         )
         priors, model_labels, _ = get_model_params(
             model_name,
             only_agn=option_flags["only_agn"],
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
             use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
         )
         results = {}

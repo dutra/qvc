@@ -1,9 +1,14 @@
 plots/
 results/
 data/
+.DS_Store
+/.claude-octopus/
+/output/
+/tmp/
 *.sh
 *.log
 *.xsh
+!hpc_scripts/shubble_validation.xsh
 *.err
 *.txt
 *.tex

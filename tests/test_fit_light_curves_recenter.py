@@ -35,6 +35,8 @@ from qvc.light_curve.fit_light_curves import (
     compute_band_adf,
     compute_g_band_residual_drift_diagnostics,
     compute_g_band_raw_drift_diagnostics,
+    eta_sigma_prior,
+    eta_tau_prior,
     TAU_FAST_TO_SLOW_PRIOR_RATIO,
     log_tau_fast_center0_prior,
     log_tau_fast_separation_raw_prior,
@@ -58,6 +60,10 @@ from qvc.light_curve.fit_light_curves import (
 from qvc.light_curve.multiband_model_dho_blr_erlang import (
     make_multiband_dho_blr_flux_linearized_erlang_model,
 )
+from qvc.light_curve.multiband_model_shared_latent_blr import (
+    SharedLatentDiskBLRQS,
+    continuum_effective_timescale,
+)
 from qvc.light_curve.multiband_fit_plotting import (
     _corner_plot_labels,
     _trace_plot_labels,
@@ -66,6 +72,10 @@ from qvc.light_curve.multiband_fit_plotting import (
 from qvc.light_curve import multiband_fit_utils
 from qvc.light_curve import fit_light_curves as fit_lc
 from qvc.light_curve.multiband_fit_utils import lambda_pivot, log_single_pl, process_samples
+from qvc.light_curve.posterior_draws import (
+    LIGHT_CURVE_POSTERIOR_DRAW_FORMAT,
+    LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY,
+)
 
 
 def _make_raw_public(n_band):
@@ -83,6 +93,78 @@ def _make_raw_public(n_band):
         "lag0": jnp.array(5.0),
         "lag_beta": jnp.array(4.0 / 3.0),
     }
+
+
+def test_modified_eta_prior_profile_has_requested_normal_priors():
+    sigma_prior = eta_sigma_prior("modified")
+    tau_prior = eta_tau_prior("modified")
+
+    assert fit_lc.ETA_PRIOR_PROFILES == ("default", "modified")
+    assert isinstance(sigma_prior, fit_lc.dist.Normal)
+    assert float(sigma_prior.loc) == pytest.approx(-0.8)
+    assert float(sigma_prior.scale) == pytest.approx(0.5)
+    assert isinstance(tau_prior, fit_lc.dist.Normal)
+    assert float(tau_prior.loc) == pytest.approx(0.5)
+    assert float(tau_prior.scale) == pytest.approx(0.5)
+
+
+def test_default_eta_prior_profile_has_widened_truncated_normal_priors():
+    sigma_prior = eta_sigma_prior("default")
+    tau_prior = eta_tau_prior("default")
+
+    assert type(sigma_prior).__name__.endswith("TruncatedDistribution")
+    assert float(sigma_prior.base_dist.loc) == pytest.approx(-0.5)
+    assert float(sigma_prior.base_dist.scale) == pytest.approx(0.5)
+    assert float(sigma_prior.low) == pytest.approx(-1.5)
+    assert float(sigma_prior.high) == pytest.approx(0.25)
+
+    assert type(tau_prior).__name__.endswith("TruncatedDistribution")
+    assert float(tau_prior.base_dist.loc) == pytest.approx(0.2)
+    assert float(tau_prior.base_dist.scale) == pytest.approx(0.5)
+    assert float(tau_prior.low) == pytest.approx(-0.5)
+    assert float(tau_prior.high) == pytest.approx(1.25)
+
+
+@pytest.mark.parametrize("shared_latent", (False, True))
+def test_modified_eta_prior_profile_omits_shared_eta_tau(shared_latent):
+    obj = {
+        "object_id": "modified-eta-prior-smoke",
+        "z": 1.0,
+        "X": (
+            np.array([0.0, 5.0, 10.0, 15.0]),
+            np.array([0, 1, 0, 1], dtype=np.int32),
+        ),
+        "y": np.array([0.0, 0.02, -0.01, 0.01]),
+        "yerr": np.full(4, 0.03),
+        "survey_idx": np.zeros(4, dtype=np.int32),
+        "mags_means": np.array([20.0, 20.0]),
+        "bands": ["g", "r"],
+        "survey_names": ("sdss", "ps1", "ztf"),
+    }
+    model = build_single_object_model_mag_flux_linearized(
+        obj,
+        np.array([2000.0, 3000.0]),
+        log_jitter_mean=np.full((2, 3), np.log(0.03)),
+        shared_latent=shared_latent,
+        eta_prior_profile="modified",
+    )
+
+    sites = fit_lc.trace(
+        fit_lc.seed(model, jax.random.PRNGKey(0))
+    ).get_trace()
+
+    if shared_latent:
+        assert "eta_tau" not in sites
+    else:
+        assert sites["eta_tau"]["type"] == "sample"
+        eta_tau_dist = sites["eta_tau"]["fn"]
+        assert isinstance(eta_tau_dist, fit_lc.dist.Normal)
+        assert float(eta_tau_dist.loc) == pytest.approx(0.5)
+        assert float(eta_tau_dist.scale) == pytest.approx(0.5)
+    eta_sigma_dist = sites["eta_sigma"]["fn"]
+    assert isinstance(eta_sigma_dist, fit_lc.dist.Normal)
+    assert float(eta_sigma_dist.loc) == pytest.approx(-0.8)
+    assert float(eta_sigma_dist.scale) == pytest.approx(0.5)
 
 
 def _make_object(z=1.6):
@@ -774,6 +856,29 @@ def test_prediction_params_expand_drw_q_without_legacy_fast_uv_coordinate():
     )
 
 
+def test_shared_prediction_uses_2500_disk_response_and_removes_legacy_eta_tau():
+    raw = _make_raw_public(2)
+    blue_center = add_model_prediction_params(
+        raw,
+        jnp.array([1800.0, 2200.0]),
+        model_variant="shared_latent_blr",
+        disk_order=3,
+    )
+    red_center = add_model_prediction_params(
+        raw,
+        jnp.array([3200.0, 4000.0]),
+        model_variant="shared_latent_blr",
+        disk_order=3,
+    )
+
+    assert "eta_tau" not in blue_center
+    assert np.ndim(np.asarray(blue_center["tau_fast_driver"])) == 0
+    assert np.ndim(np.asarray(blue_center["tau_slow_driver"])) == 0
+    # The same driver has a longer synthetic 2500 A response when 2500 A is
+    # farther to the red of the fitted wavelength center.
+    assert float(blue_center["log_tau_uv"]) > float(red_center["log_tau_uv"])
+
+
 def test_carma21_numpyro_model_trace_materializes_likelihood_and_uv_outputs():
     obj = {
         "object_id": "carma21-smoke",
@@ -810,6 +915,66 @@ def test_carma21_numpyro_model_trace_materializes_likelihood_and_uv_outputs():
     ):
         assert key in sites
         assert np.all(np.isfinite(np.asarray(sites[key]["value"])))
+
+
+@pytest.mark.parametrize("fraction_mode", ("empirical", "logit-normal"))
+def test_shared_latent_model_uses_joint_psf_fraction_draws(fraction_mode):
+    obj = {
+        "object_id": "shared-latent-fraction-smoke",
+        "z": 1.0,
+        "X": (
+            np.array([0.0, 5.0, 10.0, 15.0]),
+            np.array([0, 1, 0, 1], dtype=np.int32),
+        ),
+        "y": np.array([0.0, 0.02, -0.01, 0.01]),
+        "yerr": np.full(4, 0.03),
+        "survey_idx": np.zeros(4, dtype=np.int32),
+        "mags_means": np.array([20.0, 20.0]),
+        "bands": ["g", "r"],
+        "survey_names": ("sdss", "ps1", "ztf"),
+        "psf_agn_fraction_bands": ("u", "g", "r", "i", "z"),
+        "psf_agn_fraction_draws": np.array(
+            [
+                [0.8, 0.7, 0.6, 0.5, 0.4],
+                [0.7, 0.6, 0.5, 0.4, 0.3],
+                [0.6, 0.5, 0.4, 0.3, 0.2],
+            ]
+        ),
+        "psf_agn_fraction_valid_count": 3,
+    }
+    model = build_single_object_model_mag_flux_linearized(
+        obj,
+        np.array([2000.0, 3000.0]),
+        log_jitter_mean=np.full((2, 3), np.log(0.03)),
+        shared_latent=True,
+        psf_fraction_mode=fraction_mode,
+    )
+
+    sites = fit_lc.trace(
+        fit_lc.seed(model, jax.random.PRNGKey(0))
+    ).get_trace()
+
+    assert "loglike" in sites
+    assert np.all(np.isfinite(np.asarray(sites["loglike"]["fn"].log_factor)))
+    if fraction_mode == "empirical":
+        responsibilities = np.asarray(
+            sites["psf_agn_fraction_responsibility"]["value"]
+        )
+        assert responsibilities.shape == (3,)
+        np.testing.assert_allclose(responsibilities.sum(), 1.0)
+    else:
+        fractions = np.asarray(sites["psf_agn_fraction"]["value"])
+        assert fractions.shape == (2,)
+        assert np.all((fractions > 0.0) & (fractions < 1.0))
+
+
+def test_psf_fraction_mode_defaults_to_median():
+    assert fit_lc.DEFAULT_PSF_FRACTION_MODE == "median"
+    assert set(fit_lc.PSF_FRACTION_MODES) == {
+        "empirical",
+        "logit-normal",
+        "median",
+    }
 
 
 @pytest.mark.parametrize(
@@ -1271,6 +1436,18 @@ def test_process_samples_keeps_uv_outputs_at_2500_and_stores_band_metadata():
     assert np.isclose(result["log_tau_uv"], np.percentile(log_tau_slow_center0 / np.log(10), 50))
     assert np.isclose(result["log_tau_uv_rf"], expected_log_tau_uv_rf)
     assert np.isclose(result["log_tau_fast_uv_rf"], expected_log_tau_fast_uv_rf)
+    compact_draws = result[LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY]
+    assert compact_draws["valid_count"] == 3
+    np.testing.assert_allclose(
+        compact_draws["log_sigma_uv"][:3],
+        log_sigma_center0 / np.log(10.0),
+    )
+    np.testing.assert_allclose(
+        compact_draws["log_tau_uv_rf"][:3],
+        log_tau_slow_center0 / np.log(10.0) - np.log10(1.0 + z),
+    )
+    assert np.all(np.isnan(compact_draws["log_sigma_uv"][3:]))
+    assert np.all(compact_draws["posterior_index"][3:] == -1)
     assert np.isclose(
         result["log_lag_blr_r_RF"],
         np.percentile(np.log10([35.0, 45.0, 55.0]) - np.log10(1.0 + z), 50),
@@ -1345,7 +1522,9 @@ def test_process_samples_stores_shared_latent_effective_band_timescales():
         "log_tau_uv": np.log(tau_slow),
         "log_tau_fast_uv": np.log(tau_fast),
         "eta_sigma": np.zeros(3),
-        "eta_tau": np.zeros(3),
+        "tau_fast_driver": tau_fast,
+        "tau_slow_driver": tau_slow,
+        "lag0": np.asarray([2.0, 3.0, 4.0]),
     }
     for index, band in enumerate(bands):
         samples[f"tau_fast_{band}"] = tau_fast
@@ -1364,8 +1543,72 @@ def test_process_samples_stores_shared_latent_effective_band_timescales():
         erlang_order=3,
     )
 
-    assert result["log_tau_driver_slow_rf"] == result["log_tau_uv_rf"]
-    assert result["log_tau_driver_fast_rf"] == result["log_tau_fast_uv_rf"]
+    expected_driver = np.log10(tau_fast + tau_slow) - np.log10(1.0 + z)
+    assert result["log_tau_driver_rf"] == pytest.approx(np.median(expected_driver))
+    assert "eta_tau" not in result
+    assert "log_tau_fast_uv_rf" not in result
+    expected_total_rms_g = np.median(
+        [
+            np.log10(
+                float(
+                    SharedLatentDiskBLRQS(
+                        tau_fast=jnp.atleast_1d(tau_fast[draw]),
+                        tau_slow=jnp.atleast_1d(tau_slow[draw]),
+                        lag_disk=jnp.asarray(
+                            [samples[f"lag_disk_{band}"][draw] for band in bands]
+                        ),
+                        lag_blr=jnp.asarray(
+                            [samples[f"lag_blr_{band}"][draw] for band in bands]
+                        ),
+                        amp_cont=jnp.asarray(
+                            [
+                                samples[f"amp_cont_relflux_{band}"][draw]
+                                for band in bands
+                            ]
+                        ),
+                        amp_blr=jnp.asarray(
+                            [
+                                samples[f"amp_blr_relflux_{band}"][draw]
+                                for band in bands
+                            ]
+                        ),
+                        disk_order=3,
+                        blr_order=3,
+                    ).stationary_rms()[0]
+                )
+                * (2.5 / np.log(10.0))
+            )
+            for draw in range(3)
+        ]
+    )
+    assert result["log_sigma_total_rms_band_g"] == pytest.approx(
+        expected_total_rms_g
+    )
+    assert (
+        result[LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY]["format"]
+        == LIGHT_CURVE_POSTERIOR_DRAW_FORMAT
+    )
+    lambda_center_rf = np.exp(
+        np.mean(np.log([lambda_pivot[band] / (1.0 + z) for band in bands]))
+    )
+    lag_2500 = samples["lag0"] * (2500.0 / lambda_center_rf) ** (4.0 / 3.0)
+    expected_tau_uv_rf = np.asarray(
+        [
+            np.log10(
+                float(
+                    continuum_effective_timescale(tf, ts, lag, disk_order=3)
+                )
+            )
+            - np.log10(1.0 + z)
+            for tf, ts, lag in zip(tau_fast, tau_slow, lag_2500)
+        ]
+    )
+    payload = result[LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY]
+    np.testing.assert_allclose(
+        payload["log_tau_uv_rf"][: payload["valid_count"]],
+        expected_tau_uv_rf,
+        rtol=2e-6,
+    )
     for band in bands:
         assert np.isfinite(result[f"log_tau_band_{band}_RF"])
         assert result[f"log_tau_band_{band}_RF"] == result[f"log_tau_effective_{band}_RF"]
@@ -1469,6 +1712,43 @@ def test_compute_parameter_kls_returns_expected_keys():
     }
     assert expected_keys.issubset(kls.keys())
     assert all(np.isfinite(kls[key]) for key in expected_keys)
+
+    modified_kls = compute_parameter_kls(
+        flat_samples,
+        bands=bands,
+        survey_names=("sdss", "ps1", "ztf"),
+        t_ref=np.array([0.0, 10.0, 20.0], dtype=float),
+        z=z,
+        lambda_center_rf=lambda_center_rf,
+        log_jitter_mean=np.asarray([np.log(0.03), np.log(0.03)]),
+        disable_lag_bc=False,
+        n_blr_terms=2,
+        eta_prior_profile="modified",
+    )
+
+    assert "eta_sigma_kl" in modified_kls
+    assert "eta_tau_kl" in modified_kls
+    assert np.isfinite(modified_kls["eta_sigma_kl"])
+    assert np.isfinite(modified_kls["eta_tau_kl"])
+
+    shared_samples = dict(flat_samples)
+    shared_samples.pop("eta_tau")
+    shared_kls = compute_parameter_kls(
+        shared_samples,
+        bands=bands,
+        survey_names=("sdss", "ps1", "ztf"),
+        t_ref=np.array([0.0, 10.0, 20.0], dtype=float),
+        z=z,
+        lambda_center_rf=lambda_center_rf,
+        log_jitter_mean=np.asarray([np.log(0.03), np.log(0.03)]),
+        disable_lag_bc=False,
+        n_blr_terms=2,
+        eta_prior_profile="modified",
+        model_variant="shared_latent_blr",
+    )
+    assert "eta_tau_kl" not in shared_kls
+    assert np.isfinite(shared_kls["log_tau_slow_center0_kl"])
+    assert np.isfinite(shared_kls["log_tau_fast_center0_kl"])
 
 
 def test_compute_parameter_kls_includes_band_slope_offset_terms():

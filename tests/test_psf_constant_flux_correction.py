@@ -17,6 +17,7 @@ if str(SRC) not in sys.path:
 from qvc.light_curve.psf_constant_flux_correction import (
     apply_constant_flux_correction_to_object,
     apply_constant_flux_correction_to_objects,
+    attach_spectra_psf_fractions_to_objects,
     subtract_constant_flux_from_band,
 )
 import qvc.light_curve.psf_constant_flux_correction as correction_module
@@ -206,6 +207,44 @@ def test_apply_constant_flux_correction_to_objects_succeeds_when_all_objects_hav
     assert summary["n_objects_corrected"] == 2
     assert summary["n_bands_corrected"] == 2
     assert calls == [(spectra_h5, False)]
+
+
+def test_attach_spectra_psf_fractions_preserves_joint_draw_rows(monkeypatch):
+    draws = np.full((1, 64, 5), np.nan, dtype=np.float32)
+    draws[0, :2] = np.array(
+        [
+            [0.1, 0.2, 0.3, 0.4, 0.5],
+            [0.6, 0.7, 0.8, 0.9, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    catalog = SimpleNamespace(
+        frame=pd.DataFrame([{"object_id": "123", "f_AGN_psf_g": 0.45}]),
+        fraction_draws=draws,
+        valid_count=np.array([2], dtype=np.int16),
+        bands=("u", "g", "r", "i", "z"),
+    )
+    calls = []
+
+    def fake_reader(path, *, include_fraction_draws):
+        calls.append((path, include_fraction_draws))
+        return catalog
+
+    monkeypatch.setattr(correction_module, "read_spectra_catalog_hdf5", fake_reader)
+    monkeypatch.setattr(correction_module, "resolve_qvc_data_path", lambda path: path)
+
+    attached = attach_spectra_psf_fractions_to_objects(
+        [_make_light_curve_object("123")],
+        spectra_fit_h5s=["spectra_fit.h5"],
+    )
+
+    assert calls == [("spectra_fit.h5", True)]
+    assert attached[0]["psf_agn_fraction_valid_count"] == 2
+    assert attached[0]["psf_agn_fraction_bands"] == ("u", "g", "r", "i", "z")
+    np.testing.assert_allclose(
+        attached[0]["psf_agn_fraction_draws"],
+        draws[0, :2],
+    )
 
 
 def test_apply_constant_flux_correction_to_object_does_not_accept_pl_fraction_only():

@@ -1,0 +1,1043 @@
+import importlib.util
+import json
+from pathlib import Path
+import sys
+
+import numpy as np
+import pandas as pd
+import h5py
+import pytest
+from astropy.cosmology import FlatLambdaCDM
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+from qvc.hubble import hubble_validation
+from qvc.hubble.cuts import COMPLETENESS_MAG_2500_MAX, COMPLETENESS_MAG_2500_MIN
+from qvc.hubble.hubble_model import get_model_params
+from qvc.hubble.hubble_validation import (
+    ARM_NAMES,
+    DEFAULT_ARM_NAMES,
+    ValidationTruth,
+    analytic_completeness_params,
+    apply_sigmoid_selection,
+    collect_recovery_fragments,
+    derive_seed_ledger,
+    ensemble_summary,
+    generate_matched_fit_catalogs,
+    inject_catalog_observables,
+    incomplete_recovery_report,
+    posterior_summary_row,
+    project_absolute_magnitude_to_predictors,
+    write_completeness_parent_hdf5,
+)
+
+
+def _load_plot_module():
+    path = ROOT / "scripts" / "plot_hubble_validation.py"
+    spec = importlib.util.spec_from_file_location("plot_hubble_validation", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_runner_module():
+    path = ROOT / "scripts" / "run_hubble_validation.py"
+    spec = importlib.util.spec_from_file_location("run_hubble_validation", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_plot_parser_shows_points_by_default_and_accepts_no_points():
+    plot_module = _load_plot_module()
+    default = plot_module._parser().parse_args(["campaign"])
+    assert default.no_points is False
+    assert default.single is None
+    requested = plot_module._parser().parse_args(
+        ["campaign", "--no-points", "--single", "7"]
+    )
+    assert requested.no_points is True
+    assert requested.single == 7
+
+
+def test_default_validation_arms_and_plot_styles():
+    runner = _load_runner_module()
+    plot_module = _load_plot_module()
+
+    assert DEFAULT_ARM_NAMES == ("selected_uncorrected", "selected_estimated")
+    assert runner._parser().parse_args([]).arms == list(DEFAULT_ARM_NAMES)
+    assert plot_module.ARM_STYLE["selected_uncorrected"] == {
+        "color": "tab:red",
+        "label": "no completeness correction",
+    }
+    assert plot_module.ARM_STYLE["selected_estimated"] == {
+        "color": "tab:blue",
+        "label": "with completeness correction",
+    }
+
+
+def _write_validation_posterior_checkpoint(
+    path,
+    samples,
+    *,
+    labels=("M0_agn", "alpha_agn", "beta_agn", "log_f", "H0", "Om0", "w0", "wa"),
+    pivots=(-1.0, np.log10(300.0)),
+):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as checkpoint:
+        checkpoint.create_dataset("flat_samples", data=np.asarray(samples, dtype=float))
+        checkpoint.create_dataset("model_labels", data=np.asarray(labels, dtype="S"))
+        checkpoint.create_dataset(
+            "agn_pivot_observable_names",
+            data=np.asarray(("log_sigma_uv", "log_tau_uv_rf"), dtype="S"),
+        )
+        checkpoint.create_dataset("agn_pivot_values", data=np.asarray(pivots))
+
+
+def _posterior_corner_manifest(*, n_runs=1):
+    truth = ValidationTruth(intrinsic_scatter_mag=0.2)
+    return {
+        "configuration": {
+            "truth": {
+                "m0_agn": truth.m0_agn,
+                "alpha_agn": truth.alpha_agn,
+                "beta_agn": truth.beta_agn,
+                "intrinsic_scatter_mag": truth.intrinsic_scatter_mag,
+                "log_sigma_pivot": truth.log_sigma_pivot,
+                "log_tau_pivot": truth.log_tau_pivot,
+                "om0": truth.om0,
+                "w0": truth.w0,
+                "wa": truth.wa,
+            },
+            "seed_start": 0,
+            "n_runs": n_runs,
+            "arms": ["selected_uncorrected", "selected_estimated"],
+        }
+    }
+
+
+def test_posterior_loader_references_m0_to_injected_pivots_and_omits_h0(tmp_path):
+    plot_module = _load_plot_module()
+    manifest = _posterior_corner_manifest()
+    truth = manifest["configuration"]["truth"]
+    checkpoint_pivots = (-1.0, np.log10(300.0))
+    canonical_m0 = np.array([-23.1, -23.0, -22.9])
+    alpha = np.array([6.9, 7.0, 7.1])
+    beta = np.array([-1.1, -1.0, -0.9])
+    checkpoint_m0 = canonical_m0 + alpha * (
+        checkpoint_pivots[0] - truth["log_sigma_pivot"]
+    ) + beta * (
+        checkpoint_pivots[1] - truth["log_tau_pivot"]
+    )
+    samples = np.column_stack(
+        (
+            checkpoint_m0,
+            alpha,
+            beta,
+            np.log([0.18, 0.20, 0.22]),
+            np.full(3, 70.0),
+            [0.29, 0.30, 0.31],
+            [-1.1, -1.0, -0.9],
+            [-0.2, 0.0, 0.2],
+        )
+    )
+    checkpoint = tmp_path / "posterior_selected_estimated.h5"
+    _write_validation_posterior_checkpoint(
+        checkpoint,
+        samples,
+        pivots=checkpoint_pivots,
+    )
+
+    loaded = plot_module._load_validation_posterior(checkpoint, manifest)
+
+    assert plot_module.POSTERIOR_PARAMETERS == (
+        "M0_agn",
+        "alpha_agn",
+        "beta_agn",
+        "Om0",
+        "w0",
+        "wa",
+    )
+    assert loaded.shape == (3, 6)
+    np.testing.assert_allclose(loaded[:, 0], canonical_m0, atol=1e-14, rtol=0.0)
+
+
+def test_posterior_loader_rejects_missing_parameter_label(tmp_path):
+    plot_module = _load_plot_module()
+    checkpoint = tmp_path / "posterior_selected_estimated.h5"
+    labels = ("M0_agn", "alpha_agn", "beta_agn", "log_f", "H0", "Om0", "w0")
+    _write_validation_posterior_checkpoint(
+        checkpoint,
+        np.ones((10, len(labels))),
+        labels=labels,
+    )
+    with pytest.raises(KeyError, match="wa"):
+        plot_module._load_validation_posterior(
+            checkpoint,
+            _posterior_corner_manifest(),
+        )
+
+
+def test_single_realization_outputs_use_available_posterior_arms(tmp_path):
+    plot_module = _load_plot_module()
+    manifest = _posterior_corner_manifest(n_runs=3)
+    truth = manifest["configuration"]["truth"]
+    rng = np.random.default_rng(82)
+    center = np.array(
+        [
+            truth["m0_agn"],
+            truth["alpha_agn"],
+            truth["beta_agn"],
+            np.log(truth["intrinsic_scatter_mag"]),
+            70.0,
+            truth["om0"],
+            truth["w0"],
+            truth["wa"],
+        ]
+    )
+    scale = np.array([0.1, 0.08, 0.05, 0.04, 0.0, 0.03, 0.15, 0.5])
+    campaign = tmp_path / "campaign"
+    for realization, arms in {
+        0: ("selected_uncorrected", "selected_estimated"),
+        1: ("selected_estimated",),
+    }.items():
+        for arm_index, arm in enumerate(arms):
+            samples = center + rng.normal(
+                0.0,
+                scale,
+                size=(400, center.size),
+            )
+            samples[:, 0] += 0.03 * arm_index
+            _write_validation_posterior_checkpoint(
+                campaign
+                / "runs"
+                / f"seed_{realization:04d}"
+                / f"posterior_{arm}.h5",
+                samples,
+                pivots=(truth["log_sigma_pivot"], truth["log_tau_pivot"]),
+            )
+
+    loaded = plot_module._load_realization_posteriors(
+        campaign,
+        manifest,
+        0,
+    )
+    assert set(loaded) == {"selected_uncorrected", "selected_estimated"}
+    output_dir = tmp_path / "plots" / "single_runs"
+    corner_pdf = output_dir / "posterior_corner_seed_0000.pdf"
+    hubble_pdf = output_dir / "hubble_diagram_seed_0000.pdf"
+    plot_module.plot_realization_posterior_corner(
+        loaded,
+        plot_module._posterior_truth_from_manifest(manifest),
+        corner_pdf,
+        output_png=corner_pdf.with_suffix(".png"),
+        dpi=80,
+    )
+    plot_module.plot_single_realization_hubble(
+        loaded,
+        manifest,
+        hubble_pdf,
+        output_png=hubble_pdf.with_suffix(".png"),
+        dpi=80,
+    )
+
+    for pdf in (corner_pdf, hubble_pdf):
+        assert pdf.is_file() and pdf.stat().st_size > 0
+        png = pdf.with_suffix(".png")
+        assert png.is_file() and png.stat().st_size > 0
+    with pytest.warns(RuntimeWarning, match="missing arms"):
+        seed_one = plot_module._load_realization_posteriors(
+            campaign,
+            manifest,
+            1,
+        )
+    assert set(seed_one) == {"selected_estimated"}
+    with pytest.raises(ValueError, match="no usable posterior"):
+        plot_module._load_realization_posteriors(campaign, manifest, 2)
+    with pytest.raises(ValueError, match="outside the configured range"):
+        plot_module._load_realization_posteriors(campaign, manifest, 3)
+
+
+def test_posterior_distance_curves_match_astropy_flatw0wacdm():
+    plot_module = _load_plot_module()
+    truth = {
+        "H0": 70.0,
+        "Om0": 0.3,
+        "w0": -1.0,
+        "wa": 0.0,
+    }
+    sample = np.array([[-23.0, 7.0, -1.0, 0.3, -1.0, 0.0]])
+
+    redshift, curves = plot_module._posterior_distance_modulus_curves(
+        sample,
+        truth,
+        (0.1, 4.0),
+        n_redshift=4000,
+    )
+    expected = plot_module._distance_modulus(truth, redshift)
+
+    assert curves.shape == (1, redshift.size)
+    np.testing.assert_allclose(curves[0], expected, rtol=0.0, atol=2e-5)
+
+
+def test_seed_ledger_is_reproducible_and_streams_are_distinct():
+    first = derive_seed_ledger(1234, 7)
+    second = derive_seed_ledger(1234, 7)
+    different = derive_seed_ledger(1234, 8)
+    assert first == second
+    assert first != different
+    assert len(set(first.values())) == len(first)
+
+
+def test_projection_exactly_encodes_the_injected_relation():
+    truth = ValidationTruth()
+    absolute_magnitude = np.linspace(-27.0, -19.0, 101)
+    orthogonal = np.random.default_rng(4).normal(size=absolute_magnitude.size)
+    log_sigma, log_tau = project_absolute_magnitude_to_predictors(
+        absolute_magnitude, orthogonal, truth
+    )
+    recovered = (
+        truth.m0_agn
+        + truth.alpha_agn * (log_sigma - truth.log_sigma_pivot)
+        + truth.beta_agn * (log_tau - truth.log_tau_pivot)
+    )
+    np.testing.assert_allclose(recovered, absolute_magnitude, rtol=0.0, atol=2e-14)
+
+
+def test_injected_catalog_scatter_terms_and_schema_are_consistent():
+    truth = ValidationTruth()
+    cosmology = FlatLambdaCDM(H0=truth.h0, Om0=truth.om0)
+    redshift = np.linspace(0.2, 3.9, 64)
+    absolute_magnitude = np.linspace(-26.0, -20.0, 64)
+    frame = inject_catalog_observables(
+        redshift,
+        absolute_magnitude,
+        truth=truth,
+        rng=np.random.default_rng(10),
+        cosmology=cosmology,
+    )
+    residual = (
+        frame["apparent_mag_2500"].to_numpy()
+        - absolute_magnitude
+        - cosmology.distmod(redshift).value
+    )
+    expected = (
+        frame["injected_intrinsic_residual_mag"].to_numpy()
+        + frame["injected_lensing_residual_mag"].to_numpy()
+    )
+    np.testing.assert_allclose(residual, expected, rtol=0.0, atol=1e-13)
+    assert np.all(frame["log_sigma_uv_std_psd"] == 0.0)
+    assert np.all(frame["log_tau_uv_rf_std_psd"] == 0.0)
+    assert frame["object_id"].is_unique
+    assert frame.attrs["completeness_magnitude_support_mode"] == "hard-cut"
+
+
+def test_sigmoid_selection_reuses_recorded_uniforms():
+    truth = ValidationTruth()
+    cosmology = FlatLambdaCDM(H0=truth.h0, Om0=truth.om0)
+    frame = inject_catalog_observables(
+        np.full(100, 1.0),
+        np.full(100, -22.0),
+        truth=truth,
+        rng=np.random.default_rng(1),
+        cosmology=cosmology,
+    )
+    annotated, selected = apply_sigmoid_selection(
+        frame, m50=23.0, width=0.3, rng=np.random.default_rng(2)
+    )
+    expected = (
+        annotated["injected_detection_uniform"]
+        < annotated["injected_detection_probability"]
+    )
+    np.testing.assert_array_equal(annotated["injected_detected"], expected)
+    assert selected["object_id"].tolist() == annotated.loc[expected, "object_id"].tolist()
+
+
+def test_sigmoid_selection_is_zero_outside_hard_magnitude_support():
+    truth = ValidationTruth()
+    cosmology = FlatLambdaCDM(H0=truth.h0, Om0=truth.om0)
+    magnitude = np.array(
+        [COMPLETENESS_MAG_2500_MIN - 0.01, 23.0, COMPLETENESS_MAG_2500_MAX + 0.01]
+    )
+    redshift = np.ones(magnitude.size)
+    absolute = magnitude - cosmology.distmod(redshift).value
+    frame = inject_catalog_observables(
+        redshift,
+        absolute,
+        truth=truth,
+        rng=np.random.default_rng(31),
+        cosmology=cosmology,
+    )
+    # Remove injected magnitude scatter so this test targets the support bounds.
+    frame["apparent_mag_2500"] = magnitude
+    annotated, _ = apply_sigmoid_selection(
+        frame, m50=23.0, width=0.3, rng=np.random.default_rng(32)
+    )
+    np.testing.assert_array_equal(
+        annotated["injected_detection_probability"].to_numpy()[[0, 2]],
+        np.zeros(2),
+    )
+    assert annotated["injected_detection_probability"].iloc[1] == pytest.approx(0.5)
+
+
+def test_matched_catalogs_have_exact_sizes_and_selected_ids(monkeypatch):
+    truth = ValidationTruth()
+    cosmology = FlatLambdaCDM(H0=truth.h0, Om0=truth.om0)
+    counter = {"value": 0}
+
+    def fake_sample(*args, **kwargs):
+        del args, kwargs
+        start = counter["value"]
+        counter["value"] += 60
+        redshift = np.linspace(0.2, 3.8, 60)
+        absolute = 21.0 - cosmology.distmod(redshift).value + 0.0 * start
+        return redshift, absolute
+
+    monkeypatch.setattr(hubble_validation, "sample_lf_chunk", fake_sample)
+    all_frame, selected = generate_matched_fit_catalogs(
+        object(),
+        cosmology,
+        truth=truth,
+        n_fit=25,
+        m50=100.0,
+        selection_width=0.3,
+        population_rng=np.random.default_rng(3),
+        scatter_rng=np.random.default_rng(4),
+        selection_rng=np.random.default_rng(5),
+        area_deg2=1.0,
+    )
+    assert len(all_frame) == len(selected) == 25
+    assert all_frame["object_id"].tolist() == selected["object_id"].tolist()
+    assert all_frame.attrs["n_parent_generated"] == 60
+    assert all_frame.attrs["n_detected_generated"] == 60
+
+
+def test_analytic_oracle_and_fixed_h0_are_exact():
+    model, magnitude_grid, _, _, _ = analytic_completeness_params(23.0, 0.3)
+    np.testing.assert_allclose(model(np.array([23.0])), 0.5, rtol=0.0, atol=1e-15)
+    np.testing.assert_allclose(
+        magnitude_grid[[0, -1]],
+        [COMPLETENESS_MAG_2500_MIN, COMPLETENESS_MAG_2500_MAX],
+    )
+    np.testing.assert_array_equal(
+        model(np.array([COMPLETENESS_MAG_2500_MIN - 0.01, COMPLETENESS_MAG_2500_MAX + 0.01])),
+        np.zeros(2),
+    )
+    priors, labels, _ = get_model_params(
+        "Flatw0waCDM", only_agn=True, fixed_h0=70.0
+    )
+    assert "H0" in labels
+    assert priors["H0"] == (70.0, 70.0)
+
+
+def test_completeness_parent_sentinels_do_not_enter_map_magnitude_bins(tmp_path):
+    frame = pd.DataFrame(
+        {"apparent_mag_2500": [20.0, 23.0], "z": [0.5, 3.0]}
+    )
+    path = write_completeness_parent_hdf5(frame, tmp_path / "parent.h5")
+    with h5py.File(path, "r") as handle:
+        magnitude = handle["apparent_mag_2500"][:]
+        redshift = handle["z"][:]
+        assert handle.attrs["support_sentinels_outside_magnitude_map"] == 2
+    assert set(magnitude[-2:]) == {17.0, 100.0}
+    assert set(redshift[-2:]) == {0.0, 4.5}
+
+
+def _synthetic_recovery(truth: ValidationTruth, n_runs=12):
+    labels = ("M0_agn", "alpha_agn", "beta_agn", "log_f", "H0", "Om0", "w0", "wa")
+    center = np.array([-23.0, 7.0, -1.0, np.log(0.5), 70.0, 0.3, -1.0, 0.0])
+    rows = []
+    for realization in range(n_runs):
+        for arm_index, arm in enumerate(ARM_NAMES):
+            rng = np.random.default_rng(1000 + 10 * realization + arm_index)
+            samples = center + rng.normal(0.0, [0.1, 0.15, 0.08, 0.04, 0.0, 0.02, 0.1, 0.3], size=(200, len(center)))
+            rows.append(
+                posterior_summary_row(
+                    samples,
+                    labels,
+                    arm=arm,
+                    realization=realization,
+                    checkpoint_file=Path(f"posterior_{arm}.h5"),
+                    truth=truth,
+                    n_fit=2000,
+                    n_parent_generated=10000,
+                    detection_fraction=0.2,
+                )
+            )
+    return pd.DataFrame(rows)
+
+
+def test_ensemble_summary_and_corner_use_one_median_per_fit(tmp_path):
+    truth = ValidationTruth()
+    recovery = _synthetic_recovery(truth)
+    summary = ensemble_summary(recovery)
+    alpha = summary.loc[
+        (summary["arm"] == "all") & (summary["parameter"] == "alpha_agn")
+    ].iloc[0]
+    assert alpha["n_success"] == 12
+    assert 0.0 <= alpha["coverage_68"] <= 1.0
+
+    plot_module = _load_plot_module()
+    output_pdf = tmp_path / "corner.pdf"
+    output_png = tmp_path / "corner.png"
+    plot_module.plot_median_recovery_corner(
+        recovery,
+        {
+            "alpha_agn": truth.alpha_agn,
+            "beta_agn": truth.beta_agn,
+            "Om0": truth.om0,
+            "w0": truth.w0,
+            "wa": truth.wa,
+        },
+        output_pdf,
+        output_png=output_png,
+        min_contour_points=8,
+    )
+    assert output_pdf.is_file() and output_pdf.stat().st_size > 0
+    assert output_png.is_file() and output_png.stat().st_size > 0
+
+    hubble_pdf = tmp_path / "hubble.pdf"
+    hubble_png = tmp_path / "hubble.png"
+    plot_module.plot_hubble_recovery(
+        recovery,
+        {
+            "configuration": {
+                "truth": {
+                    "h0": truth.h0,
+                    "om0": truth.om0,
+                    "w0": truth.w0,
+                    "wa": truth.wa,
+                },
+                "z_range": [0.1, 4.0],
+            }
+        },
+        hubble_pdf,
+        output_png=hubble_png,
+    )
+    assert hubble_pdf.is_file() and hubble_pdf.stat().st_size > 0
+    assert hubble_png.is_file() and hubble_png.stat().st_size > 0
+
+
+def test_completeness_effects_plot_uses_persisted_catalogs(tmp_path):
+    plot_module = _load_plot_module()
+    truth = ValidationTruth()
+    campaign = tmp_path / "campaign"
+    run_dir = campaign / "runs/seed_0000"
+    run_dir.mkdir(parents=True)
+    rng = np.random.default_rng(44)
+    magnitude = rng.uniform(17.5, 27.0, 2000)
+    redshift = rng.uniform(0.1, 4.0, 2000)
+    probability = 1.0 / (1.0 + np.exp((magnitude - 23.0) / 0.3))
+    probability[(magnitude < 18.5) | (magnitude > 24.0)] = 0.0
+    detected = rng.random(magnitude.size) < probability
+    parent = pd.DataFrame(
+        {
+            "z": redshift,
+            "apparent_mag_2500": magnitude,
+            "injected_detection_probability": probability,
+            "injected_detected": detected,
+        }
+    )
+    selected = parent.loc[detected, ["z", "apparent_mag_2500"]].copy()
+    parent.to_csv(run_dir / "all.csv", index=False)
+    selected.to_csv(run_dir / "selected.csv", index=False)
+    calibration_parent = pd.DataFrame(
+        {"z": redshift, "apparent_mag_2500": magnitude}
+    )
+    write_completeness_parent_hdf5(
+        calibration_parent, run_dir / "calibration_parent.h5"
+    )
+    selected.to_csv(run_dir / "calibration_detected.csv", index=False)
+    recovery = _synthetic_recovery(truth, n_runs=1)
+    manifest = {
+        "configuration": {
+            "truth": {
+                "h0": truth.h0,
+                "om0": truth.om0,
+                "w0": truth.w0,
+                "wa": truth.wa,
+            },
+            "selection": {"m50": 23.0, "width": 0.3},
+            "fit": {"completeness_magnitude_support": [18.5, 24.0]},
+            "z_range": [0.1, 4.0],
+        }
+    }
+    output_pdf = tmp_path / "completeness.pdf"
+    output_png = tmp_path / "completeness.png"
+    plot_module.plot_completeness_effects(
+        campaign,
+        recovery,
+        manifest,
+        output_pdf,
+        output_png=output_png,
+    )
+    assert output_pdf.is_file() and output_pdf.stat().st_size > 0
+    assert output_png.is_file() and output_png.stat().st_size > 0
+
+
+def test_relative_completeness_percent_normalizes_finite_peak():
+    plot_module = _load_plot_module()
+    completeness = np.array([[0.02, 0.05], [np.nan, 0.10]])
+    relative = plot_module._relative_completeness_percent(completeness)
+    np.testing.assert_allclose(relative[0], [20.0, 50.0])
+    assert np.isnan(relative[1, 0])
+    assert relative[1, 1] == 100.0
+
+
+def test_relative_completeness_contours_use_automatic_levels():
+    plot_module = _load_plot_module()
+
+    class FakeAxis:
+        def __init__(self):
+            self.contour_call = None
+            self.clabel_call = None
+            self.labels = [
+                FakeLabel("50%", 15.0),
+                FakeLabel("75%", 205.0),
+                FakeLabel("90%", 335.0),
+            ]
+
+        def contour(self, *args, **kwargs):
+            self.contour_call = (args, kwargs)
+            return object()
+
+        def clabel(self, *args, **kwargs):
+            self.clabel_call = (args, kwargs)
+            return self.labels
+
+    class FakeLabel:
+        def __init__(self, text, rotation):
+            self.text = text
+            self.rotation = rotation
+
+        def get_text(self):
+            return self.text
+
+        def get_rotation(self):
+            return self.rotation
+
+        def set_rotation(self, rotation):
+            self.rotation = rotation
+
+    axis = FakeAxis()
+    result = plot_module._add_relative_completeness_contours(
+        axis,
+        np.array([[0.0, 25.0], [50.0, 100.0]]),
+        np.array([20.5, 21.5, 22.5]),
+        np.array([0.0, 1.0, 2.0]),
+    )
+    assert result is not None
+    contour_args, contour_kwargs = axis.contour_call
+    assert "levels" not in contour_kwargs
+    assert contour_kwargs["colors"] == "white"
+    assert np.all(np.isnan(contour_args[2][:, 0]))
+    assert np.all(np.isfinite(contour_args[2][:, 1]))
+    _, clabel_kwargs = axis.clabel_call
+    assert clabel_kwargs["fmt"](75.0) == "75%"
+    assert axis.labels[0].rotation == 15.0
+    assert axis.labels[1].rotation == 25.0
+    assert axis.labels[2].rotation == 155.0
+
+
+def test_single_completeness_effects_uses_only_requested_seed(tmp_path):
+    plot_module = _load_plot_module()
+    campaign = tmp_path / "campaign"
+    for realization, magnitude in ((0, 20.0), (1, 23.0)):
+        run_dir = campaign / "runs" / f"seed_{realization:04d}"
+        run_dir.mkdir(parents=True)
+        parent = pd.DataFrame(
+            {
+                "z": [1.0, 1.5],
+                "apparent_mag_2500": [magnitude, magnitude + 0.1],
+                "injected_detection_probability": [1.0, 0.5],
+                "injected_detected": [True, False],
+            }
+        )
+        parent.to_csv(run_dir / "all.csv", index=False)
+        parent.loc[[0], ["z", "apparent_mag_2500"]].to_csv(
+            run_dir / "selected.csv", index=False
+        )
+        write_completeness_parent_hdf5(
+            parent[["z", "apparent_mag_2500"]],
+            run_dir / "calibration_parent.h5",
+        )
+        parent.loc[[0], ["z", "apparent_mag_2500"]].to_csv(
+            run_dir / "calibration_detected.csv", index=False
+        )
+
+    parent, selected = plot_module._read_validation_catalogs(
+        campaign, realization=1
+    )
+    np.testing.assert_allclose(parent["apparent_mag_2500"], [23.0, 23.1])
+    np.testing.assert_allclose(selected["apparent_mag_2500"], [23.0])
+    realization, parent_path, detected_path, _ = (
+        plot_module._representative_calibration_paths(
+            campaign,
+            pd.DataFrame(columns=["status", "arm", "realization"]),
+            realization=1,
+        )
+    )
+    assert realization == 1
+    assert parent_path.parent.name == "seed_0001"
+    assert detected_path.parent.name == "seed_0001"
+
+
+def test_single_flag_requests_seed_specific_completeness_plot(tmp_path, monkeypatch):
+    plot_module = _load_plot_module()
+    truth = ValidationTruth()
+    campaign = tmp_path / "campaign"
+    campaign.mkdir()
+    recovery = _synthetic_recovery(truth, n_runs=1)
+    recovery.to_csv(campaign / "recovery.csv", index=False)
+    manifest = _posterior_corner_manifest(n_runs=1)
+    (campaign / "manifest.json").write_text(json.dumps(manifest))
+
+    monkeypatch.setattr(plot_module, "plot_median_recovery_corner", lambda *a, **k: None)
+    monkeypatch.setattr(plot_module, "plot_hubble_recovery", lambda *a, **k: None)
+    monkeypatch.setattr(
+        plot_module,
+        "_load_realization_posteriors",
+        lambda *a, **k: {"selected_estimated": np.zeros((2, 8))},
+    )
+    monkeypatch.setattr(plot_module, "plot_realization_posterior_corner", lambda *a, **k: None)
+    monkeypatch.setattr(plot_module, "plot_single_realization_hubble", lambda *a, **k: None)
+    calls = []
+
+    def fake_completeness(campaign, recovery, manifest, output_pdf, **kwargs):
+        calls.append((Path(output_pdf), kwargs.get("realization")))
+        return Path(output_pdf)
+
+    monkeypatch.setattr(plot_module, "plot_completeness_effects", fake_completeness)
+    assert plot_module.main([str(campaign), "--single", "0"]) == 0
+    assert calls == [
+        (campaign / "plots" / "completeness_effects.pdf", None),
+        (
+            campaign / "plots" / "single_runs" / "completeness_effects_seed_0000.pdf",
+            0,
+        ),
+    ]
+
+
+def test_plot_script_reads_persisted_campaign_without_posteriors(tmp_path):
+    truth = ValidationTruth()
+    recovery = _synthetic_recovery(truth, n_runs=9)
+    campaign = tmp_path / "campaign"
+    campaign.mkdir()
+    recovery.to_csv(campaign / "recovery.csv", index=False)
+    manifest = {"configuration": {"truth": {
+        "alpha_agn": truth.alpha_agn,
+        "beta_agn": truth.beta_agn,
+        "om0": truth.om0,
+        "w0": truth.w0,
+        "wa": truth.wa,
+    }}}
+    (campaign / "manifest.json").write_text(json.dumps(manifest))
+    plot_module = _load_plot_module()
+    assert plot_module.main([str(campaign)]) == 0
+    assert (campaign / "plots" / "median_recovery_corner.pdf").is_file()
+    assert (campaign / "plots" / "hubble_diagram_recovery.pdf").is_file()
+    assert (campaign / "ensemble_summary.csv").is_file()
+
+
+def test_campaign_resume_rejects_configuration_drift(tmp_path):
+    runner = _load_runner_module()
+    campaign = tmp_path / "campaign"
+    configuration = {"schema_version": 1, "truth": {"alpha_agn": 7.0}}
+    runner._write_or_validate_manifest(campaign, configuration, resume=False)
+    runner._write_or_validate_manifest(campaign, configuration, resume=True)
+    with pytest.raises(RuntimeError, match="does not match"):
+        runner._write_or_validate_manifest(
+            campaign,
+            {"schema_version": 1, "truth": {"alpha_agn": 8.0}},
+            resume=True,
+        )
+
+
+def test_runner_accepts_configurable_agn_count():
+    runner = _load_runner_module()
+    assert runner._parser().parse_args(["--n-agn", "123"]).n_agn == 123
+    assert runner._parser().parse_args(["--num-agns", "456"]).n_agn == 456
+
+
+def test_validation_manifest_records_only_nondefault_prior_profile():
+    runner = _load_runner_module()
+
+    default_args = runner._parser().parse_args([])
+    default_configuration = runner._configuration(
+        default_args, runner._truth_from_args(default_args)
+    )
+    assert "prior_profile" not in default_configuration["fit"]
+    assert "prior_bounds" not in default_configuration["fit"]
+
+    centered_args = runner._parser().parse_args(
+        ["--prior-profile", "centered_lcdm"]
+    )
+    centered_configuration = runner._configuration(
+        centered_args, runner._truth_from_args(centered_args)
+    )
+    fit = centered_configuration["fit"]
+    assert fit["prior_profile"] == "centered_lcdm"
+    assert fit["prior_bounds"]["M0_agn"] == [-26.0, -18.0]
+    assert fit["prior_bounds"]["w0"] == [-3.0, 1.0]
+    assert fit["prior_bounds"]["wa"] == [-10.0, 10.0]
+
+
+def test_initialize_only_writes_manifest_and_complete_seed_ledger(tmp_path, monkeypatch):
+    runner = _load_runner_module()
+    monkeypatch.setattr(
+        runner,
+        "build_completeness_lf",
+        lambda *args, **kwargs: pytest.fail("initialize-only must not build the LF"),
+    )
+    output_root = tmp_path / "results"
+    assert runner.main([
+        "--campaign", "init",
+        "--output-root", str(output_root),
+        "--n-runs", "3",
+        "--seed-start", "4",
+        "--initialize-only",
+    ]) == 0
+    campaign = output_root / "init"
+    assert (campaign / "manifest.json").is_file()
+    ledger = pd.read_csv(campaign / "seed_ledger.csv")
+    assert ledger["realization"].tolist() == [4, 5, 6]
+    assert not (campaign / "runs").exists()
+
+
+def test_realization_selector_rejects_out_of_range_before_lf_build(tmp_path, monkeypatch):
+    runner = _load_runner_module()
+    monkeypatch.setattr(
+        runner,
+        "build_completeness_lf",
+        lambda *args, **kwargs: pytest.fail("invalid realization must fail before LF construction"),
+    )
+    with pytest.raises(ValueError, match="outside the configured range 10-11"):
+        runner.main([
+            "--campaign", "invalid-realization",
+            "--output-root", str(tmp_path),
+            "--n-runs", "2",
+            "--seed-start", "10",
+            "--realization", "12",
+        ])
+
+
+def test_distributed_runner_writes_only_requested_seed_fragment(tmp_path, monkeypatch):
+    runner = _load_runner_module()
+    monkeypatch.setattr(runner, "build_completeness_lf", lambda *args, **kwargs: object())
+    empty = pd.DataFrame({"object_id": ["object-1"]})
+    monkeypatch.setattr(
+        runner,
+        "_load_or_generate_catalogs",
+        lambda *args, **kwargs: (
+            empty,
+            empty,
+            None,
+            {"n_parent_generated": 1, "detection_fraction": 1.0},
+        ),
+    )
+
+    def fake_fit(arm, *, realization, **kwargs):
+        return {
+            "realization": realization,
+            "arm": arm,
+            "status": "complete",
+            "checkpoint_file": f"posterior_{arm}.h5",
+            "posterior_sample_count": 20,
+        }
+
+    monkeypatch.setattr(runner, "_fit_arm", fake_fit)
+    assert runner.main([
+        "--campaign", "distributed",
+        "--output-root", str(tmp_path),
+        "--n-runs", "3",
+        "--realization", "1",
+        "--arms", "all", "selected_oracle",
+    ]) == 0
+    campaign = tmp_path / "distributed"
+    fragment = pd.read_csv(campaign / "runs/seed_0001/recovery.csv")
+    assert fragment[["realization", "arm"]].to_records(index=False).tolist() == [
+        (1, "all"),
+        (1, "selected_oracle"),
+    ]
+    assert not (campaign / "runs/seed_0000").exists()
+    assert not (campaign / "runs/seed_0002").exists()
+    assert not (campaign / "recovery.csv").exists()
+
+
+def test_distributed_failure_is_recorded_skipped_and_retried(tmp_path, monkeypatch):
+    runner = _load_runner_module()
+    monkeypatch.setattr(runner, "build_completeness_lf", lambda *args, **kwargs: object())
+    frame = pd.DataFrame({"object_id": ["object-1"]})
+    monkeypatch.setattr(
+        runner,
+        "_load_or_generate_catalogs",
+        lambda *args, **kwargs: (
+            frame,
+            frame,
+            None,
+            {"n_parent_generated": 1, "detection_fraction": 1.0},
+        ),
+    )
+    attempts = []
+
+    def fake_fit(arm, *, realization, **kwargs):
+        attempts.append((realization, arm))
+        if len(attempts) == 1:
+            raise RuntimeError("intentional failure")
+        return {
+            "realization": realization,
+            "arm": arm,
+            "status": "complete",
+            "checkpoint_file": f"posterior_{arm}.h5",
+            "posterior_sample_count": 20,
+        }
+
+    monkeypatch.setattr(runner, "_fit_arm", fake_fit)
+    base = [
+        "--campaign", "retry",
+        "--output-root", str(tmp_path),
+        "--n-runs", "1",
+        "--realization", "0",
+        "--arms", "all",
+    ]
+    assert runner.main(base) == 0
+    fragment_path = tmp_path / "retry/runs/seed_0000/recovery.csv"
+    assert pd.read_csv(fragment_path).iloc[0]["status"] == "failed"
+    assert runner.main([*base, "--resume"]) == 0
+    assert attempts == [(0, "all")]
+    assert runner.main([*base, "--resume", "--retry-failed"]) == 0
+    assert attempts == [(0, "all"), (0, "all")]
+    assert pd.read_csv(fragment_path).iloc[0]["status"] == "complete"
+
+
+def test_fragment_aggregation_and_incomplete_report_are_deterministic(tmp_path):
+    campaign = tmp_path / "campaign"
+    seed0 = campaign / "runs/seed_0000"
+    seed1 = campaign / "runs/seed_0001"
+    seed0.mkdir(parents=True)
+    seed1.mkdir(parents=True)
+    pd.DataFrame([
+        {"realization": 0, "arm": "all", "status": "complete"},
+        {
+            "realization": 0,
+            "arm": "selected_oracle",
+            "status": "failed",
+            "error_type": "RuntimeError",
+            "error_message": "fit failed",
+        },
+    ]).to_csv(seed0 / "recovery.csv", index=False)
+    pd.DataFrame([
+        {"realization": 1, "arm": "all", "status": "complete"},
+    ]).to_csv(seed1 / "recovery.csv", index=False)
+
+    recovery = collect_recovery_fragments(campaign)
+    assert recovery[["realization", "arm"]].to_records(index=False).tolist() == [
+        (0, "all"),
+        (0, "selected_oracle"),
+        (1, "all"),
+    ]
+    pd.testing.assert_frame_equal(recovery, pd.read_csv(campaign / "recovery.csv"))
+    report = incomplete_recovery_report(
+        recovery,
+        {"seed_start": 0, "n_runs": 2, "arms": ["all", "selected_oracle"]},
+    )
+    assert report[["realization", "arm", "status"]].to_records(index=False).tolist() == [
+        (0, "selected_oracle", "failed"),
+        (1, "selected_oracle", "missing"),
+    ]
+
+
+def test_fragment_aggregation_preserves_unmigrated_legacy_rows(tmp_path):
+    campaign = tmp_path / "campaign"
+    fragment_dir = campaign / "runs/seed_0000"
+    fragment_dir.mkdir(parents=True)
+    pd.DataFrame([
+        {"realization": 0, "arm": "all", "status": "complete", "marker": "new"},
+    ]).to_csv(fragment_dir / "recovery.csv", index=False)
+    pd.DataFrame([
+        {"realization": 0, "arm": "all", "status": "failed", "marker": "old"},
+        {"realization": 1, "arm": "all", "status": "complete", "marker": "legacy"},
+    ]).to_csv(campaign / "recovery.csv", index=False)
+    recovery = collect_recovery_fragments(campaign)
+    assert recovery[["realization", "marker"]].to_records(index=False).tolist() == [
+        (0, "new"),
+        (1, "legacy"),
+    ]
+
+
+def test_plot_aggregates_partial_fragments_and_reports_missing_fits(tmp_path):
+    truth = ValidationTruth()
+    campaign = tmp_path / "campaign"
+    fragment_dir = campaign / "runs/seed_0000"
+    fragment_dir.mkdir(parents=True)
+    recovery = _synthetic_recovery(truth, n_runs=2)
+    recovery = recovery.loc[
+        (recovery["realization"] == 0) & (recovery["arm"] == "all")
+    ]
+    recovery.to_csv(fragment_dir / "recovery.csv", index=False)
+    manifest = {
+        "configuration": {
+            "truth": {
+                "alpha_agn": truth.alpha_agn,
+                "beta_agn": truth.beta_agn,
+                "om0": truth.om0,
+                "w0": truth.w0,
+                "wa": truth.wa,
+            },
+            "seed_start": 0,
+            "n_runs": 2,
+            "arms": ["all", "selected_oracle"],
+        }
+    }
+    (campaign / "manifest.json").write_text(json.dumps(manifest))
+    plot_module = _load_plot_module()
+    assert plot_module.main([str(campaign)]) == 0
+    incomplete = pd.read_csv(campaign / "incomplete_fits.csv")
+    assert len(incomplete) == 3
+    assert set(incomplete["status"]) == {"missing"}
+    assert (campaign / "recovery.csv").is_file()
+    assert (campaign / "plots/median_recovery_corner.pdf").is_file()
+    assert (campaign / "plots/hubble_diagram_recovery.pdf").is_file()
+
+
+def test_plot_reports_incomplete_campaign_before_failing_without_successes(tmp_path):
+    truth = ValidationTruth()
+    campaign = tmp_path / "campaign"
+    fragment_dir = campaign / "runs/seed_0000"
+    fragment_dir.mkdir(parents=True)
+    pd.DataFrame([
+        {
+            "realization": 0,
+            "arm": "all",
+            "status": "failed",
+            "error_type": "RuntimeError",
+            "error_message": "fit failed",
+        }
+    ]).to_csv(fragment_dir / "recovery.csv", index=False)
+    manifest = {
+        "configuration": {
+            "truth": {
+                "alpha_agn": truth.alpha_agn,
+                "beta_agn": truth.beta_agn,
+                "om0": truth.om0,
+                "w0": truth.w0,
+                "wa": truth.wa,
+            },
+            "seed_start": 0,
+            "n_runs": 1,
+            "arms": ["all", "selected_oracle"],
+        }
+    }
+    (campaign / "manifest.json").write_text(json.dumps(manifest))
+    plot_module = _load_plot_module()
+    with pytest.raises(ValueError, match="no successful fits"):
+        plot_module.main([str(campaign)])
+    report = pd.read_csv(campaign / "incomplete_fits.csv")
+    assert report[["arm", "status"]].to_records(index=False).tolist() == [
+        ("all", "failed"),
+        ("selected_oracle", "missing"),
+    ]

@@ -33,7 +33,7 @@ def _checkpoint_payload(context=None):
     }
 
 
-def _prepare_resume_replot_context(current, checkpoint):
+def _prepare_resume_replot_context(current, checkpoint, *, round_pivots=True):
     return hubble_fit._prepare_shared_agn_pivot_context(
         current,
         cosmo_models=["FlatLambdaCDM"],
@@ -51,11 +51,14 @@ def _prepare_resume_replot_context(current, checkpoint):
         use_planck_om_prior=False,
         use_alpha_lambda_term=False,
         use_eta_sigma_term=False,
+        use_f_agn_psf_2500_sigmoid_term=False,
+        use_f_agn_psf_2500_flux_fraction_term=False,
         use_redshift_log_f_term=False,
         disable_sigma_clip_pass=True,
         resume_stage="both",
         prefix="unit",
         resume_replot_with_cuts=True,
+        round_pivots=round_pivots,
     )
 
 
@@ -74,6 +77,30 @@ def test_checkpoint_pivot_context_round_trip(tmp_path):
         checkpoint_file=checkpoint,
     )
 
+    assert actual == expected
+
+
+def test_resume_requires_matching_pivot_rounding_rule(tmp_path):
+    checkpoint = tmp_path / "unrounded-pivot.h5"
+    expected = build_agn_pivot_context(
+        _reference_frame(),
+        (0.5, 1.5),
+        round_pivots=False,
+    )
+    hubble_fit.save_chains(
+        checkpoint,
+        flat_samples=np.ones((2, 2)),
+        **_checkpoint_payload(expected),
+    )
+
+    with pytest.raises(RuntimeError, match="original pivot-rounding option"):
+        _prepare_resume_replot_context(_reference_frame(), checkpoint)
+
+    actual = _prepare_resume_replot_context(
+        _reference_frame(),
+        checkpoint,
+        round_pivots=False,
+    )
     assert actual == expected
 
 

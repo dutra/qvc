@@ -5,6 +5,7 @@ import math
 from qvc.hubble.cuts import (
     A_2500_TOTAL_MAX,
     AGN_TIER0_ELIGIBILITY_CUTS,
+    AGN_TIER0_EXTREME_MAGNITUDE_CUTS,
     AGN_TIER1_FIT_QUALITY_CUTS,
     AGN_TIER2_PARAMETER_CUTS,
     ALPHA_LAMBDA_MAX,
@@ -14,6 +15,7 @@ from qvc.hubble.cuts import (
     REDDENING_EBV_MAX,
     VARIABILITY_CHI_SQ_RED_G_MIN,
     WRMS_MAX,
+    normalize_completeness_magnitude_support_mode,
 )
 
 
@@ -49,9 +51,21 @@ def _with_completeness_magnitude(cuts, completeness_magnitude):
     ]
 
 
-def build_tier0_cuts(*, completeness_magnitude="dereddened"):
+def build_tier0_cuts(
+    *,
+    completeness_magnitude="dereddened",
+    completeness_magnitude_support_mode="hard-cut",
+):
+    support_mode = normalize_completeness_magnitude_support_mode(
+        completeness_magnitude_support_mode
+    )
+    cuts = (
+        AGN_TIER0_EXTREME_MAGNITUDE_CUTS
+        if support_mode == "tails"
+        else AGN_TIER0_ELIGIBILITY_CUTS
+    )
     return _with_completeness_magnitude(
-        AGN_TIER0_ELIGIBILITY_CUTS, completeness_magnitude
+        cuts, completeness_magnitude
     )
 
 

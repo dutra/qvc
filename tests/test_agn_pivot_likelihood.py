@@ -34,12 +34,16 @@ def test_nearby_calibrators_and_main_sample_use_same_pivot_context(monkeypatch):
     }
     pivot_context = build_agn_pivot_context(agn_data, (0.5, 1.5))
     priors, labels, _ = get_model_params(
-        "FlatLambdaCDM",
+        "Flatw0waCDM",
         only_agn=True,
+        prior_profile="centered_lcdm",
     )
-    theta = np.array(
-        [(priors[label][0] + priors[label][1]) / 2.0 for label in labels]
-    )
+    parameters = {
+        label: (priors[label][0] + priors[label][1]) / 2.0
+        for label in labels
+    }
+    parameters["wa"] = 5.0
+    theta = np.array([parameters[label] for label in labels])
     observed_contexts = []
     real_pack = hubble_likelihood.agn_model_pack_obs
 
@@ -61,10 +65,11 @@ def test_nearby_calibrators_and_main_sample_use_same_pivot_context(monkeypatch):
         _sna_L=None,
         _sna_Lower=True,
         _sna_LogdetCov=None,
-        cosmo_model="FlatLambdaCDM",
+        cosmo_model="Flatw0waCDM",
         completeness_params=None,
         z_pivot_agn=1.5,
         agn_pivot_context=pivot_context,
+        prior_profile="centered_lcdm",
         only_agn=True,
     )
 

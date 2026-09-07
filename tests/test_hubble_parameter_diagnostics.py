@@ -98,6 +98,63 @@ def test_plot_parameter_residual_diagnostics_rejects_misaligned_inputs(tmp_path)
         )
 
 
+def test_plot_partial_control_atlas_uses_postcut_rows_and_spectra_fields(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "mplconfig"))
+    rng = np.random.default_rng(912)
+    n = 80
+    z = np.linspace(0.5, 3.0, n)
+    log_sigma = -0.7 + 0.15 * z + rng.normal(0.0, 0.04, n)
+    log_tau = 2.2 - 0.08 * z + rng.normal(0.0, 0.05, n)
+    sed_shape = 0.5 * log_sigma + rng.normal(0.0, 0.08, n)
+    residuals = 0.3 * sed_shape + 0.15 * log_tau + rng.normal(0.0, 0.03, n)
+    frame = pd.DataFrame(
+        {
+            "object_id": [f"obj_{index}" for index in range(n)],
+            "z": z,
+            "is_fit_selection": np.arange(n) % 2 == 0,
+            "log_sigma_uv": log_sigma,
+            "log_tau_uv_rf": log_tau,
+            "sed_shape": sed_shape,
+            "sed_shape_err": np.full(n, 0.1),
+            "not_from_spectra": rng.normal(size=n),
+        }
+    )
+    frame.attrs["spectra_fit_columns"] = (
+        "sed_shape",
+        "sed_shape_err",
+    )
+
+    outputs = hubble_plotting.plot_full_residuals_debiased_partial_controls(
+        frame,
+        residuals,
+        plot_path=str(tmp_path / "plots"),
+        z_range=(0.44, 3.16),
+        panels_per_page=2,
+        min_points=8,
+    )
+
+    assert set(outputs) == {"pdf", "residuals_csv", "parameter_index_csv"}
+    for path in outputs.values():
+        assert Path(path).is_file()
+        assert Path(path).stat().st_size > 0
+
+    exported = pd.read_csv(outputs["residuals_csv"])
+    parameter_index = pd.read_csv(outputs["parameter_index_csv"])
+    assert len(exported) == frame["is_fit_selection"].sum()
+    assert set(parameter_index["field"]) == {
+        "log_sigma_uv",
+        "log_tau_uv_rf",
+        "sed_shape",
+    }
+    assert "sed_shape_partial" in exported
+    assert "R_partial_for_sed_shape" in exported
+    assert "sed_shape_err" not in parameter_index["field"].tolist()
+    assert "not_from_spectra" not in parameter_index["field"].tolist()
+
+
 def test_plot_redshift_wiggle_diagnostics_finds_jump_and_driver(
     tmp_path,
     monkeypatch,

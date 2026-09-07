@@ -92,6 +92,44 @@ def test_saved_sed_loader_normalizes_object_id_and_upper_limits(tmp_path):
     assert result["is_upper_limit"].tolist() == [True]
 
 
+def test_saved_sed_loader_preserves_numeric_aperture_diameter(tmp_path):
+    path = tmp_path / "sed.csv"
+    pd.DataFrame(
+        {
+            "object_id": [1452887],
+            "filter_name": ["J_ukidss"],
+            "flux_mjy": [0.5],
+            "flux_err_mjy": [0.1],
+            "psf_fwhm_arcsec": [""],
+            "aperture_diameter_arcsec": ["2.0"],
+            "photometry_method": ["aperture"],
+        }
+    ).to_csv(path, index=False)
+
+    result = load_saved_sed_photometry(path)
+
+    assert result["aperture_diameter_arcsec"].tolist() == [2.0]
+    assert np.isnan(result["psf_fwhm_arcsec"].item())
+
+
+def test_host_capture_spatial_metadata_rejects_partial_flux_without_scale():
+    phot = pd.DataFrame(
+        {
+            "catalog": ["ukidss_las_dr9", "allwise"],
+            "filter_name": ["J_ukidss", "W1"],
+            "photometry_method": ["aperture", "profile"],
+            "psf_fwhm_arcsec": [np.nan, np.nan],
+            "aperture_diameter_arcsec": [np.nan, np.nan],
+        }
+    )
+
+    with pytest.raises(ValueError, match="J_ukidss.*Regenerate"):
+        joint.validate_host_capture_spatial_metadata(phot)
+
+    phot.loc[0, "aperture_diameter_arcsec"] = 2.0
+    joint.validate_host_capture_spatial_metadata(phot)
+
+
 def _sdss_override_frame(object_id="1452887"):
     return pd.DataFrame(
         {
@@ -219,7 +257,7 @@ def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
     record = {
         **_record_with_ugriz(),
         "sdss_name": "000000.00+000000.0",
-        "z": 1.0,
+        "z": 2.0,
         "ra": 0.0,
         "dec": 0.0,
         "mjd": 55000.0,
@@ -233,6 +271,7 @@ def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
         fit_lines=True,
         fit_fe=False,
         fit_bc=True,
+        fit_bal=True,
         line_flux_scale_mjy=0.2,
         photometry_systematics=0.08,
         spectrum_systematics=0.06,
@@ -257,7 +296,7 @@ def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
     config, used_phot = joint.build_joint_config(
         record,
         pd.DataFrame(),
-        lam=np.array([3000.0, 4000.0, 5000.0]),
+        lam=np.array([9000.0, 10500.0, 12000.0]),
         flux=np.array([1.0, 1.1, 1.2]),
         err=np.array([0.1, 0.1, 0.1]),
         resolving_power=2000.0,
@@ -272,6 +311,15 @@ def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
     assert config.agn.tied_lines is True
     assert config.agn.fit_feii is False
     assert config.agn.fit_balmer_continuum is True
+    assert [component.name for component in config.agn.custom_components] == [
+        "bal_nv",
+        "bal_siiv",
+        "bal_civ",
+    ]
+    assert all(
+        component.metadata["component_type"] == "bal_absorption"
+        for component in config.agn.custom_components
+    )
     assert config.agn.line_flux_scale_mjy == pytest.approx(0.2)
     assert config.inference.plot_init is True
     assert config.likelihood.spectrum_systematics_width == pytest.approx(0.06)
@@ -291,6 +339,111 @@ def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
     assert config.photometry.psf_fwhm_arcsec == [
         joint.SDSS_STATIC_PSF_FWHM_ARCSEC[band] for band in "ugriz"
     ]
+    assert config.photometry.aperture_diameter_arcsec == [None] * 5
+
+    nir_phot = pd.DataFrame(
+        {
+            "source_id": [record["object_id"]],
+            "catalog": ["ukidss_las_dr9"],
+            "filter_name": ["J_ukidss"],
+            "flux_mjy": [0.2],
+            "flux_err_mjy": [0.02],
+            "is_upper_limit": [False],
+            "psf_fwhm_arcsec": [np.nan],
+            "aperture_diameter_arcsec": [2.0],
+            "photometry_method": ["aperture"],
+        }
+    )
+    config_with_aperture, _ = joint.build_joint_config(
+        record,
+        nir_phot,
+        lam=np.array([3000.0, 4000.0, 5000.0]),
+        flux=np.array([1.0, 1.1, 1.2]),
+        err=np.array([0.1, 0.1, 0.1]),
+        resolving_power=2000.0,
+        args=args,
+        aperture_diameter_arcsec=2.0,
+    )
+    aperture_by_filter = dict(
+        zip(
+            config_with_aperture.photometry.filter_names,
+            config_with_aperture.photometry.aperture_diameter_arcsec,
+            strict=True,
+        )
+    )
+    assert aperture_by_filter["J_ukidss"] == pytest.approx(2.0)
+
+    record["z"] = joint.BAL_MIN_REDSHIFT_EXCLUSIVE
+    config_at_threshold, _ = joint.build_joint_config(
+        record,
+        pd.DataFrame(),
+        lam=np.array([4000.0, 5000.0, 6000.0]),
+        flux=np.array([1.0, 1.1, 1.2]),
+        err=np.array([0.1, 0.1, 0.1]),
+        resolving_power=2000.0,
+        args=args,
+        aperture_diameter_arcsec=2.0,
+    )
+    assert config_at_threshold.agn.custom_components == ()
+
+    record["z"] = 2.0
+    args.fit_bal = False
+    config_without_bal, _ = joint.build_joint_config(
+        record,
+        pd.DataFrame(),
+        lam=np.array([3000.0, 4000.0, 5000.0]),
+        flux=np.array([1.0, 1.1, 1.2]),
+        err=np.array([0.1, 0.1, 0.1]),
+        resolving_power=2000.0,
+        args=args,
+        aperture_diameter_arcsec=2.0,
+    )
+    assert config_without_bal.agn.custom_components == ()
+
+    config_with_invalid_blue_edge, _ = joint.build_joint_config(
+        record,
+        pd.DataFrame(),
+        lam=np.array([9000.0, 9600.0, 12000.0]),
+        flux=np.array([1.0, 1.1, 1.2]),
+        err=np.array([np.nan, 0.1, 0.1]),
+        resolving_power=2000.0,
+        args=args,
+        aperture_diameter_arcsec=2.0,
+    )
+    assert config_with_invalid_blue_edge.agn.fit_balmer_continuum is False
+
+
+def test_balmer_continuum_coverage_gate_uses_inclusive_valid_boundaries():
+    args = SimpleNamespace(fit_bc=True)
+
+    assert joint.balmer_continuum_enabled_for_coverage(
+        args,
+        np.array([3000.0, 3500.0, 4000.0]),
+    )
+    assert not joint.balmer_continuum_enabled_for_coverage(
+        args,
+        np.array([3000.01, 3500.0, 4000.0]),
+    )
+    assert not joint.balmer_continuum_enabled_for_coverage(
+        args,
+        np.array([3000.0, 3500.0, 3999.99]),
+    )
+
+
+def test_balmer_continuum_coverage_ignores_invalid_and_masked_pixels():
+    args = SimpleNamespace(fit_bc=True)
+    wavelength = np.array([2990.0, 3200.0, 3900.0, 4100.0, np.nan])
+
+    assert not joint.balmer_continuum_enabled_for_coverage(
+        args,
+        wavelength,
+        valid_mask=np.array([False, True, True, False, True]),
+    )
+    args.fit_bc = False
+    assert not joint.balmer_continuum_enabled_for_coverage(
+        args,
+        np.array([3000.0, 4000.0]),
+    )
 
 
 def test_dereddened_m2500_uses_intrinsic_disk_and_both_attenuation_terms():
@@ -749,7 +902,7 @@ def test_save_spectrum_figure_uses_separate_spectrum_filename(tmp_path):
 
     assert fitter.show_plot is False
     assert fitter.plot_residual is False
-    assert path == tmp_path / "z0.300_205105.02-003302.7_spectrum.png"
+    assert path == tmp_path / "z0.300_205105.02-003302.7_spectrum.pdf"
     assert path.is_file()
 
 
@@ -816,18 +969,37 @@ def test_release_jaxsedfit_memory_discards_fit_state_and_clears_jax_cache(
     assert fit_result._state is None
 
 
-def test_plot_init_saves_each_stage_without_showing(tmp_path):
+def test_plot_init_saves_each_stage_without_showing(tmp_path, monkeypatch):
     calls = []
+    spectrum_calls = []
+    monkeypatch.setattr(
+        plt,
+        "show",
+        lambda: pytest.fail("MAP initialization plotting called plt.show()"),
+    )
 
     class FakeFitter:
         def plot_sed(self, *, output_path=None, show=False, title=None):
             calls.append(
                 {"output_path": output_path, "show": show, "title": title}
             )
+            if show:
+                plt.show()
             figure = plt.figure()
             if output_path is not None:
                 figure.savefig(output_path)
             return figure
+
+        def plot_spectrum(self, *, show_plot, plot_residual):
+            spectrum_calls.append(
+                {
+                    "show_plot": show_plot,
+                    "plot_residual": plot_residual,
+                }
+            )
+            if show_plot:
+                plt.show()
+            return plt.figure()
 
         def fit(self, *, progress_bar):
             assert progress_bar is True
@@ -837,12 +1009,9 @@ def test_plot_init_saves_each_stage_without_showing(tmp_path):
             )
             self.plot_sed(
                 show=True,
-                title="Stage 2 smooth spectral-feature MAP initialization",
+                title="Stage 2 full MAP initialization",
             )
-            self.plot_sed(
-                show=True,
-                title="Stage 3 full MAP initialization",
-            )
+            self.plot_sed(show=True, title="Future MAP diagnostic")
             return "fit-result"
 
     fitter = FakeFitter()
@@ -853,13 +1022,34 @@ def test_plot_init_saves_each_stage_without_showing(tmp_path):
 
     assert result == "fit-result"
     assert [call["show"] for call in calls] == [False, False, False]
-    assert [Path(call["output_path"]).name for call in calls] == [
-        "z0.304_013453.20-001842.3_joint_init_stage1.png",
-        "z0.304_013453.20-001842.3_joint_init_stage2.png",
-        "z0.304_013453.20-001842.3_joint_init_stage3.png",
+    assert [
+        Path(call["output_path"]).name if call["output_path"] is not None else None
+        for call in calls
+    ] == [
+        "z0.304_013453.20-001842.3_joint_init_stage1.pdf",
+        "z0.304_013453.20-001842.3_joint_init_stage2.pdf",
+        None,
     ]
-    assert all(Path(call["output_path"]).is_file() for call in calls)
+    assert all(Path(call["output_path"]).is_file() for call in calls[:2])
+    assert spectrum_calls == [
+        {"show_plot": False, "plot_residual": False},
+        {"show_plot": False, "plot_residual": False},
+    ]
+    assert (
+        tmp_path
+        / "z0.304_013453.20-001842.3_joint_init_stage1_spectrum.pdf"
+    ).is_file()
+    assert (
+        tmp_path
+        / "z0.304_013453.20-001842.3_joint_init_stage2_spectrum.pdf"
+    ).is_file()
     assert fitter.plot_sed.__func__ is FakeFitter.plot_sed
+
+
+def test_run_fit_sed_spectra_enables_saved_map_plots():
+    source = (REPO_ROOT / "run_fit_sed_spectra.xsh").read_text(encoding="utf-8")
+
+    assert "--plot-init" in source
 
 
 def _run_record():
@@ -1349,6 +1539,155 @@ def test_resume_preflight_rejects_old_and_accepts_main_bundle(tmp_path):
     joint.preflight_resume_host_capture_bundles([rec], args)
 
 
+def test_resume_validation_rejects_missing_spatial_scale_capture_fractions(
+    tmp_path,
+):
+    filter_names = [f"{band}_sdss" for band in "ugriz"]
+    fitter = SimpleNamespace(
+        config=SimpleNamespace(
+            likelihood=SimpleNamespace(use_host_capture_model=True),
+            photometry=SimpleNamespace(
+                filter_names=filter_names,
+                photometry_method=["psf"] * 5,
+                psf_fwhm_arcsec=[
+                    joint.SDSS_STATIC_PSF_FWHM_ARCSEC[band] for band in "ugriz"
+                ],
+            ),
+        ),
+        samples={
+            "log_host_capture_scale_arcsec": np.zeros(4),
+            "missing_psf_host_capture_fraction": np.full((4, 1), 0.5),
+        },
+    )
+
+    with pytest.raises(
+        joint.IncompatibleHostCaptureResumeError,
+        match="without spatial metadata",
+    ):
+        joint.validate_resume_host_capture_fitter(fitter, tmp_path / "samples.h5")
+
+
+def test_resume_bal_validation_requires_saved_bal_components(tmp_path):
+    path = tmp_path / "bal_samples.h5"
+    fitter = SimpleNamespace(
+        config=SimpleNamespace(
+            agn=SimpleNamespace(custom_components=())
+        )
+    )
+
+    with pytest.raises(
+        joint.IncompatibleBALResumeError,
+        match="lacks BAL components",
+    ):
+        joint.validate_resume_bal_fitter(fitter, path)
+
+    fitter.config.agn.custom_components = tuple(
+        SimpleNamespace(
+            name=name,
+            metadata={"component_type": "bal_absorption"},
+        )
+        for name in ("bal_nv", "bal_siiv", "bal_civ")
+    )
+    joint.validate_resume_bal_fitter(fitter, path)
+
+    with pytest.raises(
+        joint.IncompatibleBALResumeError,
+        match="BAL fitting is disabled",
+    ):
+        joint.validate_resume_bal_fitter(
+            fitter,
+            path,
+            expected_enabled=False,
+        )
+
+    fitter.config.agn.custom_components = ()
+    joint.validate_resume_bal_fitter(
+        fitter,
+        path,
+        expected_enabled=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("wave_obs", "saved_enabled"),
+    [
+        ([6000.0, 7000.0, 8000.0], True),
+        ([6200.0, 7000.0, 8000.0], False),
+        ([6000.0, 7000.0, 7800.0], False),
+    ],
+)
+def test_resume_balmer_continuum_validation_accepts_matching_policy(
+    tmp_path,
+    wave_obs,
+    saved_enabled,
+):
+    fitter = SimpleNamespace(
+        config=SimpleNamespace(
+            agn=SimpleNamespace(fit_balmer_continuum=saved_enabled),
+            spectroscopy=SimpleNamespace(
+                wave_obs=wave_obs,
+                mask=[True] * len(wave_obs),
+            ),
+        )
+    )
+
+    joint.validate_resume_balmer_continuum_fitter(
+        fitter,
+        tmp_path / "samples.h5",
+        SimpleNamespace(fit_bc=True),
+        redshift=1.0,
+    )
+
+
+@pytest.mark.parametrize("saved_enabled", [False, True])
+def test_resume_balmer_continuum_validation_rejects_mismatch(
+    tmp_path,
+    saved_enabled,
+):
+    wave_obs = (
+        [6000.0, 7000.0, 8000.0]
+        if not saved_enabled
+        else [6200.0, 7000.0, 7800.0]
+    )
+    fitter = SimpleNamespace(
+        config=SimpleNamespace(
+            agn=SimpleNamespace(fit_balmer_continuum=saved_enabled),
+            spectroscopy=SimpleNamespace(wave_obs=wave_obs, mask=[True] * 3),
+        )
+    )
+
+    with pytest.raises(
+        joint.IncompatibleBalmerContinuumResumeError,
+        match="current coverage policy requires",
+    ):
+        joint.validate_resume_balmer_continuum_fitter(
+            fitter,
+            tmp_path / "samples.h5",
+            SimpleNamespace(fit_bc=True),
+            redshift=1.0,
+        )
+
+
+def test_resume_balmer_continuum_no_fit_option_always_wins(tmp_path):
+    fitter = SimpleNamespace(
+        config=SimpleNamespace(
+            agn=SimpleNamespace(fit_balmer_continuum=True),
+            spectroscopy=SimpleNamespace(
+                wave_obs=[6000.0, 8000.0],
+                mask=[True, True],
+            ),
+        )
+    )
+
+    with pytest.raises(joint.IncompatibleBalmerContinuumResumeError):
+        joint.validate_resume_balmer_continuum_fitter(
+            fitter,
+            tmp_path / "samples.h5",
+            SimpleNamespace(fit_bc=False),
+            redshift=1.0,
+        )
+
+
 def test_resume_preflight_rejects_shared_group_bundle(tmp_path):
     args = _hybrid_args(tmp_path)
     rec = _run_record()
@@ -1539,6 +1878,39 @@ def test_parse_args_rejects_no_deredden_for_mandatory_v3_colors(tmp_path):
                 "--no-deredden",
             ]
         )
+
+
+def test_parse_args_bal_is_default_and_no_bal_is_opt_out(tmp_path):
+    common = [
+        "--mode", "fit",
+        str(tmp_path / "out.h5"),
+        "--sed-photometry-path", str(tmp_path / "phot.csv"),
+        "--filter_object_id", "1",
+    ]
+
+    assert joint.parse_args(common).fit_bal is True
+    assert joint.parse_args([*common, "--no-bal"]).fit_bal is False
+    # Retain the old opt-in spelling as a hidden compatibility alias.
+    assert joint.parse_args([*common, "--fit-bal"]).fit_bal is True
+
+
+def test_parse_args_accepts_fit_bal_with_resume(tmp_path):
+    resume_dir = tmp_path / "old" / "all"
+    resume_dir.mkdir(parents=True)
+
+    args = joint.parse_args(
+        [
+            "--mode", "fit",
+            str(tmp_path / "out.h5"),
+            "--sed-photometry-path", str(tmp_path / "phot.csv"),
+            "--filter_object_id", "1",
+            "--fit-bal",
+            "--resume", str(resume_dir),
+        ]
+    )
+
+    assert args.fit_bal is True
+    assert args.resume == str(resume_dir)
 
 
 def test_parse_args_rejects_removed_no_host_capture_baseline_flag(tmp_path):
@@ -1990,7 +2362,7 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
     monkeypatch.setattr(
         joint,
         "save_spectrum_figure",
-        lambda fitter, record, fig_dir: Path(fig_dir) / "spectrum.png",
+        lambda fitter, record, fig_dir: Path(fig_dir) / "spectrum.pdf",
     )
 
     result = joint.run_hybrid_fit(rec, args)

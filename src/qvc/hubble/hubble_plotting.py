@@ -2,6 +2,7 @@ import numpy as np
 import os
 import math
 import re
+import textwrap
 import warnings
 from ast import literal_eval
 from dataclasses import dataclass
@@ -20,10 +21,12 @@ from astropy.cosmology.realizations import Planck18
 from astropy import units as u
 from matplotlib.lines import Line2D
 from matplotlib.ticker import (
+    AutoMinorLocator,
     FixedLocator,
     FormatStrFormatter,
     FuncFormatter,
     LogLocator,
+    MultipleLocator,
     NullFormatter,
     NullLocator,
 )
@@ -36,6 +39,7 @@ from tqdm import tqdm
 from qvc.hubble.hubble_model import (
     AGN_ALPHA_LAMBDA_ERR,
     AGN_ALPHA_LAMBDA_PARAM,
+    DEFAULT_PRIOR_PROFILE,
     AgnPivotContext,
     M_model_agn,
     M_model_agn_err,
@@ -91,7 +95,7 @@ warnings.filterwarnings(
 )
 
 _FULL_RESIDUAL_YLIM = (-0.5, 0.5)
-_OUT_OF_RANGE_AGN_COLOR = "#354B5B"
+_OUT_OF_RANGE_AGN_COLOR = "tab:green"
 _OUT_OF_RANGE_AGN_MARKER_COLOR = mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.65)
 _OUT_OF_RANGE_AGN_ERROR_COLOR = mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.3)
 _COSMO_CORNER_LEGEND_FONTSIZE = 40
@@ -930,6 +934,8 @@ def plot_blr_line_lags_vs_l2500(
     clipped_mask=None,
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
+    use_f_agn_psf_2500_sigmoid_term=None,
+    use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
 ):
     """Plot BLR lag against line-matched debiased continuum luminosity."""
@@ -944,6 +950,8 @@ def plot_blr_line_lags_vs_l2500(
         np.asarray(flat_samples).shape[1],
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     _, model_labels, _ = get_model_params(
@@ -951,6 +959,8 @@ def plot_blr_line_lags_vs_l2500(
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
     param_indices = {name: model_labels.index(name) for name in model_labels}
@@ -2974,6 +2984,158 @@ def plot_eta_tau_sigma_vs_redshift(
     )
 
 
+def plot_eta_sigma_vs_redshift_colored_by_kl(
+    df,
+    plot_path="plots/hubble",
+    show=False,
+    filename="eta_sigma_vs_redshift_colored_by_kl.pdf",
+    *,
+    kl_color_limits=None,
+    sample_label=None,
+):
+    """Plot eta_sigma versus redshift, colored by its approximate KL divergence."""
+    required = {"z", "eta_sigma", "eta_sigma_kl"}
+    if not required.issubset(df.columns):
+        missing = ", ".join(sorted(required - set(df.columns)))
+        raise KeyError(f"Missing required columns for eta_sigma KL plot: {missing}")
+
+    z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
+    eta_sigma = pd.to_numeric(df["eta_sigma"], errors="coerce").to_numpy(dtype=float)
+    eta_sigma_kl = pd.to_numeric(df["eta_sigma_kl"], errors="coerce").to_numpy(dtype=float)
+    if "eta_sigma_err" in df.columns:
+        eta_sigma_err = pd.to_numeric(
+            df["eta_sigma_err"], errors="coerce"
+        ).to_numpy(dtype=float)
+    else:
+        eta_sigma_err = np.full(len(df), np.nan, dtype=float)
+
+    mask = np.isfinite(z) & np.isfinite(eta_sigma) & np.isfinite(eta_sigma_kl)
+    if not np.any(mask):
+        raise ValueError("No finite z, eta_sigma, and eta_sigma_kl rows to plot.")
+    z = z[mask]
+    eta_sigma = eta_sigma[mask]
+    eta_sigma_kl = eta_sigma_kl[mask]
+    eta_sigma_err = eta_sigma_err[mask]
+
+    if kl_color_limits is None:
+        kl_vmin, kl_vmax = np.nanpercentile(eta_sigma_kl, [1.0, 99.0])
+    else:
+        if len(kl_color_limits) != 2:
+            raise ValueError("kl_color_limits must contain exactly (vmin, vmax).")
+        kl_vmin, kl_vmax = map(float, kl_color_limits)
+    if not np.isfinite(kl_vmin) or not np.isfinite(kl_vmax):
+        raise ValueError("KL color limits must be finite.")
+    if kl_vmax <= kl_vmin:
+        padding = max(0.05 * abs(kl_vmin), 0.05)
+        kl_vmin -= padding
+        kl_vmax += padding
+
+    fig, ax = plt.subplots(figsize=(8.0, 5.2), constrained_layout=True)
+    finite_err = np.isfinite(eta_sigma_err) & (eta_sigma_err >= 0.0)
+    if np.any(finite_err):
+        ax.errorbar(
+            z[finite_err],
+            eta_sigma[finite_err],
+            yerr=eta_sigma_err[finite_err],
+            fmt="none",
+            ecolor="0.55",
+            elinewidth=0.45,
+            alpha=0.10,
+            rasterized=True,
+            zorder=1,
+        )
+
+    # Draw high-KL points last so the most data-informative fits remain visible.
+    order = np.argsort(eta_sigma_kl)
+    kl_norm = colors.Normalize(vmin=kl_vmin, vmax=kl_vmax, clip=False)
+    points = ax.scatter(
+        z[order],
+        eta_sigma[order],
+        c=eta_sigma_kl[order],
+        cmap="viridis",
+        norm=kl_norm,
+        s=17,
+        linewidths=0,
+        alpha=0.82,
+        rasterized=True,
+        zorder=2,
+    )
+
+    edges = np.linspace(np.min(z), np.max(z), 13)
+    if np.unique(edges).size > 1:
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        bin_id = np.digitize(z, edges[1:-1])
+        median = np.array(
+            [
+                np.median(eta_sigma[bin_id == index])
+                if np.count_nonzero(bin_id == index) >= 10
+                else np.nan
+                for index in range(len(centers))
+            ]
+        )
+        if np.any(np.isfinite(median)):
+            ax.plot(centers, median, color="white", linewidth=3.2, zorder=3)
+            ax.plot(
+                centers,
+                median,
+                color="black",
+                linewidth=1.35,
+                marker="o",
+                markersize=3.5,
+                label="Binned median",
+                zorder=4,
+            )
+
+    prior_mean = None
+    if "eta_prior_profile" in df.columns:
+        profiles = {
+            str(value).strip().lower()
+            for value in df.loc[mask, "eta_prior_profile"]
+            if pd.notna(value)
+        }
+        if profiles == {"modified"}:
+            prior_mean = -1.0
+        elif profiles == {"default"}:
+            prior_mean = -0.5
+    if prior_mean is not None:
+        ax.axhline(
+            prior_mean,
+            color="tab:red",
+            linestyle="--",
+            linewidth=1.1,
+            label=rf"Prior location (${prior_mean:g}$)",
+            zorder=0,
+        )
+
+    ax.set_xlabel("Redshift")
+    ax.set_ylabel(r"$\eta_\sigma$")
+    ax.set_title(r"Wavelength-dependence slope versus redshift")
+    ax.grid(alpha=0.18, linewidth=0.6)
+    handles, labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(handles, labels, frameon=False, loc="upper right")
+    cbar = fig.colorbar(points, ax=ax, extend="both", pad=0.02)
+    cbar.set_label(r"Approximate $D_{\mathrm{KL}}(q\,\Vert\,p)$ for $\eta_\sigma$")
+    if sample_label:
+        ax.text(
+            0.015,
+            0.02,
+            f"{sample_label}: N = {len(z):,}",
+            transform=ax.transAxes,
+            fontsize=9,
+            ha="left",
+            va="bottom",
+        )
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=300,
+        show=show,
+    )
+
+
 def plot_fast_vs_uv_variability(df, plot_path="plots/hubble", show=False, filename="fast_vs_uv_variability.pdf"):
     """Plot fast-vs-UV variability timescales and amplitudes on log-log axes."""
     tau_fast_col = "log_tau_fast_uv" if "log_tau_fast_uv" in df.columns else None
@@ -3290,8 +3452,19 @@ def plot_bpl_psd_vs_uv_variability(
         )
         lower = np.full(value.shape, np.nan, dtype=float)
         upper = np.full(value.shape, np.nan, dtype=float)
-        lower[finite] = np.clip(value[finite] - np.power(10.0, log_value[finite] - log_err[finite]), 0.0, None)
-        upper[finite] = np.clip(np.power(10.0, log_value[finite] + log_err[finite]) - value[finite], 0.0, None)
+        lower_exponent = log_value - log_err
+        upper_exponent = log_value + log_err
+        lower[finite] = np.clip(
+            value[finite] - np.power(10.0, lower_exponent[finite]),
+            0.0,
+            None,
+        )
+        finite_upper = finite & (upper_exponent <= np.log10(np.finfo(float).max))
+        upper[finite_upper] = np.clip(
+            np.power(10.0, upper_exponent[finite_upper]) - value[finite_upper],
+            0.0,
+            None,
+        )
         return np.vstack([lower, upper])
 
     panels = [
@@ -3412,6 +3585,588 @@ def plot_bpl_psd_vs_uv_variability(
         fig,
         os.path.join(diagnostics_path, filename),
         dpi=200,
+        show=show,
+    )
+
+
+def plot_psd_uv_recovery_comparison(
+    df,
+    plot_path="plots/hubble",
+    show=False,
+    filename="sigma_tau_psd_free_vs_fixed.pdf",
+    *,
+    tau_resolution_mode="mark",
+    nominal_psd_fmax=2e-3,
+):
+    """Compare PSD fits with like-for-like model RMS and timescale estimates.
+
+    ``tau_resolution_mode='mark'`` retains PSD-unresolved points in the tau
+    panels but excludes them from the KDE and summary statistics. ``'filter'``
+    hides them from this diagnostic only; it does not modify ``df`` or the
+    science-cut pipeline.
+    """
+
+    if tau_resolution_mode not in {"mark", "filter", "none"}:
+        raise ValueError(
+            "tau_resolution_mode must be one of 'mark', 'filter', or 'none'."
+        )
+    if not np.isfinite(nominal_psd_fmax) or nominal_psd_fmax <= 0.0:
+        raise ValueError("nominal_psd_fmax must be finite and positive.")
+
+    required = {
+        "log_sigma_ls",
+        "log_sigma_ls_err",
+        "log_tau_ls",
+        "log_tau_ls_err",
+        "alpha_high_ls",
+        "psd_ls_valid",
+        "log_sigma_ls_fixed",
+        "log_sigma_ls_fixed_err",
+        "log_tau_ls_fixed",
+        "log_tau_ls_fixed_err",
+        "psd_ls_fixed_valid",
+        "z",
+        "eta_sigma",
+        "psd_bpl_ref_band",
+        "psd_bpl_ref_lambda_rf",
+    }
+    if not required.issubset(df.columns):
+        missing = ", ".join(sorted(required - set(df.columns)))
+        raise KeyError(
+            f"Missing required columns for PSD recovery comparison: {missing}"
+        )
+
+    def _numeric(column):
+        return pd.to_numeric(df[column], errors="coerce").to_numpy(dtype=float)
+
+    ref_band = (
+        pd.Series(df["psd_bpl_ref_band"], index=df.index)
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .to_numpy()
+    )
+
+    current_tau_columns = set()
+    current_sigma_columns_by_band = {}
+    for band in np.unique(ref_band):
+        if not band:
+            continue
+        current_tau_columns.update(
+            {
+                f"log_tau_band_{band}_RF",
+                f"log_tau_band_{band}_RF_err",
+            }
+        )
+        current_sigma_columns_by_band[band] = {
+            f"log_sigma_total_rms_band_{band}",
+            f"log_sigma_total_rms_band_{band}_err",
+        }
+    missing_current_tau = current_tau_columns - set(df.columns)
+    if missing_current_tau:
+        missing = ", ".join(sorted(missing_current_tau))
+        raise KeyError(
+            "Missing stored total-band tau columns for PSD recovery "
+            f"comparison: {missing}"
+        )
+
+    def _select_ref_band_columns(stem, *, suffix=""):
+        values = np.full(len(df), np.nan, dtype=float)
+        for band in np.unique(ref_band):
+            column = f"{stem}_{band}{suffix}"
+            if band and column in df.columns:
+                selected = ref_band == band
+                values[selected] = _numeric(column)[selected]
+        return values
+
+    model_total_sigma = np.full(len(df), np.nan, dtype=float)
+    model_total_sigma_err = np.full(len(df), np.nan, dtype=float)
+    legacy_bands = []
+    for band, sigma_columns in current_sigma_columns_by_band.items():
+        selected = ref_band == band
+        if sigma_columns.issubset(df.columns):
+            model_total_sigma[selected] = _numeric(
+                f"log_sigma_total_rms_band_{band}"
+            )[selected]
+            model_total_sigma_err[selected] = _numeric(
+                f"log_sigma_total_rms_band_{band}_err"
+            )[selected]
+        else:
+            legacy_bands.append(band)
+
+    if legacy_bands:
+        import jax
+        import jax.numpy as jnp
+
+        from qvc.light_curve.multiband_model_shared_latent_blr import (
+            SharedLatentDiskBLRQS,
+        )
+
+        common_legacy_columns = {
+            "tau_fast_driver",
+            "tau_fast_driver_err",
+            "tau_slow_driver",
+            "tau_slow_driver_err",
+        }
+
+        def _legacy_log_total_rms(parameters):
+            kernel = SharedLatentDiskBLRQS(
+                tau_fast=jnp.atleast_1d(parameters[0]),
+                tau_slow=jnp.atleast_1d(parameters[1]),
+                lag_disk=jnp.atleast_1d(parameters[2]),
+                lag_blr=jnp.atleast_1d(parameters[3]),
+                amp_cont=jnp.atleast_1d(parameters[4]),
+                amp_blr=jnp.atleast_1d(parameters[5]),
+                disk_order=3,
+                blr_order=3,
+            )
+            return jnp.log10(kernel.stationary_rms()[0] * (2.5 / jnp.log(10.0)))
+
+        value_and_grad = jax.jit(jax.vmap(jax.value_and_grad(_legacy_log_total_rms)))
+        for band in legacy_bands:
+            band_stems = (
+                "tau_fast_driver",
+                "tau_slow_driver",
+                f"lag_disk_{band}",
+                f"lag_blr_{band}",
+                f"amp_cont_relflux_{band}",
+                f"amp_blr_relflux_{band}",
+            )
+            required_legacy = common_legacy_columns | {
+                column
+                for stem in band_stems[2:]
+                for column in (stem, f"{stem}_err")
+            }
+            missing_legacy = required_legacy - set(df.columns)
+            if missing_legacy:
+                missing_current = current_sigma_columns_by_band[band] - set(df.columns)
+                raise KeyError(
+                    "Missing stored total-band RMS columns and legacy shared-latent "
+                    f"reconstruction columns for reference band {band!r}. "
+                    "Missing current columns: "
+                    + ", ".join(sorted(missing_current))
+                    + "; missing legacy columns: "
+                    + ", ".join(sorted(missing_legacy))
+                )
+
+            selected_indices = np.flatnonzero(ref_band == band)
+            parameters = np.column_stack([_numeric(stem) for stem in band_stems])[
+                selected_indices
+            ]
+            parameter_errors = np.column_stack(
+                [_numeric(f"{stem}_err") for stem in band_stems]
+            )[selected_indices]
+            valid = (
+                np.all(np.isfinite(parameters), axis=1)
+                & np.all(parameters > 0.0, axis=1)
+                & np.all(np.isfinite(parameter_errors), axis=1)
+                & np.all(parameter_errors >= 0.0, axis=1)
+            )
+            if not np.any(valid):
+                continue
+            values, gradients = value_and_grad(jnp.asarray(parameters[valid]))
+            reconstructed_errors = np.sqrt(
+                np.sum(
+                    np.square(np.asarray(gradients) * parameter_errors[valid]),
+                    axis=1,
+                )
+            )
+            valid_indices = selected_indices[valid]
+            model_total_sigma[valid_indices] = np.asarray(values)
+            model_total_sigma_err[valid_indices] = reconstructed_errors
+
+        warnings.warn(
+            "Reconstructed legacy total-band RMS values from shared-latent "
+            "driver/response medians; uncertainties use independent first-order "
+            "propagation.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    model_total_tau = _select_ref_band_columns("log_tau_band", suffix="_RF")
+    model_total_tau_err = _select_ref_band_columns(
+        "log_tau_band", suffix="_RF_err"
+    )
+    eta_sigma = _numeric("eta_sigma")
+    eta_sigma_err = (
+        _numeric("eta_sigma_err")
+        if "eta_sigma_err" in df.columns
+        else np.zeros(len(df), dtype=float)
+    )
+    ref_lambda_rf = _numeric("psd_bpl_ref_lambda_rf")
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_wavelength_ratio = np.log10(2500.0 / ref_lambda_rf)
+    reference_to_2500 = eta_sigma * log_wavelength_ratio
+    reference_to_2500_err = np.abs(log_wavelength_ratio) * eta_sigma_err
+    model_total_sigma_2500 = model_total_sigma + reference_to_2500
+    model_total_sigma_2500_err = np.hypot(
+        model_total_sigma_err, reference_to_2500_err
+    )
+
+    slope = -_numeric("alpha_high_ls")
+    slope_err = (
+        _numeric("alpha_high_ls_err")
+        if "alpha_high_ls_err" in df.columns
+        else np.zeros(len(df), dtype=float)
+    )
+    valid_slope = np.isfinite(slope) & (slope > 1.0)
+    log_rms_factor = np.full(len(df), np.nan, dtype=float)
+    normalization_err = np.zeros(len(df), dtype=float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_rms_factor[valid_slope] = 0.5 * np.log10(
+            1.0
+            / (
+                slope[valid_slope]
+                * np.sin(np.pi / slope[valid_slope])
+            )
+        )
+        derivative = -0.5 / np.log(10.0) * (
+            1.0 / slope
+            - np.pi
+            * np.cos(np.pi / slope)
+            / (slope**2 * np.sin(np.pi / slope))
+        )
+    finite_slope_err = valid_slope & np.isfinite(slope_err) & (slope_err >= 0.0)
+    normalization_err[finite_slope_err] = (
+        np.abs(derivative[finite_slope_err]) * slope_err[finite_slope_err]
+    )
+
+    free_sigma = _numeric("log_sigma_ls") + log_rms_factor + reference_to_2500
+    free_sigma_err = np.hypot(
+        np.hypot(_numeric("log_sigma_ls_err"), normalization_err),
+        reference_to_2500_err,
+    )
+    fixed_sigma = _numeric("log_sigma_ls_fixed") + reference_to_2500
+    fixed_sigma_err = np.hypot(
+        _numeric("log_sigma_ls_fixed_err"), reference_to_2500_err
+    )
+    free_valid = pd.Series(df["psd_ls_valid"]).fillna(False).astype(bool).to_numpy()
+    fixed_valid = (
+        pd.Series(df["psd_ls_fixed_valid"])
+        .fillna(False)
+        .astype(bool)
+        .to_numpy()
+    )
+
+    z = _numeric("z")
+
+    def _tau_resolution_floor(fmax_column):
+        if fmax_column in df.columns:
+            fmax = _numeric(fmax_column)
+        else:
+            fmax = np.full(len(df), nominal_psd_fmax, dtype=float)
+        use_nominal = ~np.isfinite(fmax) | (fmax <= 0.0)
+        fmax[use_nominal] = nominal_psd_fmax
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return -np.log10(2.0 * np.pi * fmax) - np.log10(1.0 + z)
+
+    free_tau_resolution = _tau_resolution_floor("psd_ls_fmax")
+    fixed_tau_resolution = _tau_resolution_floor("psd_ls_fixed_fmax")
+
+    panel_inputs = [
+        (
+            model_total_sigma_2500,
+            free_sigma,
+            model_total_sigma_2500_err,
+            free_sigma_err,
+            free_valid,
+            r"$\log\,\sigma_{\rm model}$ (mag)",
+            r"$\log\,\sigma_{\rm PSD}$ (mag)",
+            "sigma",
+            None,
+        ),
+        (
+            model_total_sigma_2500,
+            fixed_sigma,
+            model_total_sigma_2500_err,
+            fixed_sigma_err,
+            fixed_valid,
+            r"$\log\,\sigma_{\rm model}$ (mag)",
+            r"$\log\,\sigma_{\rm PSD}$ (mag)",
+            "sigma",
+            None,
+        ),
+        (
+            model_total_tau,
+            _numeric("log_tau_ls"),
+            model_total_tau_err,
+            _numeric("log_tau_ls_err"),
+            free_valid,
+            r"$\log\,\tau_{\rm model}$ (days)",
+            r"$\log\,\tau_{\rm PSD}$ (days)",
+            "tau",
+            free_tau_resolution,
+        ),
+        (
+            model_total_tau,
+            _numeric("log_tau_ls_fixed"),
+            model_total_tau_err,
+            _numeric("log_tau_ls_fixed_err"),
+            fixed_valid,
+            r"$\log\,\tau_{\rm model}$ (days)",
+            r"$\log\,\tau_{\rm PSD}$ (days)",
+            "tau",
+            fixed_tau_resolution,
+        ),
+    ]
+
+    panels = []
+    for (
+        x,
+        y,
+        xerr,
+        yerr,
+        valid,
+        xlabel,
+        ylabel,
+        quantity,
+        resolution_floor,
+    ) in panel_inputs:
+        mask = (
+            valid
+            & np.isfinite(x)
+            & np.isfinite(y)
+            & np.isfinite(xerr)
+            & np.isfinite(yerr)
+            & (xerr >= 0.0)
+            & (yerr >= 0.0)
+        )
+        if resolution_floor is None or tau_resolution_mode == "none":
+            resolved = np.ones(np.count_nonzero(mask), dtype=bool)
+            floor_selected = np.full(np.count_nonzero(mask), np.nan, dtype=float)
+        else:
+            mask &= np.isfinite(resolution_floor)
+            floor_selected = resolution_floor[mask]
+            resolved = x[mask] >= floor_selected
+        if quantity == "tau" and tau_resolution_mode == "filter":
+            keep = resolved
+        else:
+            keep = np.ones(np.count_nonzero(mask), dtype=bool)
+        panels.append(
+            {
+                "x": x[mask][keep],
+                "y": y[mask][keep],
+                "xerr": xerr[mask][keep],
+                "yerr": yerr[mask][keep],
+                "resolved": resolved[keep],
+                "resolution_floor": floor_selected[keep],
+                "xlabel": xlabel,
+                "ylabel": ylabel,
+                "quantity": quantity,
+            }
+        )
+
+    def _shared_limits(selected_panels, *, step, margin_floor):
+        values = [
+            values
+            for panel in selected_panels
+            for values in (panel["x"], panel["y"])
+            if values.size
+        ]
+        if not values:
+            return None
+        values = np.concatenate(values)
+        span = float(np.max(values) - np.min(values))
+        margin = max(0.04 * span, margin_floor)
+        lower = step * np.floor((np.min(values) - margin) / step)
+        upper = step * np.ceil((np.max(values) + margin) / step)
+        return float(lower), float(upper)
+
+    sigma_limits = _shared_limits(panels[:2], step=0.05, margin_floor=0.06)
+    tau_limits = _shared_limits(panels[2:], step=0.05, margin_floor=0.08)
+    if sigma_limits is None and tau_limits is None:
+        raise ValueError("No finite valid free-slope or fixed-slope PSD fits to plot.")
+
+    def _plot_kde_contours(ax, x, y):
+        if x.size <= 50:
+            return
+        try:
+            kde = gaussian_kde(np.vstack([x, y]), bw_method="scott")
+            xq = np.quantile(x, [0.01, 0.99])
+            yq = np.quantile(y, [0.01, 0.99])
+            x_range = float(xq[1] - xq[0])
+            y_range = float(yq[1] - yq[0])
+            if x_range <= 0.0 or y_range <= 0.0:
+                return
+            x_grid, y_grid = np.meshgrid(
+                np.linspace(xq[0] - 0.1 * x_range, xq[1] + 0.1 * x_range, 220),
+                np.linspace(yq[0] - 0.1 * y_range, yq[1] + 0.1 * y_range, 220),
+            )
+            density = kde(
+                np.vstack([x_grid.ravel(), y_grid.ravel()])
+            ).reshape(x_grid.shape)
+            levels = _kde_conf_levels(density, conf=(0.954, 0.683))
+            ax.contour(
+                x_grid,
+                y_grid,
+                density,
+                levels=levels,
+                colors="red",
+                linestyles=("solid", "solid"),
+                linewidths=(2.6, 3.2),
+                alpha=1.0,
+                zorder=3,
+            )
+        except (ValueError, np.linalg.LinAlgError) as exc:
+            print(f"[PSD-vs-UV KDE contours] skipped: {exc}")
+
+    fig, axes = plt.subplots(
+        2,
+        2,
+        figsize=(10.0, 9.0),
+        sharex="row",
+        sharey="row",
+        constrained_layout=True,
+    )
+    fig.get_layout_engine().set(
+        w_pad=0.04,
+        h_pad=0.04,
+        wspace=0.06,
+        hspace=0.04,
+    )
+
+    for ax, panel in zip(axes.flat, panels):
+        limits = sigma_limits if panel["quantity"] == "sigma" else tau_limits
+        if limits is None or panel["x"].size == 0:
+            ax.text(
+                0.5,
+                0.5,
+                "No valid PSD fits",
+                transform=ax.transAxes,
+                ha="center",
+                va="center",
+            )
+            continue
+        x = panel["x"]
+        y = panel["y"]
+        resolved = panel["resolved"]
+        stats_mask = resolved if panel["quantity"] == "tau" else np.ones(
+            x.size, dtype=bool
+        )
+        delta = y[stats_mask] - x[stats_mask]
+        ax.plot(limits, limits, "--", color="m", lw=2.0, zorder=-4)
+        if np.any(resolved):
+            ax.errorbar(
+                x[resolved],
+                y[resolved],
+                xerr=panel["xerr"][resolved],
+                yerr=panel["yerr"][resolved],
+                fmt="none",
+                color="0.4",
+                alpha=0.15,
+                lw=0.75,
+                capsize=1.2,
+                capthick=0.6,
+                rasterized=True,
+                zorder=-3,
+            )
+            ax.scatter(
+                x[resolved],
+                y[resolved],
+                s=10,
+                color="k",
+                alpha=0.58,
+                edgecolors="none",
+                rasterized=True,
+                zorder=-2,
+            )
+        unresolved = ~resolved
+        if np.any(unresolved):
+            ax.errorbar(
+                x[unresolved],
+                y[unresolved],
+                xerr=panel["xerr"][unresolved],
+                yerr=panel["yerr"][unresolved],
+                fmt="none",
+                color="darkorange",
+                alpha=0.32,
+                lw=0.75,
+                capsize=1.2,
+                capthick=0.6,
+                rasterized=True,
+                zorder=-2,
+            )
+            ax.scatter(
+                x[unresolved],
+                y[unresolved],
+                s=19,
+                marker="x",
+                color="darkorange",
+                alpha=0.82,
+                linewidths=0.9,
+                rasterized=True,
+                zorder=-1,
+                label=(
+                    r"$\tau_{\rm model}<[2\pi f_{\max}(1+z)]^{-1}$"
+                ),
+            )
+        _plot_kde_contours(ax, x[stats_mask], y[stats_mask])
+        ax.set_xlim(*limits)
+        ax.set_ylim(*limits)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xlabel(panel["xlabel"])
+        ax.set_ylabel(panel["ylabel"])
+        if delta.size:
+            summary = (
+                f"N = {delta.size}\n"
+                f"Bias = {np.mean(delta):+.2f} dex\n"
+                f"$\\sigma$ = {np.std(delta):.2f} dex"
+            )
+        else:
+            summary = "N = 0"
+        ax.text(
+            0.97,
+            0.03,
+            summary,
+            transform=ax.transAxes,
+            ha="right",
+            va="bottom",
+            fontsize=10.5,
+            bbox=dict(
+                boxstyle="round,pad=0.25",
+                facecolor="white",
+                edgecolor="0.65",
+                alpha=0.92,
+            ),
+        )
+        major_step = 0.5
+        ax.xaxis.set_major_locator(MultipleLocator(major_step))
+        ax.yaxis.set_major_locator(MultipleLocator(major_step))
+        ax.xaxis.set_minor_locator(AutoMinorLocator(5))
+        ax.yaxis.set_minor_locator(AutoMinorLocator(5))
+        ax.tick_params(
+            direction="in",
+            top=True,
+            right=True,
+            which="major",
+            length=4,
+            width=1.0,
+        )
+        ax.tick_params(
+            direction="in",
+            top=True,
+            right=True,
+            which="minor",
+            length=2.5,
+            width=0.8,
+        )
+        for spine in ax.spines.values():
+            spine.set_linewidth(1.1)
+
+        if np.any(unresolved):
+            ax.legend(loc="upper left", fontsize=8.5, frameon=True)
+
+    axes[0, 0].set_title("Free-slope BPL", fontsize=14)
+    axes[0, 1].set_title("Fixed-slope DRW", fontsize=14)
+    axes[0, 1].tick_params(labelleft=False)
+    axes[1, 1].tick_params(labelleft=False)
+
+    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
+    return _save_figure(
+        fig,
+        os.path.join(diagnostics_path, filename),
+        dpi=300,
         show=show,
     )
 
@@ -4845,6 +5600,8 @@ def plot_dynesty(
     show=False,
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
+    use_f_agn_psf_2500_sigmoid_term=None,
+    use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
 ):
     """
@@ -4860,6 +5617,8 @@ def plot_dynesty(
         only_agn=bool(only_agn),
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
@@ -4868,6 +5627,8 @@ def plot_dynesty(
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
 
@@ -4924,6 +5685,8 @@ def plot_traces(
     plot_path="plots/hubble",
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
+    use_f_agn_psf_2500_sigmoid_term=None,
+    use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
 ):
     """
@@ -4951,6 +5714,8 @@ def plot_traces(
         only_sna=only_sna,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
@@ -4959,6 +5724,8 @@ def plot_traces(
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
     ndim = len(model_labels)
@@ -4998,6 +5765,8 @@ def plot_posterior_corner(
     plot_path="plots/hubble",
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
+    use_f_agn_psf_2500_sigmoid_term=None,
+    use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
 ):
     # Select cosmological parameters based on model
@@ -5017,6 +5786,8 @@ def plot_posterior_corner(
         only_sna=only_sna,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
@@ -5025,6 +5796,8 @@ def plot_posterior_corner(
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
 
@@ -5064,6 +5837,8 @@ def plot_cosmo_corner(
     only_agn=False,
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
+    use_f_agn_psf_2500_sigmoid_term=None,
+    use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
 ):
     import os
@@ -5082,6 +5857,8 @@ def plot_cosmo_corner(
         only_agn=only_agn,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     _, model_labels, model_labels_latex = get_model_params(
@@ -5089,6 +5866,8 @@ def plot_cosmo_corner(
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
     idx = {k: i for i, k in enumerate(model_labels)}
@@ -5666,7 +6445,10 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 cosmo_model_samples={}, residuals_sigma_clip=None, df_calibrators=None, z_range=(0.44, 3.16),
                 dmi_values=None, dmi_sigma=None, dmi_selection_sigma=None, clipped_mask=None,
                 filename=None, sigma_clip_threshold=None,
-                use_alpha_lambda_term=None, use_eta_sigma_term=None, use_redshift_log_f_term=None,
+                use_alpha_lambda_term=None, use_eta_sigma_term=None,
+                use_f_agn_psf_2500_sigmoid_term=None,
+                use_f_agn_psf_2500_flux_fraction_term=None,
+                use_redshift_log_f_term=None,
                 only_agn=False,
                 use_intrinsic_scatter_in_residual_sigma=True,
                 diagnostics_suffix=None,
@@ -5776,6 +6558,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         only_agn=only_agn,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     _, model_labels, _ = get_model_params(
@@ -5783,6 +6567,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
     n_agn_params = sum(label != "M0_sn" for label in model_labels)
@@ -5837,11 +6623,15 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         df_agn,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         pivot_context=agn_pivot_context,
     )
     agn_parameter_names, _, _ = get_agn_model_spec(
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
     )
     agn_parameter_samples = np.column_stack(
         [flat_samples[:, param_indices[name]] for name in agn_parameter_names]
@@ -5852,6 +6642,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         agn_pivot_arr,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
     )
     mu_pred_samples = m_obs[None, :] - predicted_M2500_samples
 
@@ -5877,8 +6669,12 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         M_model_agn_observable_variance_posterior(
             agn_parameter_samples,
             agn_err_arr,
+            obs_arr=agn_obs_arr,
+            pivots_array=agn_pivot_arr,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         )
     )
     predicted_M2500_err = np.sqrt(pred_m2500_var)
@@ -5891,6 +6687,14 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     )
     pred_m2500_eta_sigma_var = pred_m2500_var_components.get(
         "eta_sigma",
+        np.zeros_like(pred_m2500_var),
+    )
+    pred_m2500_fagn_sigmoid_var = pred_m2500_var_components.get(
+        "f_agn_psf_2500_sigmoid",
+        np.zeros_like(pred_m2500_var),
+    )
+    pred_m2500_fagn_flux_fraction_var = pred_m2500_var_components.get(
+        "f_agn_psf_2500_flux_fraction",
         np.zeros_like(pred_m2500_var),
     )
 
@@ -6352,6 +7156,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             results,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         )
         agn_obs_med = {key: float(np.median(df_agn[key].values)) * np.ones_like(z_grid) for key in agn_model_req_obs + agn_model_req_errs}
         if option_flags["use_alpha_lambda_term"]:
@@ -6360,10 +7166,22 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         if option_flags["use_eta_sigma_term"]:
             agn_obs_med["eta_sigma"] = float(np.median(df_agn["eta_sigma"].values)) * np.ones_like(z_grid)
             agn_obs_med["eta_sigma_err"] = float(np.median(df_agn["eta_sigma_err"].values)) * np.ones_like(z_grid)
+        if (
+            option_flags["use_f_agn_psf_2500_sigmoid_term"]
+            or option_flags["use_f_agn_psf_2500_flux_fraction_term"]
+        ):
+            agn_obs_med["f_AGN_psf_2500"] = float(
+                np.median(df_agn["f_AGN_psf_2500"].values)
+            ) * np.ones_like(z_grid)
+            agn_obs_med["f_AGN_psf_2500_err"] = float(
+                np.median(df_agn["f_AGN_psf_2500_err"].values)
+            ) * np.ones_like(z_grid)
         agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(
             agn_obs_med,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
             pivot_context=agn_pivot_context,
         )
 
@@ -6374,6 +7192,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 agn_pivot_arr,
                 use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
                 use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+                use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
             )
             for s in flat_samples
         ], axis=0)
@@ -6389,13 +7209,22 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     for cosmo_model_other, cosmo_model_samples_other in cosmo_model_samples.items():
         option_flags_other = resolve_model_option_flags(
-            cosmo_model_other, np.asarray(cosmo_model_samples_other).shape[1]
+            cosmo_model_other,
+            np.asarray(cosmo_model_samples_other).shape[1],
+            use_f_agn_psf_2500_sigmoid_term=option_flags[
+                "use_f_agn_psf_2500_sigmoid_term"
+            ],
+            use_f_agn_psf_2500_flux_fraction_term=option_flags[
+                "use_f_agn_psf_2500_flux_fraction_term"
+            ],
         )
         _, model_labels_other, _ = get_model_params(
             cosmo_model_other,
             only_agn=option_flags_other["only_agn"],
             use_alpha_lambda_term=option_flags_other["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags_other["use_eta_sigma_term"],
+            use_f_agn_psf_2500_sigmoid_term=option_flags_other["use_f_agn_psf_2500_sigmoid_term"],
+            use_f_agn_psf_2500_flux_fraction_term=option_flags_other["use_f_agn_psf_2500_flux_fraction_term"],
             use_redshift_log_f_term=option_flags_other["use_redshift_log_f_term"],
         )
         model_label_latex_other = cosmo_model_label_latex(cosmo_model_other)
@@ -6439,13 +7268,22 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
         for cosmo_model_other, cosmo_model_samples_other in cosmo_model_samples.items():
             option_flags_other = resolve_model_option_flags(
-                cosmo_model_other, np.asarray(cosmo_model_samples_other).shape[1]
+                cosmo_model_other,
+                np.asarray(cosmo_model_samples_other).shape[1],
+                use_f_agn_psf_2500_sigmoid_term=option_flags[
+                    "use_f_agn_psf_2500_sigmoid_term"
+                ],
+                use_f_agn_psf_2500_flux_fraction_term=option_flags[
+                    "use_f_agn_psf_2500_flux_fraction_term"
+                ],
             )
             _, model_labels_other, _ = get_model_params(
                 cosmo_model_other,
                 only_agn=option_flags_other["only_agn"],
                 use_alpha_lambda_term=option_flags_other["use_alpha_lambda_term"],
                 use_eta_sigma_term=option_flags_other["use_eta_sigma_term"],
+                use_f_agn_psf_2500_sigmoid_term=option_flags_other["use_f_agn_psf_2500_sigmoid_term"],
+                use_f_agn_psf_2500_flux_fraction_term=option_flags_other["use_f_agn_psf_2500_flux_fraction_term"],
                 use_redshift_log_f_term=option_flags_other["use_redshift_log_f_term"],
             )
             z_grid_fine = np.linspace(1e-4, 5.2, 500)
@@ -6537,7 +7375,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 ha="left",
                 va="bottom",
                 fontsize=11,
-                bbox=dict(boxstyle="round,pad=0.02", facecolor="white", alpha=0.8, edgecolor="none"),
+                bbox=dict(boxstyle="round,pad=0.02", facecolor="white", alpha=0.0, edgecolor="none"),
                 zorder=20,                
             )
         if df_calibrators is not None:
@@ -6568,11 +7406,15 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             results,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         )
         obs_show, err_show, piv_show = agn_model_pack_obs(
             ds,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
             pivot_context=agn_pivot_context,
         )
         pred_M_show = M_model_agn(
@@ -6581,6 +7423,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             piv_show,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         )
         pred_M_err_show = M_model_agn_err(
             agn_params_arr_show,
@@ -6589,6 +7433,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             piv_show,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         )
 
         # Distance modulus prediction: mu = m_2500 - M_2500
@@ -6736,6 +7582,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             {"metric": "median_predicted_M2500_cov_term_mag_signed", "value": float(np.median(np.sign(pred_m2500_cov_var[error_budget_mask]) * np.sqrt(np.abs(pred_m2500_cov_var[error_budget_mask]))))},
             {"metric": "median_predicted_M2500_alpha_lambda_term_mag", "value": float(np.median(np.sqrt(np.clip(pred_m2500_alpha_lambda_var[error_budget_mask], 0.0, None))))},
             {"metric": "median_predicted_M2500_eta_sigma_term_mag", "value": float(np.median(np.sqrt(np.clip(pred_m2500_eta_sigma_var[error_budget_mask], 0.0, None))))},
+            {"metric": "median_predicted_M2500_f_agn_psf_2500_sigmoid_term_mag", "value": float(np.median(np.sqrt(np.clip(pred_m2500_fagn_sigmoid_var[error_budget_mask], 0.0, None))))},
+            {"metric": "median_predicted_M2500_f_agn_psf_2500_flux_fraction_term_mag", "value": float(np.median(np.sqrt(np.clip(pred_m2500_fagn_flux_fraction_var[error_budget_mask], 0.0, None))))},
             {"metric": "median_mu_pred_std_mag", "value": float(np.median(mu_pred_std[error_budget_mask]))},
             {"metric": "median_intrinsic_scatter_mag", "value": float(np.median(intrinsic_scatter[error_budget_mask]))},
             {"metric": "median_mu_pred_std_with_scatter_mag", "value": float(np.median(mu_pred_std_with_scatter[error_budget_mask]))},
@@ -6754,6 +7602,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             {"metric": "median_var_fraction_predicted_M2500_cov_term", "value": _median_fraction(pred_m2500_cov_var)},
             {"metric": "median_var_fraction_predicted_M2500_alpha_lambda_term", "value": _median_fraction(pred_m2500_alpha_lambda_var)},
             {"metric": "median_var_fraction_predicted_M2500_eta_sigma_term", "value": _median_fraction(pred_m2500_eta_sigma_var)},
+            {"metric": "median_var_fraction_predicted_M2500_f_agn_psf_2500_sigmoid_term", "value": _median_fraction(pred_m2500_fagn_sigmoid_var)},
+            {"metric": "median_var_fraction_predicted_M2500_f_agn_psf_2500_flux_fraction_term", "value": _median_fraction(pred_m2500_fagn_flux_fraction_var)},
         ]
         if redshift_trend is not None:
             budget_rows.extend(
@@ -6781,6 +7631,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         per_object_budget_df["predicted_M2500_cov_term_signed"] = np.sign(pred_m2500_cov_var) * np.sqrt(np.abs(pred_m2500_cov_var))
         per_object_budget_df["predicted_M2500_alpha_lambda_term"] = np.sqrt(np.clip(pred_m2500_alpha_lambda_var, 0.0, None))
         per_object_budget_df["predicted_M2500_eta_sigma_term"] = np.sqrt(np.clip(pred_m2500_eta_sigma_var, 0.0, None))
+        per_object_budget_df["predicted_M2500_f_agn_psf_2500_sigmoid_term"] = np.sqrt(np.clip(pred_m2500_fagn_sigmoid_var, 0.0, None))
+        per_object_budget_df["predicted_M2500_f_agn_psf_2500_flux_fraction_term"] = np.sqrt(np.clip(pred_m2500_fagn_flux_fraction_var, 0.0, None))
         per_object_budget_df["intrinsic_scatter_term"] = intrinsic_scatter
         per_object_budget_df["sigma_dmi_term"] = sigma_dmi if sigma_dmi is not None else np.nan
         per_object_budget_df["sigma_sel_term"] = sigma_sel if sigma_sel is not None else np.nan
@@ -6804,6 +7656,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             "predicted_M2500_cov_term_signed",
             "predicted_M2500_alpha_lambda_term",
             "predicted_M2500_eta_sigma_term",
+            "predicted_M2500_f_agn_psf_2500_sigmoid_term",
+            "predicted_M2500_f_agn_psf_2500_flux_fraction_term",
             "intrinsic_scatter_term",
             "sigma_dmi_term",
             "sigma_sel_term",
@@ -7322,6 +8176,8 @@ def plot_predicted_vs_actual_M2500(
     clipped_mask=None,
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
+    use_f_agn_psf_2500_sigmoid_term=None,
+    use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
     dmi_selection_sigma=None,
     dmi_selection_sigma_interp=None,
@@ -7352,6 +8208,8 @@ def plot_predicted_vs_actual_M2500(
         np.asarray(flat_samples).shape[1],
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
@@ -7359,6 +8217,8 @@ def plot_predicted_vs_actual_M2500(
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
     results = {key: np.median(flat_samples[:, i])
@@ -7416,11 +8276,15 @@ def plot_predicted_vs_actual_M2500(
         results,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
     )
     agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(
         df_agn,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         pivot_context=agn_pivot_context,
     )
 
@@ -7430,6 +8294,8 @@ def plot_predicted_vs_actual_M2500(
         agn_pivot_arr,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
     )
     M_2500_pred_err = M_model_agn_err(
         agn_params_arr,
@@ -7438,6 +8304,8 @@ def plot_predicted_vs_actual_M2500(
         agn_pivot_arr,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
     )
     M_2500_pred_err[~np.isfinite(M_2500_pred_err) | (M_2500_pred_err < 0)] = np.nan
 
@@ -7775,10 +8643,18 @@ def plot_predicted_vs_actual_M2500(
 
         # Add band/completeness legend once as well (if present)
         if (show_sigma_band or show_cosmo_uncertainty_band or completeness) and i == num_cols-1:
-            leg = ax.legend(loc="lower right", fontsize=12, frameon=True)
-            leg.get_frame().set_facecolor("none")
-            leg.get_frame().set_alpha(box_alpha)
-            leg.get_frame().set_edgecolor("none")
+            handles, labels = ax.get_legend_handles_labels()
+            if handles:
+                leg = ax.legend(
+                    handles,
+                    labels,
+                    loc="lower right",
+                    fontsize=12,
+                    frameon=True,
+                )
+                leg.get_frame().set_facecolor("none")
+                leg.get_frame().set_alpha(box_alpha)
+                leg.get_frame().set_edgecolor("none")
 
     for ax in axes:
         if ax.has_data():
@@ -8007,838 +8883,492 @@ def _residual_axis_label(residual_label):
 
 
 
-def plot_full_residuals(
-    df_agn, residuals, residuals_err, flat_samples, cosmo_model, z_pivot_agn,
-    debias=False, dm_interp=None, dmi_values=None, plot_path='plots/hubble', show=False,
-    *, nbins=10, min_count=5, z_cut=None, key_y='residuals', key_color='z',
-    z_range=(0.44, 3.16), residual_label='residuals', output_tag='full_residuals',
-    max_categories=12, category_min_count=5, category_jitter=0.15,
-    clipped_mask=None,
-    use_alpha_lambda_term=None, use_eta_sigma_term=None, use_redshift_log_f_term=None,
-):
-    df_agn = df_agn.copy()
-    df_agn[residual_label] = residuals
-    if key_y == 'residuals':
-        key_y = residual_label
-    if key_color == 'residuals':
-        key_color = residual_label
+_PARTIAL_CONTROL_PRIORITY_FIELDS = (
+    "m_2500_dereddened",
+    "m_2500_attenuated_model",
+    "a_2500_total",
+    "a_2500_internal",
+    "a_2500_galaxy",
+    "ebv_agn",
+    "ebv_gal",
+    "log_ebv_agn",
+    "log_ebv_gal",
+    "alpha_nu_attenuated_1450_2500",
+    "alpha_nu_intrinsic_1450_2500",
+    "delta_alpha_nu",
+    "uv_slope",
+)
+_PARTIAL_CONTROL_EXCLUDED_SUFFIXES = (
+    "_err",
+    "_err_lower",
+    "_err_upper",
+    "_std",
+    "_rhat",
+)
 
-    df_agn = df_agn.reset_index(drop=True)
-    clipped_mask = _resolve_clipped_mask(df_agn, clipped_mask)
 
-    def _median_param_dict(samples):
-        option_flags = resolve_model_option_flags(
-            cosmo_model,
-            np.asarray(samples).shape[1],
-            use_alpha_lambda_term=use_alpha_lambda_term,
-            use_eta_sigma_term=use_eta_sigma_term,
-            use_redshift_log_f_term=use_redshift_log_f_term,
+def _partial_control_add_derived_fields(frame):
+    """Add the derived scalar quantities shown in the partial-control atlas."""
+    if {
+        "alpha_nu_attenuated_1450_2500",
+        "alpha_nu_intrinsic_1450_2500",
+    }.issubset(frame.columns):
+        frame["delta_alpha_nu"] = (
+            pd.to_numeric(
+                frame["alpha_nu_attenuated_1450_2500"], errors="coerce"
+            )
+            - pd.to_numeric(
+                frame["alpha_nu_intrinsic_1450_2500"], errors="coerce"
+            )
         )
-        _, model_labels, _ = get_model_params(
-            cosmo_model,
-            only_agn=option_flags["only_agn"],
-            use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
-            use_eta_sigma_term=option_flags["use_eta_sigma_term"],
-            use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
+    if "ebv_wu" in frame.columns:
+        frame["log_ebv_wu"] = np.log10(
+            np.abs(pd.to_numeric(frame["ebv_wu"], errors="coerce")) + 1e-10
         )
-        return {
-            key: np.percentile(samples[:, i], [16, 50, 84])
-            for i, key in enumerate(model_labels)
-        }
-
-    def _build_cosmology(results):
-        if cosmo_model == 'FlatwCDM':
-            return FlatwCDM(H0=results['H0'][1], Om0=results['Om0'][1], w0=results['w0'][1])
-        if cosmo_model == 'FlatwpwaCDM':
-            return FlatwpwaCDM(
-                H0=results['H0'][1],
-                Om0=results['Om0'][1],
-                wp=results['wp'][1],
-                wa=results['wa'][1],
-                zp=z_pivot_agn,
-            )
-        if cosmo_model == 'Flatw0waCDM':
-            return Flatw0waCDM(
-                H0=results['H0'][1],
-                Om0=results['Om0'][1],
-                w0=results['w0'][1],
-                wa=results['wa'][1],
-            )
-        if cosmo_model == 'FlatLambdaCDM':
-            return FlatLambdaCDM(H0=results['H0'][1], Om0=results['Om0'][1])
-        raise ValueError("Invalid cosmology model.")
-
-    def _safelog(a):
-        return np.log10(np.abs(a) + 1e-10)
-
-    def _augment_plot_columns(frame, cosmo):
-        frame['MY_M_2500'] = frame['apparent_mag_2500'].values - cosmo.distmod(frame['z'].values).value
-
-        if debias:
-            delta = _resolve_debias_values(
-                frame,
-                dm_interp=dm_interp,
-                dmi_values=dmi_values,
-            )
-            frame['MY_M_2500'] -= delta
-            frame['apparent_mag_2500'] -= delta
-            if 'apparent_mag_2500_reddened' in frame.columns:
-                frame['apparent_mag_2500_reddened'] -= delta
-
-        if 'apparent_mag_2500_err' in frame.columns and 'apparent_mag_2500' in frame.columns:
-            mag = np.asarray(frame['apparent_mag_2500'], dtype=float)
-            mag_err = np.asarray(frame['apparent_mag_2500_err'], dtype=float)
-            frame['rel_apparent_mag_2500_err'] = np.divide(
-                mag_err,
-                np.maximum(np.abs(mag), 1e-8),
-                out=np.full_like(mag_err, np.nan, dtype=float),
-                where=np.isfinite(mag_err) & np.isfinite(mag),
-            )
-        if 'frac_host_psf_2500' in frame.columns:
-            frac_host = np.asarray(frame['frac_host_psf_2500'], dtype=float)
-            log_frac_host = np.full(frac_host.shape, np.nan, dtype=float)
-            valid_frac_host = np.isfinite(frac_host) & (frac_host > 0)
-            log_frac_host[valid_frac_host] = np.log10(frac_host[valid_frac_host])
-            frame['log_frac_host_psf_2500'] = log_frac_host
-
-        if "f_na" in frame.columns or "f_br" in frame.columns:
-            f_na = (
-                pd.to_numeric(frame["f_na"], errors="coerce")
-                if "f_na" in frame.columns
-                else pd.Series(0.0, index=frame.index)
-            )
-            f_br = (
-                pd.to_numeric(frame["f_br"], errors="coerce")
-                if "f_br" in frame.columns
-                else pd.Series(0.0, index=frame.index)
-            )
-            frame["f_lines"] = f_na.fillna(0.0) + f_br.fillna(0.0)
-            frame["log_f_lines"] = _safelog(frame["f_lines"])
-
-        log_columns = {
-            'dm_red': 'log_dm_red',
-            'reddening_integral': 'log_reddening_integral',
-            'reddening_proxy': 'log_reddening_proxy',
-            'BI': 'log_bi',
-            'bi': 'log_bi',
-            'redchi': 'log_redchi',
-            'redchi2_conti_full': 'log_redchi2_conti_full',
-            'apparent_mag_2500_err': 'log_apparent_mag_2500_err',
-            'log_sigma_uv_err': 'log_log_sigma_uv_err',
-            'log_tau_uv_rf_err': 'log_log_tau_uv_rf_err',
-            'psf_minus_fiber_r': 'log_psf_minus_fiber_r',
-            'petroRad_r': 'log_petroRad_r',
-            'log_tau_uv_rhat': 'log_log_tau_uv_rhat',
-            'f_bc_3000': 'log_f_bc_3000',
-            'f_fe_uv_3000': 'log_f_fe_uv_3000',
-            'RCHI2': 'log_RCHI2',
-            'RCHI2DIFF': 'log_RCHI2DIFF',
-            'reddening_ebv': 'log_reddening_ebv',
-            'ebv_mw': 'log_ebv_mw',
-            'ebv_wu': 'log_ebv_wu',
-            'frac_bc_2500': 'log_frac_bc_2500',
-            'f_PL': 'log_f_PL',
-            'SN_MEDIAN_ALL': 'log_sn_median_all',
-
-        }
-        for source_col, derived_col in log_columns.items():
-            if source_col in frame.columns:
-                frame[derived_col] = _safelog(frame[source_col])
-
-        if {'log_tau_uv_rf', 'log_tau_fast_uv'}.issubset(frame.columns):
-            z = np.asarray(frame['z'], dtype=float)
-            log_tau_uv_rf = np.asarray(frame['log_tau_uv_rf'], dtype=float)
-            log_tau_fast_uv = np.asarray(frame['log_tau_fast_uv'], dtype=float)
-            log_tau_fast_uv_rf = log_tau_fast_uv - np.log10(1.0 + z)
-            tau_uv_rf = np.power(10.0, log_tau_uv_rf)
-            tau_fast_uv_rf = np.power(10.0, log_tau_fast_uv_rf)
-            frame['delta_tau_uv_fast_rf'] = np.where(
-                np.isfinite(tau_uv_rf) & np.isfinite(tau_fast_uv_rf),
-                tau_uv_rf - tau_fast_uv_rf,
-                np.nan,
-            )
-            frame['log_delta_tau_uv_fast_rf'] = np.where(
-                np.isfinite(frame['delta_tau_uv_fast_rf']) & (frame['delta_tau_uv_fast_rf'] > 0.0),
-                np.log10(frame['delta_tau_uv_fast_rf']),
-                np.nan,
-            )
-
-        for col in ['BC', 'decomp_host', 'poly']:
-            if col in frame.columns:
-                frame[col] = frame[col].replace(
-                    {True: 1, False: 0, 'True': 1, 'False': 0, 'true': 1, 'false': 0}
-                )
-
-        if "log_sigma_uv_uncorrected" in frame.columns:
-            frame["log_sigma_uv_diluted"] = frame["log_sigma_uv_uncorrected"]
-
-    results = _median_param_dict(flat_samples)
-    cosmo = _build_cosmology(results)
-    _augment_plot_columns(df_agn, cosmo)
-
-    # ---- Which x-keys to show (keep your order) ----
-    keys = [col for col in [
-        'log_f_lines',
-        'f_PL', 'log_f_PL',
-        'dlog_amp_bc', 
-        'frac_bc_2500', 'log_frac_bc_2500',
-        'log_reddening_ebv',
-        'ebv_mw', 'log_ebv_mw',
-        'ebv_wu', 'log_ebv_wu',
-        'log_bi',
-        'apparent_mag_2500_intrinsict',
-        #'chi_sq_red_g_raw', 'log_chi_sq_red_g_raw', 'variability_chi_sq_g_raw', 'log_variability_chi_sq_g_raw',
-        #'pvalue_g', 'log_pvalue_g',
-        #'sdss_plate_count', 'RCHI2', 'log_RCHI2', 'RCHI2DIFF', 'log_RCHI2DIFF', 'VDISP', 'ZWARNING', 'RUN2D',
-        'log_frac_host_psf_2500',
-        'wrms', 'log_f_bc_3000', 'log_f_fe_uv_3000',
-        'rel_apparent_mag_2500_err',
-        #'apparent_mag_2500_err', 'log_apparent_mag_2500_err', 
-        #'log_sigma_uv_err', 'log_log_sigma_uv_err',
-        #'log_tau_uv_rf_err', 'log_log_tau_uv_rf_err',
-        #'apparent_mag_2500', 'apparent_mag_2500_reddened', 'dm_red', 'log_dm_red', 
-        'ebv_wu',
-        #'conti_a_0', 'PL_slope_blue', 
-        #'MY_M_2500', 'z', 'log_lbol', 'log_ledd_ratio', 
-        'log_delta_tau_uv_fast_rf',
-        'log_sigma_uv_diluted',
-        'log_sigma_uv', 'log_tau_uv_rf',
-        'log_tau_uv', 'log_tau_fast_uv',
-        #'log_tau_fast_band_u_RF', 'log_tau_fast_band_g_RF', 'log_tau_fast_band_r_RF', 'log_tau_fast_band_i_RF', 'log_tau_fast_band_z_RF',
-        'sn_median_all', 'redchi', 'log_redchi', 'alpha_lambda',
-        #'redchi2_conti_full', 'log_redchi2_conti_full',
-        'bwb_alpha', 'bwb_beta', 
-        #'log_rho', 't_rf_length', 'tau_band_RF_mean',
-        #'log_tau_band_RF_mean', 'log_t_rf_length', 
-        #'alphaOX', 'alphaOX_int',
-        #'bwb_alpha_u', 'bwb_alpha_g', 'bwb_alpha_r', 'bwb_alpha_i', 'bwb_alpha_z',
-        'eta_sigma', 'eta_tau',
-        'dlog_amp_bc',
-        #'PL_slope_blue', 'lam_min', 'lam_max', 'lam_range', 
-        'linear_trend', 'psf_minus_fiber_r', 'log_psf_minus_fiber_r', 'petroRad_r', 'log_petroRad_r',
-        #'cadence', 'number_points',
-        #'log_jitter_total',
-        'dlog_amp_blr_total',
-        'dlog_amp_blr_u', 'dlog_amp_blr_g', 'dlog_amp_blr_r', 'dlog_amp_blr_i', 'dlog_amp_blr_z',
-        'log_igm_transmission_band_u', 'log_igm_transmission_band_g', 'log_igm_transmission_band_r', 'log_igm_transmission_band_i', 'log_igm_transmission_band_z',
-        #'log_jitter_u', 'log_jitter_g', 'log_jitter_r', 'log_jitter_i', 'log_jitter_z',
-
-    ] if col in df_agn.columns]
+    if "log_sigma_uv_uncorrected" in frame.columns:
+        frame["log_sigma_uv_diluted"] = pd.to_numeric(
+            frame["log_sigma_uv_uncorrected"], errors="coerce"
+        )
+    if {"log_tau_uv_rf", "log_tau_fast_uv", "z"}.issubset(frame.columns):
+        tau = np.power(
+            10.0, pd.to_numeric(frame["log_tau_uv_rf"], errors="coerce")
+        )
+        tau_fast_rf = np.power(
+            10.0,
+            pd.to_numeric(frame["log_tau_fast_uv"], errors="coerce")
+            - np.log10(
+                1.0 + pd.to_numeric(frame["z"], errors="coerce")
+            ),
+        )
+        delta = tau - tau_fast_rf
+        frame["log_delta_tau_uv_fast_rf"] = np.where(
+            delta > 0.0, np.log10(delta), np.nan
+        )
 
 
-    keys_masks = {
-        'dm_red': (-5, 5),
-        'log_dm_red': (-np.inf, 1),
-        'frac_host_psf_2500': (-2, 1),
-        'log_lbol': (1, np.inf),
+def _partial_control_parameter_groups(frame, *, min_points):
+    """Return fitted predictors followed by scalar spectra-H5 parameters."""
+    fitted_predictors = [
+        field
+        for field in ("log_sigma_uv", "log_tau_uv_rf")
+        if field in frame.columns
+    ]
+    spectra_fields = set(frame.attrs.get("spectra_fit_columns", ()))
+    if "delta_alpha_nu" in frame.columns:
+        spectra_fields.add("delta_alpha_nu")
+    excluded = {
+        "object_id",
+        "sdss_name",
+        "z",
+        *fitted_predictors,
     }
+    sed_fields = []
+    for field in spectra_fields:
+        if field in excluded or field not in frame.columns:
+            continue
+        if field.startswith("SDSS_") or field.endswith(
+            _PARTIAL_CONTROL_EXCLUDED_SUFFIXES
+        ):
+            continue
+        series = frame[field]
+        if not isinstance(series, pd.Series) or not (
+            pd.api.types.is_numeric_dtype(series.dtype)
+            or pd.api.types.is_bool_dtype(series.dtype)
+        ):
+            continue
+        values = pd.to_numeric(series, errors="coerce").to_numpy(dtype=float)
+        finite = values[np.isfinite(values)]
+        if finite.size < int(min_points) or np.unique(finite).size < 2:
+            continue
+        sed_fields.append(field)
 
-    keys_yx_line = ['MY_M_2500', 'apparent_mag_2500']
-
-    n_keys = len(keys)
-    n_cols = 4
-    n_rows = math.ceil(n_keys / n_cols)
-    share_residual_y = key_y == residual_label
-    use_symmetric_color_norm = key_color == residual_label
-
-    fig, axes_grid = plt.subplots(
-        n_rows,
-        n_cols,
-        figsize=(5 * n_cols, 3.5 * n_rows),
-        sharey="row" if share_residual_y else False,
-        squeeze=False,
+    sed_unique = sorted(set(sed_fields))
+    sed_ordered = [
+        field for field in _PARTIAL_CONTROL_PRIORITY_FIELDS if field in sed_unique
+    ]
+    sed_ordered.extend(
+        field for field in sed_unique if field not in sed_ordered
     )
-    axes = axes_grid.flatten()
+    return [
+        ("Hubble-fit predictors", fitted_predictors),
+        ("SED / spectral-fit parameters", sed_ordered),
+    ]
 
-    global_color_norm = None
-    global_color_cmap = "bwr_r" if use_symmetric_color_norm else (
-        "viridis" if key_y == residual_label else "bwr_r"
+
+def _partial_control_residualize(values, controls):
+    values = np.asarray(values, dtype=float)
+    controls = np.asarray(controls, dtype=float)
+    result = np.full(values.shape, np.nan, dtype=float)
+    finite = np.isfinite(values) & np.all(np.isfinite(controls), axis=1)
+    if np.count_nonzero(finite) <= controls.shape[1]:
+        return result
+    coefficients = np.linalg.lstsq(
+        controls[finite], values[finite], rcond=None
+    )[0]
+    result[finite] = values[finite] - controls[finite] @ coefficients
+    return result
+
+
+def _partial_control_binned_trend(x, y, z, *, bins=14, min_count=8):
+    finite = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
+    x, y, z = x[finite], y[finite], z[finite]
+    if x.size < max(3 * int(min_count), 10) or np.unique(x).size < 3:
+        return (np.array([]),) * 5
+    edges = np.unique(np.quantile(x, np.linspace(0.0, 1.0, int(bins) + 1)))
+    centers, medians, lower, upper, mean_z = [], [], [], [], []
+    for bin_index, (left, right) in enumerate(zip(edges[:-1], edges[1:])):
+        use = (x >= left) & (
+            (x <= right) if bin_index == len(edges) - 2 else (x < right)
+        )
+        if np.count_nonzero(use) < int(min_count):
+            continue
+        centers.append(np.median(x[use]))
+        medians.append(np.median(y[use]))
+        lower.append(np.quantile(y[use], 0.16))
+        upper.append(np.quantile(y[use], 0.84))
+        mean_z.append(np.mean(z[use]))
+    return tuple(
+        np.asarray(value)
+        for value in (centers, medians, lower, upper, mean_z)
     )
 
-    def _make_color_norm(color_num):
-        color_num = np.asarray(color_num, dtype=float)
-        finite_color = np.isfinite(color_num)
-        if not np.any(finite_color):
-            return None
-        cmin = float(np.nanmin(color_num[finite_color]))
-        cmax = float(np.nanmax(color_num[finite_color]))
-        if use_symmetric_color_norm:
-            cabs = max(abs(cmin), abs(cmax), 1e-6)
-            return mpl.colors.TwoSlopeNorm(vmin=-cabs, vcenter=0.0, vmax=cabs)
-        if cmin == cmax:
-            cmin, cmax = cmin - 1e-6, cmax + 1e-6
-        return mpl.colors.Normalize(vmin=cmin, vmax=cmax)
 
-    if key_color in df_agn.columns and pd.api.types.is_numeric_dtype(df_agn[key_color]):
-        color_all = pd.to_numeric(df_agn[key_color], errors='coerce').to_numpy(dtype=float)
-        global_color_norm = _make_color_norm(color_all)
+def plot_full_residuals_debiased_partial_controls(
+    df_agn,
+    residuals,
+    *,
+    plot_path="plots/hubble",
+    z_range=(0.44, 3.16),
+    show=False,
+    redshift_bin_width=0.3,
+    panels_per_page=20,
+    min_points=10,
+    trend_bins=14,
+):
+    """Plot post-cut Hubble residual associations after shared controls.
 
-    def _panel_mask(key):
-        if pd.api.types.is_numeric_dtype(df_agn[key]):
-            mask = (df_agn[key] > -1e9) & np.isfinite(df_agn[key])
+    Each fitted predictor is residualized against redshift-bin fixed effects
+    and the other fitted predictor. Each spectra-H5 parameter is residualized
+    against the same redshift effects and both fitted predictors. The Hubble
+    residual is residualized against the identical controls in each panel.
+    """
+    if "z" not in df_agn.columns:
+        raise ValueError("df_agn must contain a 'z' column.")
+    if int(min_points) < 3:
+        raise ValueError("min_points must be at least 3.")
+    if int(panels_per_page) < 1:
+        raise ValueError("panels_per_page must be positive.")
+    if not np.isfinite(redshift_bin_width) or redshift_bin_width <= 0.0:
+        raise ValueError("redshift_bin_width must be positive.")
+
+    residuals = np.asarray(residuals, dtype=float)
+    if residuals.ndim != 1 or residuals.size != len(df_agn):
+        raise ValueError(
+            f"residuals length {residuals.size} does not match dataframe "
+            f"length {len(df_agn)}."
+        )
+    z_min, z_max = map(float, z_range)
+    if not (np.isfinite(z_min) and np.isfinite(z_max) and z_min < z_max):
+        raise ValueError("z_range must contain two finite, increasing values.")
+
+    source_attrs = dict(df_agn.attrs)
+    table = df_agn.copy().reset_index(drop=True)
+    table.attrs.update(source_attrs)
+    table["residuals"] = residuals
+    z_all = pd.to_numeric(table["z"], errors="coerce").to_numpy(dtype=float)
+    fit_selection = (
+        table["is_fit_selection"].fillna(False).to_numpy(dtype=bool)
+        if "is_fit_selection" in table.columns
+        else np.ones(len(table), dtype=bool)
+    )
+    postcut = (
+        fit_selection
+        & np.isfinite(z_all)
+        & np.isfinite(residuals)
+        & (z_all >= z_min)
+        & (z_all <= z_max)
+    )
+    table = table.loc[postcut].copy().reset_index(drop=True)
+    table.attrs.update(source_attrs)
+    if len(table) < int(min_points):
+        raise ValueError(
+            "Too few finite post-cut residuals for partial-control "
+            f"diagnostics: {len(table)} < {int(min_points)}."
+        )
+    _partial_control_add_derived_fields(table)
+
+    groups = _partial_control_parameter_groups(table, min_points=min_points)
+    fields = [field for _, section_fields in groups for field in section_fields]
+    if not fields:
+        raise ValueError("No eligible fitted or spectra-H5 parameters found.")
+
+    z = pd.to_numeric(table["z"], errors="coerce").to_numpy(dtype=float)
+    redshift_edges = np.arange(
+        z_min, z_max + float(redshift_bin_width), float(redshift_bin_width)
+    )
+    if redshift_edges[-1] < z_max:
+        redshift_edges = np.append(redshift_edges, z_max)
+    else:
+        redshift_edges[-1] = z_max
+    z_bin = pd.cut(
+        table["z"], redshift_edges, right=True, include_lowest=True
+    )
+    z_dummies = pd.get_dummies(z_bin, drop_first=True, dtype=float).to_numpy()
+    y = table["residuals"].to_numpy(dtype=float)
+
+    partials = {}
+    for field in fields:
+        if field == "log_sigma_uv":
+            continuous = [name for name in ("log_tau_uv_rf",) if name in table]
+            control_label = r"$z$ bins + $\log\tau_{\rm UV,rf}$"
+        elif field == "log_tau_uv_rf":
+            continuous = [name for name in ("log_sigma_uv",) if name in table]
+            control_label = r"$z$ bins + $\log\sigma_{\rm UV}$"
         else:
-            mask = np.ones(len(df_agn), dtype=bool)
-        if z_cut is not None:
-            mask &= df_agn['z'] < z_cut
-        if key in keys_masks:
-            low, high = keys_masks[key]
-            mask &= df_agn[key].between(low, high)
-        if key in {"frac_host_psf_2500", "log_frac_host_psf_2500"} and "frac_host_psf_2500" in df_agn.columns:
-            mask &= pd.to_numeric(df_agn["frac_host_psf_2500"], errors="coerce").to_numpy(dtype=float) > 0.0
-        if key == "log_bi" and "bi" in df_agn.columns:
-            mask &= pd.to_numeric(df_agn["bi"], errors="coerce").to_numpy(dtype=float) > 0.0
-        mask &= np.isfinite(residuals)
-        if isinstance(mask, pd.Series):
-            mask = mask.fillna(False).to_numpy(dtype=bool)
-        elif hasattr(mask, "fillna"):
-            mask = np.asarray(mask.fillna(False), dtype=bool)
-        else:
-            mask = np.asarray(mask, dtype=bool)
-        return mask
+            continuous = [
+                name
+                for name in ("log_sigma_uv", "log_tau_uv_rf")
+                if name in table
+            ]
+            control_label = (
+                r"$z$ bins + $\log\sigma_{\rm UV}$ + $\log\tau_{\rm UV,rf}$"
+                if len(continuous) == 2
+                else "$z$ bins" + " + " + " + ".join(continuous)
+            )
+        continuous_values = np.column_stack(
+            [
+                pd.to_numeric(table[name], errors="coerce").to_numpy(float)
+                for name in continuous
+            ]
+        ) if continuous else np.empty((len(table), 0), dtype=float)
+        controls = np.column_stack(
+            [np.ones(len(table)), continuous_values, z_dummies]
+        )
+        x = pd.to_numeric(table[field], errors="coerce").to_numpy(float)
+        common = np.isfinite(x) & np.isfinite(y) & np.all(
+            np.isfinite(controls), axis=1
+        )
+        partials[field] = (
+            _partial_control_residualize(np.where(common, x, np.nan), controls),
+            _partial_control_residualize(np.where(common, y, np.nan), controls),
+            control_label,
+        )
 
-    def _panel_xy_and_style(mask, key):
-        color_values = df_agn.loc[mask, key_color].to_numpy()
-        if key_y == residual_label:
-            x = df_agn.loc[mask, key].to_numpy()
-            y = residuals[mask]
-            xlabel, ylabel = key, _residual_axis_label(residual_label)
-            color_num = pd.to_numeric(pd.Series(color_values), errors='coerce').to_numpy(dtype=float)
-            finite_color = np.isfinite(color_num)
-            if np.any(finite_color):
-                norm = global_color_norm if global_color_norm is not None else _make_color_norm(color_num)
-                color_values = color_num
-            else:
-                norm = None
-            cmap = global_color_cmap
-        else:
-            x = df_agn.loc[mask, key_y].to_numpy()
-            y = df_agn.loc[mask, key].to_numpy()
-            xlabel, ylabel = key_y, key
-            color_num = pd.to_numeric(pd.Series(color_values), errors='coerce').to_numpy(dtype=float)
-            finite_color = np.isfinite(color_num)
-            if np.any(finite_color):
-                norm = global_color_norm if global_color_norm is not None else _make_color_norm(color_num)
-                color_values = color_num
-            else:
-                norm = None
-            cmap = global_color_cmap
-        return x, y, color_values, xlabel, ylabel, cmap, norm
+    output_dir = plot_path or "plots/hubble"
+    os.makedirs(output_dir, exist_ok=True)
+    pdf_path = os.path.join(
+        output_dir, "full_residuals_debiased_partial_controls.pdf"
+    )
+    table_path = os.path.join(output_dir, "partial_control_residuals.csv")
+    index_path = os.path.join(
+        output_dir, "partial_control_parameter_index.csv"
+    )
+    color_norm = mpl.colors.Normalize(vmin=z_min, vmax=z_max)
+    color_map = mpl.colormaps["viridis"]
+    index_rows = []
+    absolute_page = 0
 
-    def _normalize_category_value(value):
-        if pd.isna(value):
-            return np.nan
-        text = str(value).strip()
-        if text == "" or text.lower() in {"nan", "none", "null"}:
-            return np.nan
-        return text
-
-    def _prepare_categories(x_raw):
-        x_cat = pd.Series(x_raw).apply(_normalize_category_value)
-        valid = x_cat.notna()
-        if not np.any(valid):
-            return None, None, None
-        x_cat = x_cat.loc[valid].reset_index(drop=True)
-        counts = x_cat.value_counts()
-        eligible = counts[counts >= int(category_min_count)]
-        if eligible.empty:
-            keep = counts.index[: int(max_categories)]
-        else:
-            keep = eligible.index[: int(max_categories)]
-        x_limited = x_cat.where(x_cat.isin(set(keep)), "OTHER")
-        order = x_limited.value_counts().index.tolist()
-        x_limited = pd.Categorical(x_limited, categories=order, ordered=True)
-        positions = np.asarray(x_limited.codes, dtype=float)
-        return positions, np.asarray(x_limited.astype(str)), np.asarray(valid)
-
-    def _draw_reference_guides(ax, key, x):
-        if key_y == residual_label:
-            ax.axhline(0, color='red', linestyle='--', lw=1)
-            if key in keys_yx_line and len(x):
-                xmin, xmax = np.nanmin(x), np.nanmax(x)
-                xmid = np.nanmean(x)
-                ax.plot([xmin, xmax], [xmin - xmid, xmax - xmid], color='red', linestyle='--', lw=1)
-
-    def _draw_binned_overlay(ax, x, y, err):
-        _ = err
-        mfin = np.isfinite(x) & np.isfinite(y)
-        if not np.any(mfin):
-            return
-
-        xb, yb = np.asarray(x[mfin], dtype=float), np.asarray(y[mfin], dtype=float)
-        lo, hi = np.nanpercentile(xb, [1, 99])
-        if not (np.isfinite(lo) and np.isfinite(hi) and hi > lo):
-            lo, hi = np.nanmin(xb), np.nanmax(xb)
-        bins = np.linspace(lo, hi, nbins + 1)
-        x_med, y_med, y_lo, y_hi, y_med_err = [], [], [], [], []
-        for i_bin in range(len(bins) - 1):
-            if i_bin == len(bins) - 2:
-                in_bin = (xb >= bins[i_bin]) & (xb <= bins[i_bin + 1])
-            else:
-                in_bin = (xb >= bins[i_bin]) & (xb < bins[i_bin + 1])
-            if np.count_nonzero(in_bin) < int(min_count):
+    with PdfPages(pdf_path) as pdf:
+        for section, section_fields in groups:
+            if not section_fields:
                 continue
-            x_bin = xb[in_bin]
-            y_bin = yb[in_bin]
-            x_med.append(np.nanmedian(x_bin))
-            y_bin_med = np.nanmedian(y_bin)
-            y_med.append(y_bin_med)
-            lo_i, hi_i = np.nanpercentile(y_bin, [16, 84])
-            y_lo.append(lo_i)
-            y_hi.append(hi_i)
-            robust_sigma = max(0.5 * (hi_i - lo_i), 0.0)
-            y_med_err.append(1.253 * robust_sigma / np.sqrt(np.count_nonzero(in_bin)))
-
-        if x_med:
-            x_med = np.asarray(x_med, dtype=float)
-            y_med = np.asarray(y_med, dtype=float)
-            y_lo = np.asarray(y_lo, dtype=float)
-            y_hi = np.asarray(y_hi, dtype=float)
-            y_med_err = np.asarray(y_med_err, dtype=float)
-            order = np.argsort(x_med)
-            x_med = x_med[order]
-            y_med = y_med[order]
-            y_lo = y_lo[order]
-            y_hi = y_hi[order]
-            y_med_err = y_med_err[order]
-            ax.fill_between(
-                x_med,
-                y_lo,
-                y_hi,
-                color="0.6",
-                alpha=0.12,
-                linewidth=0,
-                zorder=8,
-            )
-            ax.fill_between(
-                x_med,
-                y_med - y_med_err,
-                y_med + y_med_err,
-                color="red",
-                alpha=0.18,
-                linewidth=0,
-                zorder=9,
-            )
-            ax.plot(
-                x_med,
-                y_med,
-                color="red",
-                lw=1.8,
-                alpha=0.95,
-                zorder=10,
-            )
-
-    def _set_robust_numeric_xlim(ax, x):
-        x = np.asarray(x, dtype=float)
-        x = x[np.isfinite(x)]
-        if x.size < 2:
-            return
-        x_lo, x_hi = np.nanpercentile(x, [1.0, 99.0])
-        if not (np.isfinite(x_lo) and np.isfinite(x_hi) and x_hi > x_lo):
-            return
-        pad = 0.05 * (x_hi - x_lo)
-        ax.set_xlim(x_lo - pad, x_hi + pad)
-
-    for idx, key in enumerate(keys):
-        ax = axes[idx]
-        try:
-            mask = _panel_mask(key)
-            x, y, color_values, xlabel, ylabel, cmap, norm = _panel_xy_and_style(mask, key)
-            ax.set_xlabel(xlabel)
-            if share_residual_y:
-                if idx % n_cols == 0:
-                    ax.set_ylabel(ylabel)
-                else:
-                    ax.set_ylabel("")
-                    ax.tick_params(labelleft=False)
-            else:
-                ax.set_ylabel(ylabel)
-            z_masked = df_agn.loc[mask, 'z'].to_numpy(dtype=float)
-            x_is_numeric = pd.api.types.is_numeric_dtype(pd.Series(x))
-            if key_y == residual_label and not x_is_numeric:
-                cat_pos, cat_vals, valid_cat_mask = _prepare_categories(x)
-                if cat_pos is None:
-                    raise ValueError(f"No finite categorical values for key '{key}'.")
-                y = np.asarray(y)[valid_cat_mask]
-                z_masked = z_masked[valid_cat_mask]
-                color_values = np.asarray(color_values)[valid_cat_mask]
-                clipped_cat = clipped_mask[mask][valid_cat_mask] if clipped_mask is not None else None
-                in_z = (z_masked >= z_range[0]) & (z_masked <= z_range[1])
-                out_z = ~in_z
-
-                cats = list(dict.fromkeys(cat_vals.tolist()))
-                box_data = [np.asarray(y)[cat_vals == cat] for cat in cats]
-                ax.boxplot(
-                    box_data,
-                    positions=np.arange(len(cats), dtype=float),
-                    widths=0.55,
-                    showfliers=False,
-                    patch_artist=True,
-                    boxprops=dict(facecolor='white', edgecolor='0.35', linewidth=1.0),
-                    medianprops=dict(color='tab:red', linewidth=1.2),
-                    whiskerprops=dict(color='0.35', linewidth=1.0),
-                    capprops=dict(color='0.35', linewidth=1.0),
+            section_pages = int(math.ceil(len(section_fields) / panels_per_page))
+            for section_page, start in enumerate(
+                range(0, len(section_fields), panels_per_page), start=1
+            ):
+                absolute_page += 1
+                page_fields = section_fields[start : start + panels_per_page]
+                compact = len(page_fields) <= 2
+                n_columns = 2 if compact else 4
+                n_rows = int(math.ceil(len(page_fields) / n_columns))
+                fig, axes_grid = plt.subplots(
+                    n_rows,
+                    n_columns,
+                    figsize=(
+                        (8.0 * n_columns, 6.4)
+                        if compact
+                        else (5.0 * n_columns, 3.3 * n_rows)
+                    ),
+                    sharey="row",
+                    squeeze=False,
                 )
-
-                rng = np.random.default_rng(1000 + idx)
-                jitter = rng.uniform(-category_jitter, category_jitter, size=len(cat_pos))
-                xj = cat_pos + jitter
-
-                color_num = pd.to_numeric(pd.Series(color_values), errors='coerce').to_numpy(dtype=float)
-                finite_color = np.isfinite(color_num)
-                use_numeric_color = np.any(finite_color)
-                sc = None
-                if use_numeric_color:
-                    cat_norm = norm if norm is not None else _make_color_norm(color_num)
-                    if np.any(in_z):
-                        sc = ax.scatter(
-                            xj[in_z],
-                            y[in_z],
-                            c=color_num[in_z],
-                            cmap=cmap,
-                            norm=cat_norm,
-                            s=10,
-                            alpha=0.5,
-                            rasterized=True,
+                axes = axes_grid.ravel()
+                for panel_index, (ax, field) in enumerate(
+                    zip(axes, page_fields)
+                ):
+                    x_partial, r_partial, control_label = partials[field]
+                    finite = (
+                        np.isfinite(x_partial)
+                        & np.isfinite(r_partial)
+                        & np.isfinite(z)
+                    )
+                    xf, rf, zf = x_partial[finite], r_partial[finite], z[finite]
+                    ax.scatter(
+                        xf,
+                        rf,
+                        c=zf,
+                        cmap=color_map,
+                        norm=color_norm,
+                        s=10,
+                        alpha=0.43,
+                        linewidths=0,
+                        rasterized=True,
+                        zorder=2,
+                    )
+                    xb, rb, rlo, rhi, zb = _partial_control_binned_trend(
+                        xf,
+                        rf,
+                        zf,
+                        bins=trend_bins,
+                        min_count=max(3, min_points // 2),
+                    )
+                    if xb.size:
+                        ax.fill_between(
+                            xb,
+                            rlo,
+                            rhi,
+                            color="#64748B",
+                            alpha=0.10,
+                            linewidth=0,
+                            zorder=3,
                         )
-                    if np.any(out_z):
-                        edgecols = mpl.cm.get_cmap(cmap)(cat_norm(color_num[out_z]))
-                        sc_out = ax.scatter(
-                            xj[out_z],
-                            y[out_z],
-                            c=color_num[out_z],
-                            cmap=cmap,
-                            norm=cat_norm,
-                            s=10,
-                            alpha=0.8,
-                            marker='D',
-                            edgecolors=edgecols,
-                            linewidths=0.8,
-                            rasterized=True,
-                        )
-                        if sc is None:
-                            sc = sc_out
-                    if sc is not None and norm is not None and global_color_norm is None:
-                        cbar = fig.colorbar(sc, ax=ax, orientation='vertical', fraction=0.046, pad=0.04)
-                        cbar.set_label(key_color, fontsize=12)
-                else:
-                    if np.any(in_z):
+                        ax.plot(xb, rb, color="white", lw=4.2, zorder=4)
+                        ax.plot(xb, rb, color="#111827", lw=2.0, zorder=5)
                         ax.scatter(
-                            xj[in_z],
-                            y[in_z],
-                            c='tab:blue',
-                            s=10,
-                            alpha=0.5,
-                            rasterized=True,
+                            xb,
+                            rb,
+                            c=zb,
+                            cmap=color_map,
+                            norm=color_norm,
+                            s=38,
+                            edgecolors="#111827",
+                            linewidths=0.65,
+                            zorder=6,
                         )
-                    if np.any(out_z):
-                        ax.scatter(
-                            xj[out_z],
-                            y[out_z],
-                            c='tab:blue',
-                            s=10,
-                            alpha=0.8,
-                            marker='D',
-                            edgecolors='tab:blue',
-                            linewidths=0.8,
-                            rasterized=True,
-                        )
-                if clipped_cat is not None and np.any(clipped_cat):
-                    clipped_in = clipped_cat & in_z
-                    clipped_out = clipped_cat & out_z
-                    if np.any(clipped_in):
-                        ax.scatter(
-                            xj[clipped_in],
-                            y[clipped_in],
-                            c="tab:green",
-                            s=16,
-                            alpha=0.9,
-                            linewidths=0,
-                            rasterized=True,
-                        )
-                    if np.any(clipped_out):
-                        ax.scatter(
-                            xj[clipped_out],
-                            y[clipped_out],
-                            c="tab:green",
-                            s=18,
-                            alpha=0.95,
-                            marker="D",
-                            edgecolors="tab:green",
-                            linewidths=0.8,
-                            rasterized=True,
-                        )
-
-                if residuals_err is None:
-                    err = np.full_like(y, np.nan, dtype=float)
-                else:
-                    err = np.asarray(residuals_err)[mask][valid_cat_mask]
-                cat_x_med, cat_y_med, cat_y_lo, cat_y_hi, cat_y_med_err = [], [], [], [], []
-                for ci, cat in enumerate(cats):
-                    cat_mask = (cat_vals == cat)
-                    _ = err
-                    ww = np.isfinite(y[cat_mask])
-                    if not np.any(ww):
-                        continue
-                    ycat = y[cat_mask][ww]
-                    if ycat.size < int(min_count):
-                        continue
-                    cat_x_med.append(float(ci))
-                    ycat_med = np.nanmedian(ycat)
-                    cat_y_med.append(ycat_med)
-                    lo_i, hi_i = np.nanpercentile(ycat, [16, 84])
-                    cat_y_lo.append(lo_i)
-                    cat_y_hi.append(hi_i)
-                    robust_sigma = max(0.5 * (hi_i - lo_i), 0.0)
-                    cat_y_med_err.append(1.253 * robust_sigma / np.sqrt(ycat.size))
-
-                if cat_x_med:
-                    cat_x_med = np.asarray(cat_x_med, dtype=float)
-                    cat_y_med = np.asarray(cat_y_med, dtype=float)
-                    cat_y_lo = np.asarray(cat_y_lo, dtype=float)
-                    cat_y_hi = np.asarray(cat_y_hi, dtype=float)
-                    cat_y_med_err = np.asarray(cat_y_med_err, dtype=float)
-                    ax.fill_between(
-                        cat_x_med,
-                        cat_y_lo,
-                        cat_y_hi,
-                        color="0.6",
-                        alpha=0.12,
-                        linewidth=0,
+                    if xf.size >= 3 and np.nanmax(xf) > np.nanmin(xf):
+                        x_low, x_high = np.quantile(xf, [0.01, 0.99])
+                        padding = 0.05 * (x_high - x_low)
+                        ax.set_xlim(x_low - padding, x_high + padding)
+                    ax.axhline(
+                        0.0, color="#64748B", lw=0.8, ls=(0, (3, 3)), zorder=1
+                    )
+                    ax.set_ylim(*_FULL_RESIDUAL_YLIM)
+                    ax.set_title(
+                        textwrap.fill(field, 34),
+                        fontsize=9.5,
+                        fontweight="bold",
+                        pad=5,
+                    )
+                    ax.set_xlabel(f"{field} residual after controls", fontsize=8.2)
+                    if panel_index % n_columns == 0:
+                        ax.set_ylabel(r"Hubble $R$ residual after controls [mag]")
+                    else:
+                        ax.tick_params(labelleft=False)
+                    ax.text(
+                        0.97,
+                        0.04,
+                        f"Controls: {control_label}",
+                        transform=ax.transAxes,
+                        ha="right",
+                        va="bottom",
+                        fontsize=7.2,
+                        color="#334155",
+                        bbox={
+                            "boxstyle": "round,pad=0.25",
+                            "facecolor": "white",
+                            "edgecolor": "#CBD5E1",
+                            "alpha": 0.86,
+                        },
                         zorder=8,
                     )
-                    ax.fill_between(
-                        cat_x_med,
-                        cat_y_med - cat_y_med_err,
-                        cat_y_med + cat_y_med_err,
-                        color="red",
-                        alpha=0.18,
-                        linewidth=0,
-                        zorder=9,
-                    )
-                    ax.plot(
-                        cat_x_med,
-                        cat_y_med,
-                        color="red",
-                        lw=1.8,
-                        alpha=0.95,
-                        zorder=10,
-                    )
+                    ax.grid(True, color="#E2E8F0", lw=0.55, alpha=0.7, zorder=0)
+                    ax.spines[["top", "right"]].set_visible(False)
+                for ax in axes[len(page_fields) :]:
+                    ax.axis("off")
 
-                ax.set_xticks(np.arange(len(cats), dtype=float))
-                ax.set_xticklabels(cats, rotation=45, ha='right')
-                ax.axhline(0, color='red', linestyle='--', lw=1)
-            else:
-                in_z = (z_masked >= z_range[0]) & (z_masked <= z_range[1])
-                out_z = ~in_z
-                clipped_local = clipped_mask[mask] if clipped_mask is not None else None
-
-                sc = None
-                if np.any(in_z):
-                    if norm is None:
-                        sc = ax.scatter(
-                            x[in_z],
-                            y[in_z],
-                            c='tab:blue',
-                            s=10,
-                            alpha=0.5,
-                            rasterized=True,
-                        )
-                    else:
-                        sc = ax.scatter(
-                            x[in_z],
-                            y[in_z],
-                            c=color_values[in_z],
-                            cmap=cmap,
-                            norm=norm,
-                            s=10,
-                            alpha=0.5,
-                            rasterized=True,
-                        )
-                if np.any(out_z):
-                    if norm is None:
-                        sc_out = ax.scatter(
-                            x[out_z],
-                            y[out_z],
-                            c='tab:blue',
-                            s=10,
-                            alpha=0.8,
-                            marker='D',
-                            edgecolors='tab:blue',
-                            linewidths=0.8,
-                            rasterized=True,
-                        )
-                    else:
-                        edgecols = mpl.cm.get_cmap(cmap)(norm(color_values[out_z]))
-                        sc_out = ax.scatter(
-                            x[out_z],
-                            y[out_z],
-                            c=color_values[out_z],
-                            cmap=cmap,
-                            norm=norm,
-                            s=10,
-                            alpha=0.8,
-                            marker='D',
-                            edgecolors=edgecols,
-                            linewidths=0.8,
-                            rasterized=True,
-                        )
-                    if sc is None:
-                        sc = sc_out
-                if clipped_local is not None and np.any(clipped_local):
-                    clipped_in = clipped_local & in_z
-                    clipped_out = clipped_local & out_z
-                    if np.any(clipped_in):
-                        ax.scatter(
-                            np.asarray(x)[clipped_in],
-                            np.asarray(y)[clipped_in],
-                            c="tab:green",
-                            s=16,
-                            alpha=0.9,
-                            linewidths=0,
-                            rasterized=True,
-                        )
-                    if np.any(clipped_out):
-                        ax.scatter(
-                            np.asarray(x)[clipped_out],
-                            np.asarray(y)[clipped_out],
-                            c="tab:green",
-                            s=18,
-                            alpha=0.95,
-                            marker='D',
-                            edgecolors='tab:green',
-                            linewidths=0.8,
-                            rasterized=True,
-                        )
-                _draw_reference_guides(ax, key, x)
-
-                if sc is not None and norm is not None and global_color_norm is None:
-                    cbar = fig.colorbar(sc, ax=ax, orientation='vertical', fraction=0.046, pad=0.04)
-                    cbar.set_label(key_color, fontsize=12)
-
-                if residuals_err is None:
-                    err = np.full_like(y, np.nan, dtype=float)
-                else:
-                    err = np.asarray(residuals_err)[mask]
-                if pd.api.types.is_numeric_dtype(pd.Series(x)) and pd.api.types.is_numeric_dtype(pd.Series(y)):
-                    _set_robust_numeric_xlim(ax, x)
-                    _draw_binned_overlay(ax, x, y, err)
-        except Exception as e:
-            print(f"Error processing key {key}: {e}")
-            ax.axis('off')
-
-        if key_y == residual_label and ax.has_data():
-            ax.set_ylim(*_FULL_RESIDUAL_YLIM)
-        ax.grid(False)
-
-    # Hide any extra axes
-    for j in range(n_keys, len(axes)):
-        axes[j].axis('off')
-
-    if global_color_norm is not None:
-        sm = mpl.cm.ScalarMappable(norm=global_color_norm, cmap=global_color_cmap)
-        sm.set_array([])
-        for i_row in range(n_rows):
-            row_start = i_row * n_cols
-            row_end = min((i_row + 1) * n_cols, len(axes))
-            row_axes = [
-                axes[j]
-                for j in range(row_start, row_end)
-                if j < n_keys and axes[j].axison
-            ]
-            if row_axes:
-                cbar = fig.colorbar(
-                    sm,
-                    ax=row_axes,
-                    orientation='vertical',
-                    fraction=0.025,
-                    pad=0.02,
+                fig.suptitle(
+                    f"{section} — partial-regression Hubble residuals",
+                    fontsize=17,
+                    fontweight="bold",
+                    y=0.992,
                 )
-                cbar.set_label(key_color, fontsize=12)
+                if section.startswith("Hubble-fit"):
+                    explanation = (
+                        r"For each fitted predictor, both $X$ and $R$ are "
+                        r"residualized against redshift-bin fixed effects and "
+                        r"the other fitted predictor."
+                    )
+                else:
+                    explanation = (
+                        r"For each SED field, both $X$ and $R$ are residualized "
+                        r"against redshift-bin fixed effects, $\log\sigma_{\rm UV}$, "
+                        r"and $\log\tau_{\rm UV,rf}$."
+                    )
+                fig.text(
+                    0.5,
+                    0.865 if compact else 0.950,
+                    explanation
+                    + "\n"
+                    + r"A non-flat black trend indicates an association beyond "
+                    + r"the listed controls; color shows remaining redshift structure."
+                    + "\n"
+                    + f"Section page {section_page}/{section_pages}; "
+                    + f"{len(table):,} post-cut quasars.",
+                    ha="center",
+                    va="center",
+                    fontsize=11.2,
+                    linespacing=1.3,
+                    color="#334155",
+                )
+                layout_top = 0.76 if compact else 0.895
+                fig.tight_layout(
+                    rect=(0.025, 0.02, 0.93, layout_top),
+                    h_pad=1.55,
+                    w_pad=1.1,
+                )
+                colorbar_ax = fig.add_axes([0.95, 0.12, 0.012, 0.76])
+                colorbar = fig.colorbar(
+                    mpl.cm.ScalarMappable(norm=color_norm, cmap=color_map),
+                    cax=colorbar_ax,
+                )
+                colorbar.set_label("Redshift  $z$", fontsize=10)
+                pdf.savefig(fig, dpi=180)
+                if show:
+                    plt.show()
+                plt.close(fig)
+                index_rows.extend(
+                    {
+                        "pdf_page": absolute_page,
+                        "section": section,
+                        "section_page": section_page,
+                        "panel": panel + 1,
+                        "field": field,
+                        "controls": partials[field][2],
+                    }
+                    for panel, field in enumerate(page_fields)
+                )
 
-    os.makedirs(plot_path, exist_ok=True)
-    fig.tight_layout(rect=(0.0, 0.0, 0.98, 1.0))
-    return _save_figure(
-        fig,
-        os.path.join(plot_path, f"{output_tag}_{'debiased' if debias else 'biased'}_y{key_y}_c{key_color}_zcut{z_cut}.pdf"),
-        dpi=150,
-        show=show,
-    )
-
-
-def plot_full_residuals_rz(
-    df_agn, residuals, residuals_err, flat_samples, cosmo_model, z_pivot_agn,
-    debias=False, dm_interp=None, dmi_values=None, plot_path='plots/hubble', show=False,
-    *, nbins=10, min_count=5, z_cut=None, key_y='r_z', key_color='z',
-    z_range=(0.44, 3.16), nz_bins=12, z_min_count=8,
-    lowess_frac=0.25, lowess_it=1, lowess_min_points=10,
-    max_categories=12, category_min_count=5, category_jitter=0.15,
-    clipped_mask=None,
-    use_alpha_lambda_term=None, use_eta_sigma_term=None, use_redshift_log_f_term=None,
-):
-    """
-    Plot redshift-detrended residual diagnostics where
-    r_z = residual - E[residual | z].
-
-    E[residual | z] is estimated with the shared 1D redshift smoother.
-    """
-    z = np.asarray(df_agn['z'], dtype=float)
-    r = np.asarray(residuals, dtype=float)
-    if residuals_err is None:
-        rerr = np.full_like(r, np.nan, dtype=float)
-    else:
-        rerr = np.asarray(residuals_err, dtype=float)
-
-    good = np.isfinite(z) & np.isfinite(r)
-    good_weighted = good & np.isfinite(rerr) & (rerr > 0)
-
-    if np.count_nonzero(good) < max(z_min_count, 3):
-        r_z = np.asarray(r, dtype=float)
-    else:
-        use_weighted = np.count_nonzero(good_weighted) >= max(z_min_count, 3)
-        fit_mask = good_weighted if use_weighted else good
-        z_good = z[fit_mask]
-        r_good = r[fit_mask]
-        rerr_good = rerr[fit_mask] if use_weighted else None
-        trend = build_smooth_trend_1d(
-            z_good,
-            r_good,
-            yerr=rerr_good,
-            frac=lowess_frac,
-            it=lowess_it,
-            min_points=max(int(lowess_min_points), int(z_min_count)),
-            fallback_bins=nz_bins,
-        )
-        trend_at_z = np.asarray(trend(z), dtype=float)
-        r_z = r - trend_at_z
-
-    return plot_full_residuals(
-        df_agn,
-        r_z,
-        residuals_err,
-        flat_samples,
-        cosmo_model,
-        z_pivot_agn,
-        debias=debias,
-        dm_interp=dm_interp,
-        dmi_values=dmi_values,
-        plot_path=plot_path,
-        show=show,
-        nbins=nbins,
-        min_count=min_count,
-        z_cut=z_cut,
-        key_y=key_y,
-        key_color=key_color,
-        z_range=z_range,
-        clipped_mask=clipped_mask,
-        residual_label='r_z',
-        output_tag='full_residuals_rz',
-        max_categories=max_categories,
-        category_min_count=category_min_count,
-        category_jitter=category_jitter,
-        use_alpha_lambda_term=use_alpha_lambda_term,
-        use_eta_sigma_term=use_eta_sigma_term,
-        use_redshift_log_f_term=use_redshift_log_f_term,
-    )
+    export = {
+        "object_id": (
+            table["object_id"].to_numpy()
+            if "object_id" in table
+            else table.index.to_numpy()
+        ),
+        "z": z,
+        "residuals": y,
+        "z_control_bin": z_bin.astype(str).to_numpy(),
+    }
+    for field in fields:
+        export[field] = pd.to_numeric(table[field], errors="coerce").to_numpy()
+        export[f"{field}_partial"] = partials[field][0]
+        export[f"R_partial_for_{field}"] = partials[field][1]
+    pd.DataFrame(export).to_csv(table_path, index=False)
+    pd.DataFrame(index_rows).to_csv(index_path, index=False)
+    return {
+        "pdf": pdf_path,
+        "residuals_csv": table_path,
+        "parameter_index_csv": index_path,
+    }
 
 
 def plot_parameter_residual_diagnostics(
@@ -10126,7 +10656,10 @@ def plot_predicted_L2500_vs_sigmahat(
     flat_samples, df_agn, cosmo_model, z_pivot_agn,
     plot_path='plots/hubble', show=False, debias=True, dm_interp=None,
     show_residuals=False, df_calibrators=None, z_range=(0.44, 3.16),
-    use_alpha_lambda_term=None, use_eta_sigma_term=None, use_redshift_log_f_term=None,
+    use_alpha_lambda_term=None, use_eta_sigma_term=None,
+    use_f_agn_psf_2500_sigmoid_term=None,
+    use_f_agn_psf_2500_flux_fraction_term=None,
+    use_redshift_log_f_term=None,
     dmi_values=None,
     dmi_selection_sigma=None,
     dmi_selection_sigma_interp=None,
@@ -10153,6 +10686,8 @@ def plot_predicted_L2500_vs_sigmahat(
         np.asarray(flat_samples).shape[1],
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     priors, model_labels, model_labels_latex = get_model_params(
@@ -10160,6 +10695,8 @@ def plot_predicted_L2500_vs_sigmahat(
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
     param_indices = {name: model_labels.index(name) for name in model_labels}
@@ -10169,6 +10706,8 @@ def plot_predicted_L2500_vs_sigmahat(
         d,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         pivot_context=agn_pivot_context,
     )
 
@@ -10209,6 +10748,8 @@ def plot_predicted_L2500_vs_sigmahat(
         med_params,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
     )
     M0_med = med_arr[agn_model_pidx["M0_agn"]]
     logL0_med = convert_M2500_to_logL2500(M0_med)
@@ -10220,6 +10761,8 @@ def plot_predicted_L2500_vs_sigmahat(
             agn_pivot_arr,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         ) - M0_med
     )
     x_ref = 10.0 ** x_log_ref
@@ -10232,6 +10775,8 @@ def plot_predicted_L2500_vs_sigmahat(
         agn_pivot_arr,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
     )
     x_log_err_med = 0.4 * pred_M_err_med
     x_lower = 10.0 ** (x_log_ref - x_log_err_med)
@@ -10261,6 +10806,8 @@ def plot_predicted_L2500_vs_sigmahat(
             ds,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
             pivot_context=agn_pivot_context,
         )
         x_log_ref_show = -0.4 * (
@@ -10270,6 +10817,8 @@ def plot_predicted_L2500_vs_sigmahat(
                 agn_pivot_arr,
                 use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
                 use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+                use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
             ) - M0_med
         )
         x_show = 10.0 ** x_log_ref_show
@@ -10281,6 +10830,8 @@ def plot_predicted_L2500_vs_sigmahat(
             agn_pivot_arr,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         )
         x_log_err_show = 0.4 * pred_M_err_show
         x_log_lower_show = np.min(np.ravel(x_log_ref_show - x_log_err_show))
@@ -10320,6 +10871,8 @@ def plot_predicted_L2500_vs_sigmahat(
             sample_params,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         )
         sample_M0 = sample_arr[agn_model_pidx["M0_agn"]]
         sample_x_log = -0.4 * (
@@ -10329,6 +10882,8 @@ def plot_predicted_L2500_vs_sigmahat(
                 agn_pivot_arr,
                 use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
                 use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+                use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
             )
             - sample_M0
         )
@@ -10584,6 +11139,8 @@ def plot_predicted_L2500_vs_sigmahat(
             ds,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
             pivot_context=agn_pivot_context,
         )
         x_log_ref_show = -0.4 * (
@@ -10593,6 +11150,8 @@ def plot_predicted_L2500_vs_sigmahat(
                 agn_pivot_arr,
                 use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
                 use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+                use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
             )
             - M0_med
         )
@@ -10605,6 +11164,8 @@ def plot_predicted_L2500_vs_sigmahat(
             agn_pivot_arr,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         )
         x_log_err_show = 0.4 * pred_M_err_show
         x_lower_show = 10.0 ** (x_log_ref_show - x_log_err_show)
@@ -10671,6 +11232,8 @@ def plot_predicted_L2500_vs_sigmahat(
         df_agn,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         pivot_context=agn_pivot_context,
     )
     log_sigma_uv_pivot  = pivots_arr[agn_model_oidx["log_sigma_uv"]]
@@ -10839,6 +11402,8 @@ def plot_L2500_vs_sigma_tau_separate(
     z_range=(0.44, 3.16),
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
+    use_f_agn_psf_2500_sigmoid_term=None,
+    use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
     sigma_sel_floor_mag=0.05,
     *,
@@ -10858,12 +11423,16 @@ def plot_L2500_vs_sigma_tau_separate(
         np.asarray(flat_samples).shape[1],
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     _priors, model_labels, _model_labels_latex = get_model_params(
         cosmo_model,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
     )
     param_indices = {name: model_labels.index(name) for name in model_labels}
@@ -10900,12 +11469,16 @@ def plot_L2500_vs_sigma_tau_separate(
         d,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         pivot_context=agn_pivot_context,
     )
     med_arr = agn_model_pack_params(
         med_params,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
     )
     M0_med = med_arr[agn_model_pidx["M0_agn"]]
     logL0_med = convert_M2500_to_logL2500(M0_med)
@@ -10916,6 +11489,8 @@ def plot_L2500_vs_sigma_tau_separate(
             agn_pivot_arr,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         )
         - M0_med
     )
@@ -10929,6 +11504,8 @@ def plot_L2500_vs_sigma_tau_separate(
         agn_pivot_arr,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
     )
     sigma_meas = np.asarray(y_log_meas_err, dtype=float)
     sigma_model = 0.4 * np.asarray(pred_M_err_med, dtype=float)
@@ -11479,7 +12056,9 @@ def _highest_weight_theta(results, plot_path=None):
 def _blob_for_theta(theta, *, df_agn, df_pantheon, cosmo_model,
                     completeness_params, _sna_L, _sna_Lower, _sna_LogdetCov,
                     z_pivot_agn, agn_pivot_context,
-                    use_full_cov=True, plot_path=None):
+                    use_full_cov=True,
+                    prior_profile=DEFAULT_PRIOR_PROFILE,
+                    plot_path=None):
     """
     Re-evaluate the likelihood exactly once at 'theta' to get the selection blob.
     Returns: blob (2, N) and the AGN arrays z, m_obs needed for plotting.
@@ -11493,6 +12072,7 @@ def _blob_for_theta(theta, *, df_agn, df_pantheon, cosmo_model,
         completeness_params=completeness_params,
         z_pivot_agn=z_pivot_agn,
         agn_pivot_context=agn_pivot_context,
+        prior_profile=prior_profile,
         only_sna=False, use_full_cov=use_full_cov,
     )
     z = df_agn['z'].values
@@ -11598,7 +12178,8 @@ def run_completeness_diagnostics(sampler_results, df_agn, df_pantheon,
                                  title_note="— highest posterior weight sample",
                                  *,
                                  z_pivot_agn,
-                                 agn_pivot_context: AgnPivotContext):
+                                 agn_pivot_context: AgnPivotContext,
+                                 prior_profile=DEFAULT_PRIOR_PROFILE):
     """
     One-call orchestration:
       - choose highest-posterior θ,
@@ -11612,6 +12193,7 @@ def run_completeness_diagnostics(sampler_results, df_agn, df_pantheon,
                                  _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov,
                                  z_pivot_agn=z_pivot_agn,
                                  agn_pivot_context=agn_pivot_context,
+                                 prior_profile=prior_profile,
                                  use_full_cov=use_full_cov)
     Z   = np.asarray(blob[0], dtype=float)
     dmi = np.asarray(blob[1], dtype=float)
@@ -12952,6 +13534,110 @@ def plot_g_band_drift_slope_histograms(
     )
 
 
+def _add_bivariate_sigma_contours(ax, x, y, *, grid_size=160):
+    """Draw KDE contours enclosing 68.3% and 95.4% of the sample density."""
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    finite = np.isfinite(x) & np.isfinite(y)
+    x = x[finite]
+    y = y[finite]
+    if x.size < 5:
+        warnings.warn(
+            "Skipping 1- and 2-sigma contours: fewer than five finite points.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+
+    x_center = float(np.median(x))
+    y_center = float(np.median(y))
+    x_scale = float(np.std(x))
+    y_scale = float(np.std(y))
+    if (
+        not np.isfinite(x_scale)
+        or not np.isfinite(y_scale)
+        or x_scale <= 0
+        or y_scale <= 0
+    ):
+        warnings.warn(
+            "Skipping 1- and 2-sigma contours: a plotted variable has zero spread.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+
+    x_standard = (x - x_center) / x_scale
+    y_standard = (y - y_center) / y_scale
+    try:
+        kde = gaussian_kde(np.vstack([x_standard, y_standard]), bw_method="scott")
+    except (ValueError, np.linalg.LinAlgError) as exc:
+        warnings.warn(
+            f"Skipping 1- and 2-sigma contours because the KDE failed: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+
+    # Include the KDE tails when converting enclosed probabilities to density
+    # thresholds.  Standardizing first prevents either axis from dominating the
+    # covariance calculation merely because of its units.
+    padding = max(0.5, 3.0 * float(kde.factor))
+    x_grid_standard = np.linspace(
+        float(np.min(x_standard)) - padding,
+        float(np.max(x_standard)) + padding,
+        grid_size,
+    )
+    y_grid_standard = np.linspace(
+        float(np.min(y_standard)) - padding,
+        float(np.max(y_standard)) + padding,
+        grid_size,
+    )
+    xx_standard, yy_standard = np.meshgrid(x_grid_standard, y_grid_standard)
+    density = kde(np.vstack([xx_standard.ravel(), yy_standard.ravel()])).reshape(
+        xx_standard.shape
+    )
+
+    density_sorted = np.sort(density.ravel())[::-1]
+    enclosed_probability = np.cumsum(density_sorted)
+    enclosed_probability /= enclosed_probability[-1]
+
+    def density_threshold(probability):
+        index = int(np.searchsorted(enclosed_probability, probability, side="left"))
+        return float(density_sorted[min(index, density_sorted.size - 1)])
+
+    threshold_1sigma = density_threshold(0.683)
+    threshold_2sigma = density_threshold(0.954)
+    levels = np.array([threshold_2sigma, threshold_1sigma])
+    if not np.all(np.isfinite(levels)) or levels[0] >= levels[1]:
+        warnings.warn(
+            "Skipping 1- and 2-sigma contours: KDE density thresholds are degenerate.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+
+    xx = xx_standard * x_scale + x_center
+    yy = yy_standard * y_scale + y_center
+    contours = ax.contour(
+        xx,
+        yy,
+        density,
+        levels=levels,
+        colors="black",
+        linestyles=["--", "-"],
+        linewidths=1.4,
+        zorder=4,
+    )
+    ax.clabel(
+        contours,
+        levels=levels,
+        fmt={threshold_2sigma: r"$2\sigma$", threshold_1sigma: r"$1\sigma$"},
+        inline=True,
+        fontsize=9,
+    )
+    return contours
+
+
 def plot_completeness_diagnostics(
     dmi_plot,
     z,
@@ -12977,34 +13663,59 @@ def plot_completeness_diagnostics(
     else:
         fit_mask = finite & (z >= z_range[0]) & (z <= z_range[1])
         out_mask = finite & ~((z >= z_range[0]) & (z <= z_range[1]))
-    
+
+    cmap = "viridis"
+    magnitude_norm = colors.Normalize(
+        vmin=float(np.min(m2500[finite])),
+        vmax=float(np.max(m2500[finite])),
+    )
+    redshift_norm = colors.Normalize(
+        vmin=float(np.min(z[finite])),
+        vmax=float(np.max(z[finite])),
+    )
+
     fig, ax = plt.subplots(figsize=(8, 5))
 
     if np.any(fit_mask):
-        ax.plot(
+        ax.scatter(
             z[fit_mask],
             -dmi_plot[fit_mask],
+            c=m2500[fit_mask],
+            cmap=cmap,
+            norm=magnitude_norm,
+            s=20,
             marker="o",
-            linestyle="none",
             label="in $z$ range",
-            color="k",
             alpha=0.5,
+            linewidths=0,
         )
     if np.any(out_mask):
-        ax.plot(
+        ax.scatter(
             z[out_mask],
             -dmi_plot[out_mask],
+            c=m2500[out_mask],
+            cmap=cmap,
+            norm=magnitude_norm,
+            s=28,
             marker="D",
-            linestyle="none",
             label="outside $z$ range",
-            color="k",
             alpha=0.5,
+            linewidths=0,
+        )
+    if np.any(fit_mask):
+        _add_bivariate_sigma_contours(
+            ax,
+            z[fit_mask],
+            -dmi_plot[fit_mask],
         )
 
     ax.set_xlabel(r"$z$")
     ax.set_ylabel(r"$\Delta m$ (mag)")
-    
-    ax.legend(frameon=True, loc="upper right", fontsize=12)
+    magnitude_mappable = mpl.cm.ScalarMappable(norm=magnitude_norm, cmap=cmap)
+    magnitude_mappable.set_array([])
+    cbar = fig.colorbar(magnitude_mappable, ax=ax)
+    cbar.set_label(r"Apparent magnitude $m_{2500}$ (mag)")
+
     fig.tight_layout()
 
     outdir = os.path.join(plot_path, "completeness")
@@ -13020,27 +13731,42 @@ def plot_completeness_diagnostics(
         ax.scatter(
             m2500[fit_mask],
             -dmi_plot[fit_mask],
+            c=z[fit_mask],
+            cmap=cmap,
+            norm=redshift_norm,
             alpha=0.5,
             s=20,
             marker="o",
-            color="k",
             label="in $z$ range",
+            linewidths=0,
         )
     if np.any(out_mask):
         ax.scatter(
             m2500[out_mask],
             -dmi_plot[out_mask],
+            c=z[out_mask],
+            cmap=cmap,
+            norm=redshift_norm,
             alpha=0.5,
             s=28,
             marker="D",
-            color="k",
             label="outside $z$ range",
+            linewidths=0,
+        )
+    if np.any(fit_mask):
+        _add_bivariate_sigma_contours(
+            ax,
+            m2500[fit_mask],
+            -dmi_plot[fit_mask],
         )
 
     ax.set_xlabel(r"Apparent magnitude $m_{2500}$ (mag)")
     ax.set_ylabel(r"$\Delta m$ (mag)")
+    redshift_mappable = mpl.cm.ScalarMappable(norm=redshift_norm, cmap=cmap)
+    redshift_mappable.set_array([])
+    cbar = fig.colorbar(redshift_mappable, ax=ax)
+    cbar.set_label(r"Redshift $z$")
 
-    ax.legend(frameon=True, loc="upper right", fontsize=12)
     fig.tight_layout()
 
     fig.savefig(f"{outdir}/dmi_vs_m2500_posterior_median.pdf", dpi=300)

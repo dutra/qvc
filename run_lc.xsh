@@ -23,8 +23,8 @@ object_ids = [
     # 1391093,
     # 1388129,
 ]
-description = "aug28d_erlang_dho_iters3_svithennuts_psflogitnormal_svi10000w250s100lr0003_stonechisq_specaug24_v3"
-nproc = 3
+description = "aug28d_erlang_sharedlatent_iters2_svithennuts_psflogitnormal_svi10000w250s100lr0003_stonechisq_specaug24_v3"
+nproc = 1
 repo_root = Path(__file__).resolve().parent
 spectra_fit_h5 = repo_root / (
     "results/data/jaxqsofit/"
@@ -54,7 +54,7 @@ def fit_object(index, object_id):
     command = [
         sys.executable,
         "-m", "qvc.light_curve.fit_light_curves",
-        "--dho_drw_parameterization",
+        #"--dho_drw_parameterization",
         "--filter_object_id", object_id,
         "--progress",
         "--outlier_half_window_days", "60",
@@ -65,8 +65,9 @@ def fit_object(index, object_id):
         "--nchains", "3",
         "--max_tree_depth", "8",
         "--target_accept", "0.7",
-        "--model_variant", "mag_flux_linearized_erlang",
-        "--flux_linearized_refinement_iters", "3",
+        "--model_variant","shared_latent_blr", #"mag_flux_linearized_erlang",
+        "--flux_linearized_refinement_iters", "2",
+        "--disk_order", "2",
         "--flux_linearized_refinement_strategy", "svi_then_nuts",
         "--fit_method", "svi+nuts",
         "--plot",

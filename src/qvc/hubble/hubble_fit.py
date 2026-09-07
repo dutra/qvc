@@ -44,11 +44,18 @@ from qvc.hubble.cuts import (
     COMPLETENESS_MAP_Z_EDGE_MIN,
     COMPLETENESS_MAG_2500_MAX,
     COMPLETENESS_MAG_2500_MIN,
+    COMPLETENESS_MAGNITUDE_SUPPORT_MODES,
+    DEFAULT_COMPLETENESS_MAGNITUDE_SUPPORT_MODE,
+    COMPLETENESS_TAIL_MAG_2500_MAX,
+    COMPLETENESS_TAIL_MAG_2500_MIN,
     COMPLETENESS_N_MAG_BINS,
     COMPLETENESS_N_Z_BINS,
+    COMPLETENESS_Z_MAX,
+    COMPLETENESS_Z_MIN,
     CUT_TIER_CHOICES,
     SDSS_TARGET_SELECTION_CHOICES,
     normalize_cut_tier,
+    normalize_completeness_magnitude_support_mode,
     normalize_sdss_target_selection,
 )
 from qvc.hubble.hubble_utils import (
@@ -57,6 +64,7 @@ from qvc.hubble.hubble_utils import (
     compute_age_universe_with_error,
     compute_pivot_redshift,
     display_results_summary,
+    derive_f_agn_psf_2500_columns,
     extract_cosmo_results_from_samples,
     get_qvc_result_dir,
     load_agn_data,
@@ -64,6 +72,7 @@ from qvc.hubble.hubble_utils import (
     load_pantheon_data,
     posterior_corr,
     reduced_chi_squared,
+    render_ascii_table,
     read_quasars_from_hdf5_flat,
     report_pivots,
     save_chains,
@@ -71,18 +80,28 @@ from qvc.hubble.hubble_utils import (
     select_agn_subset_uniform_with_replacement,
     sym_percentile,
     write_results_tex_variables,
+    _wrap_text_in_purple,
 )
 from qvc.hubble.hubble_likelihood import (
     JOINT_ATTENUATED_MAG_DRAWS_COL,
     JOINT_DEREDDENED_MAG_DRAWS_COL,
     JOINT_POSTERIOR_VALID_COUNT_COL,
+    LIGHT_CURVE_UNCERTAINTY_MODES,
     SELECTION_ATTENUATION_MODES,
     _joint_attenuation_draw_arrays,
+    _light_curve_posterior_draw_arrays,
     log_likelihood,
     log_likelihood_nearbylcs,
+    normalize_light_curve_uncertainty_mode,
     normalize_selection_attenuation_mode,
     sigma_lens_from_dc,
     sigma_mu_from_z_err,
+    warn_if_selection_tails_dominate,
+)
+from qvc.light_curve.posterior_draws import (
+    LIGHT_CURVE_LOG_SIGMA_DRAW_COL,
+    LIGHT_CURVE_LOG_TAU_RF_DRAW_COL,
+    LIGHT_CURVE_POSTERIOR_VALID_COUNT_COL,
 )
 from qvc.hubble.hubble_plotting import (
     HubblePosteriorDrawSelection,
@@ -97,8 +116,7 @@ from qvc.hubble.hubble_plotting import (
     plot_delta_m_flux_recal_vs_redshift,
     plot_dynesty,
     plot_fast_vs_uv_variability,
-    plot_full_residuals,
-    plot_full_residuals_rz,
+    plot_full_residuals_debiased_partial_controls,
     plot_hubble,
     plot_hubble_residual_normality,
     plot_hubble_residual_tail_diagnostics,
@@ -116,6 +134,10 @@ from qvc.hubble.hubble_plotting import (
 from qvc.hubble.tex_utils import make_agn_csv_table, make_agn_latex_table
 from qvc.hubble.hubble_model import (
     AGN_LOGF_Z_PARAM,
+    AGN_PIVOT_RULE,
+    AGN_UNROUNDED_PIVOT_RULE,
+    DEFAULT_PRIOR_PROFILE,
+    PRIOR_PROFILE_CHOICES,
     AgnPivotContext,
     agn_model_pack_obs,
     agn_model_pack_params,
@@ -125,6 +147,7 @@ from qvc.hubble.hubble_model import (
     get_model_params,
     M_model_agn,
     M_model_agn_err,
+    normalize_prior_profile,
     resolve_model_option_flags,
 )
 from qvc.hubble.hubble_completeness_refactored import (
@@ -144,15 +167,23 @@ from qvc.hubble.hubble_completeness_refactored import (
     prepare_completeness_magnitude_columns,
 )
 from qvc.hubble.completeness_mock_catalog import (
+    COMPLETENESS_LF_MODELS,
     COSMO as COMPLETENESS_MOCK_COSMO,
+    DEFAULT_M2500_SUPPORT,
+    SHEN_DEFAULT_LF_MODE,
+    build_completeness_lf,
     build_shen_lf,
+    mock_lf_grid_per_zbin,
     mock_m_per_zbin,
+    normalize_shen_lf_mode,
     save_mock_catalog,
+    shen_lf_expected_completeness_magnitude,
 )
 
 VALID_COMPLETENESS_MODES = ("2d", "3d_fhost", "4d_fhost_alpha")
 SPEED_CHOICES = ("fastest", "quick", "standard", "production")
 SIGMA_CLIP_SECOND_PASS_MODES = ("warm", "fresh")
+SHEN_LF_MODE_ENV = "QVC_HUBBLE_SHEN_LF_MODE"
 AGN_PIVOT_CHECKPOINT_KEYS = (
     "agn_pivot_observable_names",
     "agn_pivot_values",
@@ -261,6 +292,8 @@ def _compute_debiased_agn_table_mu(
     only_agn=False,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
     use_redshift_log_f_term=False,
 ):
     """Compute debiased AGN distance-modulus table values without making plots."""
@@ -278,6 +311,8 @@ def _compute_debiased_agn_table_mu(
         only_agn=only_agn,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     param_indices = {label: idx for idx, label in enumerate(model_labels)}
@@ -286,6 +321,8 @@ def _compute_debiased_agn_table_mu(
         df_agn,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         pivot_context=agn_pivot_context,
     )
 
@@ -296,6 +333,8 @@ def _compute_debiased_agn_table_mu(
             sample_params,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         )
         predicted_M2500 = M_model_agn(
             agn_params_arr,
@@ -303,6 +342,8 @@ def _compute_debiased_agn_table_mu(
             agn_pivot_arr,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         )
         mu_samples.append(m_obs - predicted_M2500)
 
@@ -321,6 +362,8 @@ def _compute_debiased_agn_table_mu(
         median_params,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
     )
     predicted_M2500_err = M_model_agn_err(
         agn_params_arr,
@@ -329,6 +372,8 @@ def _compute_debiased_agn_table_mu(
         agn_pivot_arr,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
+        use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
     )
     cosmo = _cosmo_from_params(cosmo_model, median_params, z_pivot_agn)
     z = df_agn["z"].to_numpy(dtype=float)
@@ -356,6 +401,8 @@ def _agn_likelihood_param_labels(
     *,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
     use_redshift_log_f_term=False,
 ):
     allowed_labels = {
@@ -378,6 +425,8 @@ def _agn_likelihood_param_labels(
     req_params, _, _ = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
     )
     allowed_labels.update(req_params)
     if use_redshift_log_f_term:
@@ -396,6 +445,8 @@ def compute_agn_likelihood_space_reduced_chi2(
     agn_pivot_context,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
     use_redshift_log_f_term=False,
 ):
     """Compute AGN chi2 with the same residual and variance as the AGN likelihood."""
@@ -404,6 +455,8 @@ def compute_agn_likelihood_space_reduced_chi2(
         cosmo_model,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     n_agn_params = len(agn_likelihood_labels)
@@ -426,11 +479,15 @@ def compute_agn_likelihood_space_reduced_chi2(
         median_params,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
     )
     agn_obs_arr, agn_err_arr, agn_pivot_arr = agn_model_pack_obs(
         df_agn_fit_selection,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         pivot_context=agn_pivot_context,
     )
     M_pred = M_model_agn(
@@ -439,6 +496,8 @@ def compute_agn_likelihood_space_reduced_chi2(
         agn_pivot_arr,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
     )
     M_pred_err, _ = M_model_agn_err(
         agn_params_arr,
@@ -448,6 +507,8 @@ def compute_agn_likelihood_space_reduced_chi2(
         check_negative=True,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
     )
 
     z = df_agn_fit_selection["z"].to_numpy(dtype=float)
@@ -483,9 +544,9 @@ def get_dynesty_speed_settings(speed, ndim, *, warm_start=False):
     if speed == "fastest":
         settings = dict(dlogz_init=10, n_effective=50, nlive_init=20, nlive_batch=5)
     elif speed == "quick":
-        settings = dict(dlogz_init=0.01, n_effective=500, nlive_init=50, nlive_batch=20)
+        settings = dict(dlogz_init=0.01, n_effective=2000, nlive_init=100, nlive_batch=50)
     elif speed == "standard":
-        settings = dict(dlogz_init=0.01, n_effective=1000, nlive_init=250, nlive_batch=100)
+        settings = dict(dlogz_init=0.01, n_effective=10000, nlive_init=250, nlive_batch=100)
     elif speed == "production":
         settings = dict(
             dlogz_init=0.01,
@@ -617,31 +678,62 @@ def make_run_tag(
     completeness=True,
     completeness_mode="2d",
     completeness_magnitude="dereddened",
+    completeness_magnitude_support_mode="hard-cut",
     disable_ceph_dist_calibration=False,
     use_planck_h0_prior=False,
     use_planck_om_prior=False,
+    prior_profile=DEFAULT_PRIOR_PROFILE,
+    fixed_h0=None,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
     use_redshift_log_f_term=False,
     selection_attenuation_mode="fixed-offset",
+    light_curve_uncertainty_mode="covariance",
+    pivot_rule=AGN_PIVOT_RULE,
 ):
     speed = normalize_speed(speed)
+    prior_profile = normalize_prior_profile(prior_profile)
     zmin, zmax = z_range
     n_tag = "all" if N is None else f"N{N}"
     z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
     completeness_magnitude = normalize_completeness_magnitude(
         completeness_magnitude
     )
+    completeness_magnitude_support_mode = (
+        normalize_completeness_magnitude_support_mode(
+            completeness_magnitude_support_mode
+        )
+    )
     completeness_tag = (
         f"_{completeness_mode}_compmag-{completeness_magnitude}"
         if completeness
         else "_disable_completeness"
     )
+    completeness_support_tag = (
+        "_compsupport-hardcut"
+        if completeness and completeness_magnitude_support_mode == "hard-cut"
+        else ""
+    )
     ceph_tag = "_nocephdist_planckh0" if disable_ceph_dist_calibration else ""
     planck_h0_tag = "_planckh0" if use_planck_h0_prior and not disable_ceph_dist_calibration else ""
+    fixed_h0_tag = "" if fixed_h0 is None else f"_fixedh0-{float(fixed_h0):g}"
     planck_om_tag = "_planckom" if use_planck_om_prior else ""
+    prior_profile_tag = (
+        "" if prior_profile == DEFAULT_PRIOR_PROFILE
+        else f"_prior-{prior_profile}"
+    )
     alpha_tag = "_alphaLam" if use_alpha_lambda_term else ""
     eta_sigma_tag = "_etaSigma" if use_eta_sigma_term else ""
+    fagn_sigmoid_tag = (
+        "_fagnPsf2500Sigmoid" if use_f_agn_psf_2500_sigmoid_term else ""
+    )
+    fagn_flux_fraction_tag = (
+        "_fagnPsf2500FluxFraction"
+        if use_f_agn_psf_2500_flux_fraction_term
+        else ""
+    )
     logf_tag = "_logfz" if use_redshift_log_f_term else ""
     attenuation_tag = (
         "_attsel-jointpost"
@@ -649,9 +741,37 @@ def make_run_tag(
         == "joint-posterior"
         else ""
     )
+    light_curve_uncertainty_tag = (
+        "_lcpost64"
+        if normalize_light_curve_uncertainty_mode(
+            light_curve_uncertainty_mode
+        )
+        == "posterior-draws"
+        else ""
+    )
+    if pivot_rule not in (AGN_PIVOT_RULE, AGN_UNROUNDED_PIVOT_RULE):
+        raise ValueError(f"Unsupported AGN pivot rule {pivot_rule!r}.")
+    pivot_tag = (
+        "_pivots-median" if pivot_rule == AGN_UNROUNDED_PIVOT_RULE else ""
+    )
     return (
         f"{cosmo_model}_{_fit_mode_label(only_sna, only_agn)}_{speed}_{n_tag}_{z_tag}"
-        f"{completeness_tag}{attenuation_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}"
+        f"{completeness_tag}{completeness_support_tag}{attenuation_tag}{light_curve_uncertainty_tag}"
+        f"{ceph_tag}{planck_h0_tag}{fixed_h0_tag}{planck_om_tag}{prior_profile_tag}{alpha_tag}{eta_sigma_tag}"
+        f"{fagn_sigmoid_tag}{fagn_flux_fraction_tag}{logf_tag}{pivot_tag}"
+    )
+
+
+def canonical_prior_bounds_json(priors):
+    """Serialize resolved top-hat bounds for checkpoint provenance."""
+
+    return json.dumps(
+        {
+            str(name): [float(bounds[0]), float(bounds[1])]
+            for name, bounds in priors.items()
+        },
+        sort_keys=True,
+        separators=(",", ":"),
     )
 
 
@@ -667,6 +787,33 @@ def validate_selection_attenuation_configuration(
     if completeness_magnitude != "attenuated":
         raise ValueError("joint-posterior attenuation selection requires --completeness_magnitude attenuated.")
     _joint_attenuation_draw_arrays(df_agn, df_agn["apparent_mag_2500"])
+    return mode
+
+
+def validate_light_curve_uncertainty_configuration(
+    df_agn,
+    *,
+    light_curve_uncertainty_mode,
+    selection_attenuation_mode,
+    only_sna=False,
+    df_calibrators=None,
+):
+    mode = normalize_light_curve_uncertainty_mode(
+        light_curve_uncertainty_mode
+    )
+    if mode == "covariance" or only_sna:
+        return mode
+    if normalize_selection_attenuation_mode(selection_attenuation_mode) != "fixed-offset":
+        raise NotImplementedError(
+            "--light-curve-uncertainty-mode posterior-draws currently requires "
+            "--selection-attenuation-mode fixed-offset."
+        )
+    if df_calibrators is not None:
+        raise NotImplementedError(
+            "--light-curve-uncertainty-mode posterior-draws is not yet "
+            "supported with --agn_calibrators."
+        )
+    _light_curve_posterior_draw_arrays(df_agn)
     return mode
 
 
@@ -713,6 +860,65 @@ def _checkpoint_scalar_string(value, *, field_name, checkpoint_file):
     return values[0]
 
 
+def _validate_checkpoint_prior_metadata(
+    results,
+    checkpoint_file,
+    *,
+    expected_prior_profile=DEFAULT_PRIOR_PROFILE,
+    expected_prior_bounds_json=None,
+    expected_early_de_guard=False,
+):
+    """Reject resume files produced with incompatible effective priors."""
+
+    expected_prior_profile = normalize_prior_profile(expected_prior_profile)
+    has_profile = "prior_profile" in results
+    has_bounds = "prior_bounds_json" in results
+    if not has_profile and not has_bounds:
+        if expected_prior_profile != DEFAULT_PRIOR_PROFILE:
+            raise RuntimeError(
+                f"Checkpoint '{checkpoint_file}' predates prior-profile metadata "
+                f"and cannot be resumed with {expected_prior_profile!r}."
+            )
+    elif not has_profile or not has_bounds:
+        raise RuntimeError(
+            f"Checkpoint '{checkpoint_file}' has incomplete prior-profile metadata."
+        )
+    else:
+        stored_profile = normalize_prior_profile(
+            _checkpoint_scalar_string(
+                results["prior_profile"],
+                field_name="prior_profile",
+                checkpoint_file=checkpoint_file,
+            )
+        )
+        if stored_profile != expected_prior_profile:
+            raise RuntimeError(
+                f"Checkpoint '{checkpoint_file}' uses prior profile "
+                f"{stored_profile!r}; expected {expected_prior_profile!r}."
+            )
+        stored_bounds = _checkpoint_scalar_string(
+            results["prior_bounds_json"],
+            field_name="prior_bounds_json",
+            checkpoint_file=checkpoint_file,
+        )
+        if (
+            expected_prior_bounds_json is not None
+            and stored_bounds != str(expected_prior_bounds_json)
+        ):
+            raise RuntimeError(
+                f"Checkpoint '{checkpoint_file}' uses incompatible resolved prior bounds."
+            )
+
+    stored_early_de_guard = bool(
+        np.asarray(results.get("early_de_guard", False)).reshape(()).item()
+    )
+    if stored_early_de_guard != bool(expected_early_de_guard):
+        raise RuntimeError(
+            f"Checkpoint '{checkpoint_file}' uses early_de_guard="
+            f"{stored_early_de_guard}; expected {bool(expected_early_de_guard)}."
+        )
+
+
 def _checkpoint_reference_object_id_tuple(
     value,
     *,
@@ -741,6 +947,8 @@ def _load_agn_pivot_context_from_checkpoint(
     checkpoint_file,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
 ):
     missing = sorted(set(AGN_PIVOT_CHECKPOINT_KEYS) - set(results))
     if missing:
@@ -790,6 +998,8 @@ def _load_agn_pivot_context_from_checkpoint(
         context.as_array(
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         )
     except (TypeError, ValueError) as exc:
         raise RuntimeError(
@@ -849,6 +1059,8 @@ def _validate_agn_pivot_context_for_reference(
     z_range,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
     require_reference_ids=True,
 ):
     if not isinstance(agn_pivot_context, AgnPivotContext):
@@ -865,6 +1077,8 @@ def _validate_agn_pivot_context_for_reference(
     agn_pivot_context.as_array(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
     )
     if require_reference_ids:
         expected_ids = tuple(df_agn_reference["object_id"].astype(str).tolist())
@@ -883,9 +1097,15 @@ def validate_resume_checkpoint(
     n_agn,
     *,
     expected_selection_attenuation_mode="fixed-offset",
+    expected_light_curve_uncertainty_mode="covariance",
     expected_cut_tier=None,
     expected_cut_configuration_json=None,
     expected_z_range_semantics=None,
+    expected_use_f_agn_psf_2500_sigmoid_term=False,
+    expected_use_f_agn_psf_2500_flux_fraction_term=False,
+    expected_prior_profile=DEFAULT_PRIOR_PROFILE,
+    expected_prior_bounds_json=None,
+    expected_early_de_guard=False,
 ):
     _validate_strict_padded_checkpoint_metadata(
         results, checkpoint_file, expected_cut_configuration_json
@@ -905,6 +1125,13 @@ def validate_resume_checkpoint(
             "This usually means the file is stale or was written by an older pipeline version. "
             "Delete it or pass resume=False to start a fresh run."
         )
+    _validate_checkpoint_prior_metadata(
+        results,
+        checkpoint_file,
+        expected_prior_profile=expected_prior_profile,
+        expected_prior_bounds_json=expected_prior_bounds_json,
+        expected_early_de_guard=expected_early_de_guard,
+    )
 
     flat_samples = np.asarray(results["flat_samples"])
     if flat_samples.ndim != 2:
@@ -966,6 +1193,40 @@ def validate_resume_checkpoint(
             f"Resume checkpoint '{checkpoint_file}' selection attenuation mode "
             "does not match the current run."
         )
+    stored_light_curve_uncertainty_mode = _checkpoint_scalar_string(
+        results.get("light_curve_uncertainty_mode", "covariance"),
+        field_name="light_curve_uncertainty_mode",
+        checkpoint_file=checkpoint_file,
+    )
+    if stored_light_curve_uncertainty_mode != normalize_light_curve_uncertainty_mode(
+        expected_light_curve_uncertainty_mode
+    ):
+        raise RuntimeError(
+            f"Resume checkpoint '{checkpoint_file}' light-curve uncertainty "
+            "mode does not match the current run."
+        )
+    stored_sigmoid = bool(
+        np.asarray(
+            results.get("use_f_agn_psf_2500_sigmoid_term", False)
+        ).reshape(()).item()
+    )
+    if stored_sigmoid != bool(expected_use_f_agn_psf_2500_sigmoid_term):
+        raise RuntimeError(
+            f"Resume checkpoint '{checkpoint_file}' uses an incompatible "
+            "f_AGN_psf_2500 sigmoid model option."
+        )
+    stored_flux_fraction = bool(
+        np.asarray(
+            results.get("use_f_agn_psf_2500_flux_fraction_term", False)
+        ).reshape(()).item()
+    )
+    if stored_flux_fraction != bool(
+        expected_use_f_agn_psf_2500_flux_fraction_term
+    ):
+        raise RuntimeError(
+            f"Resume checkpoint '{checkpoint_file}' uses an incompatible "
+            "f_AGN_psf_2500 flux-fraction model option."
+        )
 
     for key in ("dmi_max_w", "integrals_max_w"):
         value = np.asarray(results[key])
@@ -1010,9 +1271,15 @@ def _validate_resume_replot_checkpoint_params(
     ndim,
     *,
     expected_selection_attenuation_mode="fixed-offset",
+    expected_light_curve_uncertainty_mode="covariance",
     expected_cut_tier=None,
     expected_cut_configuration_json=None,
     expected_z_range_semantics=None,
+    expected_use_f_agn_psf_2500_sigmoid_term=False,
+    expected_use_f_agn_psf_2500_flux_fraction_term=False,
+    expected_prior_profile=DEFAULT_PRIOR_PROFILE,
+    expected_prior_bounds_json=None,
+    expected_early_de_guard=False,
 ):
     _validate_strict_padded_checkpoint_metadata(
         results, checkpoint_file, expected_cut_configuration_json
@@ -1032,6 +1299,13 @@ def _validate_resume_replot_checkpoint_params(
             f"Resume-replot checkpoint '{checkpoint_file}' was created for a different parameterization: "
             f"flat_samples has {flat_samples.shape[1]} columns, but the current model expects {ndim}."
         )
+    _validate_checkpoint_prior_metadata(
+        results,
+        checkpoint_file,
+        expected_prior_profile=expected_prior_profile,
+        expected_prior_bounds_json=expected_prior_bounds_json,
+        expected_early_de_guard=expected_early_de_guard,
+    )
     if expected_cut_tier is not None:
         if "cut_tier" not in results or "cut_configuration_json" not in results:
             raise RuntimeError(
@@ -1077,6 +1351,40 @@ def _validate_resume_replot_checkpoint_params(
             f"Resume-replot checkpoint '{checkpoint_file}' selection attenuation "
             "mode does not match the current run."
         )
+    stored_light_curve_uncertainty_mode = _checkpoint_scalar_string(
+        results.get("light_curve_uncertainty_mode", "covariance"),
+        field_name="light_curve_uncertainty_mode",
+        checkpoint_file=checkpoint_file,
+    )
+    if stored_light_curve_uncertainty_mode != normalize_light_curve_uncertainty_mode(
+        expected_light_curve_uncertainty_mode
+    ):
+        raise RuntimeError(
+            f"Resume-replot checkpoint '{checkpoint_file}' light-curve "
+            "uncertainty mode does not match the current run."
+        )
+    stored_sigmoid = bool(
+        np.asarray(
+            results.get("use_f_agn_psf_2500_sigmoid_term", False)
+        ).reshape(()).item()
+    )
+    if stored_sigmoid != bool(expected_use_f_agn_psf_2500_sigmoid_term):
+        raise RuntimeError(
+            f"Resume-replot checkpoint '{checkpoint_file}' uses an "
+            "incompatible f_AGN_psf_2500 sigmoid model option."
+        )
+    stored_flux_fraction = bool(
+        np.asarray(
+            results.get("use_f_agn_psf_2500_flux_fraction_term", False)
+        ).reshape(()).item()
+    )
+    if stored_flux_fraction != bool(
+        expected_use_f_agn_psf_2500_flux_fraction_term
+    ):
+        raise RuntimeError(
+            f"Resume-replot checkpoint '{checkpoint_file}' uses an "
+            "incompatible f_AGN_psf_2500 flux-fraction model option."
+        )
 
 
 def _remap_resume_replot_checkpoint(
@@ -1086,9 +1394,15 @@ def _remap_resume_replot_checkpoint(
     ndim,
     *,
     expected_selection_attenuation_mode="fixed-offset",
+    expected_light_curve_uncertainty_mode="covariance",
     expected_cut_tier=None,
     expected_cut_configuration_json=None,
     expected_z_range_semantics=None,
+    expected_use_f_agn_psf_2500_sigmoid_term=False,
+    expected_use_f_agn_psf_2500_flux_fraction_term=False,
+    expected_prior_profile=DEFAULT_PRIOR_PROFILE,
+    expected_prior_bounds_json=None,
+    expected_early_de_guard=False,
 ):
     """Return checkpoint payload remapped to the current cut AGN fit selection."""
 
@@ -1097,9 +1411,21 @@ def _remap_resume_replot_checkpoint(
         checkpoint_file,
         ndim,
         expected_selection_attenuation_mode=expected_selection_attenuation_mode,
+        expected_light_curve_uncertainty_mode=(
+            expected_light_curve_uncertainty_mode
+        ),
         expected_cut_tier=expected_cut_tier,
         expected_cut_configuration_json=expected_cut_configuration_json,
         expected_z_range_semantics=expected_z_range_semantics,
+        expected_use_f_agn_psf_2500_sigmoid_term=(
+            expected_use_f_agn_psf_2500_sigmoid_term
+        ),
+        expected_use_f_agn_psf_2500_flux_fraction_term=(
+            expected_use_f_agn_psf_2500_flux_fraction_term
+        ),
+        expected_prior_profile=expected_prior_profile,
+        expected_prior_bounds_json=expected_prior_bounds_json,
+        expected_early_de_guard=expected_early_de_guard,
     )
     if "object_id_fit_selection" not in results:
         raise RuntimeError(
@@ -1574,15 +1900,12 @@ def resolve_completeness_redshift_support(df_agn, z_range):
     values = values[np.isfinite(values)]
     if values.size == 0:
         raise ValueError("Completeness redshift support requires at least one finite z.")
-    dz = (COMPLETENESS_MAP_Z_EDGE_MAX - COMPLETENESS_MAP_Z_EDGE_MIN) / COMPLETENESS_N_Z_BINS
-    center_lo = COMPLETENESS_MAP_Z_EDGE_MIN + 0.5 * dz
-    center_hi = COMPLETENESS_MAP_Z_EDGE_MAX - 0.5 * dz
     requested = np.concatenate((values, np.asarray(z_range, dtype=float)))
-    outside = (requested < center_lo) | (requested > center_hi)
+    outside = (requested < COMPLETENESS_Z_MIN) | (requested > COMPLETENESS_Z_MAX)
     if np.any(outside):
         raise ValueError(
             "Plot and fit redshifts must lie inside the strict completeness "
-            f"interpolation range [{center_lo}, {center_hi}]; got "
+            f"interpolation range [{COMPLETENESS_Z_MIN}, {COMPLETENESS_Z_MAX}]; got "
             f"[{np.min(requested):.6g}, {np.max(requested):.6g}]."
         )
     return COMPLETENESS_MAP_Z_EDGE_MIN, COMPLETENESS_MAP_Z_EDGE_MAX
@@ -1591,7 +1914,23 @@ def resolve_completeness_redshift_support(df_agn, z_range):
 def record_completeness_support_metadata(frames, *, magnitude_support, redshift_support):
     """Persist strict padded-map support in selection/checkpoint metadata."""
 
-    magnitude_support = [float(value) for value in magnitude_support]
+    frames = tuple(frame for frame in frames if frame is not None)
+    support_mode = (
+        frames[0].attrs.get(
+            "completeness_magnitude_support_mode",
+            DEFAULT_COMPLETENESS_MAGNITUDE_SUPPORT_MODE,
+        )
+        if frames
+        else DEFAULT_COMPLETENESS_MAGNITUDE_SUPPORT_MODE
+    )
+    support_mode = normalize_completeness_magnitude_support_mode(support_mode)
+    if support_mode == "tails":
+        magnitude_support = [
+            float(COMPLETENESS_TAIL_MAG_2500_MIN),
+            float(COMPLETENESS_TAIL_MAG_2500_MAX),
+        ]
+    else:
+        magnitude_support = [float(value) for value in magnitude_support]
     redshift_support = [float(value) for value in redshift_support]
     for frame in frames:
         if frame is None:
@@ -1601,6 +1940,7 @@ def record_completeness_support_metadata(frames, *, magnitude_support, redshift_
         configuration.update(
             {
                 "completeness_magnitude_support": magnitude_support,
+                "completeness_magnitude_support_mode": support_mode,
                 "completeness_redshift_support": redshift_support,
                 "completeness_map_magnitude_support": [
                     COMPLETENESS_MAP_MAG_EDGE_MIN, COMPLETENESS_MAP_MAG_EDGE_MAX
@@ -1616,15 +1956,86 @@ def record_completeness_support_metadata(frames, *, magnitude_support, redshift_
                 "completeness_smooth_sigma_z": float(os.environ.get(
                     COMPLETENESS_SMOOTH_SIGMA_Z_ENV, DEFAULT_COMPLETENESS_SMOOTH_SIGMA_Z
                 )),
-                "completeness_interpolation_policy": "strict-padded-v1",
+                "completeness_interpolation_policy": (
+                    "constant-bright-supported-transition-faint-v2"
+                    if support_mode == "tails"
+                    else "strict-padded-v1"
+                ),
             }
         )
         frame.attrs["cut_configuration_json"] = json.dumps(
             configuration, sort_keys=True, separators=(",", ":")
         )
+        frame.attrs["completeness_magnitude_support_mode"] = support_mode
 
 
-def completeness_checkpoint_metadata(completeness_sim_file):
+def record_completeness_tail_metadata(frames, completeness_model):
+    """Add fitted tail parameters to the immutable selection fingerprint."""
+    decay = getattr(completeness_model, "faint_tail_decay", None)
+    if decay is None:
+        return
+    diagnostics = completeness_model.faint_tail_diagnostics or {}
+    payload = {
+        "completeness_faint_tail_decay": np.asarray(decay, dtype=float).tolist(),
+        "completeness_faint_tail_redshift": np.asarray(
+            completeness_model.z_centers, dtype=float
+        ).tolist(),
+        "completeness_faint_tail_fit_width_mag": float(
+            diagnostics.get("fit_width_mag", 0.75)
+        ),
+        "completeness_faint_tail_max_fit_width_mag": float(
+            diagnostics.get("max_fit_width_mag", 2.0)
+        ),
+        "completeness_faint_tail_shrinkage": float(
+            diagnostics.get("shrinkage", 4.0)
+        ),
+        "completeness_faint_tail_support_source": str(
+            diagnostics.get("support_source", "unknown")
+        ),
+        "completeness_faint_tail_support_z_half_width": float(
+            diagnostics.get("support_z_half_width", 0.2)
+        ),
+        "completeness_faint_tail_min_parent_count": float(
+            diagnostics.get("min_parent_count", 20.0)
+        ),
+        "completeness_faint_tail_min_observed_count": float(
+            diagnostics.get("min_observed_count", 3.0)
+        ),
+        "completeness_faint_tail_min_endpoint_observed_count": float(
+            diagnostics.get("min_endpoint_observed_count", 1.0)
+        ),
+        "completeness_faint_tail_transition_relative_bounds": list(
+            diagnostics.get("transition_relative_bounds", (0.02, 0.95))
+        ),
+        "completeness_faint_tail_min_fit_bins": int(
+            diagnostics.get("min_fit_bins", 3)
+        ),
+        "completeness_faint_tail_fit_start_magnitude": np.asarray(
+            diagnostics.get("fit_start_magnitude", []), dtype=float
+        ).tolist(),
+        "completeness_faint_tail_fit_end_magnitude": np.asarray(
+            diagnostics.get("fit_end_magnitude", []), dtype=float
+        ).tolist(),
+        "completeness_faint_tail_raw_target_decay": float(
+            diagnostics.get("raw_target_decay", np.nan)
+        ),
+        "completeness_faint_tail_target_decay": float(
+            diagnostics.get("target_decay", np.nan)
+        ),
+    }
+    for frame in frames:
+        if frame is None:
+            continue
+        configuration = json.loads(frame.attrs.get("cut_configuration_json", "{}"))
+        configuration.update(payload)
+        frame.attrs["cut_configuration_json"] = json.dumps(
+            configuration, sort_keys=True, separators=(",", ":")
+        )
+
+
+def completeness_checkpoint_metadata(
+    completeness_sim_file, *, magnitude_support_mode="hard-cut", completeness_model=None
+):
     """Return immutable fixed-grid and mock provenance for new checkpoints."""
 
     provenance = {"path": None}
@@ -1636,6 +2047,8 @@ def completeness_checkpoint_metadata(completeness_sim_file):
             with h5py.File(resolved, "r") as handle:
                 for key in (
                     "lf_model",
+                    "shen_lf_mode",
+                    "completeness_magnitude_state",
                     "mock_redshift_min",
                     "mock_redshift_max",
                     "requested_redshift_min",
@@ -1653,8 +2066,21 @@ def completeness_checkpoint_metadata(completeness_sim_file):
                         provenance[key] = value
                 provenance["datasets"] = sorted(handle.keys())
 
-    return {
-        "completeness_interpolation_policy": "strict-padded-v1",
+    support_mode = normalize_completeness_magnitude_support_mode(
+        magnitude_support_mode
+    )
+    selection_support = (
+        [COMPLETENESS_TAIL_MAG_2500_MIN, COMPLETENESS_TAIL_MAG_2500_MAX]
+        if support_mode == "tails"
+        else [COMPLETENESS_MAG_2500_MIN, COMPLETENESS_MAG_2500_MAX]
+    )
+    metadata = {
+        "completeness_interpolation_policy": (
+            "constant-bright-supported-transition-faint-v2"
+            if support_mode == "tails"
+            else "strict-padded-v1"
+        ),
+        "completeness_magnitude_support_mode": support_mode,
         "completeness_map_magnitude_support": np.asarray(
             [COMPLETENESS_MAP_MAG_EDGE_MIN, COMPLETENESS_MAP_MAG_EDGE_MAX],
             dtype=float,
@@ -1666,7 +2092,7 @@ def completeness_checkpoint_metadata(completeness_sim_file):
         "completeness_map_n_magnitude_bins": int(COMPLETENESS_N_MAG_BINS),
         "completeness_map_n_redshift_bins": int(COMPLETENESS_N_Z_BINS),
         "completeness_selection_magnitude_support": np.asarray(
-            [COMPLETENESS_MAG_2500_MIN, COMPLETENESS_MAG_2500_MAX], dtype=float
+            selection_support, dtype=float
         ),
         "completeness_smooth_sigma_mag": float(
             os.environ.get(
@@ -1684,6 +2110,41 @@ def completeness_checkpoint_metadata(completeness_sim_file):
             provenance, sort_keys=True, separators=(",", ":")
         ),
     }
+    if completeness_model is not None and getattr(
+        completeness_model, "faint_tail_decay", None
+    ) is not None:
+        metadata["completeness_faint_tail_decay"] = np.asarray(
+            completeness_model.faint_tail_decay, dtype=float
+        )
+        metadata["completeness_faint_tail_redshift"] = np.asarray(
+            completeness_model.z_centers, dtype=float
+        )
+        diagnostics = completeness_model.faint_tail_diagnostics or {}
+        for output_key, diagnostics_key in (
+            ("completeness_faint_tail_fit_start_magnitude", "fit_start_magnitude"),
+            ("completeness_faint_tail_fit_end_magnitude", "fit_end_magnitude"),
+            ("completeness_faint_tail_fit_n_bins", "fit_n_bins"),
+            ("completeness_faint_tail_supported_parent_count", "supported_parent_count"),
+            ("completeness_faint_tail_supported_observed_count", "supported_observed_count"),
+        ):
+            metadata[output_key] = np.asarray(
+                diagnostics.get(diagnostics_key, []), dtype=float
+            )
+        metadata["completeness_faint_tail_diagnostics_json"] = json.dumps(
+            {
+                key: (
+                    value.tolist()
+                    if isinstance(value, np.ndarray)
+                    else list(value)
+                    if isinstance(value, tuple)
+                    else value
+                )
+                for key, value in diagnostics.items()
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    return metadata
 
 
 def _validate_strict_padded_checkpoint_metadata(
@@ -1694,9 +2155,19 @@ def _validate_strict_padded_checkpoint_metadata(
     if not expected_cut_configuration_json:
         return
     expected_configuration = json.loads(str(expected_cut_configuration_json))
-    if expected_configuration.get("completeness_interpolation_policy") != "strict-padded-v1":
+    policy = expected_configuration.get("completeness_interpolation_policy")
+    if policy not in {
+        "strict-padded-v1",
+        "constant-bright-exponential-faint-v1",
+        "constant-bright-supported-transition-faint-v2",
+    }:
         return
-    expected = completeness_checkpoint_metadata(None)
+    expected = completeness_checkpoint_metadata(
+        None,
+        magnitude_support_mode=expected_configuration.get(
+            "completeness_magnitude_support_mode", "hard-cut"
+        ),
+    )
     required = set(expected)
     missing = sorted(required - set(results))
     if missing:
@@ -1790,14 +2261,19 @@ def _prepare_shared_agn_pivot_context(
     disable_ceph_dist_calibration,
     use_planck_h0_prior,
     use_planck_om_prior,
+    prior_profile=DEFAULT_PRIOR_PROFILE,
     use_alpha_lambda_term,
     use_eta_sigma_term,
+    use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
     use_redshift_log_f_term,
     disable_sigma_clip_pass,
     resume_stage,
     prefix,
     completeness_magnitude="dereddened",
+    light_curve_uncertainty_mode="covariance",
     resume_replot_with_cuts=False,
+    round_pivots=True,
 ):
     """Build once, or strictly load once, for cosmologies sharing a fit sample."""
 
@@ -1811,6 +2287,9 @@ def _prepare_shared_agn_pivot_context(
         uniform_redshift_distribution=(
             False if resume_replot_with_cuts else uniform_redshift_distribution
         ),
+    )
+    expected_pivot_rule = (
+        AGN_PIVOT_RULE if round_pivots else AGN_UNROUNDED_PIVOT_RULE
     )
     loaded_contexts = []
     for cosmo_model in cosmo_models:
@@ -1827,12 +2306,20 @@ def _prepare_shared_agn_pivot_context(
             completeness=completeness,
             completeness_mode=completeness_mode,
             completeness_magnitude=completeness_magnitude,
+            completeness_magnitude_support_mode=reference_selection.attrs.get(
+                "completeness_magnitude_support_mode", "hard-cut"
+            ),
             disable_ceph_dist_calibration=disable_ceph_dist_calibration,
             use_planck_h0_prior=use_planck_h0_prior,
             use_planck_om_prior=use_planck_om_prior,
+            prior_profile=prior_profile,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
+            light_curve_uncertainty_mode=light_curve_uncertainty_mode,
+            pivot_rule=expected_pivot_rule,
         )
         checkpoint_paths = _build_checkpoint_paths(prefix, run_tag)
         apply_two_pass = (
@@ -1856,7 +2343,15 @@ def _prepare_shared_agn_pivot_context(
             checkpoint_file=checkpoint_file,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         )
+        if context.rule != expected_pivot_rule:
+            raise RuntimeError(
+                f"AGN checkpoint '{checkpoint_file}' uses pivot rule "
+                f"{context.rule!r}; expected {expected_pivot_rule!r}. Match "
+                "the original pivot-rounding option when resuming."
+            )
         _validate_agn_pivot_checkpoint_reference_provenance(
             context,
             results,
@@ -1868,6 +2363,8 @@ def _prepare_shared_agn_pivot_context(
             z_range=z_range,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             require_reference_ids=not resume_replot_with_cuts,
         )
         loaded_contexts.append((checkpoint_file, context))
@@ -1891,6 +2388,9 @@ def _prepare_shared_agn_pivot_context(
         z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
+        round_pivots=round_pivots,
     )
 
 
@@ -1904,9 +2404,18 @@ def _build_completeness_params(
     plot_path,
     plot=False,
     completeness_z_range=None,
+    magnitude_support_mode=None,
 ):
     if not completeness:
         return None
+    if magnitude_support_mode is None:
+        magnitude_support_mode = df_agn_completeness.attrs.get(
+            "completeness_magnitude_support_mode",
+            DEFAULT_COMPLETENESS_MAGNITUDE_SUPPORT_MODE,
+        )
+    magnitude_support_mode = normalize_completeness_magnitude_support_mode(
+        magnitude_support_mode
+    )
     missing_magnitude_columns = {
         COMPLETENESS_MAG_COL,
         COMPLETENESS_MAG_ERR_COL,
@@ -1957,6 +2466,7 @@ def _build_completeness_params(
             plot_path=plot_path,
             df_agn_fhost_population=df_agn_all,
             z_range=completeness_z_range,
+            magnitude_support_mode=magnitude_support_mode,
         )
     if completeness_mode == "3d_fhost":
         return get_completeness_function_3d_fhost(
@@ -1966,6 +2476,7 @@ def _build_completeness_params(
             plot_path=plot_path,
             df_agn_fhost_population=df_agn_all,
             z_range=completeness_z_range,
+            magnitude_support_mode=magnitude_support_mode,
         )
     return get_completeness_function_2d(
         df_agn_completeness,
@@ -1973,6 +2484,7 @@ def _build_completeness_params(
         plot=plot,
         plot_path=plot_path,
         z_range=completeness_z_range,
+        magnitude_support_mode=magnitude_support_mode,
     )
 
 
@@ -2079,12 +2591,16 @@ def _compute_direct_full_sample_completeness_summaries(
     disable_ceph_dist_calibration,
     use_planck_h0_prior,
     use_planck_om_prior,
+    prior_profile=DEFAULT_PRIOR_PROFILE,
     only_agn=False,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
     use_redshift_log_f_term=False,
     early_de_guard=False,
     selection_attenuation_mode="fixed-offset",
+    light_curve_uncertainty_mode="covariance",
     dmi_draw_indices=None,
 ):
     """Replay completeness for the full plotting sample.
@@ -2196,12 +2712,16 @@ def _compute_direct_full_sample_completeness_summaries(
             agn_pivot_context=agn_pivot_context,
             use_planck_h0_prior=use_planck_h0_prior,
             use_planck_om_prior=use_planck_om_prior,
+            prior_profile=prior_profile,
             use_ceph_dist_calibration=not disable_ceph_dist_calibration,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
             early_de_guard=early_de_guard,
             selection_attenuation_mode=selection_attenuation_mode,
+            light_curve_uncertainty_mode=light_curve_uncertainty_mode,
             only_sna=False,
             only_agn=only_agn,
             use_full_cov=use_full_cov,
@@ -2402,13 +2922,17 @@ def _run_fit_stage(
     completeness_sim_file,
     completeness_mode,
     selection_attenuation_mode,
+    light_curve_uncertainty_mode,
     compare_sigma_only,
     minimal_plots=False,
     disable_ceph_dist_calibration,
     use_planck_h0_prior,
     use_planck_om_prior,
+    prior_profile,
     use_alpha_lambda_term,
     use_eta_sigma_term,
+    use_f_agn_psf_2500_sigmoid_term,
+    use_f_agn_psf_2500_flux_fraction_term,
     use_redshift_log_f_term,
     early_de_guard=False,
     checkpoint_file_override=None,
@@ -2452,6 +2976,7 @@ def _run_fit_stage(
         completeness_sim_file=completeness_sim_file,
         completeness_mode=completeness_mode,
         selection_attenuation_mode=selection_attenuation_mode,
+        light_curve_uncertainty_mode=light_curve_uncertainty_mode,
         completeness_magnitude=df_agn_fit_selection.attrs.get(
             "completeness_magnitude",
             "dereddened",
@@ -2461,8 +2986,11 @@ def _run_fit_stage(
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        prior_profile=prior_profile,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         early_de_guard=early_de_guard,
         resume_replot_with_cuts=resume_replot_with_cuts,
@@ -2477,6 +3005,8 @@ def _run_fit_stage(
         z_pivot_agn,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         sigma_sel_posterior_median=dmi_selection_sigma_posterior_median,
     )
@@ -2487,6 +3017,8 @@ def _run_fit_stage(
         max_eval=200,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     return (
@@ -2511,39 +3043,106 @@ def generate_fresh_completeness_sim_file(
     seed=123,
     z_range=(0.44, 3.16),
     completeness_magnitude="dereddened",
+    lf_model="shen",
 ):
-    """Generate a fresh Shen-LF mock catalog for completeness-map construction."""
-    del completeness_magnitude
+    """Generate a fresh LF mock catalog for completeness-map construction."""
+    lf_model = str(lf_model).strip().lower().replace("-", "_")
+    if lf_model not in COMPLETENESS_LF_MODELS:
+        raise ValueError(
+            f"Unknown completeness LF model {lf_model!r}; expected one of "
+            f"{COMPLETENESS_LF_MODELS}."
+        )
+    shen_lf_mode = (
+        normalize_shen_lf_mode(
+            os.environ.get(SHEN_LF_MODE_ENV, SHEN_DEFAULT_LF_MODE)
+        )
+        if lf_model == "shen"
+        else None
+    )
+    expected_magnitude = (
+        shen_lf_expected_completeness_magnitude(shen_lf_mode)
+        if shen_lf_mode is not None
+        else "attenuated"
+    )
+    if (
+        completeness_magnitude != expected_magnitude
+        and shen_lf_mode != SHEN_DEFAULT_LF_MODE
+    ):
+        if shen_lf_mode is None:
+            raise ValueError(
+                "Empirical Type-1 LFs retain their samples' implicit internal "
+                "attenuation and therefore require "
+                "completeness_magnitude='attenuated'."
+            )
+        descriptor = (
+            f"shen/{shen_lf_mode}" if shen_lf_mode is not None else lf_model
+        )
+        raise ValueError(
+            f"Completeness LF {descriptor!r} requires "
+            f"completeness_magnitude={expected_magnitude!r}."
+        )
     z_range = tuple(float(value) for value in z_range)
     if len(z_range) != 2 or z_range[0] < 0.0 or z_range[0] >= z_range[1]:
         raise ValueError("Completeness mock z_range must be increasing and non-negative.")
     completeness_dir = Path(plot_path) / "completeness"
     completeness_dir.mkdir(parents=True, exist_ok=True)
-    output_path = completeness_dir / "mock_completeness_catalog_fresh.h5"
+    if lf_model == "shen" and shen_lf_mode == SHEN_DEFAULT_LF_MODE:
+        output_name = "mock_completeness_catalog_fresh.h5"
+    elif lf_model == "shen":
+        output_name = f"mock_completeness_catalog_fresh_shen_{shen_lf_mode}.h5"
+    else:
+        output_name = f"mock_completeness_catalog_fresh_{lf_model}.h5"
+    output_path = completeness_dir / output_name
     thinning_probability = 1.0
 
     rng = np.random.default_rng(seed)
-    phi_log10, m_grid, z_bins = build_shen_lf(None)
     alpha_nu_parent_mean = -0.5
     alpha_nu_parent_sigma = 0.3
-    _, _, _, _, z_all, m_all, m_rest_all, _, alpha_lambda_all = mock_m_per_zbin(
-        phi_log10,
-        m_grid,
-        z_bins,
-        float(area_deg2),
-        alpha_nu_parent_mean,
-        alpha_nu_parent_sigma,
-        COMPLETENESS_MOCK_COSMO,
-        z_res=512,
-        m_scatter=0.0,
-        kcorr_zref=2.0,
-        m_lim=28.0,
-        thinning_probability=thinning_probability,
-        rng=rng,
-        return_z=True,
-        return_global=True,
-        return_alpha=True,
-    )
+    lf_grid = None
+    if lf_model == "shen":
+        if shen_lf_mode == SHEN_DEFAULT_LF_MODE:
+            phi_log10, m_grid, z_bins = build_shen_lf(None)
+        else:
+            phi_log10, m_grid, z_bins = build_shen_lf(
+                None, mode=shen_lf_mode
+            )
+        _, _, _, _, z_all, m_all, m_rest_all, _, alpha_lambda_all = mock_m_per_zbin(
+            phi_log10,
+            m_grid,
+            z_bins,
+            float(area_deg2),
+            alpha_nu_parent_mean,
+            alpha_nu_parent_sigma,
+            COMPLETENESS_MOCK_COSMO,
+            z_res=512,
+            m_scatter=0.0,
+            kcorr_zref=2.0,
+            m_lim=28.0,
+            thinning_probability=thinning_probability,
+            rng=rng,
+            return_z=True,
+            return_global=True,
+            return_alpha=True,
+        )
+    else:
+        lf_grid = build_completeness_lf(
+            lf_model,
+            z_range=z_range,
+            target_cosmology=COMPLETENESS_MOCK_COSMO,
+        )
+        _, _, _, _, z_all, m_all, m_rest_all, _, alpha_lambda_all = mock_lf_grid_per_zbin(
+            lf_grid,
+            float(area_deg2),
+            alpha_nu_parent_mean,
+            alpha_nu_parent_sigma,
+            COMPLETENESS_MOCK_COSMO,
+            z_range=z_range,
+            m2500_support=DEFAULT_M2500_SUPPORT,
+            z_res=512,
+            rng=rng,
+            return_global=True,
+            return_alpha=True,
+        )
     n_generated = int(np.size(z_all))
     print(
         f"Fresh completeness mock generated {n_generated} sources "
@@ -2562,11 +3161,17 @@ def generate_fresh_completeness_sim_file(
         area_deg2=area_deg2,
         alpha_nu_parent_mean=alpha_nu_parent_mean,
         alpha_nu_parent_sigma=alpha_nu_parent_sigma,
+        lf_grid=lf_grid,
+        m2500_support=(DEFAULT_M2500_SUPPORT if lf_grid is not None else None),
+        z_range=z_range,
     )
     finite_z = np.asarray(z_all, dtype=float)
     finite_z = finite_z[np.isfinite(finite_z)]
     with h5py.File(output_path, "a") as handle:
-        handle.attrs["lf_model"] = "shen"
+        handle.attrs["lf_model"] = lf_model
+        if shen_lf_mode is not None:
+            handle.attrs["shen_lf_mode"] = shen_lf_mode
+        handle.attrs["completeness_magnitude_state"] = completeness_magnitude
         handle.attrs["mock_redshift_min"] = float(np.min(finite_z))
         handle.attrs["mock_redshift_max"] = float(np.max(finite_z))
         handle.attrs["requested_redshift_min"] = z_range[0]
@@ -2592,17 +3197,24 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       prefix="default",
                       checkpoint_file_override=None,
                       completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
+                      completeness_params_override=None,
                       completeness_mode="2d",
                       completeness_magnitude="dereddened",
                       selection_attenuation_mode="fixed-offset",
+                      light_curve_uncertainty_mode="covariance",
                       N=None,
                       compare_sigma_only=False,
                       minimal_plots=False,
                       disable_ceph_dist_calibration=False,
                       use_planck_h0_prior=False,
                       use_planck_om_prior=False,
+                      prior_profile=DEFAULT_PRIOR_PROFILE,
+                      fixed_h0=None,
+                      rng_seed=None,
                       use_alpha_lambda_term=False,
                       use_eta_sigma_term=False,
+                      use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
                       use_redshift_log_f_term=False,
                       early_de_guard=False,
                       resume_replot_with_cuts=False,
@@ -2621,6 +3233,13 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         completeness=completeness,
         completeness_magnitude=completeness_magnitude,
         only_sna=only_sna,
+    )
+    light_curve_uncertainty_mode = validate_light_curve_uncertainty_configuration(
+        df_agn,
+        light_curve_uncertainty_mode=light_curve_uncertainty_mode,
+        selection_attenuation_mode=selection_attenuation_mode,
+        only_sna=only_sna,
+        df_calibrators=df_calibrators,
     )
     if completeness and COMPLETENESS_MAG_COL not in df_agn.columns:
         df_agn = prepare_completeness_magnitude_columns(
@@ -2642,12 +3261,22 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             completeness_magnitude,
         )
     speed = normalize_speed(speed)
+    prior_profile = normalize_prior_profile(prior_profile)
     if completeness_z_range is None and completeness and df_agn_completeness is not None:
         completeness_z_range = resolve_completeness_redshift_support(
             df_agn_completeness, z_range
         )
     _fit_mode_label(only_sna, only_agn)
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
+    if fixed_h0 is not None and use_planck_h0_prior:
+        raise ValueError(
+            "fixed_h0 cannot be combined with the Planck H0 prior or "
+            "distance-calibration mode."
+        )
+    if completeness_params_override is not None and not completeness:
+        raise ValueError(
+            "completeness_params_override requires completeness=True."
+        )
     if only_sna:
         if agn_pivot_context is not None:
             raise ValueError("SNe-only runs must not receive AGN pivot metadata.")
@@ -2658,6 +3287,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             z_range=z_range,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             require_reference_ids=False,
         )
     run_tag = make_run_tag(
@@ -2670,13 +3301,26 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         completeness=completeness,
         completeness_mode=completeness_mode,
         completeness_magnitude=completeness_magnitude,
+        completeness_magnitude_support_mode=df_agn.attrs.get(
+            "completeness_magnitude_support_mode", "hard-cut"
+        ),
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        prior_profile=prior_profile,
+        fixed_h0=fixed_h0,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         selection_attenuation_mode=selection_attenuation_mode,
+        light_curve_uncertainty_mode=light_curve_uncertainty_mode,
+        pivot_rule=(
+            agn_pivot_context.rule
+            if agn_pivot_context is not None
+            else AGN_PIVOT_RULE
+        ),
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -2687,10 +3331,15 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         only_agn=only_agn,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        prior_profile=prior_profile,
+        fixed_h0=fixed_h0,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
+    prior_bounds_json = canonical_prior_bounds_json(priors)
     ndim = len(model_labels)
     print(f"Running sampling with {ndim} parameters for cosmological model: {cosmo_model}")
     if resume_replot_with_cuts and not resume:
@@ -2720,31 +3369,99 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     f"--fit_eta_sigma_term requires finite {required_col} for all AGN used in the fit; "
                     f"found {np.count_nonzero(bad)} non-finite rows."
                 )
+    if (
+        use_f_agn_psf_2500_sigmoid_term
+        and use_f_agn_psf_2500_flux_fraction_term
+    ):
+        raise ValueError(
+            "The f_AGN_psf_2500 sigmoid and flux-fraction terms are "
+            "mutually exclusive."
+        )
+    if (
+        use_f_agn_psf_2500_sigmoid_term
+        or use_f_agn_psf_2500_flux_fraction_term
+    ):
+        required_columns = (
+            "f_AGN_psf_2500",
+            "f_AGN_psf_2500_err",
+        )
+        option_name = (
+            "--fit_f_agn_psf_2500_flux_fraction_term"
+            if use_f_agn_psf_2500_flux_fraction_term
+            else "--fit_f_agn_psf_2500_sigmoid_term"
+        )
+        for required_col in required_columns:
+            if required_col not in df_agn.columns:
+                raise KeyError(
+                    f"{option_name} requires df_agn[{required_col!r}]."
+                )
+        f_agn = df_agn["f_AGN_psf_2500"].to_numpy(dtype=float)
+        f_agn_err = df_agn["f_AGN_psf_2500_err"].to_numpy(dtype=float)
+        lower_invalid = (
+            f_agn <= 0.0
+            if use_f_agn_psf_2500_flux_fraction_term
+            else f_agn < 0.0
+        )
+        invalid_fraction = ~np.isfinite(f_agn) | lower_invalid | (f_agn > 1.0)
+        invalid_error = ~np.isfinite(f_agn_err) | (f_agn_err < 0.0)
+        if np.any(invalid_fraction):
+            interval = (
+                "(0, 1]"
+                if use_f_agn_psf_2500_flux_fraction_term
+                else "[0, 1]"
+            )
+            raise ValueError(
+                f"{option_name} requires finite f_AGN_psf_2500 in "
+                f"{interval} for every fitted AGN; found "
+                f"{np.count_nonzero(invalid_fraction)} invalid row(s)."
+            )
+        if np.any(invalid_error):
+            raise ValueError(
+                f"{option_name} requires finite, "
+                "nonnegative f_AGN_psf_2500_err for every fitted AGN; found "
+                f"{np.count_nonzero(invalid_error)} invalid row(s)."
+            )
 
     if df_agn_completeness is None:
         df_agn_completeness = df_agn
 
     if completeness and not resume_replot_with_cuts:
-        if completeness_sim_file is None:
-            completeness_area_deg2 = estimate_sky_box_area_deg2(df_agn_all)
-            completeness_sim_file = generate_fresh_completeness_sim_file(
-                plot_path,
-                area_deg2=completeness_area_deg2,
-                z_range=completeness_z_range,
-                completeness_magnitude=completeness_magnitude,
+        if completeness_params_override is not None:
+            if not isinstance(completeness_params_override, (tuple, list)) or len(
+                completeness_params_override
+            ) < 5:
+                raise ValueError(
+                    "completeness_params_override must be a completeness tuple "
+                    "with at least (model, mag_grid, z_grid, dm, dz)."
+                )
+            completeness_params = tuple(completeness_params_override)
+            print("Using caller-supplied completeness model.")
+        else:
+            if completeness_sim_file is None:
+                completeness_area_deg2 = estimate_sky_box_area_deg2(df_agn_all)
+                completeness_sim_file = generate_fresh_completeness_sim_file(
+                    plot_path,
+                    area_deg2=completeness_area_deg2,
+                    z_range=completeness_z_range,
+                    completeness_magnitude=completeness_magnitude,
+                )
+            print(f"Building {completeness_mode} completeness map using mock catalog: {completeness_sim_file}")
+            completeness_params = _build_completeness_params(
+                df_agn_completeness,
+                df_agn_all,
+                completeness=completeness,
+                completeness_mode=completeness_mode,
+                completeness_sim_file=completeness_sim_file,
+                plot_path=plot_path,
+                plot=not (compare_sigma_only or minimal_plots),
+                completeness_z_range=completeness_z_range,
             )
-        print(f"Building {completeness_mode} completeness map using mock catalog: {completeness_sim_file}")
-        completeness_params = _build_completeness_params(
-            df_agn_completeness,
-            df_agn_all,
-            completeness=completeness,
-            completeness_mode=completeness_mode,
-            completeness_sim_file=completeness_sim_file,
-            plot_path=plot_path,
-            plot=not (compare_sigma_only or minimal_plots),
-            completeness_z_range=completeness_z_range,
-        )
-        if not compare_sigma_only:
+        if completeness_params is not None:
+            record_completeness_tail_metadata(
+                (df_agn, df_agn_all, df_agn_completeness),
+                completeness_params[0],
+            )
+        if not (compare_sigma_only or minimal_plots):
             _plot_completeness_cut_audit(
                 completeness_params,
                 df_agn_all,
@@ -2759,6 +3476,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     agn_model_req_params, agn_model_req_obs, agn_model_req_errs = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
     )
     agn_fields = agn_model_req_params + agn_model_req_obs + agn_model_req_errs
     agn_fields += ('apparent_mag_2500', 'apparent_mag_2500_err', 'z', 'z_err', 'object_id')
@@ -2769,6 +3488,12 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             JOINT_DEREDDENED_MAG_DRAWS_COL,
             JOINT_ATTENUATED_MAG_DRAWS_COL,
             JOINT_POSTERIOR_VALID_COUNT_COL,
+        )
+    if light_curve_uncertainty_mode == "posterior-draws":
+        agn_fields += (
+            LIGHT_CURVE_LOG_SIGMA_DRAW_COL,
+            LIGHT_CURVE_LOG_TAU_RF_DRAW_COL,
+            LIGHT_CURVE_POSTERIOR_VALID_COUNT_COL,
         )
     if COMPLETENESS_FHOST_COL in df_agn.columns:
         agn_fields += (COMPLETENESS_FHOST_COL,)
@@ -2813,6 +3538,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     checkpoint_file=checkpoint_file,
                     use_alpha_lambda_term=use_alpha_lambda_term,
                     use_eta_sigma_term=use_eta_sigma_term,
+                    use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                 )
                 _validate_agn_pivot_checkpoint_reference_provenance(
                     stored_pivot_context,
@@ -2826,6 +3553,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     df_agn,
                     ndim,
                     expected_selection_attenuation_mode=selection_attenuation_mode,
+                    expected_light_curve_uncertainty_mode=(
+                        light_curve_uncertainty_mode
+                    ),
                     expected_cut_tier=df_agn.attrs.get("cut_tier"),
                     expected_cut_configuration_json=df_agn.attrs.get("cut_configuration_json"),
                     expected_z_range_semantics=(
@@ -2833,6 +3563,15 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                         if df_agn.attrs.get("cut_configuration_json")
                         else None
                     ),
+                    expected_use_f_agn_psf_2500_sigmoid_term=(
+                        use_f_agn_psf_2500_sigmoid_term
+                    ),
+                    expected_use_f_agn_psf_2500_flux_fraction_term=(
+                        use_f_agn_psf_2500_flux_fraction_term
+                    ),
+                    expected_prior_profile=prior_profile,
+                    expected_prior_bounds_json=prior_bounds_json,
+                    expected_early_de_guard=early_de_guard,
                 )
                 print(
                     "Resume-replot with cuts: loaded posterior samples and remapped "
@@ -2845,6 +3584,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     ndim=ndim,
                     n_agn=len(agn_data["z"]),
                     expected_selection_attenuation_mode=selection_attenuation_mode,
+                    expected_light_curve_uncertainty_mode=(
+                        light_curve_uncertainty_mode
+                    ),
                     expected_cut_tier=df_agn.attrs.get("cut_tier"),
                     expected_cut_configuration_json=df_agn.attrs.get(
                         "cut_configuration_json"
@@ -2854,6 +3596,15 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                         if df_agn.attrs.get("cut_configuration_json")
                         else None
                     ),
+                    expected_use_f_agn_psf_2500_sigmoid_term=(
+                        use_f_agn_psf_2500_sigmoid_term
+                    ),
+                    expected_use_f_agn_psf_2500_flux_fraction_term=(
+                        use_f_agn_psf_2500_flux_fraction_term
+                    ),
+                    expected_prior_profile=prior_profile,
+                    expected_prior_bounds_json=prior_bounds_json,
+                    expected_early_de_guard=early_de_guard,
                 )
             if not only_sna:
                 if stored_pivot_context != agn_pivot_context:
@@ -2918,12 +3669,17 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 use_full_cov=use_full_cov,
                 use_planck_h0_prior=use_planck_h0_prior,
                 use_planck_om_prior=use_planck_om_prior,
+                prior_profile=prior_profile,
+                fixed_h0=fixed_h0,
                 use_ceph_dist_calibration=not disable_ceph_dist_calibration,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 early_de_guard=early_de_guard,
                 selection_attenuation_mode=selection_attenuation_mode,
+                light_curve_uncertainty_mode=light_curve_uncertainty_mode,
             )
             ptform_kwargs = dict(priors=priors, model_labels=model_labels)
             loglike_func = (
@@ -2942,6 +3698,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 sample='rwalk',
                 pool=pool,
                 queue_size=num_cores,
+                rstate=np.random.default_rng(rng_seed),
                 blob=True
             )
             warm_start = warm_start_flat_samples is not None
@@ -2986,6 +3743,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 speed=speed,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
             )
         logZ, logZerr = results.logz[-1], results.logzerr[-1]
@@ -3001,7 +3760,14 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
 
         # Keep equal-weight resampling
         idx = np.arange(weights.size)
-        flat_idx = dyfunc.resample_equal(idx, weights)          # (nsamp,)
+        if rng_seed is None:
+            flat_idx = dyfunc.resample_equal(idx, weights)
+        else:
+            flat_idx = dyfunc.resample_equal(
+                idx,
+                weights,
+                rstate=np.random.default_rng(int(rng_seed) + 1),
+            )
         flat_samples = samples[flat_idx]
         flat_blobs   = blobs[flat_idx]
 
@@ -3072,6 +3838,12 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
 
         checkpoint_payload = dict(
             flat_samples=flat_samples,
+            model_labels=np.asarray(model_labels, dtype=str),
+            prior_profile=prior_profile,
+            prior_bounds_json=prior_bounds_json,
+            early_de_guard=bool(early_de_guard),
+            fixed_h0=np.nan if fixed_h0 is None else float(fixed_h0),
+            rng_seed=-1 if rng_seed is None else int(rng_seed),
             dmi_max_w=dmi_max_w,
             dmi_posterior_median=dmi_posterior_median,
             dmi_posterior_sigma=dmi_posterior_sigma,
@@ -3086,10 +3858,35 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             cut_configuration_json=str(df_agn.attrs.get("cut_configuration_json", "")),
             z_range_semantics=Z_RANGE_SEMANTICS,
             selection_attenuation_mode=selection_attenuation_mode,
+            light_curve_uncertainty_mode=light_curve_uncertainty_mode,
+            use_f_agn_psf_2500_sigmoid_term=bool(
+                use_f_agn_psf_2500_sigmoid_term
+            ),
+            use_f_agn_psf_2500_flux_fraction_term=bool(
+                use_f_agn_psf_2500_flux_fraction_term
+            ),
         )
         if completeness:
+            # Re-evaluate the highest-weight point so the persisted tail audit
+            # corresponds to the same sample as integrals_max_w and dmi_max_w.
+            loglike_func(samples[idx_max_weight], **logl_kwargs)
+            selection_components = getattr(
+                completeness_params[0], "_last_selection_components", {}
+            )
+            warn_if_selection_tails_dominate(selection_components)
+            for region, diagnostics in selection_components.items():
+                for quantity, values in diagnostics.items():
+                    checkpoint_payload[
+                        f"completeness_{region}_{quantity}"
+                    ] = np.asarray(values, dtype=float)
             checkpoint_payload.update(
-                completeness_checkpoint_metadata(completeness_sim_file)
+                completeness_checkpoint_metadata(
+                    completeness_sim_file,
+                    magnitude_support_mode=df_agn.attrs.get(
+                        "completeness_magnitude_support_mode", "hard-cut"
+                    ),
+                    completeness_model=completeness_params[0],
+                )
             )
         if not only_sna:
             checkpoint_payload.update(
@@ -3162,14 +3959,19 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                completeness_sim_file=DEFAULT_COMPLETENESS_SIM_FILE,
                completeness_mode="2d",
                completeness_magnitude="dereddened",
+               completeness_lf_model="shen",
                selection_attenuation_mode="fixed-offset",
+               light_curve_uncertainty_mode="covariance",
                compare_sigma_only=False,
                minimal_plots=False,
                disable_ceph_dist_calibration=False,
                use_planck_h0_prior=False,
                use_planck_om_prior=False,
+               prior_profile=DEFAULT_PRIOR_PROFILE,
                use_alpha_lambda_term=False,
                use_eta_sigma_term=False,
+               use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
                use_redshift_log_f_term=False,
                early_de_guard=False,
                resume_replot_with_cuts=False,
@@ -3179,6 +3981,40 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     completeness_magnitude = normalize_completeness_magnitude(
         completeness_magnitude
     )
+    completeness_lf_model = str(completeness_lf_model).strip().lower().replace("-", "_")
+    if completeness_lf_model not in COMPLETENESS_LF_MODELS:
+        raise ValueError(
+            f"Unknown completeness LF model {completeness_lf_model!r}; "
+            f"expected one of {COMPLETENESS_LF_MODELS}."
+        )
+    shen_lf_mode = (
+        normalize_shen_lf_mode(
+            os.environ.get(SHEN_LF_MODE_ENV, SHEN_DEFAULT_LF_MODE)
+        )
+        if completeness_lf_model == "shen"
+        else None
+    )
+    expected_magnitude = (
+        shen_lf_expected_completeness_magnitude(shen_lf_mode)
+        if shen_lf_mode is not None
+        else "attenuated"
+    )
+    if (
+        completeness_magnitude != expected_magnitude
+        and shen_lf_mode != SHEN_DEFAULT_LF_MODE
+    ):
+        if shen_lf_mode is None:
+            raise ValueError(
+                "Empirical Type-1 completeness LFs require "
+                "completeness_magnitude='attenuated'."
+            )
+        raise ValueError(
+            f"Completeness LF {completeness_lf_model!r}"
+            + (
+                f"/{shen_lf_mode!s}" if shen_lf_mode is not None else ""
+            )
+            + f" requires completeness_magnitude={expected_magnitude!r}."
+        )
     df_agn = prepare_completeness_magnitude_columns(
         df_agn,
         completeness_magnitude,
@@ -3193,6 +4029,13 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         completeness=completeness,
         completeness_magnitude=completeness_magnitude,
         only_sna=only_sna,
+    )
+    light_curve_uncertainty_mode = validate_light_curve_uncertainty_configuration(
+        df_agn,
+        light_curve_uncertainty_mode=light_curve_uncertainty_mode,
+        selection_attenuation_mode=selection_attenuation_mode,
+        only_sna=only_sna,
+        df_calibrators=df_calibrators,
     )
     if df_agn_completeness_parent is None:
         df_agn_completeness_parent = df_agn.copy()
@@ -3215,9 +4058,10 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 COMPLETENESS_MAG_2500_MIN,
                 COMPLETENESS_MAG_2500_MAX,
             ),
-            redshift_support=completeness_z_range,
+            redshift_support=(COMPLETENESS_Z_MIN, COMPLETENESS_Z_MAX),
         )
     speed = normalize_speed(speed)
+    prior_profile = normalize_prior_profile(prior_profile)
     _fit_mode_label(only_sna, only_agn)
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
     sigma_clip_second_pass_mode = normalize_sigma_clip_second_pass_mode(sigma_clip_second_pass_mode)
@@ -3231,13 +4075,20 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         completeness=completeness,
         completeness_mode=completeness_mode,
         completeness_magnitude=completeness_magnitude,
+        completeness_magnitude_support_mode=df_agn.attrs.get(
+            "completeness_magnitude_support_mode", "hard-cut"
+        ),
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        prior_profile=prior_profile,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         selection_attenuation_mode=selection_attenuation_mode,
+        light_curve_uncertainty_mode=light_curve_uncertainty_mode,
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -3259,6 +4110,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 area_deg2=completeness_area_deg2,
                 z_range=completeness_z_range,
                 completeness_magnitude=completeness_magnitude,
+                lf_model=completeness_lf_model,
             )
         else:
             print(f"Completeness enabled with mock catalog file: {completeness_sim_file}")
@@ -3343,6 +4195,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             checkpoint_file=pivot_checkpoint_file,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         )
         _validate_agn_pivot_checkpoint_reference_provenance(
             stored_pivot_context,
@@ -3362,6 +4216,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             z_range=z_range,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             require_reference_ids=not resume_replot_with_cuts,
         )
     else:
@@ -3371,6 +4227,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 z_range,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             )
         _validate_agn_pivot_context_for_reference(
             agn_pivot_context,
@@ -3378,6 +4236,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             z_range=z_range,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             require_reference_ids=True,
         )
     direct_completeness_params = None
@@ -3478,13 +4338,17 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 completeness_sim_file=completeness_sim_file,
                 completeness_mode=completeness_mode,
                 selection_attenuation_mode=selection_attenuation_mode,
+                light_curve_uncertainty_mode=light_curve_uncertainty_mode,
                 compare_sigma_only=compare_sigma_only,
                 minimal_plots=minimal_plots,
                 disable_ceph_dist_calibration=disable_ceph_dist_calibration,
                 use_planck_h0_prior=use_planck_h0_prior,
                 use_planck_om_prior=use_planck_om_prior,
+                prior_profile=prior_profile,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 early_de_guard=early_de_guard,
                 checkpoint_file_override=pass1_checkpoint_file,
@@ -3518,12 +4382,16 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 disable_ceph_dist_calibration=disable_ceph_dist_calibration,
                 use_planck_h0_prior=use_planck_h0_prior,
                 use_planck_om_prior=use_planck_om_prior,
+                prior_profile=prior_profile,
                 only_agn=only_agn,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 early_de_guard=early_de_guard,
                 selection_attenuation_mode=selection_attenuation_mode,
+                light_curve_uncertainty_mode=light_curve_uncertainty_mode,
                 dmi_draw_indices=posterior_sample_indices_pass1,
             )
             pass1_residuals_full, pass1_clipping_sigma_full, _, _, _ = plot_hubble(
@@ -3553,6 +4421,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 z_range=z_range,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 only_agn=only_agn,
                 agn_pivot_context=agn_pivot_context,
@@ -3632,6 +4502,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     z_range=z_range,
                     use_alpha_lambda_term=use_alpha_lambda_term,
                     use_eta_sigma_term=use_eta_sigma_term,
+                    use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                     use_redshift_log_f_term=use_redshift_log_f_term,
                     only_agn=only_agn,
                     agn_pivot_context=agn_pivot_context,
@@ -3676,21 +4548,28 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                         f"Cannot warm-start sigma-clipped pass 2 from '{selected_resume_checkpoint}' "
                         "because its pass-1 object_id_fit_selection does not match the current pass-1 fit selection."
                     )
-                validate_resume_checkpoint(
-                    selected_resume_results,
-                    checkpoint_file=selected_resume_checkpoint,
-                    ndim=len(get_model_params(
+                expected_resume_priors, expected_resume_labels, _ = get_model_params(
                         cosmo_model,
                         only_sna=only_sna,
                         only_agn=only_agn,
                         use_planck_h0_prior=use_planck_h0_prior,
                         use_planck_om_prior=use_planck_om_prior,
+                        prior_profile=prior_profile,
                         use_alpha_lambda_term=use_alpha_lambda_term,
                         use_eta_sigma_term=use_eta_sigma_term,
+                        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                         use_redshift_log_f_term=use_redshift_log_f_term,
-                    )[1]),
+                    )
+                validate_resume_checkpoint(
+                    selected_resume_results,
+                    checkpoint_file=selected_resume_checkpoint,
+                    ndim=len(expected_resume_labels),
                     n_agn=len(expected_pass1_fit_selection),
                     expected_selection_attenuation_mode=selection_attenuation_mode,
+                    expected_light_curve_uncertainty_mode=(
+                        light_curve_uncertainty_mode
+                    ),
                     expected_cut_tier=expected_pass1_fit_selection.attrs.get("cut_tier"),
                     expected_cut_configuration_json=expected_pass1_fit_selection.attrs.get("cut_configuration_json"),
                     expected_z_range_semantics=(
@@ -3700,6 +4579,17 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                         )
                         else None
                     ),
+                    expected_use_f_agn_psf_2500_sigmoid_term=(
+                        use_f_agn_psf_2500_sigmoid_term
+                    ),
+                    expected_use_f_agn_psf_2500_flux_fraction_term=(
+                        use_f_agn_psf_2500_flux_fraction_term
+                    ),
+                    expected_prior_profile=prior_profile,
+                    expected_prior_bounds_json=canonical_prior_bounds_json(
+                        expected_resume_priors
+                    ),
+                    expected_early_de_guard=early_de_guard,
                 )
                 pass2_warm_start_flat_samples = selected_resume_results["flat_samples"]
             _write_sigma_clip_diagnostics(
@@ -3808,13 +4698,17 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         completeness_sim_file=completeness_sim_file,
         completeness_mode=completeness_mode,
         selection_attenuation_mode=selection_attenuation_mode,
+        light_curve_uncertainty_mode=light_curve_uncertainty_mode,
         compare_sigma_only=compare_sigma_only,
         minimal_plots=minimal_plots,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        prior_profile=prior_profile,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         early_de_guard=early_de_guard,
         resume_replot_with_cuts=resume_replot_with_cuts,
@@ -3869,12 +4763,16 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             disable_ceph_dist_calibration=disable_ceph_dist_calibration,
             use_planck_h0_prior=use_planck_h0_prior,
             use_planck_om_prior=use_planck_om_prior,
+            prior_profile=prior_profile,
             only_agn=only_agn,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
             early_de_guard=early_de_guard,
             selection_attenuation_mode=selection_attenuation_mode,
+            light_curve_uncertainty_mode=light_curve_uncertainty_mode,
             dmi_draw_indices=posterior_sample_indices,
         )
         (
@@ -3908,16 +4806,25 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             z_range=z_range,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
             only_agn=only_agn,
             agn_pivot_context=agn_pivot_context,
         )
+        plot_full_residuals_debiased_partial_controls(
+            df_agn_pass2_plot_sample,
+            debiased_residuals,
+            plot_path=plot_path,
+            z_range=z_range,
+            show=False,
+        )
         print(
             "minimal_plots=True: retained the raw and debiased Hubble diagrams, "
-            "debiased-residual diagnostic, Dynesty corner plot, redshift "
+            "debiased partial-control residual atlas, Dynesty corner plot, redshift "
             "histogram, completeness pre/post-cut audit, two predicted-L2500 "
             "band plots, and "
-            "hubble_plot_residuals.csv; skipped other figures."
+            "the Hubble and partial-control residual CSVs; skipped other figures."
         )
         return (
             flat_samples,
@@ -3968,12 +4875,16 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        prior_profile=prior_profile,
         only_agn=only_agn,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         early_de_guard=early_de_guard,
         selection_attenuation_mode=selection_attenuation_mode,
+        light_curve_uncertainty_mode=light_curve_uncertainty_mode,
         dmi_draw_indices=posterior_sample_indices,
     )
     dmi_posterior_median_full = dmi_posterior_median_full_direct
@@ -3995,6 +4906,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         agn_pivot_context=agn_pivot_context,
     )
@@ -4011,6 +4924,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         agn_pivot_context=agn_pivot_context,
     )
@@ -4030,6 +4945,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         agn_pivot_context=agn_pivot_context,
     )
@@ -4049,6 +4966,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         agn_pivot_context=agn_pivot_context,
     )
@@ -4067,6 +4986,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         agn_pivot_context=agn_pivot_context,
     )
@@ -4085,6 +5006,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         agn_pivot_context=agn_pivot_context,
     )
@@ -4120,6 +5043,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         show=False,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     plot_blr_diagnostics_summary(
@@ -4150,6 +5075,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         agn_pivot_context=agn_pivot_context,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     print("Plotting Hubble diagram...")
@@ -4178,6 +5105,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     z_range=z_range,
                     use_alpha_lambda_term=use_alpha_lambda_term,
                     use_eta_sigma_term=use_eta_sigma_term,
+                    use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                     use_redshift_log_f_term=use_redshift_log_f_term,
                     only_agn=only_agn,
                     agn_pivot_context=agn_pivot_context)
@@ -4279,12 +5208,16 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 disable_ceph_dist_calibration=disable_ceph_dist_calibration,
                 use_planck_h0_prior=use_planck_h0_prior,
                 use_planck_om_prior=use_planck_om_prior,
+                prior_profile=prior_profile,
                 only_agn=only_agn,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 early_de_guard=early_de_guard,
                 selection_attenuation_mode=selection_attenuation_mode,
+                light_curve_uncertainty_mode=light_curve_uncertainty_mode,
             )
         mu_table, mu_err_table = _compute_debiased_agn_table_mu(
             flat_samples,
@@ -4297,6 +5230,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             only_agn=only_agn,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
         )
         make_agn_csv_table(
@@ -4328,6 +5263,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 z_range=z_range,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
                 only_agn=only_agn,
                 agn_pivot_context=agn_pivot_context)
@@ -4429,6 +5366,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         only_agn=only_agn,
         use_intrinsic_scatter_in_residual_sigma=False,
@@ -4465,6 +5404,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         plot_path=plot_path,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         agn_pivot_context=agn_pivot_context,
     )
@@ -4481,6 +5422,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         plot_path=plot_path,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         agn_pivot_context=agn_pivot_context,
     )
@@ -4490,95 +5433,12 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         n_params=len(model_labels) - 1,
     )
     print("Plotting debiased residuals...")
-    plot_full_residuals(
+    plot_full_residuals_debiased_partial_controls(
         df_agn_pass2_plot_sample,
         debiased_residuals,
-        debiased_clipping_sigma,
-        flat_samples,
-        cosmo_model,
-        z_pivot_agn,
-        debias=True,
-        dm_interp=dm_interp,
-        dmi_values=dmi_posterior_median_full,
-        show=False,
         plot_path=plot_path,
         z_range=z_range,
-        use_alpha_lambda_term=use_alpha_lambda_term,
-        use_eta_sigma_term=use_eta_sigma_term,
-        use_redshift_log_f_term=use_redshift_log_f_term,
-    )
-    plot_full_residuals(
-        df_agn_pass2_plot_sample,
-        debiased_residuals,
-        debiased_clipping_sigma,
-        flat_samples,
-        cosmo_model,
-        z_pivot_agn,
-        debias=True,
-        dm_interp=dm_interp,
-        dmi_values=dmi_posterior_median_full,
         show=False,
-        plot_path=plot_path,
-        z_cut=1.5,
-        z_range=z_range,
-        use_alpha_lambda_term=use_alpha_lambda_term,
-        use_eta_sigma_term=use_eta_sigma_term,
-        use_redshift_log_f_term=use_redshift_log_f_term,
-    )
-    plot_full_residuals(
-        df_agn_pass2_plot_sample,
-        L_residuals_debiased,
-        L_pred_std_debiased,
-        flat_samples,
-        cosmo_model,
-        z_pivot_agn,
-        debias=True,
-        dm_interp=dm_interp,
-        dmi_values=dmi_posterior_median_full,
-        show=False,
-        plot_path=plot_path,
-        z_range=z_range,
-        residual_label='L2500_sigma_tau_residuals',
-        output_tag='full_residuals_l2500_sigma_tau',
-        use_alpha_lambda_term=use_alpha_lambda_term,
-        use_eta_sigma_term=use_eta_sigma_term,
-        use_redshift_log_f_term=use_redshift_log_f_term,
-    )
-    plot_full_residuals(
-        df_agn_pass2_plot_sample,
-        debiased_residuals,
-        debiased_clipping_sigma,
-        flat_samples,
-        cosmo_model,
-        z_pivot_agn,
-        debias=True,
-        dm_interp=dm_interp,
-        dmi_values=dmi_posterior_median_full,
-        show=False,
-        plot_path=plot_path,
-        key_y='z',
-        key_color='residuals',
-        z_range=z_range,
-        use_alpha_lambda_term=use_alpha_lambda_term,
-        use_eta_sigma_term=use_eta_sigma_term,
-        use_redshift_log_f_term=use_redshift_log_f_term,
-    )
-    plot_full_residuals_rz(
-        df_agn_pass2_plot_sample,
-        debiased_residuals,
-        debiased_clipping_sigma,
-        flat_samples,
-        cosmo_model,
-        z_pivot_agn,
-        debias=True,
-        dm_interp=dm_interp,
-        dmi_values=dmi_posterior_median_full,
-        show=False,
-        plot_path=plot_path,
-        z_range=z_range,
-        use_alpha_lambda_term=use_alpha_lambda_term,
-        use_eta_sigma_term=use_eta_sigma_term,
-        use_redshift_log_f_term=use_redshift_log_f_term,
     )
     plot_debias_impact_diagnostics(
         df_agn_pass2_plot_sample,
@@ -4625,6 +5485,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                       only_agn=only_agn,
                       use_alpha_lambda_term=use_alpha_lambda_term,
                       use_eta_sigma_term=use_eta_sigma_term,
+                      use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                       use_redshift_log_f_term=use_redshift_log_f_term)
 
     if completeness:
@@ -4716,17 +5578,23 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             disable_ceph_dist_calibration=False,
             use_planck_h0_prior=False,
             use_planck_om_prior=False,
+            prior_profile=DEFAULT_PRIOR_PROFILE,
             only_agn=False,
             use_alpha_lambda_term=False,
             use_eta_sigma_term=False,
+            use_f_agn_psf_2500_sigmoid_term=False,
+    use_f_agn_psf_2500_flux_fraction_term=False,
             use_redshift_log_f_term=False,
-            early_de_guard=False):
+            early_de_guard=False,
+            light_curve_uncertainty_mode="covariance",
+            round_pivots=True):
 
     validate_completeness_mode(completeness_mode)
     completeness_magnitude = normalize_completeness_magnitude(
         completeness_magnitude
     )
     speed = normalize_speed(speed)
+    prior_profile = normalize_prior_profile(prior_profile)
     if only_agn:
         print("Running full model comparison in AGN-only mode; SNe-only comparison branch is disabled.")
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
@@ -4742,14 +5610,24 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     ceph_tag = "_nocephdist_planckh0" if disable_ceph_dist_calibration else ""
     planck_h0_tag = "_planckh0" if use_planck_h0_prior and not disable_ceph_dist_calibration else ""
     planck_om_tag = "_planckom" if use_planck_om_prior else ""
+    prior_profile_tag = (
+        "" if prior_profile == DEFAULT_PRIOR_PROFILE
+        else f"_prior-{prior_profile}"
+    )
     mode_tag = _fit_mode_label(False, only_agn)
-    compare_run_tag = f"model_compare_{mode_tag}_{speed}_{n_tag}_{z_tag}{completeness_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}"
+    compare_run_tag = f"model_compare_{mode_tag}_{speed}_{n_tag}_{z_tag}{completeness_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{prior_profile_tag}"
+    if not round_pivots:
+        compare_run_tag += "_pivots-median"
     if use_alpha_lambda_term:
         compare_run_tag += "_alphaLam"
     if use_eta_sigma_term:
         compare_run_tag += "_etaSigma"
     if use_redshift_log_f_term:
         compare_run_tag += "_logfz"
+    if normalize_light_curve_uncertainty_mode(
+        light_curve_uncertainty_mode
+    ) == "posterior-draws":
+        compare_run_tag += "_lcpost64"
     compare_plot_path = f"plots/hubble/{prefix}/{compare_run_tag}"
     os.makedirs(compare_plot_path, exist_ok=True)
 
@@ -4775,12 +5653,17 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         disable_ceph_dist_calibration=disable_ceph_dist_calibration,
         use_planck_h0_prior=use_planck_h0_prior,
         use_planck_om_prior=use_planck_om_prior,
+        prior_profile=prior_profile,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
         disable_sigma_clip_pass=disable_sigma_clip_pass,
         resume_stage=resume_stage,
         prefix=prefix,
+        light_curve_uncertainty_mode=light_curve_uncertainty_mode,
+        round_pivots=round_pivots,
     )
     for cosmo_model in cosmo_models:
         model_resume = resume_by_model[cosmo_model]
@@ -4806,9 +5689,13 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        disable_ceph_dist_calibration=disable_ceph_dist_calibration,
                        use_planck_h0_prior=use_planck_h0_prior,
                        use_planck_om_prior=use_planck_om_prior,
+                       prior_profile=prior_profile,
                        use_alpha_lambda_term=use_alpha_lambda_term,
                        use_eta_sigma_term=use_eta_sigma_term,
+                       use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                        use_redshift_log_f_term=use_redshift_log_f_term,
+                       light_curve_uncertainty_mode=light_curve_uncertainty_mode,
                        early_de_guard=early_de_guard,
                        agn_pivot_context=agn_pivot_context)
         
@@ -4842,9 +5729,13 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                            disable_ceph_dist_calibration=disable_ceph_dist_calibration,
                            use_planck_h0_prior=use_planck_h0_prior,
                            use_planck_om_prior=use_planck_om_prior,
+                           prior_profile=prior_profile,
                            use_alpha_lambda_term=use_alpha_lambda_term,
                            use_eta_sigma_term=use_eta_sigma_term,
+                           use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                            use_redshift_log_f_term=use_redshift_log_f_term,
+                           light_curve_uncertainty_mode="covariance",
                            early_de_guard=early_de_guard,
                            agn_pivot_context=None)
             samples_sna, model_labels_sna, dm_interp_sna, logZ_sna, logZerr_sna, debiased_residuals_sna, age_sna, age_sna_err = r
@@ -4854,12 +5745,16 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                               gauss_sigma=1.5, kde_bw_scale=1.5, include_alpha_beta=False,
                               use_alpha_lambda_term=use_alpha_lambda_term,
                               use_eta_sigma_term=use_eta_sigma_term,
+                              use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                               use_redshift_log_f_term=use_redshift_log_f_term)
             plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
                               plot_path=compare_plot_path, speed=speed,
                               gauss_sigma=1.5, kde_bw_scale=1.5, include_alpha_beta=True,
                               use_alpha_lambda_term=use_alpha_lambda_term,
                               use_eta_sigma_term=use_eta_sigma_term,
+                              use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                               use_redshift_log_f_term=use_redshift_log_f_term)
         
         cosmo_models_result_dict[cosmo_model]['logZ'] = logZ_joint
@@ -4884,6 +5779,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                 value_fmt="{:.2f}",
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
             )
         r_joint   = extract_cosmo_results_from_samples(
@@ -4896,6 +5793,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             value_fmt="{:.2f}",
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
         )
 
@@ -4941,7 +5840,13 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                                 result_prefix=result_prefix, cosmo_models_result_dict=cosmo_models_result_dict,
                                 cosmo_models_sna_result_dict=cosmo_models_sna_result_dict,
                                 compare_r_sna=compare_r_sna,
-                                agn_pivot_context=agn_pivot_context)
+                                agn_pivot_context=agn_pivot_context,
+                                use_f_agn_psf_2500_sigmoid_term=(
+                                    use_f_agn_psf_2500_sigmoid_term
+                                ),
+                                use_f_agn_psf_2500_flux_fraction_term=(
+                                    use_f_agn_psf_2500_flux_fraction_term
+                                ))
 
     cosmo_output_dir = get_qvc_result_dir() / "cosmo" / prefix
     cosmo_output_dir.mkdir(parents=True, exist_ok=True)
@@ -4964,6 +5869,98 @@ def validate_plot_mode_args(args):
         raise ValueError("--minimal-plots cannot be used with a direct --only_sna run.")
     if args.minimal_plots and args.use_jax:
         raise ValueError("--minimal-plots is not supported with --use_jax.")
+
+
+def render_hubble_mode_table(args):
+    """Return a concise audit table of scientifically consequential modes."""
+    if args.only_sna:
+        sample = "SNe Ia only"
+    elif args.only_agn:
+        sample = "AGN only"
+    else:
+        sample = "joint AGN + SNe Ia"
+
+    agn_inactive = "inactive (SNe-only)"
+    if args.only_sna:
+        light_curve_uncertainty = agn_inactive
+        sigma_host_correction = agn_inactive
+        standardization = agn_inactive
+        intrinsic_scatter = agn_inactive
+        pivot_rule = agn_inactive
+    else:
+        light_curve_uncertainty = args.light_curve_uncertainty_mode
+        sigma_host_correction = (
+            "enabled" if args.correct_sigma_uv_host else "disabled"
+        )
+        regressors = ["log_sigma_uv", "log_tau_uv_rf"]
+        if args.fit_alpha_lambda_term:
+            regressors.append("alpha_lambda")
+        if args.fit_eta_sigma_term:
+            regressors.append("eta_sigma")
+        if args.fit_f_agn_psf_2500_sigmoid_term:
+            regressors.append("f_AGN_psf_2500 sigmoid")
+        if args.fit_f_agn_psf_2500_flux_fraction_term:
+            regressors.append("f_AGN_psf_2500 physical flux fraction")
+        standardization = " + ".join(regressors)
+        intrinsic_scatter = (
+            "redshift-dependent log_f(z)"
+            if args.fit_redshift_log_f_term
+            else "constant log_f"
+        )
+        pivot_rule = (
+            "exact log-space medians"
+            if getattr(args, "disable_pivot_rounding", False)
+            else "rounded sigma/tau medians"
+        )
+
+    if args.disable_completeness:
+        completeness = "disabled"
+        selection_attenuation = "inactive (completeness disabled)"
+    else:
+        completeness = (
+            f"{args.completeness_mode}; m2500={args.completeness_magnitude}; "
+            f"LF={args.completeness_lf_model}; "
+            f"support={getattr(args, 'completeness_magnitude_support_mode', 'hard-cut')}"
+        )
+        selection_attenuation = args.selection_attenuation_mode
+
+    if args.disable_sigma_clip_pass:
+        sigma_clipping = "disabled"
+    else:
+        sigma_clipping = (
+            f"two-pass; |mu_zscore| < {args.sigma_clip_threshold:g}; "
+            f"pass2={args.sigma_clip_second_pass_mode}"
+        )
+
+    sn_covariance = (
+        "inactive (AGN-only)"
+        if args.only_agn
+        else ("diagonal" if args.disable_full_covariance else "full")
+    )
+    rows = [
+        {"mode": "inference engine", "setting": "JAX / NumPyro" if args.use_jax else "NumPy / Dynesty"},
+        {"mode": "sample", "setting": sample},
+        {"mode": "cosmology", "setting": ", ".join(args.cosmo_models)},
+        {
+            "mode": "prior profile",
+            "setting": getattr(args, "prior_profile", DEFAULT_PRIOR_PROFILE),
+        },
+        {"mode": "cumulative cut tier", "setting": args.cut_tier},
+        {"mode": "Hubble m2500", "setting": args.magnitude_convention},
+        {"mode": "LC sigma/tau uncertainty", "setting": light_curve_uncertainty},
+        {"mode": "post-hoc sigma host correction", "setting": sigma_host_correction},
+        {"mode": "AGN standardization", "setting": standardization},
+        {"mode": "AGN observable pivots", "setting": pivot_rule},
+        {"mode": "intrinsic scatter", "setting": intrinsic_scatter},
+        {"mode": "completeness", "setting": completeness},
+        {"mode": "selection attenuation", "setting": selection_attenuation},
+        {"mode": "sigma clipping", "setting": sigma_clipping},
+        {"mode": "SN covariance", "setting": sn_covariance},
+    ]
+    return "HUBBLE ANALYSIS MODES\n" + render_ascii_table(
+        rows,
+        (("mode", "mode"), ("setting", "active setting")),
+    )
 
 
 if __name__ == "__main__":
@@ -4994,6 +5991,15 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help="Use the Planck 2018 top-hat Om0 prior.",
+    )
+    parser.add_argument(
+        "--prior-profile",
+        choices=PRIOR_PROFILE_CHOICES,
+        default=DEFAULT_PRIOR_PROFILE,
+        help=(
+            "Named top-hat prior profile. centered_lcdm uses "
+            "M0_agn=[-26,-18], w0=[-3,1], and wa=[-10,10] where applicable."
+        ),
     )
     parser.add_argument(
         "--early-de-guard",
@@ -5141,6 +6147,15 @@ if __name__ == "__main__":
                         help="Redshift range for AGN data (default: [0.44, 3.16])")
     parser.add_argument("--uniform_redshift_distribution", action="store_true", default=False, help="Select AGN subset with uniform redshift distribution (default: False)")
     parser.add_argument(
+        "--disable-pivot-rounding",
+        action="store_true",
+        default=False,
+        help=(
+            "Use the exact median of each fitted AGN observable as its pivot. "
+            "By default, the sigma and tau medians are rounded in linear units."
+        ),
+    )
+    parser.add_argument(
         "--completeness_sim_file",
         type=str,
         default=DEFAULT_COMPLETENESS_SIM_FILE,
@@ -5164,6 +6179,25 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--completeness-magnitude-support-mode",
+        choices=list(COMPLETENESS_MAGNITUDE_SUPPORT_MODES),
+        default=DEFAULT_COMPLETENESS_MAGNITUDE_SUPPORT_MODE,
+        help=(
+            "Magnitude selection support: 'tails' uses the physical 14--32 "
+            "guard with map extrapolation; 'hard-cut' retains 18.5--24.0."
+        ),
+    )
+    parser.add_argument(
+        "--completeness_lf_model",
+        choices=list(COMPLETENESS_LF_MODELS),
+        default="shen",
+        help=(
+            "Luminosity function used when a fresh completeness mock is "
+            "generated. Empirical Type-1 models require "
+            "--completeness_magnitude attenuated."
+        ),
+    )
+    parser.add_argument(
         "--correct-sigma-uv-host",
         action="store_true",
         default=False,
@@ -5179,6 +6213,17 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--light-curve-uncertainty-mode",
+        choices=LIGHT_CURVE_UNCERTAINTY_MODES,
+        default="covariance",
+        help=(
+            "Treatment of log_sigma_uv/log_tau_uv_rf uncertainty. "
+            "'covariance' keeps the existing Gaussian covariance propagation "
+            "(default); 'posterior-draws' marginalizes the Dynesty likelihood "
+            "over the paired compact light-curve posterior draws."
+        ),
+    )
+    parser.add_argument(
         "--fit_alpha_lambda_term",
         action="store_true",
         default=False,
@@ -5189,6 +6234,24 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help="Fit an additional linear eta_sigma term in the AGN standardization relation.",
+    )
+    parser.add_argument(
+        "--fit_f_agn_psf_2500_sigmoid_term",
+        action="store_true",
+        default=False,
+        help=(
+            "Fit a pivot-anchored sigmoid correction in the raw PSF AGN "
+            "fraction at 2500 Angstrom."
+        ),
+    )
+    parser.add_argument(
+        "--fit_f_agn_psf_2500_flux_fraction_term",
+        action="store_true",
+        default=False,
+        help=(
+            "Fit a one-parameter, pivot-anchored physical flux-fraction "
+            "correction in the raw PSF AGN fraction at 2500 Angstrom."
+        ),
     )
     parser.add_argument(
         "--fit_redshift_log_f_term",
@@ -5221,6 +6284,30 @@ if __name__ == "__main__":
     resume_by_model = normalize_resume_by_model(args.resume, args.cosmo_models)
     if args.only_sna and args.only_agn:
         raise ValueError("--only_sna and --only_agn cannot be used together.")
+    if (
+        args.fit_f_agn_psf_2500_sigmoid_term
+        and args.fit_f_agn_psf_2500_flux_fraction_term
+    ):
+        raise ValueError(
+            "--fit_f_agn_psf_2500_sigmoid_term and "
+            "--fit_f_agn_psf_2500_flux_fraction_term are mutually exclusive."
+        )
+    if args.use_jax and args.fit_f_agn_psf_2500_sigmoid_term:
+        raise NotImplementedError(
+            "--fit_f_agn_psf_2500_sigmoid_term is currently supported only "
+            "by the CPU/Dynesty Hubble model and cannot be used with --use_jax."
+        )
+    if args.use_jax and args.fit_f_agn_psf_2500_flux_fraction_term:
+        raise NotImplementedError(
+            "--fit_f_agn_psf_2500_flux_fraction_term is currently supported "
+            "only by the CPU/Dynesty Hubble model and cannot be used with "
+            "--use_jax."
+        )
+    if args.use_jax and args.light_curve_uncertainty_mode != "covariance":
+        raise NotImplementedError(
+            "--light-curve-uncertainty-mode posterior-draws currently supports "
+            "only the default NumPy/Dynesty pipeline."
+        )
     validate_plot_mode_args(args)
     if args.selection_attenuation_mode == "joint-posterior" and (
         args.run != "single" or args.use_jax
@@ -5229,6 +6316,15 @@ if __name__ == "__main__":
             "joint-posterior selection attenuation currently supports only "
             "the default non-JAX single Hubble run."
         )
+    if args.completeness_lf_model != "shen" and (
+        args.run != "single" or args.use_jax
+    ):
+        raise NotImplementedError(
+            "Empirical completeness LF selection currently supports only "
+            "the default non-JAX single Hubble run."
+        )
+
+    print(_wrap_text_in_purple(render_hubble_mode_table(args)))
 
     if args.disable_full_covariance:
         print("Warning: Running without full covariance may lead to underestimated uncertainties.")
@@ -5267,8 +6363,14 @@ if __name__ == "__main__":
                            sdss_target_selection=args.sdss_target_selection,
                            magnitude_convention=args.magnitude_convention,
                            completeness_magnitude=args.completeness_magnitude,
+                           completeness_magnitude_support_mode=(
+                               args.completeness_magnitude_support_mode
+                           ),
                            spectra_sdss_run2d=args.spectra_sdss_run2d,
                            correct_sigma_uv_host=args.correct_sigma_uv_host,
+                           light_curve_uncertainty_mode=(
+                               args.light_curve_uncertainty_mode
+                           ),
                            enforce_completeness_support=not args.disable_completeness,
                            return_completeness_parent=not args.disable_completeness,
                            z_range=tuple(args.z_range), plot_path=agn_plot_path,
@@ -5287,6 +6389,7 @@ if __name__ == "__main__":
             df_calibrators = pd.read_csv(args.agn_calibrators)
         else:
             raise ValueError("Unsupported file format for agn_calibrators. Use .h5 or .csv")
+        df_calibrators = derive_f_agn_psf_2500_columns(df_calibrators)
     else:
         df_calibrators = None
 
@@ -5315,12 +6418,17 @@ if __name__ == "__main__":
             disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
             use_planck_h0_prior=effective_use_planck_h0_prior,
             use_planck_om_prior=args.use_planck_om_prior,
+            prior_profile=args.prior_profile,
             use_alpha_lambda_term=args.fit_alpha_lambda_term,
             use_eta_sigma_term=args.fit_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=args.fit_f_agn_psf_2500_sigmoid_term,
+            use_f_agn_psf_2500_flux_fraction_term=args.fit_f_agn_psf_2500_flux_fraction_term,
             use_redshift_log_f_term=args.fit_redshift_log_f_term,
             disable_sigma_clip_pass=True,
             resume_stage="both",
             prefix=args.prefix,
+            light_curve_uncertainty_mode="covariance",
+            round_pivots=not args.disable_pivot_rounding,
         )
         for cosmo_model in args.cosmo_models:
             run_single_jax(
@@ -5345,6 +6453,7 @@ if __name__ == "__main__":
                 disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
                 use_planck_h0_prior=effective_use_planck_h0_prior,
                 use_planck_om_prior=args.use_planck_om_prior,
+                prior_profile=args.prior_profile,
                 use_alpha_lambda_term=args.fit_alpha_lambda_term,
                 use_eta_sigma_term=args.fit_eta_sigma_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
@@ -5370,13 +6479,18 @@ if __name__ == "__main__":
             disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
             use_planck_h0_prior=effective_use_planck_h0_prior,
             use_planck_om_prior=args.use_planck_om_prior,
+            prior_profile=args.prior_profile,
             use_alpha_lambda_term=args.fit_alpha_lambda_term,
             use_eta_sigma_term=args.fit_eta_sigma_term,
+            use_f_agn_psf_2500_sigmoid_term=args.fit_f_agn_psf_2500_sigmoid_term,
+            use_f_agn_psf_2500_flux_fraction_term=args.fit_f_agn_psf_2500_flux_fraction_term,
             use_redshift_log_f_term=args.fit_redshift_log_f_term,
             disable_sigma_clip_pass=args.disable_sigma_clip_pass,
             resume_stage=args.resume_stage,
             prefix=args.prefix,
+            light_curve_uncertainty_mode=args.light_curve_uncertainty_mode,
             resume_replot_with_cuts=args.resume_replot_with_cuts,
+            round_pivots=not args.disable_pivot_rounding,
         )
         for cosmo_model in args.cosmo_models:
             r = run_single(df_agn=df_agn, df_agn_all=df_agn_all, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 
@@ -5393,14 +6507,19 @@ if __name__ == "__main__":
                 completeness_sim_file=args.completeness_sim_file,
                 completeness_mode=args.completeness_mode,
                 completeness_magnitude=args.completeness_magnitude,
+                completeness_lf_model=args.completeness_lf_model,
                 selection_attenuation_mode=args.selection_attenuation_mode,
+                light_curve_uncertainty_mode=args.light_curve_uncertainty_mode,
                 compare_sigma_only=args.compare_sigma_only,
                 minimal_plots=args.minimal_plots,
                 disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
                 use_planck_h0_prior=effective_use_planck_h0_prior,
                 use_planck_om_prior=args.use_planck_om_prior,
+                prior_profile=args.prior_profile,
                 use_alpha_lambda_term=args.fit_alpha_lambda_term,
                 use_eta_sigma_term=args.fit_eta_sigma_term,
+                use_f_agn_psf_2500_sigmoid_term=args.fit_f_agn_psf_2500_sigmoid_term,
+            use_f_agn_psf_2500_flux_fraction_term=args.fit_f_agn_psf_2500_flux_fraction_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
                 early_de_guard=args.early_de_guard,
                 resume_replot_with_cuts=args.resume_replot_with_cuts,
@@ -5421,13 +6540,39 @@ if __name__ == "__main__":
         ceph_tag = "_nocephdist_planckh0" if args.disable_ceph_dist_calibration else ""
         planck_h0_tag = "_planckh0" if effective_use_planck_h0_prior and not args.disable_ceph_dist_calibration else ""
         planck_om_tag = "_planckom" if args.use_planck_om_prior else ""
+        prior_profile_tag = (
+            "" if args.prior_profile == DEFAULT_PRIOR_PROFILE
+            else f"_prior-{args.prior_profile}"
+        )
         alpha_tag = "_alphaLam" if args.fit_alpha_lambda_term else ""
         eta_sigma_tag = "_etaSigma" if args.fit_eta_sigma_term else ""
+        fagn_sigmoid_tag = (
+            "_fagnPsf2500Sigmoid"
+            if args.fit_f_agn_psf_2500_sigmoid_term
+            else ""
+        )
+        fagn_flux_fraction_tag = (
+            "_fagnPsf2500FluxFraction"
+            if args.fit_f_agn_psf_2500_flux_fraction_term
+            else ""
+        )
         logf_tag = "_logfz" if args.fit_redshift_log_f_term else ""
+        light_curve_uncertainty_tag = (
+            "_lcpost64"
+            if args.light_curve_uncertainty_mode == "posterior-draws"
+            else ""
+        )
+        pivot_tag = (
+            "_pivots-median"
+            if args.disable_pivot_rounding and not args.only_sna
+            else ""
+        )
         mode_tag = _fit_mode_label(args.only_sna, args.only_agn)
         compare_path = (
             f"plots/hubble/{args.prefix}/single_compare_{mode_tag}_{args.speed}_{n_tag}_{z_tag}"
-            f"{completeness_tag}{ceph_tag}{planck_h0_tag}{planck_om_tag}{alpha_tag}{eta_sigma_tag}{logf_tag}"
+            f"{completeness_tag}{light_curve_uncertainty_tag}{ceph_tag}"
+            f"{planck_h0_tag}{planck_om_tag}{prior_profile_tag}{alpha_tag}{eta_sigma_tag}"
+            f"{fagn_sigmoid_tag}{fagn_flux_fraction_tag}{logf_tag}{pivot_tag}"
         )
         os.makedirs(compare_path, exist_ok=True)
         if len(cosmo_models_dict) >= 2:
@@ -5461,10 +6606,15 @@ if __name__ == "__main__":
                 disable_ceph_dist_calibration=args.disable_ceph_dist_calibration,
                 use_planck_h0_prior=effective_use_planck_h0_prior,
                 use_planck_om_prior=args.use_planck_om_prior,
+                prior_profile=args.prior_profile,
                 only_agn=args.only_agn,
                 use_alpha_lambda_term=args.fit_alpha_lambda_term,
                 use_eta_sigma_term=args.fit_eta_sigma_term,
+                use_f_agn_psf_2500_sigmoid_term=args.fit_f_agn_psf_2500_sigmoid_term,
+            use_f_agn_psf_2500_flux_fraction_term=args.fit_f_agn_psf_2500_flux_fraction_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
-                early_de_guard=args.early_de_guard)
+                light_curve_uncertainty_mode=args.light_curve_uncertainty_mode,
+                early_de_guard=args.early_de_guard,
+                round_pivots=not args.disable_pivot_rounding)
     
     print(f"Finished running Hubble fit pipeline for {args.cosmo_models}")

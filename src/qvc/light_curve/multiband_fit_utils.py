@@ -12,6 +12,14 @@ suffix = os.environ.get('SUFFIX', "test")
 import logging
 
 from qvc.provenance import merge_history, read_hdf5_provenance, write_hdf5_provenance
+from qvc.light_curve.posterior_draws import (
+    LIGHT_CURVE_POSTERIOR_DRAW_FORMAT,
+    LIGHT_CURVE_POSTERIOR_DRAW_FORMAT_V1,
+    LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY,
+    compact_log_sigma_tau_posterior_draws,
+    stack_light_curve_posterior_draw_payloads,
+    write_light_curve_posterior_draw_group,
+)
 
 logging.basicConfig(
     format='%(asctime)s - %(message)s',
@@ -460,6 +468,11 @@ def save_all_samples_to_hdf5(samples):
 
     with h5py.File(file_path, "w") as hdf:
         _write_hdf5_run_metadata(hdf)
+        if "tau_fast_driver" in samples and "tau_slow_driver" in samples:
+            hdf.attrs["log_tau_uv_definition"] = (
+                "continuum_only_disk_convolved_integral_timescale_at_rest_"
+                "2500A_observer_frame_natural_log"
+            )
         for key, value in samples.items():
             hdf.create_dataset(key, data=value)
     logging.info(f"Saved all samples to {file_path}")
@@ -526,6 +539,11 @@ def save_obj_samples_to_hdf5(samples, object_id, scalar_diagnostics=None):
 
     with h5py.File(file_path, "w") as hdf:
         _write_hdf5_run_metadata(hdf)
+        if "tau_fast_driver" in samples and "tau_slow_driver" in samples:
+            hdf.attrs["log_tau_uv_definition"] = (
+                "continuum_only_disk_convolved_integral_timescale_at_rest_"
+                "2500A_observer_frame_natural_log"
+            )
         for key, value in samples.items():
             hdf.create_dataset(key, data=value)
         for key, value in (scalar_diagnostics or {}).items():
@@ -679,6 +697,13 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024, prove
 
     rows = []
     total = len(quasars)
+    posterior_draw_payloads = [
+        quasar.get(LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY)
+        for quasar in quasars
+    ]
+    has_posterior_draws = any(
+        payload is not None for payload in posterior_draw_payloads
+    )
     output_dir = f"results/data/{prefix}"
     os.makedirs(output_dir, exist_ok=True)
     file_path = os.path.join(output_dir, _output_basename(quasars))
@@ -702,7 +727,11 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024, prove
 
         row = {"object_id": object_id}
         for key, value in quasar.items():
-            if key in ignored_keys or key == "object_id":
+            if (
+                key in ignored_keys
+                or key == "object_id"
+                or key == LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY
+            ):
                 continue
             _flatten_value(row, str(key), value, obj_bands)
         rows.append(row)
@@ -718,6 +747,14 @@ def save_quasar_list_hdf5(quasars, ignored_keys=None, size_threshold=1024, prove
             values = [row.get(col, None) for row in rows]
             arr = _build_column(values)
             hdf.create_dataset(col, data=arr)
+
+        if has_posterior_draws:
+            write_light_curve_posterior_draw_group(
+                hdf,
+                stack_light_curve_posterior_draw_payloads(
+                    posterior_draw_payloads
+                ),
+            )
 
         if provenance is not None:
             write_hdf5_provenance(hdf, merge_history(provenance, previous_provenance))
@@ -856,6 +893,8 @@ def process_samples(
 
     # per flat param computation
     for k, v in flat_samples.items():
+        if model_variant == "shared_latent_blr" and k == "eta_tau":
+            continue
         if k in internal_skip_keys or any(k.startswith(prefix) for prefix in internal_skip_prefixes):
             continue
         if v.ndim > 1:
@@ -871,38 +910,95 @@ def process_samples(
     # generalized per-band computation
     # Power Law Params
     log_sigma_uv = np.asarray(flat_samples["log_sigma_uv"]) if "log_sigma_uv" in flat_samples else None
+    shared_latent = model_variant == "shared_latent_blr"
     log_tau_uv = np.asarray(flat_samples["log_tau_uv"]) if "log_tau_uv" in flat_samples else None
     log_tau_fast_uv = np.asarray(flat_samples["log_tau_fast_uv"]) if "log_tau_fast_uv" in flat_samples else None
     has_fast_pole = log_tau_fast_uv is not None
     eta_sigma = np.asarray(flat_samples["eta_sigma"])
-    eta_tau = np.asarray(flat_samples["eta_tau"])
+    eta_tau = None if shared_latent else np.asarray(flat_samples["eta_tau"])
     lambda_ref = 2500
     lam_ref_arr = np.full_like(eta_sigma, lambda_ref, dtype=float)
 
+    if shared_latent:
+        from qvc.light_curve.multiband_model_shared_latent_blr import (
+            continuum_effective_timescale,
+        )
+
+        required = ("tau_fast_driver", "tau_slow_driver", "lag0")
+        missing = [key for key in required if key not in flat_samples]
+        if missing:
+            raise KeyError(
+                "Missing shared-latent samples required for the 2500 A "
+                f"continuum timescale: {missing}."
+            )
+        tau_fast_driver = np.asarray(flat_samples["tau_fast_driver"], dtype=float)
+        tau_slow_driver = np.asarray(flat_samples["tau_slow_driver"], dtype=float)
+        lag0_draws = np.asarray(flat_samples["lag0"], dtype=float)
+        lag_disk_2500 = lag0_draws * (2500.0 / lambda_center_rf) ** (4.0 / 3.0)
+        effective_tau_uv_obs = np.asarray(
+            jax.jit(
+                jax.vmap(
+                    lambda tf, ts, lag: continuum_effective_timescale(
+                        tf,
+                        ts,
+                        lag,
+                        disk_order=int(disk_order),
+                    )
+                )
+            )(
+                jnp.asarray(tau_fast_driver),
+                jnp.asarray(tau_slow_driver),
+                jnp.asarray(lag_disk_2500),
+            )
+        )
+        log_tau_uv = np.log(effective_tau_uv_obs)
+        log_tau_driver_rf = np.log10(tau_fast_driver + tau_slow_driver) - np.log10(
+            1.0 + data["z"]
+        )
+        log_tau_driver_fast_rf = np.log10(tau_fast_driver) - np.log10(1.0 + data["z"])
+        log_tau_driver_slow_rf = np.log10(tau_slow_driver) - np.log10(1.0 + data["z"])
+
     if "eta_sigma" not in result:
         result["eta_sigma"], result["eta_sigma_err"] = sym_percentile(eta_sigma)
-    if "eta_tau" not in result:
+    if not shared_latent and "eta_tau" not in result:
         result["eta_tau"], result["eta_tau_err"] = sym_percentile(eta_tau)
 
     if "log_sigma_uv" not in result:
         result["log_sigma_uv"], result["log_sigma_uv_err"] = sym_percentile(log_sigma_uv / np.log(10))
     if "log_sigma_fast_uv" not in result:
         result["log_sigma_fast_uv"], result["log_sigma_fast_uv_err"] = sym_percentile(log_sigma_uv / np.log(10))
-    if "log_tau_uv" not in result:
+    if shared_latent:
+        # Always replace any legacy/base-driver value carried by input samples.
+        # Under this model variant the public quantity is the synthetic,
+        # continuum-only 2500 A integral-correlation timescale.
+        result["log_tau_uv"], result["log_tau_uv_err"] = sym_percentile(
+            log_tau_uv / np.log(10)
+        )
+    elif "log_tau_uv" not in result:
         result["log_tau_uv"], result["log_tau_uv_err"] = sym_percentile(log_tau_uv / np.log(10))
-    if has_fast_pole and "log_tau_fast_uv" not in result:
+    if has_fast_pole and not shared_latent and "log_tau_fast_uv" not in result:
         result["log_tau_fast_uv"], result["log_tau_fast_uv_err"] = sym_percentile(log_tau_fast_uv / np.log(10))
-    samples_log_tau_uv_rf = log_tau_uv / np.log(10) - np.log10(1 + data['z']) + log_single_pl(lambda_ref, lam_ref_arr, eta_tau)
+    samples_log_tau_uv_rf = log_tau_uv / np.log(10) - np.log10(1 + data['z'])
+    if not shared_latent:
+        samples_log_tau_uv_rf = samples_log_tau_uv_rf + log_single_pl(
+            lambda_ref,
+            lam_ref_arr,
+            eta_tau,
+        )
     result["log_tau_uv_rf"], result["log_tau_uv_rf_err"] = sym_percentile(samples_log_tau_uv_rf)
-    if has_fast_pole:
+    if has_fast_pole and not shared_latent:
         samples_log_tau_fast_uv_rf = log_tau_fast_uv / np.log(10) - np.log10(1 + data['z']) + log_single_pl(lambda_ref, lam_ref_arr, eta_tau)
         result["log_tau_fast_uv_rf"], result["log_tau_fast_uv_rf_err"] = sym_percentile(samples_log_tau_fast_uv_rf)
-    if model_variant == "shared_latent_blr":
-        result["log_tau_driver_slow_rf"] = result["log_tau_uv_rf"]
-        result["log_tau_driver_slow_rf_err"] = result["log_tau_uv_rf_err"]
-        if has_fast_pole:
-            result["log_tau_driver_fast_rf"] = result["log_tau_fast_uv_rf"]
-            result["log_tau_driver_fast_rf_err"] = result["log_tau_fast_uv_rf_err"]
+    if shared_latent:
+        result["log_tau_driver_rf"], result["log_tau_driver_rf_err"] = sym_percentile(
+            log_tau_driver_rf
+        )
+        result["log_tau_driver_fast_rf"], result["log_tau_driver_fast_rf_err"] = sym_percentile(
+            log_tau_driver_fast_rf
+        )
+        result["log_tau_driver_slow_rf"], result["log_tau_driver_slow_rf_err"] = sym_percentile(
+            log_tau_driver_slow_rf
+        )
 
     log_sigma_band = []
     for band in bands:
@@ -911,12 +1007,14 @@ def process_samples(
         log_sigma_band.append(val)
     log_sigma_band = np.array(log_sigma_band).T
 
-    log_tau_band = []
-    for band in bands:
-        lam_eff = lambda_pivot[band] / (1 + data['z'])
-        val = log_tau_uv / np.log(10) - np.log10(1 + data['z']) + log_single_pl(lam_eff, lam_ref_arr, eta_tau)
-        log_tau_band.append(val)
-    log_tau_band = np.array(log_tau_band).T
+    log_tau_band = None
+    if not shared_latent:
+        log_tau_band = []
+        for band in bands:
+            lam_eff = lambda_pivot[band] / (1 + data['z'])
+            val = log_tau_uv / np.log(10) - np.log10(1 + data['z']) + log_single_pl(lam_eff, lam_ref_arr, eta_tau)
+            log_tau_band.append(val)
+        log_tau_band = np.array(log_tau_band).T
 
     if model_variant == "shared_latent_blr":
         from qvc.light_curve.multiband_model_shared_latent_blr import (
@@ -924,8 +1022,8 @@ def process_samples(
         )
 
         required = [
-            *(f"tau_fast_{band}" for band in bands),
-            *(f"tau_slow_{band}" for band in bands),
+            "tau_fast_driver",
+            "tau_slow_driver",
             *(f"lag_disk_{band}" for band in bands),
             *(f"lag_blr_{band}" for band in bands),
             *(f"amp_cont_relflux_{band}" for band in bands),
@@ -938,8 +1036,8 @@ def process_samples(
                 + ", ".join(missing)
             )
 
-        tau_fast_draws = np.asarray(flat_samples[f"tau_fast_{bands[0]}"])
-        tau_slow_draws = np.asarray(flat_samples[f"tau_slow_{bands[0]}"])
+        tau_fast_draws = np.asarray(flat_samples["tau_fast_driver"])
+        tau_slow_draws = np.asarray(flat_samples["tau_slow_driver"])
         lag_disk_draws = np.column_stack(
             [np.asarray(flat_samples[f"lag_disk_{band}"]) for band in bands]
         )
@@ -953,8 +1051,10 @@ def process_samples(
             [np.asarray(flat_samples[f"amp_blr_relflux_{band}"]) for band in bands]
         )
 
-        def effective_one(tau_fast, tau_slow, lag_disk, lag_blr, amp_cont, amp_blr):
-            return SharedLatentDiskBLRQS(
+        def band_moments_one(
+            tau_fast, tau_slow, lag_disk, lag_blr, amp_cont, amp_blr
+        ):
+            kernel = SharedLatentDiskBLRQS(
                 tau_fast=jnp.atleast_1d(tau_fast),
                 tau_slow=jnp.atleast_1d(tau_slow),
                 lag_disk=lag_disk,
@@ -963,10 +1063,12 @@ def process_samples(
                 amp_blr=amp_blr,
                 disk_order=int(disk_order),
                 blr_order=int(erlang_order),
-            ).effective_timescales()
+            )
+            return kernel.effective_timescales(), kernel.stationary_rms()
 
-        effective_tau_obs = np.asarray(
-            jax.jit(jax.vmap(effective_one))(
+        effective_tau_obs, total_rms_relflux = (
+            np.asarray(value)
+            for value in jax.jit(jax.vmap(band_moments_one))(
                 jnp.asarray(tau_fast_draws),
                 jnp.asarray(tau_slow_draws),
                 jnp.asarray(lag_disk_draws),
@@ -976,9 +1078,12 @@ def process_samples(
             )
         )
         log_tau_band = np.log10(effective_tau_obs) - np.log10(1.0 + data["z"])
+        log_sigma_total_rms_band = np.log10(
+            total_rms_relflux * (2.5 / np.log(10.0))
+        )
 
     log_tau_fast_band = None
-    if has_fast_pole:
+    if has_fast_pole and not shared_latent:
         fast_by_band = []
         for band in bands:
             lam_eff = lambda_pivot[band] / (1 + data['z'])
@@ -996,13 +1101,17 @@ def process_samples(
         median, err = sym_percentile(sigma_rms_band[:, i])
         result[f"log_sigma_rms_band_{band}"] = median
         result[f"log_sigma_rms_band_{band}_err"] = err
+        if model_variant == "shared_latent_blr":
+            median, err = sym_percentile(log_sigma_total_rms_band[:, i])
+            result[f"log_sigma_total_rms_band_{band}"] = median
+            result[f"log_sigma_total_rms_band_{band}_err"] = err
         median, err = sym_percentile(log_tau_band[:, i])
         result[f"log_tau_band_{band}_RF"] = median
         result[f"log_tau_band_{band}_RF_err"] = err
         if model_variant == "shared_latent_blr":
             result[f"log_tau_effective_{band}_RF"] = median
             result[f"log_tau_effective_{band}_RF_err"] = err
-        if has_fast_pole:
+        if has_fast_pole and not shared_latent:
             median, err = sym_percentile(log_tau_fast_band[:, i])
             result[f"log_tau_fast_band_{band}_RF"] = median
             result[f"log_tau_fast_band_{band}_RF_err"] = err
@@ -1063,6 +1172,21 @@ def process_samples(
     result['log_tau_uv_rf_std_psd'] = np.sqrt(vy)
     print("Hubble covariance term: ", cov_log_sigma_tau_reg)
     print("Hubble std terms: ", np.sqrt(vx), np.sqrt(vy))
+
+    result[LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY] = (
+        compact_log_sigma_tau_posterior_draws(
+            log_sigma_uv,
+            log_tau_uv,
+            redshift=data["z"],
+            object_id=data["object_id"],
+            selection_seed=0,
+            payload_format=(
+                LIGHT_CURVE_POSTERIOR_DRAW_FORMAT
+                if shared_latent
+                else LIGHT_CURVE_POSTERIOR_DRAW_FORMAT_V1
+            ),
+        )
+    )
 
     return result
 

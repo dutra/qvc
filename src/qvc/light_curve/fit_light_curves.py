@@ -94,6 +94,7 @@ from qvc.light_curve.multiband_model_dho_blr_erlang import (
 )
 from qvc.light_curve.multiband_model_shared_latent_blr import (
     DEFAULT_DISK_ORDER,
+    continuum_effective_timescale,
     make_multiband_shared_latent_blr_model,
 )
 from qvc.light_curve.dho_drw_parameterization import (
@@ -102,12 +103,21 @@ from qvc.light_curve.dho_drw_parameterization import (
     log_perturbation_ratio_prior,
     log_quality_factor_prior,
 )
+from qvc.light_curve.fraction_marginalization import (
+    empirical_logmeanexp,
+    fit_logit_normal,
+    responsibility_resample_fractions,
+    scale_prediction_samples_by_fraction,
+    scale_variable_relflux_amplitudes,
+    select_fraction_draws_for_bands,
+)
 from qvc.provenance import build_run_record
 from qvc.light_curve.multiband_model_dho_blr_erlang_drw import (
     make_multiband_dho_blr_flux_linearized_erlang_drw_model,
 )
 from qvc.light_curve.psf_constant_flux_correction import (
     apply_constant_flux_correction_to_objects,
+    attach_spectra_psf_fractions_to_objects,
     print_constant_flux_correction_summary,
 )
 from qvc.light_curve.variability_metrics import compute_variability_metrics_for_cleaned_lc
@@ -120,6 +130,8 @@ FLUX_LINEARIZED_MODEL_VARIANTS = (
     "mag_flux_linearized_erlang",
     SHARED_LATENT_BLR_VARIANT,
 )
+PSF_FRACTION_MODES = ("empirical", "logit-normal", "median")
+DEFAULT_PSF_FRACTION_MODE = "median"
 BALMER_EDGE_REST_WAVELENGTH = 3646.0
 BALMER_EDGE_ATTENUATION_WIDTH = 250.0
 ETA_SIGMA_LOW = -5.0
@@ -144,9 +156,10 @@ FLUX_LINEARIZED_REFINEMENT_ITERS = 1
 FLUX_LINEARIZED_MIN_TOTAL_FLUX_RATIO = 0.05
 HUBBLE_CONVERGENCE_FIELD_MAP = {
     "log_sigma_uv": "log_sigma_uv",
-    # The catalog value is an affine rest-frame/base-10 transform of this
-    # observer-frame natural-log sampled site. ESS and R-hat are invariant
-    # under that transform.
+    # For shared_latent_blr, add_model_prediction_params replaces this with
+    # the per-draw continuum-only 2500 A effective timescale before computing
+    # diagnostics. The catalog rest-frame/base-10 conversion is affine, so ESS
+    # and R-hat are invariant under that final conversion.
     "log_tau_uv_rf": "log_tau_uv",
 }
 HUBBLE_POSTERIOR_SITE_NAMES = tuple(
@@ -1912,6 +1925,16 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
         & (f_bin_raw >= psd_xlim[0])
         & (f_bin_raw <= psd_bpl_fit_fmax)
     )
+    psd_ls_fmax = (
+        float(np.max(f_bin_raw[display_fit_mask]))
+        if np.any(display_fit_mask)
+        else np.nan
+    )
+    psd_ls_fixed_fmax = (
+        float(np.max(f_bin_raw[fixed_mask]))
+        if np.any(fixed_mask)
+        else np.nan
+    )
     fit_fixed = fit_fixed_slope_drw_psd(
         f_bin_raw[fixed_mask],
         p_bin_raw[fixed_mask],
@@ -1919,7 +1942,11 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
         p_hi_raw[fixed_mask],
     )
     eta_sigma = float(np.nanmedian(np.asarray(samples["eta_sigma"], dtype=float)))
-    eta_tau = float(np.nanmedian(np.asarray(samples["eta_tau"], dtype=float)))
+    # The shared-latent model has no wavelength-dependent driver exponent.
+    # Its reference-band PSD diagnostic therefore needs no eta_tau shift.
+    eta_tau = float(
+        np.nanmedian(np.asarray(samples.get("eta_tau", 0.0), dtype=float))
+    )
     log_sigma_uv = (
         fit_norm["log_sigma_bpl"] + log_single_pl(2500.0, lam_ref_band, eta_sigma)
         if np.isfinite(fit_norm["log_sigma_bpl"]) else np.nan
@@ -2021,6 +2048,7 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
         "psd_noise_floor_ls": psd_noise_floor_raw,
         "psd_ls_valid": fit_raw["psd_bpl_valid"],
         "psd_ls_nbins": fit_raw["psd_bpl_nbins"],
+        "psd_ls_fmax": psd_ls_fmax,
         "log_sigma_ls_fixed": log_sigma_ls_fixed,
         "log_sigma_ls_fixed_err": fit_fixed["log_sigma_err"],
         "sigma_ls_fixed": sigma_ls_fixed,
@@ -2033,6 +2061,7 @@ def compute_lomb_scargle_break_diagnostics(model, samples, obj, z, *, n_freq=500
         "tau_ls_fixed_err": tau_ls_fixed_err,
         "psd_ls_fixed_valid": fit_fixed["valid"],
         "psd_ls_fixed_nbins": float(fit_fixed["n_bins"]),
+        "psd_ls_fixed_fmax": psd_ls_fixed_fmax,
     }
     if np.isfinite(fit_norm["log_tau_bpl"]):
         out["log_nu_break_bpl"] = -np.log10(2.0 * np.pi) - fit_norm["log_tau_bpl"]
@@ -2930,16 +2959,51 @@ def tau_shift_to_uv(eta_tau, lambda_center_rf, lambda_uv=2500.0):
     return jnp.log(10.0) * log_single_pl(lambda_uv, lambda_center_rf, eta_tau)
 
 
-def eta_sigma_prior():
-    """Quasar-like wavelength scaling for the stationary continuum RMS."""
+DEFAULT_ETA_PRIOR_PROFILE = "default"
+ETA_PRIOR_PROFILES = (
+    DEFAULT_ETA_PRIOR_PROFILE,
+    "modified",
+)
+MODIFIED_ETA_SIGMA_LOC = -0.8
+MODIFIED_ETA_TAU_LOC = 0.5
+MODIFIED_ETA_PRIOR_SCALE = 0.5
 
-    return dist.TruncatedNormal(-0.5, 0.3, low=-1.5, high=0.25)
+
+def _validate_eta_prior_profile(eta_prior_profile):
+    if eta_prior_profile not in ETA_PRIOR_PROFILES:
+        raise ValueError(
+            f"eta_prior_profile must be one of {ETA_PRIOR_PROFILES}, "
+            f"got {eta_prior_profile!r}."
+        )
 
 
-def eta_tau_prior():
-    """Weakly informative wavelength scaling for the DRW-style timescale."""
+def eta_sigma_prior(eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE):
+    """Wavelength-scaling prior for the stationary continuum RMS."""
 
-    return dist.TruncatedNormal(0.2, 0.35, low=-0.5, high=1.25)
+    _validate_eta_prior_profile(eta_prior_profile)
+    if eta_prior_profile == "modified":
+        return dist.Normal(MODIFIED_ETA_SIGMA_LOC, MODIFIED_ETA_PRIOR_SCALE)
+    return dist.TruncatedNormal(-0.5, 0.5, low=-1.5, high=0.25)
+
+
+def eta_tau_prior(eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE):
+    """Wavelength-scaling prior for the DRW-style timescale."""
+
+    _validate_eta_prior_profile(eta_prior_profile)
+    if eta_prior_profile == "modified":
+        return dist.Normal(MODIFIED_ETA_TAU_LOC, MODIFIED_ETA_PRIOR_SCALE)
+    return dist.TruncatedNormal(0.2, 0.5, low=-0.5, high=1.25)
+
+
+def eta_tau_is_sampled(
+    *,
+    eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE,
+    shared_latent=False,
+):
+    """Whether eta_tau is stochastic for the selected model and prior profile."""
+
+    _validate_eta_prior_profile(eta_prior_profile)
+    return not shared_latent
 
 
 def log_sigma_center0_prior(eta_sigma, lambda_center_rf):
@@ -3397,12 +3461,16 @@ def compute_parameter_kls(
     tau_fast_truncated=False,
     n_blr_terms=1,
     drw_parameterization=False,
+    eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE,
 ):
     """Return approximate KL(q||p) for sampled light-curve parameters."""
 
     kls = {}
     eta_sigma = np.asarray(flat_samples["eta_sigma"])
-    eta_tau = np.asarray(flat_samples["eta_tau"])
+    shared_latent = model_variant == SHARED_LATENT_BLR_VARIANT
+    eta_tau = (
+        None if shared_latent else np.asarray(flat_samples["eta_tau"])
+    )
     sigma_center0_key = (
         "log_sigma_center0_relflux"
         if model_variant in FLUX_LINEARIZED_MODEL_VARIANTS and "log_sigma_center0_relflux" in flat_samples
@@ -3425,12 +3493,15 @@ def compute_parameter_kls(
 
     kls["eta_sigma_kl"] = kl_from_samples(
         eta_sigma,
-        lambda x: _dist_log_prob_array(eta_sigma_prior(), x),
+        lambda x: _dist_log_prob_array(eta_sigma_prior(eta_prior_profile), x),
     )
-    if model_variant != SHARED_LATENT_BLR_VARIANT:
+    if eta_tau_is_sampled(
+        eta_prior_profile=eta_prior_profile,
+        shared_latent=shared_latent,
+    ):
         kls["eta_tau_kl"] = kl_from_samples(
             eta_tau,
-            lambda x: _dist_log_prob_array(eta_tau_prior(), x),
+            lambda x: _dist_log_prob_array(eta_tau_prior(eta_prior_profile), x),
         )
 
     if sigma_center0_key in flat_samples:
@@ -3469,18 +3540,27 @@ def compute_parameter_kls(
                 lambda x: _dist_log_prob_array(log_perturbation_ratio_prior(), x),
             )
     elif "log_tau_slow_center0" in flat_samples:
-        kls["log_tau_slow_center0_kl"] = conditional_kl_from_samples(
-            flat_samples["log_tau_slow_center0"],
-            lambda x, eta: _dist_log_prob_array(
-                log_tau_slow_center0_prior(
-                    eta,
-                    z,
-                    lambda_center_rf,
+        if shared_latent:
+            kls["log_tau_slow_center0_kl"] = kl_from_samples(
+                flat_samples["log_tau_slow_center0"],
+                lambda x: _dist_log_prob_array(
+                    log_tau_slow_center0_prior(0.0, z, lambda_center_rf),
+                    x,
                 ),
-                x,
-            ),
-            eta_tau,
-        )
+            )
+        else:
+            kls["log_tau_slow_center0_kl"] = conditional_kl_from_samples(
+                flat_samples["log_tau_slow_center0"],
+                lambda x, eta: _dist_log_prob_array(
+                    log_tau_slow_center0_prior(
+                        eta,
+                        z,
+                        lambda_center_rf,
+                    ),
+                    x,
+                ),
+                eta_tau,
+            )
 
     if not drw_parameterization and "log_tau_fast_center0" in flat_samples:
         kls["log_tau_fast_center0_kl"] = conditional_kl_from_samples(
@@ -3961,7 +4041,13 @@ def build_explicit_model_params(raw_params, lam_rf, *, lam_lya_rf=None):
     return explicit
 
 
-def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
+def build_explicit_model_params_relflux(
+    raw_params,
+    lam_rf,
+    *,
+    lam_lya_rf=None,
+    shared_latent=False,
+):
     """Convert sampled relative-flux parameters into internal and legacy arrays."""
 
     lam_rf = jnp.asarray(lam_rf)
@@ -3974,7 +4060,7 @@ def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
     )
 
     eta_sigma = jnp.asarray(raw_params["eta_sigma"])
-    eta_tau = jnp.asarray(raw_params["eta_tau"])
+    eta_tau = jnp.asarray(raw_params.get("eta_tau", 0.0))
     dlog_amp_blr = jnp.asarray(raw_params["dlog_amp_blr"])
     dlog_amp_blr2 = jnp.asarray(
         raw_params.get(
@@ -3997,7 +4083,11 @@ def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
     lag0 = jnp.asarray(raw_params["lag0"])
     lag_beta = jnp.asarray(raw_params["lag_beta"])
     sigma_shift = jnp.log(10.0) * log_single_pl(lambda_uv, lambda_center_rf, eta_sigma)
-    tau_shift = jnp.log(10.0) * log_single_pl(lambda_uv, lambda_center_rf, eta_tau)
+    tau_shift = jnp.where(
+        shared_latent,
+        jnp.asarray(0.0, dtype=lam_rf.dtype),
+        jnp.log(10.0) * log_single_pl(lambda_uv, lambda_center_rf, eta_tau),
+    )
 
     if "log_sigma_center0_relflux" in raw_params:
         log_sigma_center0_relflux = jnp.asarray(raw_params["log_sigma_center0_relflux"])
@@ -4104,6 +4194,9 @@ def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
     explicit["lag_blr2"] = lag_blr2
     explicit["tau_fast_band"] = jnp.exp(log_tau_fast_band)
     explicit["tau_slow_band"] = jnp.exp(log_tau_slow_band)
+    if shared_latent:
+        explicit["tau_fast_driver"] = jnp.exp(log_tau_fast_center0)
+        explicit["tau_slow_driver"] = jnp.exp(log_tau_slow_center0)
     explicit["log_kernel_param"] = log_kernel_param
     if has_bc_lag:
         explicit["dlog_amp_bc"] = dlog_amp_bc
@@ -4112,10 +4205,21 @@ def build_explicit_model_params_relflux(raw_params, lam_rf, *, lam_lya_rf=None):
 
 
 
-def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_rf=None):
+def add_model_prediction_params(
+    samples,
+    lam_rf,
+    *,
+    model_variant=None,
+    lam_lya_rf=None,
+    disk_order=DEFAULT_DISK_ORDER,
+):
     """Add explicit model parameters needed for prediction/plotting."""
 
     out = dict(samples)
+    if model_variant == SHARED_LATENT_BLR_VARIANT:
+        # Also sanitize resumed legacy draws, where eta_tau may have been
+        # stored as a deterministic zero or sampled under the modified prior.
+        out.pop("eta_tau", None)
     use_drw_q = "log_tau_drw_center0" in out
     if use_drw_q:
         # The shared wavelength-scaling helper is expressed in the legacy
@@ -4128,7 +4232,7 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
         if "quality_factor" not in out and "log_quality_factor" in out:
             out["quality_factor"] = np.exp(np.asarray(out["log_quality_factor"]))
     use_relflux = True
-    if use_relflux and all(
+    if use_relflux and model_variant != SHARED_LATENT_BLR_VARIANT and all(
         key in out
         for key in (
             "log_kernel_param",
@@ -4155,12 +4259,13 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
             "lambda_center_rf",
         )
     ):
-        return out
+        return scale_prediction_samples_by_fraction(out)
     if use_relflux:
         explicit = build_explicit_model_params_relflux(
             out,
             lam_rf,
             lam_lya_rf=lam_lya_rf,
+            shared_latent=(model_variant == SHARED_LATENT_BLR_VARIANT),
         )
         out["log_kernel_param"] = np.asarray(explicit["log_kernel_param"])
         out["amp_cont_relflux"] = np.asarray(explicit["amp_cont_relflux"])
@@ -4194,6 +4299,9 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
         else:
             out["tau_fast_band"] = np.asarray(explicit["tau_fast_band"])
             out["tau_slow_band"] = np.asarray(explicit["tau_slow_band"])
+            if model_variant == SHARED_LATENT_BLR_VARIANT:
+                out["tau_fast_driver"] = np.asarray(explicit["tau_fast_driver"])
+                out["tau_slow_driver"] = np.asarray(explicit["tau_slow_driver"])
         out["log_sigma_center0_relflux"] = np.asarray(explicit["log_sigma_center0_relflux"])
         out.setdefault("log_sigma_center0", np.asarray(explicit["log_sigma_center0_relflux"]))
         out["log_sigma_center0_mag_equiv"] = np.asarray(explicit["log_sigma_center0"])
@@ -4202,9 +4310,32 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
             out["log_tau_fast_center0"] = np.asarray(explicit["log_tau_fast_center0"])
         out["log_sigma_uv_relflux"] = np.asarray(explicit["log_sigma_uv_relflux"])
         out["log_sigma_uv"] = np.asarray(explicit["log_sigma_uv"])
-        out["log_tau_uv"] = np.asarray(explicit["log_tau_uv"]) + (
-            np.log(2.0) if use_drw_q else 0.0
-        )
+        if model_variant == SHARED_LATENT_BLR_VARIANT:
+            tau_fast_driver = jnp.asarray(explicit["tau_fast_driver"])
+            tau_slow_driver = jnp.asarray(explicit["tau_slow_driver"])
+            lag_disk_2500 = jnp.asarray(out["lag0"]) * (
+                jnp.asarray(2500.0) / jnp.asarray(explicit["lambda_center_rf"])
+            ) ** (4.0 / 3.0)
+            out["log_tau_uv"] = np.asarray(
+                jnp.log(
+                    jax.vmap(
+                        lambda tf, ts, lag: continuum_effective_timescale(
+                            tf,
+                            ts,
+                            lag,
+                            disk_order=disk_order,
+                        )
+                    )(
+                        tau_fast_driver.reshape(-1),
+                        tau_slow_driver.reshape(-1),
+                        lag_disk_2500.reshape(-1),
+                    )
+                ).reshape(tau_fast_driver.shape)
+            )
+        else:
+            out["log_tau_uv"] = np.asarray(explicit["log_tau_uv"]) + (
+                np.log(2.0) if use_drw_q else 0.0
+            )
         if not use_drw_q:
             out["log_tau_fast_uv"] = np.asarray(explicit["log_tau_fast_uv"])
         out["log_igm_transmission_band"] = np.asarray(explicit["log_igm_transmission_band"])
@@ -4218,7 +4349,7 @@ def add_model_prediction_params(samples, lam_rf, *, model_variant=None, lam_lya_
         if "log_lag_blr2" in explicit:
             out["log_lag_blr2"] = np.asarray(explicit["log_lag_blr2"])
         out["lambda_center_rf"] = np.asarray(explicit["lambda_center_rf"])
-        return out
+        return scale_prediction_samples_by_fraction(out)
 
     if all(
         key in out
@@ -4301,9 +4432,12 @@ def build_single_object_model_mag_flux_linearized(
     drw_parameterization=False,
     enforce_positive_flux_guard=False,
     enable_seeing_dependence=False,
+    psf_fraction_mode=None,
+    eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE,
 ):
     """Return the relative-flux quasi-separable model for one object."""
 
+    _validate_eta_prior_profile(eta_prior_profile)
     if n_blr_terms != 1:
         raise ValueError(
             "model_variant='mag_flux_linearized' currently supports only n_blr_terms=1."
@@ -4329,6 +4463,20 @@ def build_single_object_model_mag_flux_linearized(
     else:
         log_igm_transmission_band = jnp.zeros(B, dtype=lam_rf.dtype)
     baseline_flux_by_band = reference_flux_from_mean_magnitudes(obj_dict["mags_means"])
+    fraction_draws = None
+    logit_normal_mean = None
+    logit_normal_scale_tril = None
+    if psf_fraction_mode is not None:
+        if psf_fraction_mode not in {"empirical", "logit-normal"}:
+            raise ValueError(
+                "Flux-likelihood PSF fraction mode must be 'empirical' or "
+                "'logit-normal'."
+            )
+        fraction_draws = select_fraction_draws_for_bands(obj_dict, bands)
+        if psf_fraction_mode == "logit-normal":
+            logit_normal_mean, _, logit_normal_scale_tril = fit_logit_normal(
+                fraction_draws
+            )
     if "y_relflux_fit" in obj_dict and "yerr_relflux_fit" in obj_dict:
         y_relflux = jnp.asarray(obj_dict["y_relflux_fit"], dtype=float)
         yerr_relflux = jnp.asarray(obj_dict["yerr_relflux_fit"], dtype=float)
@@ -4346,12 +4494,17 @@ def build_single_object_model_mag_flux_linearized(
     _, survey_offset_active_mask = _get_object_active_noise_calibration_masks(obj_dict, B)
 
     def model():
-        eta_sigma = numpyro.sample("eta_sigma", eta_sigma_prior())
-        eta_tau = (
-            numpyro.deterministic("eta_tau", jnp.asarray(0.0))
-            if shared_latent
-            else numpyro.sample("eta_tau", eta_tau_prior())
+        eta_sigma = numpyro.sample(
+            "eta_sigma",
+            eta_sigma_prior(eta_prior_profile),
         )
+        if shared_latent:
+            eta_tau = jnp.asarray(0.0)
+        else:
+            eta_tau = numpyro.sample(
+                "eta_tau",
+                eta_tau_prior(eta_prior_profile),
+            )
 
         tau_center_prior_fn = (
             log_tau_drw_center0_prior
@@ -4503,8 +4656,9 @@ def build_single_object_model_mag_flux_linearized(
             lag_beta=lag_beta,
             log_igm_transmission_band=log_igm_transmission_band,
             eta_sigma=eta_sigma,
-            eta_tau=eta_tau,
         )
+        if not shared_latent:
+            raw_params["eta_tau"] = eta_tau
         if dlog_amp_bc is not None:
             raw_params["dlog_amp_bc"] = dlog_amp_bc
             raw_params["log_lag_ratio_bc_to_blr"] = log_lag_ratio_bc_to_blr
@@ -4513,6 +4667,7 @@ def build_single_object_model_mag_flux_linearized(
             raw_params,
             lam_rf,
             lam_lya_rf=lam_lya_rf,
+            shared_latent=shared_latent,
         )
         if drw_parameterization:
             params["tau_drw_band"] = (
@@ -4563,6 +4718,15 @@ def build_single_object_model_mag_flux_linearized(
             numpyro.deterministic("log_tau_fast_uv", params["log_tau_fast_uv"])
             numpyro.deterministic("tau_fast", params["tau_fast_band"])
             numpyro.deterministic("tau_slow", params["tau_slow_band"])
+            if shared_latent:
+                numpyro.deterministic(
+                    "tau_fast_driver",
+                    params["tau_fast_driver"],
+                )
+                numpyro.deterministic(
+                    "tau_slow_driver",
+                    params["tau_slow_driver"],
+                )
         numpyro.deterministic("amp_cont_relflux", params["amp_cont_relflux"])
         numpyro.deterministic("amp_bc_relflux", params["amp_bc_relflux"])
         numpyro.deterministic("amp_blr_relflux", params["amp_blr_relflux"])
@@ -4624,7 +4788,35 @@ def build_single_object_model_mag_flux_linearized(
                 "negative_total_flux_probability_max",
                 jnp.max(negative_flux_probability),
             )
-        numpyro.factor("loglike", m.log_prob(params))
+        if psf_fraction_mode == "empirical":
+            component_loglikes = jax.vmap(
+                lambda fractions: m.log_prob(
+                    scale_variable_relflux_amplitudes(params, fractions)
+                )
+            )(jnp.asarray(fraction_draws))
+            numpyro.deterministic(
+                "psf_agn_fraction_responsibility",
+                jax.nn.softmax(component_loglikes),
+            )
+            numpyro.factor("loglike", empirical_logmeanexp(component_loglikes))
+        elif psf_fraction_mode == "logit-normal":
+            fraction_logits = numpyro.sample(
+                "psf_agn_fraction_logit",
+                dist.MultivariateNormal(
+                    loc=jnp.asarray(logit_normal_mean),
+                    scale_tril=jnp.asarray(logit_normal_scale_tril),
+                ),
+            )
+            fractions = numpyro.deterministic(
+                "psf_agn_fraction",
+                jax.nn.sigmoid(fraction_logits),
+            )
+            numpyro.factor(
+                "loglike",
+                m.log_prob(scale_variable_relflux_amplitudes(params, fractions)),
+            )
+        else:
+            numpyro.factor("loglike", m.log_prob(params))
 
     return model
 
@@ -4885,6 +5077,8 @@ def run_iterated_mag_flux_linearized_inference(
     drw_parameterization=False,
     enforce_positive_flux_guard=False,
     enable_seeing_dependence=False,
+    psf_fraction_mode=None,
+    eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE,
 ):
     """Iteratively refit the relative-flux QS model using local pseudo-data.
 
@@ -4937,6 +5131,8 @@ def run_iterated_mag_flux_linearized_inference(
         drw_parameterization=drw_parameterization,
         enforce_positive_flux_guard=enforce_positive_flux_guard,
         enable_seeing_dependence=enable_seeing_dependence,
+        psf_fraction_mode=psf_fraction_mode,
+        eta_prior_profile=eta_prior_profile,
     )
 
     for iter_idx in range(int(refinement_iters)):
@@ -4995,6 +5191,21 @@ def run_iterated_mag_flux_linearized_inference(
                 target_accept=target_accept,
                 init_strategy=init_strategy,
             )
+            if model_variant == SHARED_LATENT_BLR_VARIANT:
+                samples_flat = add_model_prediction_params(
+                    samples_flat,
+                    lam_rf,
+                    model_variant=model_variant,
+                    lam_lya_rf=lam_lya_rf,
+                    disk_order=disk_order,
+                )
+                samples_per_chain = add_model_prediction_params(
+                    samples_per_chain,
+                    lam_rf,
+                    model_variant=model_variant,
+                    lam_lya_rf=lam_lya_rf,
+                    disk_order=disk_order,
+                )
             if iter_idx == int(refinement_iters) - 1:
                 final_nuts_diagnostics = dict(iter_diag)
                 posterior_summary = summarize_final_hubble_nuts_posterior(
@@ -5016,23 +5227,66 @@ def run_iterated_mag_flux_linearized_inference(
             diagnostics[f"flux_linearized_iter{iter_idx + 1}_elapsed_sec"] = iter_diag[
                 "elapsed_sec"
             ]
+            prediction_samples = dict(samples_flat)
+            if (
+                psf_fraction_mode == "empirical"
+                and "psf_agn_fraction_responsibility" in prediction_samples
+            ):
+                responsibilities = np.asarray(
+                    prediction_samples.pop("psf_agn_fraction_responsibility"),
+                    dtype=float,
+                )
+                fraction_draws = select_fraction_draws_for_bands(
+                    obj_dict,
+                    obj_dict["bands"],
+                )
+                prediction_samples["psf_agn_fraction"] = (
+                    responsibility_resample_fractions(
+                        fraction_draws,
+                        responsibilities,
+                        seed=iter_idx,
+                    )
+                )
             prediction_params = _posterior_median_params(
                 add_model_prediction_params(
-                    samples_flat,
+                    prediction_samples,
                     lam_rf,
                     model_variant=model_variant,
                     lam_lya_rf=lam_lya_rf,
+                    disk_order=disk_order,
                 )
             )
         else:
             diagnostics[f"flux_linearized_iter{iter_idx + 1}_accept_prob"] = np.nan
             diagnostics[f"flux_linearized_iter{iter_idx + 1}_num_divergences"] = 0
             diagnostics[f"flux_linearized_iter{iter_idx + 1}_elapsed_sec"] = 0.0
+            prediction_samples = _model_params_at_values(
+                iter_model,
+                inference_key,
+                init_values,
+            )
+            if (
+                psf_fraction_mode == "empirical"
+                and "psf_agn_fraction_responsibility" in prediction_samples
+            ):
+                responsibilities = np.asarray(
+                    prediction_samples.pop("psf_agn_fraction_responsibility"),
+                    dtype=float,
+                )
+                fraction_draws = select_fraction_draws_for_bands(
+                    obj_dict,
+                    obj_dict["bands"],
+                )
+                prediction_samples["psf_agn_fraction"] = np.sum(
+                    responsibilities[:, None] * fraction_draws,
+                    axis=0,
+                )
             prediction_params = add_model_prediction_params(
-                _model_params_at_values(iter_model, inference_key, init_values),
+                prediction_samples,
                 lam_rf,
                 model_variant=model_variant,
                 lam_lya_rf=lam_lya_rf,
+                disk_order=disk_order,
             )
 
         params_median = prediction_params
@@ -5321,8 +5575,22 @@ def main():
         default="mag_flux_linearized_erlang",
         help=(
             "Causal-Erlang light-curve model. 'shared_latent_blr' uses one "
-            "DHO driver with wavelength-scaled disk convolutions and bandwise "
-            "unit-RMS delayed responses."
+            "wavelength-independent DHO driver with wavelength-scaled disk "
+            "convolutions and bandwise unit-RMS delayed responses; its "
+            "log_tau_uv_rf is the continuum-only 2500 A effective timescale."
+        ),
+    )
+    parser.add_argument(
+        "--eta_prior_profile",
+        "--eta-prior-profile",
+        choices=ETA_PRIOR_PROFILES,
+        default=DEFAULT_ETA_PRIOR_PROFILE,
+        help=(
+            "Wavelength-scaling prior profile. 'default' preserves the existing "
+            "eta_sigma and model-specific eta_tau behavior; 'modified' uses "
+            "eta_sigma ~ Normal(-0.8, 0.5) and eta_tau ~ Normal(0.5, 0.5) "
+            "for variants with wavelength-dependent drivers. shared_latent_blr "
+            "has one wavelength-independent driver and does not use eta_tau."
         ),
     )
     parser.add_argument(
@@ -5339,13 +5607,27 @@ def main():
         "--spectra_fit_h5",
         nargs="+",
         default=None,
-        help="Spectra-fit HDF5 catalog file(s) used to derive per-band PSF AGN/total fractions.",
+        help="Spectra-fit HDF5 catalog file(s) containing per-band PSF AGN fractions.",
+    )
+    parser.add_argument(
+        "--psf-fraction-mode",
+        choices=PSF_FRACTION_MODES,
+        default=DEFAULT_PSF_FRACTION_MODE,
+        help=(
+            "Treatment of spectra-derived PSF AGN fractions: subtract the "
+            "per-band median before fitting (default), marginalize over the "
+            "empirical joint draws, or fit a correlated logit-normal latent prior."
+        ),
     )
     parser.add_argument(
         "--subtract_psf_constant_flux",
         action="store_true",
         default=False,
-        help="Subtract spectra-derived constant contaminating flux in PSF light curves before GP fitting.",
+        help=(
+            "Enable spectra-derived PSF-fraction treatment. The selected "
+            "--psf-fraction-mode determines whether photometry is corrected "
+            "before fitting or fractions are propagated in the likelihood."
+        ),
     )
     args = parser.parse_args()
     if (
@@ -5387,12 +5669,18 @@ def main():
     if args.subtract_psf_constant_flux:
         if not args.spectra_fit_h5:
             raise ValueError("--subtract_psf_constant_flux requires --spectra_fit_h5.")
-        objs, correction_summary = apply_constant_flux_correction_to_objects(
-            objs,
-            spectra_fit_h5s=args.spectra_fit_h5,
-            progress_bar=args.progress,
-        )
-        print_constant_flux_correction_summary(correction_summary)
+        if args.psf_fraction_mode == "median":
+            objs, correction_summary = apply_constant_flux_correction_to_objects(
+                objs,
+                spectra_fit_h5s=args.spectra_fit_h5,
+                progress_bar=args.progress,
+            )
+            print_constant_flux_correction_summary(correction_summary)
+        else:
+            objs = attach_spectra_psf_fractions_to_objects(
+                objs,
+                spectra_fit_h5s=args.spectra_fit_h5,
+            )
 
     if args.inject_random_fake_etas:
         rng = np.random.default_rng()
@@ -5605,6 +5893,13 @@ def main():
                             drw_parameterization=args.dho_drw_parameterization,
                             enforce_positive_flux_guard=args.enforce_positive_flux_guard,
                             enable_seeing_dependence=args.enable_seeing_dependence,
+                            psf_fraction_mode=(
+                                args.psf_fraction_mode
+                                if args.subtract_psf_constant_flux
+                                and args.psf_fraction_mode != "median"
+                                else None
+                            ),
+                            eta_prior_profile=args.eta_prior_profile,
                         )
                 elif args.fit_method in ("nuts", "svi+nuts"):
                     if args.fit_method == "svi+nuts":
@@ -5708,11 +6003,30 @@ def main():
                     heading=f"[{oid}] NumPyro posterior summary after final NUTS sampling:",
                 )
 
+            if (
+                args.subtract_psf_constant_flux
+                and args.psf_fraction_mode == "empirical"
+                and "psf_agn_fraction_responsibility" in obj_flat_samples
+            ):
+                fraction_draws = select_fraction_draws_for_bands(obj, bands)
+                responsibilities = np.asarray(
+                    obj_flat_samples.pop("psf_agn_fraction_responsibility"),
+                    dtype=float,
+                )
+                obj_flat_samples["psf_agn_fraction"] = (
+                    responsibility_resample_fractions(
+                        fraction_draws,
+                        responsibilities,
+                        seed=idx,
+                    )
+                )
+
             obj_flat_samples = add_model_prediction_params(
                 obj_flat_samples,
                 lam_rf,
                 model_variant=args.model_variant,
                 lam_lya_rf=lam_lya_rf,
+                disk_order=args.disk_order,
             )
 
             log_nonfinite_sample_summary(obj_flat_samples, label=oid)
@@ -5854,6 +6168,7 @@ def main():
                 tau_fast_truncated=args.tau_fast_truncated,
                 n_blr_terms=args.n_blr_terms,
                 drw_parameterization=args.dho_drw_parameterization,
+                eta_prior_profile=args.eta_prior_profile,
             )
 
             if args.plot:
@@ -5942,7 +6257,33 @@ def main():
                     logging.error(f"[{oid}] Plotting error: {e}")
                     logging.error(traceback.format_exc())
 
-            final_result = obj | result | adf_result | drift_result | raw_drift_result | psd_break_result | sf_result | kl_result | loo_residual_result | diagnostics | dict(prefix=prefix, suffix=suffix, model_variant=args.model_variant, seeing_dependence_enabled=args.enable_seeing_dependence)
+            final_result = obj | result | adf_result | drift_result | raw_drift_result | psd_break_result | sf_result | kl_result | loo_residual_result | diagnostics | dict(prefix=prefix, suffix=suffix, model_variant=args.model_variant, eta_prior_profile=args.eta_prior_profile, seeing_dependence_enabled=args.enable_seeing_dependence)
+            final_result["psf_fraction_mode"] = (
+                args.psf_fraction_mode
+                if args.subtract_psf_constant_flux
+                else "none"
+            )
+            final_result["psf_agn_fraction_valid_count"] = int(
+                obj.get("psf_agn_fraction_valid_count", 0)
+            )
+            for band in bands:
+                posterior_key = f"psf_agn_fraction_{band}"
+                posterior_err_key = f"{posterior_key}_err"
+                if (
+                    args.subtract_psf_constant_flux
+                    and args.psf_fraction_mode == "median"
+                ):
+                    posterior_value = obj.get(f"f_AGN_psf_{band}", np.nan)
+                    posterior_error = obj.get(f"f_AGN_psf_{band}_err", np.nan)
+                else:
+                    posterior_value = result.get(posterior_key, np.nan)
+                    posterior_error = result.get(posterior_err_key, np.nan)
+                final_result[
+                    f"psf_agn_fraction_lc_posterior_{band}"
+                ] = posterior_value
+                final_result[
+                    f"psf_agn_fraction_lc_posterior_{band}_err"
+                ] = posterior_error
             log_sigma_uv = final_result.get("log_sigma_uv")
             log_sigma_uv_err = final_result.get("log_sigma_uv_err")
             log_tau_uv_rf = final_result.get("log_tau_uv_rf")
@@ -6006,7 +6347,14 @@ def main():
     )
     save_quasar_list_hdf5(
         results,
-        ignored_keys=["X", "y", "yerr", "band_idx"],
+        ignored_keys=[
+            "X",
+            "y",
+            "yerr",
+            "band_idx",
+            "psf_agn_fraction_draws",
+            "psf_agn_fraction_bands",
+        ],
         provenance=provenance,
     )
 
