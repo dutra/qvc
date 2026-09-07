@@ -34,6 +34,8 @@ from qvc.hubble.cuts import (
     COMPLETENESS_MAP_Z_EDGE_MIN,
     COMPLETENESS_MAG_2500_MAX,
     COMPLETENESS_MAG_2500_MIN,
+    COMPLETENESS_Z_MAX,
+    COMPLETENESS_Z_MIN,
     COMPLETENESS_TAIL_MAG_2500_MAX,
     COMPLETENESS_TAIL_MAG_2500_MIN,
     EBV_GAL_PLUS_EBV_AGN_COLUMN,
@@ -2359,11 +2361,17 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         completeness_magnitude=completeness_magnitude,
         completeness_magnitude_support_mode=completeness_magnitude_support_mode,
     )
+    completeness_magnitude_support_cuts = [
+        cut for cut in completeness_support_cuts if cut[0] != "z"
+    ]
+    tier0_redshift_cuts = [
+        cut for cut in completeness_support_cuts if cut[0] == "z"
+    ]
     if enforce_completeness_support and completeness_magnitude_support_mode == "hard-cut":
         if return_completeness_parent:
             map_support_cuts = tuple(
                 (column, COMPLETENESS_MAP_MAG_EDGE_MIN, COMPLETENESS_MAP_MAG_EDGE_MAX)
-                for column, _lower, _upper in completeness_support_cuts
+                for column, _lower, _upper in completeness_magnitude_support_cuts
             )
             df = _apply_scalar_cut_group(df, map_support_cuts, tier="map-support")
             redshift = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
@@ -2379,7 +2387,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         else:
             df = _apply_scalar_cut_group(
                 df,
-                completeness_support_cuts,
+                completeness_magnitude_support_cuts,
                 tier="support",
             )
 
@@ -2435,10 +2443,11 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                 "tier0:SDSS_RUN2D", cut_desc, df, run2d_mask, tier="0"
             )
 
+        df = _apply_scalar_cut_group(df, tier0_redshift_cuts, tier="0")
         if not enforce_completeness_support or return_completeness_parent:
             df = _apply_scalar_cut_group(
                 df,
-                completeness_support_cuts,
+                completeness_magnitude_support_cuts,
                 tier="0",
             )
         _append_cut_report_row(
@@ -2672,7 +2681,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         completeness_parent = df.copy().reset_index(drop=True)
         df = _apply_scalar_cut_group(
             df,
-            completeness_support_cuts,
+            completeness_magnitude_support_cuts,
             tier="analysis-support",
         ).reset_index(drop=True)
 
@@ -2694,7 +2703,10 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             ),
         ],
         "completeness_magnitude_support_mode": completeness_magnitude_support_mode,
-        "completeness_redshift_support": None,
+        "completeness_redshift_support": [
+            float(COMPLETENESS_Z_MIN),
+            float(COMPLETENESS_Z_MAX),
+        ],
         "completeness_map_magnitude_support": [
             float(COMPLETENESS_MAP_MAG_EDGE_MIN),
             float(COMPLETENESS_MAP_MAG_EDGE_MAX),
@@ -2713,12 +2725,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             if enforce_completeness_support
             else None
         ),
-        "tier0": (
-            completeness_support_cuts
-            if apply_tier0
-            and (not enforce_completeness_support or return_completeness_parent)
-            else []
-        ),
+        "tier0": completeness_support_cuts if apply_tier0 else [],
         "tier1": build_tier1_cuts() if apply_tier1 else [],
         "tier2": (
             build_tier2_cuts(completeness_magnitude=completeness_magnitude)

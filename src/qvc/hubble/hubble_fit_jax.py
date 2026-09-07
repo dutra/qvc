@@ -128,6 +128,8 @@ from qvc.hubble.cuts import (
     DEFAULT_COMPLETENESS_MAGNITUDE_SUPPORT_MODE,
     COMPLETENESS_MAG_2500_MAX,
     COMPLETENESS_MAG_2500_MIN,
+    COMPLETENESS_Z_MAX,
+    COMPLETENESS_Z_MIN,
     CUT_TIER_CHOICES,
     SDSS_TARGET_SELECTION_CHOICES,
     normalize_cut_tier,
@@ -1016,7 +1018,7 @@ def run_single_jax(
                 COMPLETENESS_MAG_2500_MIN,
                 COMPLETENESS_MAG_2500_MAX,
             ),
-            redshift_support=completeness_z_range,
+            redshift_support=(COMPLETENESS_Z_MIN, COMPLETENESS_Z_MAX),
         )
     if uniform_redshift_distribution:
         plot_redshift_histograms(df_pantheon, df_agn_fit, xscale="linear", plot_path=plot_path, only_agn=only_agn)

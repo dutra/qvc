@@ -50,6 +50,8 @@ from qvc.hubble.cuts import (
     COMPLETENESS_TAIL_MAG_2500_MIN,
     COMPLETENESS_N_MAG_BINS,
     COMPLETENESS_N_Z_BINS,
+    COMPLETENESS_Z_MAX,
+    COMPLETENESS_Z_MIN,
     CUT_TIER_CHOICES,
     SDSS_TARGET_SELECTION_CHOICES,
     normalize_cut_tier,
@@ -1890,15 +1892,12 @@ def resolve_completeness_redshift_support(df_agn, z_range):
     values = values[np.isfinite(values)]
     if values.size == 0:
         raise ValueError("Completeness redshift support requires at least one finite z.")
-    dz = (COMPLETENESS_MAP_Z_EDGE_MAX - COMPLETENESS_MAP_Z_EDGE_MIN) / COMPLETENESS_N_Z_BINS
-    center_lo = COMPLETENESS_MAP_Z_EDGE_MIN + 0.5 * dz
-    center_hi = COMPLETENESS_MAP_Z_EDGE_MAX - 0.5 * dz
     requested = np.concatenate((values, np.asarray(z_range, dtype=float)))
-    outside = (requested < center_lo) | (requested > center_hi)
+    outside = (requested < COMPLETENESS_Z_MIN) | (requested > COMPLETENESS_Z_MAX)
     if np.any(outside):
         raise ValueError(
             "Plot and fit redshifts must lie inside the strict completeness "
-            f"interpolation range [{center_lo}, {center_hi}]; got "
+            f"interpolation range [{COMPLETENESS_Z_MIN}, {COMPLETENESS_Z_MAX}]; got "
             f"[{np.min(requested):.6g}, {np.max(requested):.6g}]."
         )
     return COMPLETENESS_MAP_Z_EDGE_MIN, COMPLETENESS_MAP_Z_EDGE_MAX
@@ -4034,7 +4033,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 COMPLETENESS_MAG_2500_MIN,
                 COMPLETENESS_MAG_2500_MAX,
             ),
-            redshift_support=completeness_z_range,
+            redshift_support=(COMPLETENESS_Z_MIN, COMPLETENESS_Z_MAX),
         )
     speed = normalize_speed(speed)
     prior_profile = normalize_prior_profile(prior_profile)

@@ -26,6 +26,9 @@ from qvc.hubble.cuts import (  # noqa: E402
     COMPLETENESS_MAG_2500_MAX,
     COMPLETENESS_TAIL_MAG_2500_MAX,
     COMPLETENESS_TAIL_MAG_2500_MIN,
+    COMPLETENESS_Z_BIN_WIDTH,
+    COMPLETENESS_Z_MAX,
+    COMPLETENESS_Z_MIN,
     EBV_GAL_PLUS_EBV_AGN_COLUMN,
     EBV_GAL_PLUS_EBV_AGN_MAX,
     EXCLUDED_SDSS_NAMES,
@@ -70,6 +73,7 @@ def test_build_agn_cuts_are_partitioned_in_tier_order():
     assert tuple(build_tier0_cuts()) == AGN_TIER0_ELIGIBILITY_CUTS
     assert tuple(build_tier1_cuts()) == AGN_TIER1_FIT_QUALITY_CUTS
     assert cut_map == {
+        "z": (COMPLETENESS_Z_MIN, COMPLETENESS_Z_MAX),
         "log_tau_uv_rf": (1.5, 4.0),
         T_RF_OVER_TAU_UV_RF_COLUMN: (5.0, None),
         "apparent_mag_2500_err": (None, APPARENT_MAG_2500_ERR_MAX),
@@ -92,6 +96,9 @@ def test_build_agn_cuts_are_partitioned_in_tier_order():
     assert A_2500_TOTAL_MAX == 3.5
     assert COMPLETENESS_MAG_2500_MIN == 18.5
     assert COMPLETENESS_MAG_2500_MAX == 24.0
+    assert COMPLETENESS_Z_BIN_WIDTH == 0.1
+    assert COMPLETENESS_Z_MIN == 0.05
+    assert COMPLETENESS_Z_MAX == 4.45
 
 
 def test_normalize_cut_tier_accepts_exact_four_modes():
@@ -110,6 +117,7 @@ def test_tails_tier0_uses_extreme_guard_in_selected_magnitude_coordinate():
         completeness_magnitude="attenuated",
         completeness_magnitude_support_mode="tails",
     ) == [
+        ("z", COMPLETENESS_Z_MIN, COMPLETENESS_Z_MAX),
         (
             "m_2500_attenuated_model",
             COMPLETENESS_TAIL_MAG_2500_MIN,

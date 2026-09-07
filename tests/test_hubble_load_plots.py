@@ -793,9 +793,62 @@ def test_load_agn_data_cut_tiers_apply_cumulatively(tmp_path, monkeypatch):
 def test_load_agn_data_defers_z_range_to_fit_selection(tmp_path, monkeypatch):
     source_path = tmp_path / "agn.h5"
     source_path.touch()
-    frame = _minimal_agn_frame(n=4)
-    frame["object_id"] = ["below", "inside", "above", "nonfinite"]
-    frame["z"] = [0.2, 1.5, 3.5, np.nan]
+    frame = _minimal_agn_frame(n=8)
+    frame["object_id"] = [
+        "below-support",
+        "lower-edge",
+        "below-fit",
+        "inside",
+        "above-fit",
+        "upper-edge",
+        "regression-outlier",
+        "nonfinite",
+    ]
+    frame["z"] = [0.04999, 0.05, 0.2, 1.5, 3.5, 4.45, 4.45594, np.nan]
+
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *_args, **_kwargs: frame.copy(),
+    )
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda value: value)
+    _patch_load_agn_plotters(monkeypatch)
+
+    selected, _all, parent = hubble_utils.load_agn_data(
+        source_path,
+        magnitude_convention="dereddened",
+        spectra_fit_h5=None,
+        cut_tier="0",
+        enforce_completeness_support=True,
+        return_completeness_parent=True,
+        z_range=(1.0, 3.16),
+        plot_diagnostics=False,
+        plot_path=str(tmp_path / "plots"),
+        cut_report_path=tmp_path / "cut_summary.txt",
+    )
+
+    expected = ["lower-edge", "below-fit", "inside", "above-fit", "upper-edge"]
+    assert selected["object_id"].tolist() == expected
+    assert parent["object_id"].tolist() == expected
+    assert selected.loc[
+        selected["z"].between(1.0, 3.16), "object_id"
+    ].tolist() == ["inside"]
+    summary = (tmp_path / "cut_summary.txt").read_text(encoding="utf-8")
+    assert "deferred to fit selection" in summary
+    assert "tier0:agn_scalar:z" in summary
+    assert "z in [0.05, 4.45]" in summary
+    config = json.loads(selected.attrs["cut_configuration_json"])
+    assert config["z_range_semantics"] == "fit_only_v1"
+    assert config["completeness_redshift_support"] == [0.05, 4.45]
+    assert ["z", 0.05, 4.45] in config["tier0"]
+
+
+def test_tier0_redshift_support_is_bypassed_at_cut_tier_none(tmp_path, monkeypatch):
+    source_path = tmp_path / "agn.h5"
+    source_path.touch()
+    frame = _minimal_agn_frame(n=2)
+    frame["object_id"] = ["below-support", "above-support"]
+    frame["z"] = [0.04999, 4.45594]
 
     monkeypatch.setattr(
         hubble_utils,
@@ -809,24 +862,17 @@ def test_load_agn_data_defers_z_range_to_fit_selection(tmp_path, monkeypatch):
         source_path,
         magnitude_convention="dereddened",
         spectra_fit_h5=None,
-        cut_tier="0",
-        z_range=(1.0, 3.16),
+        cut_tier="none",
         plot_diagnostics=False,
         plot_path=str(tmp_path / "plots"),
         cut_report_path=tmp_path / "cut_summary.txt",
     )
 
-    assert selected["object_id"].tolist() == ["below", "inside", "above"]
-    assert parent["object_id"].tolist() == ["below", "inside", "above"]
-    assert selected.loc[
-        selected["z"].between(1.0, 3.16), "object_id"
-    ].tolist() == ["inside"]
-    assert "deferred to fit selection" in (
-        tmp_path / "cut_summary.txt"
-    ).read_text(encoding="utf-8")
-    assert '"z_range_semantics":"fit_only_v1"' in selected.attrs[
-        "cut_configuration_json"
-    ]
+    expected = ["below-support", "above-support"]
+    assert selected["object_id"].tolist() == expected
+    assert parent["object_id"].tolist() == expected
+    config = json.loads(selected.attrs["cut_configuration_json"])
+    assert config["tier0"] == []
 
 
 def test_tier1_fails_when_a_mandatory_diagnostic_column_is_missing(

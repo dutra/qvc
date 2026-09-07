@@ -1432,6 +1432,20 @@ def test_completeness_redshift_support_covers_plot_sample_and_rejects_narrow_moc
     assert hubble_fit.resolve_completeness_redshift_support(
         frame, (1.0, 3.16)
     ) == (0.0, 4.5)
+    boundary_frame = frame.copy()
+    boundary_frame["z"] = [0.05, 1.5, 4.45]
+    assert hubble_fit.resolve_completeness_redshift_support(
+        boundary_frame, (1.0, 3.16)
+    ) == (0.0, 4.5)
+    outside_frame = frame.copy()
+    outside_frame["z"] = [0.05, 1.5, 4.45594]
+    with pytest.raises(
+        ValueError,
+        match=r"strict completeness interpolation range \[0.05, 4.45\]",
+    ):
+        hubble_fit.resolve_completeness_redshift_support(
+            outside_frame, (1.0, 3.16)
+        )
 
     mock_path = tmp_path / "narrow_mock.h5"
     with hubble_fit.h5py.File(mock_path, "w") as handle:
