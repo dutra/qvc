@@ -16,6 +16,7 @@ import numpy as np
 from tinygp import GaussianProcess
 from tinygp.kernels import quasisep as qs
 from tinygp.solvers.quasisep.core import DiagQSM, StrictLowerTriQSM, SymmQSM
+from tinygp.solvers.quasisep.general import GeneralQSM
 
 from qvc.light_curve.multiband_dho_core import (
     ContiBLRRelativeFlux_SHO_Model,
@@ -233,18 +234,79 @@ class SharedLatentDiskBLRQS(qs.Quasisep):
             lower=StrictLowerTriQSM(p=p, q=q, a=transitions),
         )
 
+    def to_general_qsm(self, X1, X2):
+        """Cross-covariance using this kernel's forward state transitions.
+
+        X2 must be sorted by time; X1 may be in any order. Search physical
+        times so simultaneous observations may have any band ordering, as in
+        the training GP. For later i and earlier j, the covariance is
+        ``h_i F_ij Pinf h_j.T``. The placement of Pinf therefore differs from
+        tinygp's base implementation, which expects transposed transitions.
+        """
+
+        t1, t2 = jnp.asarray(X1[0]), jnp.asarray(X2[0])
+        idx = jnp.searchsorted(t2, t1, side="right") - 1
+        Xprev = jax.tree_util.tree_map(lambda x: jnp.append(x[0], x[:-1]), X2)
+        transitions = jax.vmap(self.transition_matrix)(Xprev, X2)
+        Pinf = self.stationary_covariance()
+        slices, _size = self._chain_slices()
+        endpoints = jnp.asarray([chain_slice.stop - 1 for chain_slice in slices])
+        stds = jnp.sqrt(_safe_pos(Pinf[endpoints, endpoints]))
+        observe = lambda Xi: self._observation_model_with_stds(Xi, stds)
+        h1, h2 = jax.vmap(observe)(X1), jax.vmap(observe)(X2)
+
+        left = jnp.clip(idx, 0, t2.size - 1)
+        Xleft = jax.tree_util.tree_map(lambda x: jnp.asarray(x)[left], X2)
+        # GeneralQSM masks the absent side when extrapolating. Use a zero-time
+        # transition there too: evaluating an unused negative time can overflow
+        # and contaminate parameter gradients despite that final mask.
+        Xleft = jax.tree_util.tree_map(
+            lambda x, query: jnp.where(idx >= 0, x, query), Xleft, X1
+        )
+        pl = jax.vmap(jnp.dot)(h1, jax.vmap(self.transition_matrix)(Xleft, X1))
+
+        right = jnp.clip(idx + 1, 0, t2.size - 1)
+        Xright = jax.tree_util.tree_map(lambda x: jnp.asarray(x)[right], X2)
+        Xright = jax.tree_util.tree_map(
+            lambda x, query: jnp.where(idx < t2.size - 1, x, query), Xright, X1
+        )
+        qu = jax.vmap(jnp.dot)(
+            jax.vmap(self.transition_matrix)(X1, Xright), h1 @ Pinf.T
+        )
+        return GeneralQSM(
+            pl=pl, ql=h2 @ Pinf.T, pu=h2, qu=qu, a=transitions, idx=idx
+        )
+
     def evaluate(self, X1, X2):
         Pinf = self.stationary_covariance()
         slices, _size = self._chain_slices()
         endpoints = jnp.asarray([chain_slice.stop - 1 for chain_slice in slices])
         stds = jnp.sqrt(_safe_pos(Pinf[endpoints, endpoints]))
-        h1 = self._observation_model_with_stds(X1, stds)
-        h2 = self._observation_model_with_stds(X2, stds)
-        return jnp.where(
-            self.coord_to_sortable(X1) < self.coord_to_sortable(X2),
-            h2 @ self.transition_matrix(X1, X2) @ Pinf @ h1,
-            h1 @ self.transition_matrix(X2, X1) @ Pinf @ h2,
+        # Choose the causal direction before evaluating the transition. A
+        # jnp.where over two covariances also evaluates the negative-time branch
+        # and can produce NaN gradients when that unused branch overflows.
+        first_is_earlier = X1[0] <= X2[0]
+        earlier = jax.tree_util.tree_map(
+            lambda x1, x2: jnp.where(first_is_earlier, x1, x2), X1, X2
         )
+        later = jax.tree_util.tree_map(
+            lambda x1, x2: jnp.where(first_is_earlier, x2, x1), X1, X2
+        )
+        h_early = self._observation_model_with_stds(earlier, stds)
+        h_late = self._observation_model_with_stds(later, stds)
+        return h_late @ self.transition_matrix(earlier, later) @ Pinf @ h_early
+
+    def matmul(self, X1, X2=None, y=None):
+        """Multiply using the matching symmetric or generalized QSM."""
+
+        if y is None:
+            if X2 is None:
+                raise ValueError("Missing right-hand side for kernel matmul")
+            y = X2
+            X2 = None
+        if X2 is None:
+            return self.to_symm_qsm(X1) @ y
+        return self.to_general_qsm(X1, X2) @ y
 
     def effective_timescales(self):
         """Return exact integral-correlation timescales for all observed bands."""
