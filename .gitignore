@@ -1,6 +1,10 @@
 plots/
 results/
 data/
+.DS_Store
+/.claude-octopus/
+/output/
+/tmp/
 *.sh
 *.log
 *.xsh
