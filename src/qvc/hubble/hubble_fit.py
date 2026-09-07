@@ -544,9 +544,9 @@ def get_dynesty_speed_settings(speed, ndim, *, warm_start=False):
     if speed == "fastest":
         settings = dict(dlogz_init=10, n_effective=50, nlive_init=20, nlive_batch=5)
     elif speed == "quick":
-        settings = dict(dlogz_init=0.01, n_effective=500, nlive_init=50, nlive_batch=20)
+        settings = dict(dlogz_init=0.01, n_effective=2000, nlive_init=100, nlive_batch=50)
     elif speed == "standard":
-        settings = dict(dlogz_init=0.01, n_effective=1000, nlive_init=250, nlive_batch=100)
+        settings = dict(dlogz_init=0.01, n_effective=10000, nlive_init=250, nlive_batch=100)
     elif speed == "production":
         settings = dict(
             dlogz_init=0.01,

@@ -281,7 +281,7 @@ def test_sfitspectra_fresh_run_uses_explicit_csv_and_description(tmp_path, path_
         manifests[0].name,
     )
     generated = scripts[0].read_text(encoding="utf-8")
-    assert "#SBATCH --array=0-1" in generated
+    assert "#SBATCH --array=0-4" in generated
     encoded = re.search(
         r'export QVC_SUBMISSION_PROVENANCE_B64="([^"]+)"', generated
     ).group(1)
@@ -434,7 +434,7 @@ def test_sfitspectra_retry_resubmits_latest_unsuccessful_tasks_with_current_reso
     assert calls[0][:5] == [
         "--array=2,4-8",
         "--partition=day",
-        "--time=8:00:00",
+        "--time=3:00:00",
         "--mem=40G",
         "--cpus-per-task=1",
     ]

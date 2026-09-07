@@ -5940,5 +5940,5 @@ def test_run_hubble_forwards_configurable_cumulative_cut_tier():
     assert '"QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z", "0.30"' in runner
     assert '"QVC_HUBBLE_COMPLETENESS_MAGNITUDE_SUPPORT_MODE", "hard-cut"' in runner
     assert "--completeness-magnitude-support-mode @(completeness_magnitude_support_mode)" in runner
-    assert '"QVC_CUT_A_2500_TOTAL_MAX": "3.5"' in runner
+    assert '"QVC_CUT_A_2500_TOTAL_MAX": "none"' in runner
     assert '"QVC_CUT_EBV_GAL_PLUS_EBV_AGN_MAX": "1.0"' in runner
