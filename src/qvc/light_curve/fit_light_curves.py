@@ -5486,6 +5486,20 @@ def apply_resume_sample_save_policy(args):
 
 
 
+def apply_only_light_curve_plot_policy(args):
+    """Select the combined light-curve/PSD figure without changing diagnostics."""
+    if not getattr(args, "only_light_curve_plot", False):
+        return args
+    for flag in ("disable_combined_plot", "disable_plot_psd"):
+        if getattr(args, flag, False):
+            raise ValueError(f"--only-light-curve-plot is incompatible with --{flag}")
+    args.plot = True
+    for name in ("trace", "color_magnitude", "correlation", "histogram", "corner",
+                 "sigma_tau_lambda", "recovery"):
+        setattr(args, f"disable_{name}_plot", True)
+    return args
+
+
 def main():
     logging.basicConfig(
         format="%(asctime)s - %(message)s",
@@ -5508,6 +5522,8 @@ def main():
     )
     parser.add_argument("--filter_file", type=str, help="Path to file containing object IDs.")
     parser.add_argument("--plot", action="store_true", help="Enable plotting of results.")
+    parser.add_argument("--only_light_curve_plot", "--only-light-curve-plot",
+                        action="store_true", help="Only create the combined light-curve figure with PSD; implies --plot.")
     parser.add_argument("--progress", action="store_true", help="Show progress bar.")
     parser.add_argument("--nwarm", type=int, default=500, help="Warmup steps for MCMC.")
     parser.add_argument("--nsamp", type=int, default=250, help="Samples per chain for MCMC.")
@@ -5758,6 +5774,10 @@ def main():
         ),
     )
     args = parser.parse_args()
+    try:
+        apply_only_light_curve_plot_policy(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     resolve_band_poles_transition(args.band_poles_transition, model_variant=args.model_variant)
     args.eta_prior_profile = resolve_eta_prior_profile(args.eta_prior_profile, args.model_variant)
     if (
@@ -6387,44 +6407,45 @@ def main():
                             time0=obj["time0"],
                             bands=bands,
                         )
-                    drift_plot_result = compute_g_band_residual_drift_diagnostics(
-                        obj_flat_samples_flatten_per_band,
-                        obj,
-                        bands,
-                        z=float(obj["z"]),
-                        return_series=True,
-                    )
-                    save_g_band_binned_residual_drift_plot(
-                        drift_plot_result,
-                        obj | dict(prefix=prefix, suffix=suffix),
-                    )
-                    sf_plot_result = compute_structure_function_diagnostics(
-                        obj_flat_samples_flatten_per_band,
-                        obj,
-                        float(obj["z"]),
-                        return_series=True,
-                        **({"disk_order": args.disk_order,
-                            "band_poles_transition": active_band_poles_transition}
-                           if args.model_variant == BAND_POLES_BLR_VARIANT else {}),
-                    )
-                    save_structure_function_plot(
-                        sf_plot_result,
-                        obj | dict(prefix=prefix, suffix=suffix),
-                    )
-                    normality_plot_result = compute_multiband_residual_normality_diagnostics(
-                        obj_flat_samples_flatten_per_band,
-                        obj,
-                        bands,
-                        z=float(obj["z"]),
-                        return_series=True,
-                    )
-                    save_multiband_residual_normality_plot(
-                        normality_plot_result,
-                        obj | dict(prefix=prefix, suffix=suffix, bands=bands),
-                    )
-                    save_dm_df_over_f_distribution_plot(
-                        obj | dict(prefix=prefix, suffix=suffix, bands=bands),
-                    )
+                    if not args.only_light_curve_plot:
+                        drift_plot_result = compute_g_band_residual_drift_diagnostics(
+                            obj_flat_samples_flatten_per_band,
+                            obj,
+                            bands,
+                            z=float(obj["z"]),
+                            return_series=True,
+                        )
+                        save_g_band_binned_residual_drift_plot(
+                            drift_plot_result,
+                            obj | dict(prefix=prefix, suffix=suffix),
+                        )
+                        sf_plot_result = compute_structure_function_diagnostics(
+                            obj_flat_samples_flatten_per_band,
+                            obj,
+                            float(obj["z"]),
+                            return_series=True,
+                            **({"disk_order": args.disk_order,
+                                "band_poles_transition": active_band_poles_transition}
+                               if args.model_variant == BAND_POLES_BLR_VARIANT else {}),
+                        )
+                        save_structure_function_plot(
+                            sf_plot_result,
+                            obj | dict(prefix=prefix, suffix=suffix),
+                        )
+                        normality_plot_result = compute_multiband_residual_normality_diagnostics(
+                            obj_flat_samples_flatten_per_band,
+                            obj,
+                            bands,
+                            z=float(obj["z"]),
+                            return_series=True,
+                        )
+                        save_multiband_residual_normality_plot(
+                            normality_plot_result,
+                            obj | dict(prefix=prefix, suffix=suffix, bands=bands),
+                        )
+                        save_dm_df_over_f_distribution_plot(
+                            obj | dict(prefix=prefix, suffix=suffix, bands=bands),
+                        )
                     if not args.disable_correlation_plot:
                         plot_correlation_matrix(obj_flat_samples_flatten_per_band, obj)
                     if not args.disable_histogram_plot:

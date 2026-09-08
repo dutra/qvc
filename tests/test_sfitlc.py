@@ -430,3 +430,29 @@ def test_stone_photometry_flag_forwarded(monkeypatch, enabled):
         script = build_sbatch_script('probe', job, args, None, None, object_ids_path=Path('/tmp/ids'))
         assert script.count('--load_stone_lcs') == int(enabled)
         assert subprocess.run(['bash', '-n'], input=script, text=True, capture_output=True).returncode == 0
+
+
+@pytest.mark.parametrize('flag', ['--only-light-curve-plot', '--only_light_curve_plot'])
+def test_only_light_curve_flag_forwarding(monkeypatch, flag):
+    monkeypatch.setattr(sys, 'argv', ['sfitlc', '--fit', 'stone', flag])
+    args = parse_args()
+    assert args.only_light_curve_plot
+    script = build_sbatch_script('probe', JobConfig(description='stone', object_ids=['1']),
+                                args, None, None, object_ids_path=Path('/tmp/ids.txt'))
+    assert '--only-light-curve-plot' in script
+    merge = build_merge_sbatch_script('probe', 'stone', args,
+        enable_stone_identity_plot=True, enable_macleod_identity_plot=True,
+        enable_suberlak_identity_plot=True)
+    assert '--plot-stone-' not in merge
+    assert '--plot-macleod-' not in merge
+    assert '--plot-suberlak-' not in merge
+    assert 'qvc.light_curve.merge_results' in merge
+    assert '--skip-populate-sdss' in merge
+
+
+@pytest.mark.parametrize('conflict', ['--disable_combined_plot', '--disable_plot_psd'])
+def test_only_light_curve_conflicts_rejected_before_submission(monkeypatch, conflict):
+    monkeypatch.setattr(sys, 'argv', ['sfitlc', '--fit', 'stone', '--only-light-curve-plot', conflict])
+    with pytest.raises(SystemExit) as error:
+        parse_args()
+    assert error.value.code == 2
