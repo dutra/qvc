@@ -11,7 +11,7 @@ import numpy as np
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jax.scipy.linalg import expm
+from jax.scipy.linalg import expm, solve_triangular
 from tinygp import GaussianProcess
 from tinygp.kernels import quasisep as qs
 from tinygp.solvers.quasisep.core import DiagQSM, StrictLowerTriQSM, SymmQSM
@@ -187,22 +187,27 @@ class SharedLatentBandPolesBLRQS(qs.Quasisep):
     def stationary_covariance(self):
         """Solve AP + PA.T + Q = 0 without dividing by pole differences.
 
-        For lower-triangular A, each row-major element depends only on
-        previously computed elements. P may be singular when states coincide.
+        Solve one row at a time using symmetry and a triangular system. P may
+        be singular when states coincide; only sums of negative rates divide.
         """
         A = self.design_matrix()
         size = A.shape[0]
         Q = jnp.zeros_like(A).at[0, 0].set(2.0 / jnp.ravel(self.tau_fast)[0])
         indices = jnp.arange(size)
 
-        def update(k, P):
-            i, j = k // size, k % size
-            left = jnp.sum(jnp.where(indices < i, A[i] * P[:, j], 0.0))
-            right = jnp.sum(jnp.where(indices < j, P[i] * A[j], 0.0))
-            return P.at[i, j].set((-Q[i, j] - left - right) / (A[i, i] + A[j, j]))
+        def update(i, P):
+            rhs = -Q[i] - jnp.where(indices < i, A[i], 0.0) @ P
+            shifted = A + A[i, i] * jnp.eye(size, dtype=A.dtype)
+            # Symmetry doubles the off-diagonal terms at j=i. The diagonal
+            # already equals 2*A[i,i] and must not be doubled again.
+            shifted = shifted.at[i].set(
+                jnp.where(indices < i, 2.0 * shifted[i], shifted[i])
+            )
+            row = solve_triangular(shifted, rhs, lower=True)
+            row = jnp.where(indices <= i, row, 0.0)
+            return P.at[i, :].set(row).at[:, i].set(row)
 
-        P = jax.lax.fori_loop(0, size * size, update, jnp.zeros_like(A))
-        return (P + P.T) * 0.5
+        return jax.lax.fori_loop(0, size, update, jnp.zeros_like(A))
 
     def _observation_model_with_stds(self, X, stds):
         b = jnp.asarray(X[1], dtype=jnp.int32)
@@ -270,9 +275,9 @@ class SharedLatentBandPolesBLRQS(qs.Quasisep):
             def local_columns(times):
                 indices = jnp.asarray([0, parent, *range(sl.start, sl.stop)])
                 local = A[jnp.ix_(indices, indices)]
-                return jax.vmap(lambda t: expm(local * t, max_squarings=64)[2:, :2])(
-                    times
-                )
+                return jax.vmap(jax.checkpoint(
+                    lambda t: expm(local * t, max_squarings=64)[2:, :2]
+                ))(times)
 
             # The predicate is scalar and outside the time vmap: ordinary
             # likelihoods do not execute the local expm branch at every epoch.
@@ -372,8 +377,8 @@ class SharedLatentBandPolesBLRQS(qs.Quasisep):
             return self.to_symm_qsm(X1) @ y
         return self.to_general_qsm(X1, X2) @ y
 
-    def _moments(self, continuum_only=False):
-        A, P = self.design_matrix(), self.stationary_covariance()
+    def _moments(self, continuum_only=False, *, state=None):
+        A, P = (self.design_matrix(), self.stationary_covariance()) if state is None else state
         B = self.lag_disk.shape[0]
         endpoints = jnp.array([sl.stop - 1 for sl in self._chain_slices()[0]])
         stds = jnp.sqrt(P[endpoints, endpoints])
@@ -398,6 +403,13 @@ class SharedLatentBandPolesBLRQS(qs.Quasisep):
 
     def continuum_effective_timescales(self):
         return self._moments(continuum_only=True)[0]
+
+    def all_band_moments(self):
+        """Total and continuum moments sharing one stationary covariance."""
+        state = self.design_matrix(), self.stationary_covariance()
+        total_tau, total_rms = self._moments(state=state)
+        continuum_tau, _ = self._moments(continuum_only=True, state=state)
+        return total_tau, total_rms, continuum_tau
 
 
 def continuum_effective_timescale(tau_fast, tau_slow_uv, lag_disk_uv, *, disk_order=3):

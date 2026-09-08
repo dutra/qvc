@@ -1,6 +1,7 @@
 """Independent inference and derived-parameter plumbing for the band-pole model."""
 
 from __future__ import annotations
+from functools import lru_cache
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -13,6 +14,52 @@ from qvc.light_curve.multiband_model_shared_latent_band_poles_blr import (
     SharedLatentBandPolesBLRQS,
     make_multiband_shared_latent_band_poles_blr_model,
 )
+
+
+POSTERIOR_BATCH_SIZE = 128
+
+
+@lru_cache(maxsize=32)
+def _uv_moment_batch(disk_order):
+    return jax.jit(jax.vmap(
+        lambda f, s, lag: continuum_effective_timescale(f, s, lag, disk_order=disk_order)
+    ))
+
+
+@lru_cache(maxsize=32)
+def _uv_moments(disk_order):
+    """Stable traced entry point, also used inside the NumPyro builder."""
+    batch = _uv_moment_batch(disk_order)
+
+    @jax.jit
+    def calculate(f, s, lag):
+        if f.size <= POSTERIOR_BATCH_SIZE:
+            return batch(f, s, lag)
+        padding = (-f.size) % POSTERIOR_BATCH_SIZE
+        blocks = tuple(jnp.pad(x, (0, padding), mode="edge").reshape(
+            -1, POSTERIOR_BATCH_SIZE
+        ) for x in (f, s, lag))
+        return jax.lax.map(lambda xs: batch(*xs), blocks).reshape(-1)[:f.size]
+
+    return calculate
+
+
+def _posterior_batches(function, *arrays):
+    """Host-scheduled fixed batches bound device work and avoid new JIT closures."""
+    arrays = tuple(np.asarray(x) for x in arrays)
+    n = arrays[0].shape[0]
+    if not n:
+        raise ValueError("Posterior moments require at least one draw")
+    results = []
+    for start in range(0, n, POSTERIOR_BATCH_SIZE):
+        count = min(POSTERIOR_BATCH_SIZE, n - start)
+        batch = tuple(np.pad(x[start:start + count],
+            ((0, POSTERIOR_BATCH_SIZE - count),) + ((0, 0),) * (x.ndim - 1),
+            mode="edge") for x in arrays)
+        results.append(jax.tree_util.tree_map(
+            lambda x: np.asarray(x)[:count], function(*batch)
+        ))
+    return jax.tree_util.tree_map(lambda *xs: np.concatenate(xs), *results)
 
 
 def build_explicit_band_poles_params(raw, lam_rf, *, lam_lya_rf=None, disk_order=3):
@@ -49,9 +96,7 @@ def build_explicit_band_poles_params(raw, lam_rf, *, lam_lya_rf=None, disk_order
         4.0 / 3.0
     )
     fast, slow, lag_uv = jnp.broadcast_arrays(jnp.exp(log_f), jnp.exp(log_s_uv), lag_uv)
-    times = jax.vmap(
-        lambda f, s, l: continuum_effective_timescale(f, s, l, disk_order=disk_order)
-    )(fast.reshape(-1), slow.reshape(-1), lag_uv.reshape(-1))
+    times = _uv_moments(disk_order)(fast.reshape(-1), slow.reshape(-1), lag_uv.reshape(-1))
     params["log_tau_uv"] = jnp.log(times).reshape(fast.shape)
     return params
 
@@ -69,6 +114,19 @@ def add_band_poles_prediction_params(samples, lam_rf, *, lam_lya_rf=None, disk_o
     # This is the raw reference-flux amplitude coordinate used by the builder.
     out["log_sigma_center0"] = np.asarray(explicit["log_sigma_center0_relflux"])
     return scale_prediction_samples_by_fraction(out)
+
+
+def reshape_band_poles_chains(samples, chain_shape):
+    """Undo NumPyro's chain/draw flattening after one augmentation.
+
+    bc_weight is a fixed wavelength vector, not a posterior variable. Identify
+    it by meaning, never by shape (the draw count can equal the band count).
+    """
+    return {
+        key: (np.asarray(value) if key == "bc_weight" else
+              np.asarray(value).reshape(tuple(chain_shape) + np.asarray(value).shape[1:]))
+        for key, value in samples.items()
+    }
 
 
 def build_single_object_model_band_poles(
@@ -369,12 +427,8 @@ def build_single_object_model_band_poles(
     return model
 
 
-def posterior_band_poles_moments(flat_samples, bands, *, disk_order=3, blr_order=3):
-    """Exact draw-wise moments from flattened catalog/prediction samples."""
-    f = jnp.asarray(flat_samples["tau_fast_driver"])
-    s = jnp.asarray(flat_samples["tau_slow_uv_driver"])
-    by_band = lambda key: jnp.column_stack([flat_samples[f"{key}_{b}"] for b in bands])
-
+@lru_cache(maxsize=32)
+def _band_moment_batch(disk_order, blr_order):
     def one(f, s, sb, ld, lb, ac, ab):
         kernel = SharedLatentBandPolesBLRQS(
             tau_fast=jnp.atleast_1d(f),
@@ -387,13 +441,19 @@ def posterior_band_poles_moments(flat_samples, bands, *, disk_order=3, blr_order
             disk_order=disk_order,
             blr_order=blr_order,
         )
-        return (
-            kernel.effective_timescales(),
-            kernel.stationary_rms(),
-            kernel.continuum_effective_timescales(),
-        )
+        return kernel.all_band_moments()
 
-    total_tau, total_rms, cont_tau = jax.jit(jax.vmap(one))(
+    return jax.jit(jax.vmap(one))
+
+
+def posterior_band_poles_moments(flat_samples, bands, *, disk_order=3, blr_order=3):
+    """Exact draw-wise moments, computed in bounded batches in original order."""
+    f = np.asarray(flat_samples["tau_fast_driver"])
+    s = np.asarray(flat_samples["tau_slow_uv_driver"])
+    by_band = lambda key: np.column_stack([flat_samples[f"{key}_{b}"] for b in bands])
+
+    total_tau, total_rms, cont_tau = _posterior_batches(
+        _band_moment_batch(disk_order, blr_order),
         f,
         s,
         by_band("tau_slow_band"),
@@ -402,16 +462,10 @@ def posterior_band_poles_moments(flat_samples, bands, *, disk_order=3, blr_order
         by_band("amp_cont_relflux"),
         by_band("amp_blr_relflux"),
     )
-    ld_uv = jnp.asarray(flat_samples["lag0"]) * (
-        2500.0 / jnp.asarray(flat_samples["lambda_center_rf"])
+    ld_uv = np.asarray(flat_samples["lag0"]) * (
+        2500.0 / np.asarray(flat_samples["lambda_center_rf"])
     ) ** (4.0 / 3.0)
-    uv = jax.jit(
-        jax.vmap(
-            lambda tf, ts, l: continuum_effective_timescale(
-                tf, ts, l, disk_order=disk_order
-            )
-        )
-    )(f, s, ld_uv)
+    uv = _posterior_batches(_uv_moment_batch(disk_order), f, s, ld_uv)
     return {
         k: np.asarray(v)
         for k, v in dict(

@@ -873,6 +873,7 @@ def process_samples(
     model_variant=None,
     disk_order=3,
     erlang_order=3,
+    band_pole_moments=None,
 ):
     """
     Generalized processing of MCMC samples for arbitrary parameters and bands.
@@ -881,6 +882,8 @@ def process_samples(
         flat_samples (dict): Dictionary of flat MCMC samples, each value is (n_samples,).
         data (dict): Data dictionary, must contain 'object_id', 'z', and 'clean_bands'.
         percentiles (list): Percentiles for summary statistics.
+        band_pole_moments (dict, optional): Precomputed moments from these exact
+            draws and band order, shared with sample serialization by the fitter.
 
     Returns:
         dict: Summary statistics for all parameters and bands.
@@ -935,7 +938,7 @@ def process_samples(
     log_sigma_uv = np.asarray(flat_samples["log_sigma_uv"]) if "log_sigma_uv" in flat_samples else None
     shared_latent = model_variant == "shared_latent_blr"
     band_poles = model_variant == "shared_latent_band_poles_blr"
-    if band_poles:
+    if band_poles and band_pole_moments is None:
         from qvc.light_curve.band_poles_fit import posterior_band_poles_moments
         band_pole_moments = posterior_band_poles_moments(
             flat_samples, bands, disk_order=int(disk_order), blr_order=int(erlang_order),

@@ -1157,16 +1157,22 @@ def compute_loo_short_lag_residual_diagnostics(
         gp, inds = model._build_gp(params)
         y_sorted = np.asarray(model._observed_y_sorted(params, inds), dtype=float)
         mean_sorted = np.asarray(gp.loc, dtype=float)
-        covariance = np.asarray(gp.covariance, dtype=float)
-        covariance = 0.5 * (covariance + covariance.T)
-        scale = max(float(np.nanmedian(np.diag(covariance))), 1.0)
-        covariance = covariance + np.eye(covariance.shape[0]) * (1e-10 * scale)
-        chol = np.linalg.cholesky(covariance)
         centered = y_sorted - mean_sorted
-        alpha = np.linalg.solve(chol.T, np.linalg.solve(chol, centered))
-        precision = np.linalg.solve(chol.T, np.linalg.solve(chol, np.eye(chol.shape[0])))
-        precision_diag = np.diag(precision)
-        loo_standardized = alpha / np.sqrt(np.maximum(precision_diag, 1e-300))
+        from .quasisep_prediction import regularized_loo_residuals, supports_shared_prediction
+        if supports_shared_prediction(gp.kernel):
+            loo_standardized = np.asarray(
+                regularized_loo_residuals(gp.solver.matrix, jnp.asarray(centered))
+            )
+        else:
+            covariance = np.asarray(gp.covariance, dtype=float)
+            covariance = 0.5 * (covariance + covariance.T)
+            scale = max(float(np.nanmedian(np.diag(covariance))), 1.0)
+            covariance = covariance + np.eye(covariance.shape[0]) * (1e-10 * scale)
+            chol = np.linalg.cholesky(covariance)
+            alpha = np.linalg.solve(chol.T, np.linalg.solve(chol, centered))
+            precision = np.linalg.solve(chol.T, np.linalg.solve(chol, np.eye(chol.shape[0])))
+            precision_diag = np.diag(precision)
+            loo_standardized = alpha / np.sqrt(np.maximum(precision_diag, 1e-300))
         finite_loo = np.isfinite(loo_standardized)
         loo_standardized_finite = loo_standardized[finite_loo]
         if not loo_standardized_finite.size:
@@ -5063,7 +5069,11 @@ def _model_params_at_values(model, rng_key, values):
 def _flux_linearized_pseudo_data_from_prediction(obj_dict, model, params):
     """Build one Gauss-Newton pseudo-data update for the magnitude likelihood."""
 
-    r_star, _ = model.pred(params, obj_dict["X"])
+    from .quasisep_prediction import supports_shared_prediction
+    if supports_shared_prediction(model):
+        r_star = model.pred_training_mean(params)
+    else:
+        r_star, _ = model.pred(params, obj_dict["X"])
     r_star = np.asarray(device_get(r_star), dtype=float)
     y_mag = np.asarray(obj_dict["y"], dtype=float)
     yerr_mag = np.asarray(obj_dict["yerr"], dtype=float)
@@ -5282,13 +5292,17 @@ def run_iterated_mag_flux_linearized_inference(
                     lam_lya_rf=lam_lya_rf,
                     disk_order=disk_order,
                 )
-                samples_per_chain = add_model_prediction_params(
-                    samples_per_chain,
-                    lam_rf,
-                    model_variant=model_variant,
-                    lam_lya_rf=lam_lya_rf,
-                    disk_order=disk_order,
-                )
+                if model_variant == BAND_POLES_BLR_VARIANT:
+                    from .band_poles_fit import reshape_band_poles_chains
+                    chain_shape = np.asarray(next(iter(samples_per_chain.values()))).shape[:2]
+                    # NumPyro flattens chain then draw axes. All transformations
+                    # above are draw-wise, including fraction multiplication.
+                    samples_per_chain = reshape_band_poles_chains(samples_flat, chain_shape)
+                else:
+                    samples_per_chain = add_model_prediction_params(
+                        samples_per_chain, lam_rf, model_variant=model_variant,
+                        lam_lya_rf=lam_lya_rf, disk_order=disk_order,
+                    )
             if iter_idx == int(refinement_iters) - 1:
                 final_nuts_diagnostics = dict(iter_diag)
                 posterior_summary = summarize_final_hubble_nuts_posterior(
@@ -5311,6 +5325,7 @@ def run_iterated_mag_flux_linearized_inference(
                 "elapsed_sec"
             ]
             prediction_samples = dict(samples_flat)
+            prediction_fractions_changed = False
             if (
                 psf_fraction_mode == "empirical"
                 and "psf_agn_fraction_responsibility" in prediction_samples
@@ -5330,15 +5345,16 @@ def run_iterated_mag_flux_linearized_inference(
                         seed=iter_idx,
                     )
                 )
-            prediction_params = _posterior_median_params(
-                add_model_prediction_params(
+                prediction_fractions_changed = True
+            if model_variant != BAND_POLES_BLR_VARIANT or prediction_fractions_changed:
+                prediction_samples = add_model_prediction_params(
                     prediction_samples,
                     lam_rf,
                     model_variant=model_variant,
                     lam_lya_rf=lam_lya_rf,
                     disk_order=disk_order,
                 )
-            )
+            prediction_params = _posterior_median_params(prediction_samples)
         else:
             diagnostics[f"flux_linearized_iter{iter_idx + 1}_accept_prob"] = np.nan
             diagnostics[f"flux_linearized_iter{iter_idx + 1}_num_divergences"] = 0
@@ -6220,6 +6236,13 @@ def main():
                 obj,
                 bands,
             )
+            band_pole_moments = None
+            if args.model_variant == BAND_POLES_BLR_VARIANT:
+                from qvc.light_curve.band_poles_fit import posterior_band_poles_moments
+                band_pole_moments = posterior_band_poles_moments(
+                    obj_flat_samples_flatten_per_band, bands,
+                    disk_order=args.disk_order, blr_order=args.erlang_order,
+                )
             result = process_samples(
                 obj_flat_samples_flatten_per_band,
                 obj,
@@ -6227,6 +6250,7 @@ def main():
                 model_variant=args.model_variant,
                 disk_order=args.disk_order,
                 erlang_order=args.erlang_order,
+                band_pole_moments=band_pole_moments,
             )
             adf_result = compute_object_adf_diagnostics(
                 obj_flat_samples_flatten_per_band,
@@ -6254,11 +6278,7 @@ def main():
             if args.save_sample_file:
                 samples_to_save = obj_flat_samples
                 if args.model_variant == BAND_POLES_BLR_VARIANT:
-                    from qvc.light_curve.band_poles_fit import posterior_band_poles_moments
-                    moments = posterior_band_poles_moments(
-                        obj_flat_samples_flatten_per_band, bands,
-                        disk_order=args.disk_order, blr_order=args.erlang_order,
-                    )
+                    moments = band_pole_moments
                     samples_to_save = {
                         **obj_flat_samples,
                         "tau_continuum_band_obs": moments["tau_continuum"],
