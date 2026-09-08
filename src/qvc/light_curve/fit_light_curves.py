@@ -121,14 +121,24 @@ from qvc.light_curve.psf_constant_flux_correction import (
     print_constant_flux_correction_summary,
 )
 from qvc.light_curve.variability_metrics import compute_variability_metrics_for_cleaned_lc
-
+from qvc.light_curve.multiband_model_shared_latent_band_poles_blr import (
+    VARIANT as BAND_POLES_BLR_VARIANT,
+    DEFAULT_TRANSITION as BAND_POLES_DEFAULT_TRANSITION,
+    TRANSITION_CHOICES as BAND_POLES_TRANSITION_CHOICES,
+    resolve_transition as resolve_band_poles_transition,
+    run_transition_metadata as band_poles_run_transition_metadata,
+    make_multiband_shared_latent_band_poles_blr_model,
+)
 
 zero_mean = False
 has_jitter = True
+
 SHARED_LATENT_BLR_VARIANT = "shared_latent_blr"
+DISK_RESPONSE_VARIANTS = (SHARED_LATENT_BLR_VARIANT, BAND_POLES_BLR_VARIANT)
 FLUX_LINEARIZED_MODEL_VARIANTS = (
     "mag_flux_linearized_erlang",
     SHARED_LATENT_BLR_VARIANT,
+    BAND_POLES_BLR_VARIANT,
 )
 PSF_FRACTION_MODES = ("empirical", "logit-normal", "median")
 DEFAULT_PSF_FRACTION_MODE = "median"
@@ -2664,7 +2674,7 @@ def _build_structure_function_lag_grid(t_band, tau_sf):
     return np.logspace(np.log10(tau_min), np.log10(tau_max), 16)
 
 
-def compute_model_structure_function_equivalent(samples, ref_band, tau_grid, *, z=0.0, return_series=False):
+def compute_model_structure_function_equivalent(samples, ref_band, tau_grid, *, z=0.0, return_series=False, disk_order=DEFAULT_DISK_ORDER, band_poles_transition=BAND_POLES_DEFAULT_TRANSITION):
     """Fit the same DRW SF form to the model-implied DHO SF in the reference band."""
 
     nan_out = {
@@ -2679,6 +2689,28 @@ def compute_model_structure_function_equivalent(samples, ref_band, tau_grid, *, 
             "sf_model_tau_ref_band": np.array([], dtype=float),
             "sf_model_curve_ref_band": np.array([], dtype=float),
         }
+
+    if "tau_slow_uv_driver" in samples:
+        from qvc.light_curve.band_poles_fit import continuum_structure_function
+        tau_grid = np.asarray(tau_grid, dtype=float)
+        tau_grid = tau_grid[np.isfinite(tau_grid) & (tau_grid > 0.0)]
+        if tau_grid.size < 4:
+            return nan_out
+        curve = continuum_structure_function(
+            samples, ref_band, tau_grid, z=z, disk_order=disk_order,
+            transition=band_poles_transition,
+        )
+        fit = fit_structure_function(tau_grid, curve)
+        out = {
+            **nan_out,
+            "log_sigma_sf_model_ref_band": fit["log_sigma_sf"] - LOG_SF_INF_TO_RMS,
+            "log_tau_sf_model_ref_band": fit["log_tau_sf"],
+            "sf_model_valid": bool(fit["sf_valid"]),
+            "sf_model_definition": "continuum_disk_filtered_median_parameters",
+        }
+        if return_series:
+            out.update(sf_model_tau_ref_band=tau_grid, sf_model_curve_ref_band=curve)
+        return out
 
     amp_key = f"amp_cont_{ref_band}"
     tau_drw_key = f"tau_drw_{ref_band}"
@@ -2800,6 +2832,8 @@ def compute_structure_function_diagnostics(
     n_bootstrap=16,
     bootstrap_seed=0,
     return_series=False,
+    disk_order=DEFAULT_DISK_ORDER,
+    band_poles_transition=BAND_POLES_DEFAULT_TRANSITION,
 ):
     """Fit a raw all-band SF after scaling each band's amplitude to the g-band RMS."""
 
@@ -2848,6 +2882,8 @@ def compute_structure_function_diagnostics(
         tau_grid_model,
         z=float(z),
         return_series=return_series,
+        disk_order=disk_order,
+        band_poles_transition=band_poles_transition,
     )
 
     log_sigma_uv = (
@@ -2975,6 +3011,16 @@ def _validate_eta_prior_profile(eta_prior_profile):
             f"eta_prior_profile must be one of {ETA_PRIOR_PROFILES}, "
             f"got {eta_prior_profile!r}."
         )
+
+
+def resolve_eta_prior_profile(profile, model_variant=None):
+    if profile is None:
+        profile = (
+            "modified" if model_variant == BAND_POLES_BLR_VARIANT
+            else DEFAULT_ETA_PRIOR_PROFILE
+        )
+    _validate_eta_prior_profile(profile)
+    return profile
 
 
 def eta_sigma_prior(eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE):
@@ -3461,10 +3507,11 @@ def compute_parameter_kls(
     tau_fast_truncated=False,
     n_blr_terms=1,
     drw_parameterization=False,
-    eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE,
+    eta_prior_profile=None,
 ):
     """Return approximate KL(q||p) for sampled light-curve parameters."""
 
+    eta_prior_profile = resolve_eta_prior_profile(eta_prior_profile, model_variant)
     kls = {}
     eta_sigma = np.asarray(flat_samples["eta_sigma"])
     shared_latent = model_variant == SHARED_LATENT_BLR_VARIANT
@@ -3539,7 +3586,7 @@ def compute_parameter_kls(
                 flat_samples["log_tau_perturb_ratio"],
                 lambda x: _dist_log_prob_array(log_perturbation_ratio_prior(), x),
             )
-    elif "log_tau_slow_center0" in flat_samples:
+    elif model_variant != BAND_POLES_BLR_VARIANT and "log_tau_slow_center0" in flat_samples:
         if shared_latent:
             kls["log_tau_slow_center0_kl"] = kl_from_samples(
                 flat_samples["log_tau_slow_center0"],
@@ -3562,7 +3609,11 @@ def compute_parameter_kls(
                 eta_tau,
             )
 
-    if not drw_parameterization and "log_tau_fast_center0" in flat_samples:
+    if (
+        not drw_parameterization
+        and model_variant != BAND_POLES_BLR_VARIANT
+        and "log_tau_fast_center0" in flat_samples
+    ):
         kls["log_tau_fast_center0_kl"] = conditional_kl_from_samples(
             flat_samples["log_tau_fast_center0"],
             lambda x, log_tau_slow: _dist_log_prob_array(
@@ -3574,6 +3625,16 @@ def compute_parameter_kls(
             ),
             flat_samples["log_tau_slow_center0"],
         )
+
+    if model_variant == BAND_POLES_BLR_VARIANT:
+        for key, prior in (
+            ("log_tau_slow_uv_driver", log_tau_slow_center0_prior(0.0, z, 2500.0)),
+            ("log_tau_separation_raw", log_tau_fast_separation_raw_prior()),
+        ):
+            if key in flat_samples:
+                kls[f"{key}_kl"] = kl_from_samples(
+                    flat_samples[key], lambda x, prior=prior: _dist_log_prob_array(prior, x)
+                )
 
     if not disable_linear_trend and "linear_trend" in flat_samples:
         kls["linear_trend_kl"] = kl_from_samples(
@@ -3670,7 +3731,7 @@ def compute_parameter_kls(
                         low=jnp.log(5e-3),
                         high=0.0,
                     )
-                    if model_variant == SHARED_LATENT_BLR_VARIANT
+                    if model_variant in DISK_RESPONSE_VARIANTS
                     else dlog_amp_blr_prior()
                 )
                 kls[f"{amp_key}_kl"] = kl_from_samples(
@@ -4215,6 +4276,11 @@ def add_model_prediction_params(
 ):
     """Add explicit model parameters needed for prediction/plotting."""
 
+    if model_variant == BAND_POLES_BLR_VARIANT:
+        from qvc.light_curve.band_poles_fit import add_band_poles_prediction_params
+        return add_band_poles_prediction_params(
+            samples, lam_rf, lam_lya_rf=lam_lya_rf, disk_order=disk_order,
+        )
     out = dict(samples)
     if model_variant == SHARED_LATENT_BLR_VARIANT:
         # Also sanitize resumed legacy draws, where eta_tau may have been
@@ -5036,6 +5102,9 @@ def _damped_flux_linearized_update(y_fit, yerr_fit, y_target, yerr_target):
 
 
 def _build_mag_flux_linearized_model_for_fit(obj_dict, lam_rf, log_jitter_mean, **kwargs):
+    if kwargs.pop("model_variant", None) == BAND_POLES_BLR_VARIANT:
+        from qvc.light_curve.band_poles_fit import build_single_object_model_band_poles
+        return build_single_object_model_band_poles(obj_dict, lam_rf, log_jitter_mean, **kwargs)
     return build_single_object_model_mag_flux_linearized(
         obj_dict,
         lam_rf,
@@ -5078,7 +5147,8 @@ def run_iterated_mag_flux_linearized_inference(
     enforce_positive_flux_guard=False,
     enable_seeing_dependence=False,
     psf_fraction_mode=None,
-    eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE,
+    eta_prior_profile=None,
+    band_poles_transition=None,
 ):
     """Iteratively refit the relative-flux QS model using local pseudo-data.
 
@@ -5088,6 +5158,10 @@ def run_iterated_mag_flux_linearized_inference(
     reserves posterior sampling for the final refined likelihood.
     """
 
+    eta_prior_profile = resolve_eta_prior_profile(eta_prior_profile, model_variant)
+    band_poles_transition = resolve_band_poles_transition(
+        band_poles_transition, model_variant=model_variant,
+    )
     if fit_method == "ns":
         raise ValueError(
             "model_variant='mag_flux_linearized' uses iterative local likelihood refinement "
@@ -5134,6 +5208,10 @@ def run_iterated_mag_flux_linearized_inference(
         psf_fraction_mode=psf_fraction_mode,
         eta_prior_profile=eta_prior_profile,
     )
+
+    if model_variant == BAND_POLES_BLR_VARIANT:
+        model_kwargs["model_variant"] = model_variant
+        model_kwargs["band_poles_transition"] = band_poles_transition
 
     for iter_idx in range(int(refinement_iters)):
         fit_obj = _flux_linearized_fit_object(obj_dict, y_fit, yerr_fit)
@@ -5191,7 +5269,7 @@ def run_iterated_mag_flux_linearized_inference(
                 target_accept=target_accept,
                 init_strategy=init_strategy,
             )
-            if model_variant == SHARED_LATENT_BLR_VARIANT:
+            if model_variant in DISK_RESPONSE_VARIANTS:
                 samples_flat = add_model_prediction_params(
                     samples_flat,
                     lam_rf,
@@ -5291,7 +5369,9 @@ def run_iterated_mag_flux_linearized_inference(
 
         params_median = prediction_params
         use_erlang_response = not disable_lag_blr
-        if model_variant == SHARED_LATENT_BLR_VARIANT:
+        if model_variant == BAND_POLES_BLR_VARIANT:
+            display_factory = make_multiband_shared_latent_band_poles_blr_model
+        elif model_variant == SHARED_LATENT_BLR_VARIANT:
             display_factory = make_multiband_shared_latent_blr_model
         elif drw_parameterization:
             display_factory = make_multiband_dho_blr_flux_linearized_erlang_drw_model
@@ -5306,6 +5386,8 @@ def run_iterated_mag_flux_linearized_inference(
             baseline_flux_by_band=reference_flux_from_mean_magnitudes(obj_dict["mags_means"]),
             zero_mean=zero_mean,
             has_jitter=has_jitter,
+            **({"transition": band_poles_transition}
+               if model_variant == BAND_POLES_BLR_VARIANT else {}),
             seeing_covariate=(
                 obj_dict.get("seeing_covariate")
                 if enable_seeing_dependence
@@ -5316,7 +5398,7 @@ def run_iterated_mag_flux_linearized_inference(
                     "disk_order": disk_order,
                     "blr_order": erlang_order,
                 }
-                if model_variant == SHARED_LATENT_BLR_VARIANT
+                if model_variant in DISK_RESPONSE_VARIANTS
                 else {"enforce_positive_flux_guard": enforce_positive_flux_guard}
                 if drw_parameterization
                 else {"erlang_order": erlang_order}
@@ -5577,20 +5659,30 @@ def main():
             "Causal-Erlang light-curve model. 'shared_latent_blr' uses one "
             "wavelength-independent DHO driver with wavelength-scaled disk "
             "convolutions and bandwise unit-RMS delayed responses; its "
-            "log_tau_uv_rf is the continuum-only 2500 A effective timescale."
+            "log_tau_uv_rf is the continuum-only 2500 A effective timescale. "
+            "shared_latent_band_poles_blr adds band-dependent relaxation poles "
+            "under common forcing, using stable cascaded state transitions."
         ),
+    )
+    parser.add_argument(
+        "--band_poles_transition", "--band-poles-transition",
+        choices=BAND_POLES_TRANSITION_CHOICES, default=None,
+        help=("Transition backend for shared_latent_band_poles_blr: analytic "
+              "(default for new fits, with local expm near coincident poles) or "
+              "expm (full matrix exponential). Resume defaults to the saved backend."),
     )
     parser.add_argument(
         "--eta_prior_profile",
         "--eta-prior-profile",
         choices=ETA_PRIOR_PROFILES,
-        default=DEFAULT_ETA_PRIOR_PROFILE,
+        default=None,
         help=(
             "Wavelength-scaling prior profile. 'default' preserves the existing "
             "eta_sigma and model-specific eta_tau behavior; 'modified' uses "
             "eta_sigma ~ Normal(-0.8, 0.5) and eta_tau ~ Normal(0.5, 0.5) "
             "for variants with wavelength-dependent drivers. shared_latent_blr "
-            "has one wavelength-independent driver and does not use eta_tau."
+            "has one wavelength-independent driver and does not use eta_tau. "
+            "If omitted, the band-pole variant uses 'modified'; others use 'default'."
         ),
     )
     parser.add_argument(
@@ -5630,6 +5722,8 @@ def main():
         ),
     )
     args = parser.parse_args()
+    resolve_band_poles_transition(args.band_poles_transition, model_variant=args.model_variant)
+    args.eta_prior_profile = resolve_eta_prior_profile(args.eta_prior_profile, args.model_variant)
     if (
         not np.isfinite(args.outlier_half_window_days)
         or args.outlier_half_window_days <= 0
@@ -5718,8 +5812,8 @@ def main():
         raise ValueError("--flux_linearized_refinement_iters must be at least 1.")
     if not 0.0 < args.target_accept < 1.0:
         raise ValueError("--target_accept must be strictly between 0 and 1.")
-    if args.disk_order != DEFAULT_DISK_ORDER and args.model_variant != SHARED_LATENT_BLR_VARIANT:
-        raise ValueError("--disk_order is only used by --model_variant shared_latent_blr.")
+    if args.disk_order != DEFAULT_DISK_ORDER and args.model_variant not in DISK_RESPONSE_VARIANTS:
+        raise ValueError("--disk_order requires a disk-response model variant.")
     if args.fast_solver and args.model_variant != "mag_flux_linearized_erlang":
         raise ValueError("--fast_solver is only used by --model_variant mag_flux_linearized_erlang.")
     if args.dho_drw_parameterization and args.model_variant != "mag_flux_linearized_erlang":
@@ -5847,9 +5941,19 @@ def main():
             stage_diagnostics = unavailable_nuts_diagnostics()
             flux_linearized_fit_obj = None
             posterior_summary = {}
+            saved_band_poles_metadata = None
+            active_band_poles_transition = resolve_band_poles_transition(
+                args.band_poles_transition, model_variant=args.model_variant,
+            )
             if args.resume:
                 logging.warning("[DEBUG] Loading saved samples (flat) — developer mode.")
-                obj_flat_samples = load_obj_samples_from_hdf5(oid)
+                if args.model_variant == BAND_POLES_BLR_VARIANT:
+                    obj_flat_samples, saved_band_poles_metadata = load_obj_samples_from_hdf5(oid, return_metadata=True)
+                    active_band_poles_transition = resolve_band_poles_transition(
+                        args.band_poles_transition, saved_metadata=saved_band_poles_metadata,
+                    )
+                else:
+                    obj_flat_samples = load_obj_samples_from_hdf5(oid)
                 samples_per_chain = None
             else:
                 key = random.PRNGKey(0)
@@ -5885,6 +5989,7 @@ def main():
                             tau_fast_truncated=args.tau_fast_truncated,
                             n_blr_terms=args.n_blr_terms,
                             model_variant=args.model_variant,
+                            band_poles_transition=active_band_poles_transition,
                             erlang_order=args.erlang_order,
                             disk_order=args.disk_order,
                             use_fast_solver=args.fast_solver,
@@ -6057,7 +6162,9 @@ def main():
                         magerr_residual_to_relative_fluxerr(obj["y"], obj["yerr"]),
                     )
                 )
-                if args.model_variant == SHARED_LATENT_BLR_VARIANT:
+                if args.model_variant == BAND_POLES_BLR_VARIANT:
+                    display_factory = make_multiband_shared_latent_band_poles_blr_model
+                elif args.model_variant == SHARED_LATENT_BLR_VARIANT:
                     display_factory = make_multiband_shared_latent_blr_model
                 else:
                     display_factory = (
@@ -6074,6 +6181,8 @@ def main():
                     baseline_flux_by_band=reference_flux_from_mean_magnitudes(obj["mags_means"]),
                     zero_mean=zero_mean,
                     has_jitter=has_jitter,
+                    **({"transition": active_band_poles_transition}
+                       if args.model_variant == BAND_POLES_BLR_VARIANT else {}),
                     seeing_covariate=(
                         obj.get("seeing_covariate")
                         if args.enable_seeing_dependence
@@ -6084,7 +6193,7 @@ def main():
                             "disk_order": args.disk_order,
                             "blr_order": args.erlang_order,
                         }
-                        if args.model_variant == SHARED_LATENT_BLR_VARIANT
+                        if args.model_variant in DISK_RESPONSE_VARIANTS
                         else
                         {
                             "enforce_positive_flux_guard": args.enforce_positive_flux_guard,
@@ -6133,14 +6242,36 @@ def main():
                 float(obj["z"]),
             )
             if args.save_sample_file:
+                samples_to_save = obj_flat_samples
+                if args.model_variant == BAND_POLES_BLR_VARIANT:
+                    from qvc.light_curve.band_poles_fit import posterior_band_poles_moments
+                    moments = posterior_band_poles_moments(
+                        obj_flat_samples_flatten_per_band, bands,
+                        disk_order=args.disk_order, blr_order=args.erlang_order,
+                    )
+                    samples_to_save = {
+                        **obj_flat_samples,
+                        "tau_continuum_band_obs": moments["tau_continuum"],
+                        "tau_total_band_obs": moments["tau_total"],
+                        "rms_total_band_relflux": moments["rms_total"],
+                    }
                 ls_fixed_diagnostics = {
                     key: value
                     for key, value in psd_break_result.items()
                     if "ls_fixed" in key
                 }
                 save_obj_samples_to_hdf5(
-                    obj_flat_samples,
+                    samples_to_save,
                     oid,
+                    **(
+                        {"model_metadata": {
+                            **band_poles_run_transition_metadata(active_band_poles_transition),
+                            "eta_prior_profile": args.eta_prior_profile,
+                            "disk_order": args.disk_order,
+                            "blr_order": args.erlang_order,
+                        }}
+                        if args.model_variant == BAND_POLES_BLR_VARIANT else {}
+                    ),
                     scalar_diagnostics={
                         "loo_chi2_eff": loo_residual_result["loo_chi2_eff"],
                         "loo_rms": loo_residual_result["loo_rms"],
@@ -6151,6 +6282,9 @@ def main():
                 obj_flat_samples_flatten_per_band,
                 obj,
                 float(obj["z"]),
+                **({"disk_order": args.disk_order,
+                    "band_poles_transition": active_band_poles_transition}
+                   if args.model_variant == BAND_POLES_BLR_VARIANT else {}),
             )
             kl_result = compute_parameter_kls(
                 obj_flat_samples_flatten_per_band,
@@ -6224,6 +6358,9 @@ def main():
                         obj,
                         float(obj["z"]),
                         return_series=True,
+                        **({"disk_order": args.disk_order,
+                            "band_poles_transition": active_band_poles_transition}
+                           if args.model_variant == BAND_POLES_BLR_VARIANT else {}),
                     )
                     save_structure_function_plot(
                         sf_plot_result,
@@ -6258,6 +6395,10 @@ def main():
                     logging.error(traceback.format_exc())
 
             final_result = obj | result | adf_result | drift_result | raw_drift_result | psd_break_result | sf_result | kl_result | loo_residual_result | diagnostics | dict(prefix=prefix, suffix=suffix, model_variant=args.model_variant, eta_prior_profile=args.eta_prior_profile, seeing_dependence_enabled=args.enable_seeing_dependence)
+            if args.model_variant == BAND_POLES_BLR_VARIANT:
+                final_result.update(band_poles_run_transition_metadata(
+                    active_band_poles_transition, saved_metadata=saved_band_poles_metadata,
+                ))
             final_result["psf_fraction_mode"] = (
                 args.psf_fraction_mode
                 if args.subtract_psf_constant_flux

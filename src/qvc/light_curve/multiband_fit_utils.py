@@ -454,7 +454,7 @@ def load_all_samples_from_hdf5(file_path=None):
     logging.info(f"Loaded {len(samples)} datasets from {file_path}")
     return samples
 
-def save_all_samples_to_hdf5(samples):
+def save_all_samples_to_hdf5(samples, model_metadata=None):
     """
     Save all samples to an HDF5 file
     Args:
@@ -468,6 +468,17 @@ def save_all_samples_to_hdf5(samples):
 
     with h5py.File(file_path, "w") as hdf:
         _write_hdf5_run_metadata(hdf)
+        for key, value in (model_metadata or {}).items():
+            hdf.attrs[key] = value
+        if "tau_slow_uv_driver" in samples:
+            from qvc.light_curve.multiband_model_shared_latent_band_poles_blr import VARIANT, transition_metadata, resolve_transition
+            hdf.attrs["model_variant"] = VARIANT
+            backend = resolve_transition(saved_metadata=model_metadata) if model_metadata and (
+                "band_poles_transition" in model_metadata or "transition_implementation" in model_metadata
+            ) else resolve_transition()
+            for key, value in transition_metadata(backend).items():
+                hdf.attrs[key] = value
+            hdf.attrs["log_tau_uv_definition"] = "continuum_only_disk_convolved_integral_timescale_at_rest_2500A_observer_frame_natural_log"
         if "tau_fast_driver" in samples and "tau_slow_driver" in samples:
             hdf.attrs["log_tau_uv_definition"] = (
                 "continuum_only_disk_convolved_integral_timescale_at_rest_"
@@ -478,7 +489,7 @@ def save_all_samples_to_hdf5(samples):
     logging.info(f"Saved all samples to {file_path}")
     print(f"Saved all samples to {file_path}")
 
-def load_obj_samples_from_hdf5(object_id=None, file_path=None):
+def load_obj_samples_from_hdf5(object_id=None, file_path=None, *, return_metadata=False):
     """
     """
     if file_path is None:
@@ -514,15 +525,16 @@ def load_obj_samples_from_hdf5(object_id=None, file_path=None):
 
     samples = {}
     with h5py.File(file_path, "r") as hdf:
+        metadata = dict(hdf.attrs)
         for key in hdf.keys():
             if key in _RUN_METADATA_KEYS:
                 continue
             samples[key] = np.array(hdf[key])
 
     logging.info(f"Loaded {len(samples)} datasets from {file_path}")
-    return samples
+    return (samples, metadata) if return_metadata else samples
 
-def save_obj_samples_to_hdf5(samples, object_id, scalar_diagnostics=None):
+def save_obj_samples_to_hdf5(samples, object_id, scalar_diagnostics=None, model_metadata=None):
     """
     Save all samples to an HDF5 file, one file per object_id.
 
@@ -539,6 +551,17 @@ def save_obj_samples_to_hdf5(samples, object_id, scalar_diagnostics=None):
 
     with h5py.File(file_path, "w") as hdf:
         _write_hdf5_run_metadata(hdf)
+        for key, value in (model_metadata or {}).items():
+            hdf.attrs[key] = value
+        if "tau_slow_uv_driver" in samples:
+            from qvc.light_curve.multiband_model_shared_latent_band_poles_blr import VARIANT, transition_metadata, resolve_transition
+            hdf.attrs["model_variant"] = VARIANT
+            backend = resolve_transition(saved_metadata=model_metadata) if model_metadata and (
+                "band_poles_transition" in model_metadata or "transition_implementation" in model_metadata
+            ) else resolve_transition()
+            for key, value in transition_metadata(backend).items():
+                hdf.attrs[key] = value
+            hdf.attrs["log_tau_uv_definition"] = "continuum_only_disk_convolved_integral_timescale_at_rest_2500A_observer_frame_natural_log"
         if "tau_fast_driver" in samples and "tau_slow_driver" in samples:
             hdf.attrs["log_tau_uv_definition"] = (
                 "continuum_only_disk_convolved_integral_timescale_at_rest_"
@@ -911,6 +934,12 @@ def process_samples(
     # Power Law Params
     log_sigma_uv = np.asarray(flat_samples["log_sigma_uv"]) if "log_sigma_uv" in flat_samples else None
     shared_latent = model_variant == "shared_latent_blr"
+    band_poles = model_variant == "shared_latent_band_poles_blr"
+    if band_poles:
+        from qvc.light_curve.band_poles_fit import posterior_band_poles_moments
+        band_pole_moments = posterior_band_poles_moments(
+            flat_samples, bands, disk_order=int(disk_order), blr_order=int(erlang_order),
+        )
     log_tau_uv = np.asarray(flat_samples["log_tau_uv"]) if "log_tau_uv" in flat_samples else None
     log_tau_fast_uv = np.asarray(flat_samples["log_tau_fast_uv"]) if "log_tau_fast_uv" in flat_samples else None
     has_fast_pole = log_tau_fast_uv is not None
@@ -958,6 +987,14 @@ def process_samples(
         log_tau_driver_fast_rf = np.log10(tau_fast_driver) - np.log10(1.0 + data["z"])
         log_tau_driver_slow_rf = np.log10(tau_slow_driver) - np.log10(1.0 + data["z"])
 
+    if band_poles:
+        log_tau_uv = np.log(band_pole_moments["tau_uv"])
+        for key, draws in (
+            ("log_tau_slow_uv_driver_rf", np.log10(flat_samples["tau_slow_uv_driver"])),
+            ("log_tau_driver_fast_rf", np.log10(flat_samples["tau_fast_driver"])),
+        ):
+            result[key], result[f"{key}_err"] = sym_percentile(draws - np.log10(1.0 + data["z"]))
+
     if "eta_sigma" not in result:
         result["eta_sigma"], result["eta_sigma_err"] = sym_percentile(eta_sigma)
     if not shared_latent and "eta_tau" not in result:
@@ -967,7 +1004,7 @@ def process_samples(
         result["log_sigma_uv"], result["log_sigma_uv_err"] = sym_percentile(log_sigma_uv / np.log(10))
     if "log_sigma_fast_uv" not in result:
         result["log_sigma_fast_uv"], result["log_sigma_fast_uv_err"] = sym_percentile(log_sigma_uv / np.log(10))
-    if shared_latent:
+    if shared_latent or band_poles:
         # Always replace any legacy/base-driver value carried by input samples.
         # Under this model variant the public quantity is the synthetic,
         # continuum-only 2500 A integral-correlation timescale.
@@ -1082,6 +1119,10 @@ def process_samples(
             total_rms_relflux * (2.5 / np.log(10.0))
         )
 
+    if band_poles:
+        log_tau_band = np.log10(band_pole_moments["tau_total"]) - np.log10(1.0 + data["z"])
+        log_sigma_total_rms_band = np.log10(band_pole_moments["rms_total"] * (2.5 / np.log(10.0)))
+
     log_tau_fast_band = None
     if has_fast_pole and not shared_latent:
         fast_by_band = []
@@ -1090,6 +1131,12 @@ def process_samples(
             val = log_tau_fast_uv / np.log(10) - np.log10(1 + data['z']) + log_single_pl(lam_eff, lam_ref_arr, eta_tau)
             fast_by_band.append(val)
         log_tau_fast_band = np.array(fast_by_band).T
+
+    if band_poles:
+        log_tau_fast_band = np.broadcast_to(
+            (np.log10(flat_samples["tau_fast_driver"]) - np.log10(1.0 + data["z"]))[:, None],
+            log_tau_band.shape,
+        )
 
     # Both retained continuum kernels normalize amp_cont to stationary RMS.
     sigma_rms_band = np.asarray(log_sigma_band)
@@ -1101,20 +1148,24 @@ def process_samples(
         median, err = sym_percentile(sigma_rms_band[:, i])
         result[f"log_sigma_rms_band_{band}"] = median
         result[f"log_sigma_rms_band_{band}_err"] = err
-        if model_variant == "shared_latent_blr":
+        if model_variant == "shared_latent_blr" or band_poles:
             median, err = sym_percentile(log_sigma_total_rms_band[:, i])
             result[f"log_sigma_total_rms_band_{band}"] = median
             result[f"log_sigma_total_rms_band_{band}_err"] = err
         median, err = sym_percentile(log_tau_band[:, i])
         result[f"log_tau_band_{band}_RF"] = median
         result[f"log_tau_band_{band}_RF_err"] = err
-        if model_variant == "shared_latent_blr":
+        if model_variant == "shared_latent_blr" or band_poles:
             result[f"log_tau_effective_{band}_RF"] = median
             result[f"log_tau_effective_{band}_RF_err"] = err
         if has_fast_pole and not shared_latent:
             median, err = sym_percentile(log_tau_fast_band[:, i])
             result[f"log_tau_fast_band_{band}_RF"] = median
             result[f"log_tau_fast_band_{band}_RF_err"] = err
+        if band_poles:
+            cont = np.log10(band_pole_moments["tau_continuum"][:, i]) - np.log10(1.0 + data["z"])
+            result[f"log_tau_cont_band_{band}_RF"], result[f"log_tau_cont_band_{band}_RF_err"] = sym_percentile(cont)
+            result[f"band_pole_below_common_fraction_{band}"] = float(np.mean(band_pole_moments["crossing"][:, i]))
         lag_disk_key = f"lag_disk_{band}"
         if lag_disk_key in flat_samples:
             lag_disk = np.asarray(flat_samples[lag_disk_key], dtype=float)
@@ -1182,7 +1233,7 @@ def process_samples(
             selection_seed=0,
             payload_format=(
                 LIGHT_CURVE_POSTERIOR_DRAW_FORMAT
-                if shared_latent
+                if shared_latent or band_poles
                 else LIGHT_CURVE_POSTERIOR_DRAW_FORMAT_V1
             ),
         )
