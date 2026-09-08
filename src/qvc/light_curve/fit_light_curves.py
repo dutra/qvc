@@ -187,7 +187,7 @@ LC_SURVEY_NAMES = tuple(SURVEY_NAMES)
 LC_SURVEY_TO_IDX = {name: idx for idx, name in enumerate(LC_SURVEY_NAMES)}
 
 
-def _normalize_survey_name(value):
+def _normalize_survey_name(value, survey_names=LC_SURVEY_NAMES):
     if value is None:
         return "sdss"
     text = str(value).strip().lower()
@@ -199,11 +199,11 @@ def _normalize_survey_name(value):
         return "ps1"
     if text == "z":
         return "ztf"
-    if text in LC_SURVEY_TO_IDX:
+    if text in survey_names:
         return text
     if text.startswith("panstarr") or text.startswith("pan-starr") or text == "panstarrs":
         return "ps1"
-    raise ValueError(f"Unsupported survey label {value!r}. Expected one of {LC_SURVEY_NAMES}.")
+    raise ValueError(f"Unsupported survey label {value!r}. Expected one of {survey_names}.")
 
 
 def _default_survey_labels_for_band(band, size):
@@ -216,20 +216,20 @@ def _default_survey_labels_for_band(band, size):
     return np.full(int(size), default, dtype=f"<U{len(default)}")
 
 
-def _survey_indices_from_labels(labels):
+def _survey_indices_from_labels(labels, survey_names=LC_SURVEY_NAMES):
     labels = np.asarray(labels, dtype=str)
     if labels.size == 0:
         return np.array([], dtype=np.int32), np.array([], dtype=str)
-    normalized = np.asarray([_normalize_survey_name(value) for value in labels], dtype=str)
-    survey_idx = np.asarray([LC_SURVEY_TO_IDX[value] for value in normalized], dtype=np.int32)
+    normalized = np.asarray([_normalize_survey_name(value, survey_names) for value in labels], dtype=str)
+    survey_idx = np.asarray([tuple(survey_names).index(value) for value in normalized], dtype=np.int32)
     return survey_idx, normalized
 
 
-def _compute_log_jitter_mean_grid(yerr, band_idx, survey_idx, n_bands):
+def _compute_log_jitter_mean_grid(yerr, band_idx, survey_idx, n_bands, survey_names=LC_SURVEY_NAMES):
     yerr = np.asarray(yerr, dtype=float)
     band_idx = np.asarray(band_idx, dtype=np.int32)
     survey_idx = np.asarray(survey_idx, dtype=np.int32)
-    n_surveys = len(LC_SURVEY_NAMES)
+    n_surveys = len(survey_names)
     log_jitter_mean = np.full((n_bands, n_surveys), np.log(1e-3), dtype=float)
     active_mask = np.zeros((n_bands, n_surveys), dtype=bool)
     fallback = np.log(1e-3)
@@ -249,10 +249,10 @@ def _compute_log_jitter_mean_grid(yerr, band_idx, survey_idx, n_bands):
     return jnp.asarray(log_jitter_mean, dtype=float), active_mask
 
 
-def _compute_survey_offset_active_mask(band_idx, survey_idx, n_bands):
+def _compute_survey_offset_active_mask(band_idx, survey_idx, n_bands, survey_names=LC_SURVEY_NAMES):
     band_idx = np.asarray(band_idx, dtype=np.int32)
     survey_idx = np.asarray(survey_idx, dtype=np.int32)
-    n_surveys = len(LC_SURVEY_NAMES)
+    n_surveys = len(survey_names)
     active_mask = np.zeros((n_bands, n_surveys), dtype=bool)
     for i in range(int(n_bands)):
         band_surveys = survey_idx[band_idx == i]
@@ -281,6 +281,7 @@ def _get_object_active_noise_calibration_masks(obj_dict, n_bands):
             band_idx,
             survey_idx,
             n_bands,
+            survey_names=obj_dict.get("survey_names", LC_SURVEY_NAMES),
         )
     survey_offset_active_mask = obj_dict.get("survey_offset_active_mask")
     if survey_offset_active_mask is None:
@@ -288,6 +289,7 @@ def _get_object_active_noise_calibration_masks(obj_dict, n_bands):
             band_idx,
             survey_idx,
             n_bands,
+            survey_names=obj_dict.get("survey_names", LC_SURVEY_NAMES),
         )
     return (
         np.asarray(log_jitter_active_mask, dtype=bool),
@@ -295,18 +297,18 @@ def _get_object_active_noise_calibration_masks(obj_dict, n_bands):
     )
 
 
-def _coerce_log_jitter_mean_grid(log_jitter_mean, n_bands):
+def _coerce_log_jitter_mean_grid(log_jitter_mean, n_bands, survey_names=LC_SURVEY_NAMES):
     log_jitter_mean = np.asarray(log_jitter_mean, dtype=float)
     if log_jitter_mean.ndim == 2:
         return jnp.asarray(log_jitter_mean, dtype=float)
     if log_jitter_mean.ndim == 1 and log_jitter_mean.shape[0] == int(n_bands):
         return jnp.asarray(
-            np.repeat(log_jitter_mean[:, None], len(LC_SURVEY_NAMES), axis=1),
+            np.repeat(log_jitter_mean[:, None], len(survey_names), axis=1),
             dtype=float,
         )
     raise ValueError(
         f"log_jitter_mean must have shape ({int(n_bands)},) or "
-        f"({int(n_bands)}, {len(LC_SURVEY_NAMES)}); got {log_jitter_mean.shape}."
+        f"({int(n_bands)}, {len(survey_names)}); got {log_jitter_mean.shape}."
     )
 
 
@@ -373,16 +375,16 @@ def _sample_seeing_effect_grids(active_mask):
     )
 
 
-def _normalized_seeing_covariate(seeing, band_idx, survey_idx, n_bands):
+def _normalized_seeing_covariate(seeing, band_idx, survey_idx, n_bands, survey_names=LC_SURVEY_NAMES):
     """Return centered log-FWHM and groups with enough leverage to fit it."""
 
     seeing = np.asarray(seeing, dtype=float)
     band_idx = np.asarray(band_idx, dtype=np.int32)
     survey_idx = np.asarray(survey_idx, dtype=np.int32)
     covariate = np.zeros(seeing.shape, dtype=float)
-    active_mask = np.zeros((int(n_bands), len(LC_SURVEY_NAMES)), dtype=bool)
+    active_mask = np.zeros((int(n_bands), len(survey_names)), dtype=bool)
     for band in range(int(n_bands)):
-        for survey in range(len(LC_SURVEY_NAMES)):
+        for survey in range(len(survey_names)):
             mask = (
                 (band_idx == band)
                 & (survey_idx == survey)
@@ -3785,6 +3787,7 @@ def make_lc(
     mags = data["mags"]
     magerrs = data["magerrs"]
     surveys = data.get("surveys", {})
+    survey_names = tuple(data.get("survey_names", LC_SURVEY_NAMES))
     seeing_by_band = data.get("psf_fwhm_arcsec", {})
 
     if len(bands) == 0:
@@ -3922,12 +3925,13 @@ def make_lc(
             all_mags[m] = all_mags[m] - mu
 
     time0 = np.min(all_times)
-    survey_idx, survey_labels = _survey_indices_from_labels(all_surveys)
+    survey_idx, survey_labels = _survey_indices_from_labels(all_surveys, survey_names)
     seeing_covariate, seeing_active_mask = _normalized_seeing_covariate(
         all_seeing,
         band_idx,
         survey_idx,
         B,
+        survey_names=survey_names,
     )
     X = (jnp.array(all_times) - jnp.min(all_times), jnp.array(band_idx))
     y = jnp.array(all_mags)
@@ -3941,7 +3945,7 @@ def make_lc(
         "band_idx": band_idx,
         "survey_idx": survey_idx,
         "survey_labels": survey_labels,
-        "survey_names": LC_SURVEY_NAMES,
+        "survey_names": survey_names,
         "psf_fwhm_arcsec": all_seeing,
         "seeing_covariate": seeing_covariate,
         "seeing_active_mask": seeing_active_mask,
@@ -4556,6 +4560,7 @@ def build_single_object_model_mag_flux_linearized(
         bidx_np,
         np.asarray(survey_idx, dtype=np.int32),
         B,
+        survey_names=obj_dict.get("survey_names", LC_SURVEY_NAMES),
     )
     _, survey_offset_active_mask = _get_object_active_noise_calibration_masks(obj_dict, B)
 
@@ -5733,7 +5738,7 @@ def main():
     print("Args:", args)
 
     if args.load_stone_lcs:
-        objs = load_stone_lcs(filter_object_ids=args.filter_object_id)
+        objs = load_stone_lcs(filter_object_ids=args.filter_object_id, skip=args.skip, N=args.N)
         print(f"Loaded {len(objs)} Stone light curves.")
     elif args.load_nearby_lc_csv is not None:
         objs = load_nearby_lcs(args.load_nearby_lc_csv)
@@ -5748,7 +5753,9 @@ def main():
         )
     print(f"Loaded {len(objs)} objects.")
 
-    objs = populate_sdss_fields(objs, progress_bar=args.progress)
+    objs = populate_sdss_fields(
+        objs, progress_bar=args.progress, preserve_stone_redshift=args.load_stone_lcs,
+    )
     for obj in objs:
         obj["psf_constant_flux_n_bands_corrected"] = 0
         obj["psf_constant_flux_corrected"] = False
@@ -5902,11 +5909,13 @@ def main():
                 bidx,
                 survey_idx,
                 B,
+                survey_names=obj["survey_names"],
             )
             survey_offset_active_mask = _compute_survey_offset_active_mask(
                 bidx,
                 survey_idx,
                 B,
+                survey_names=obj["survey_names"],
             )
             obj["log_jitter_active_mask"] = log_jitter_active_mask
             obj["survey_offset_active_mask"] = survey_offset_active_mask
@@ -5922,6 +5931,7 @@ def main():
                     bidx,
                     survey_idx,
                     B,
+                    survey_names=obj["survey_names"],
                 )
             if args.n_blr_terms != 1:
                 raise ValueError(

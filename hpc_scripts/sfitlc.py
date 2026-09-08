@@ -51,6 +51,8 @@ def parse_args():
             "standard linear-trend fit, or only the no-linear-trend fit."
         ),
     )
+    parser.add_argument("--load_stone_lcs", action="store_true",
+                        help="Fit original Stone g/r/i photometry for the selected objects.")
     parser.add_argument("--chisq-csv", type=str, default=None, help="CSV file with object_id column for --fit chisq.")
     parser.add_argument(
         "--spectra-fit-h5",
@@ -477,6 +479,8 @@ def build_sbatch_script(
                 spectra_fit_h5,
             ]
         )
+    if getattr(args, "load_stone_lcs", False):
+        base_flags.append("--load_stone_lcs")
     base_flags.extend(job.extra_flags)
     base_flags.extend(getattr(args, "extra_fit_flags", ()))
     submission = submission_record(

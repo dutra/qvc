@@ -179,7 +179,8 @@ def build_single_object_model_band_poles(
     yerr_relflux_np = np.asarray(yerr_relflux, dtype=float)
     log_jitter_mean_relflux, log_jitter_active_mask_relflux = (
         _compute_log_jitter_mean_grid(
-            yerr_relflux_np, bidx_np, np.asarray(survey_idx, dtype=np.int32), B
+            yerr_relflux_np, bidx_np, np.asarray(survey_idx, dtype=np.int32), B,
+            survey_names=obj_dict.get("survey_names", ("sdss", "ps1", "ztf")),
         )
     )
     _, survey_offset_active_mask = _get_object_active_noise_calibration_masks(

@@ -189,3 +189,11 @@ def test_populate_sdss_fields_falls_back_to_catalog_z_sys(monkeypatch):
     assert len(parquet_calls) == 2
     assert parquet_calls[0]["include_names"] == ["objectId", "RA", "DEC", "z"]
     assert parquet_calls[1]["include_names"] == ["objectId", "RA", "DEC", "Z_SYS"]
+
+
+def test_stone_redshift_survives_enrichment(monkeypatch):
+    _mock_table_read(monkeypatch, _build_catalog_table(), _build_dr16q_table())
+    obj = {"object_id": "obj_a", "stone_Z": 0.51}
+    result = populate_sdss_fields([obj], preserve_stone_redshift=True)[0]
+    assert result['z'] == 0.51
+    assert result['catalog_z'] == 0.5

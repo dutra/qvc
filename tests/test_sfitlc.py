@@ -415,3 +415,16 @@ def test_regular_merge_keeps_variability_recomputation():
     assert "--compute-variability" in script
     assert "--skip-populate-sdss" not in script
     assert "#SBATCH --mem=40G" in script
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_stone_photometry_flag_forwarded(monkeypatch, enabled):
+    monkeypatch.setattr(sys, 'argv', ['sfitlc.py', '--fit', 'stone'] + (['--load_stone_lcs'] if enabled else []))
+    args = sfitlc.parse_args()
+    assert args.load_stone_lcs is enabled
+    assert '--load_stone_lcs' not in args.extra_fit_flags
+    monkeypatch.setattr(sfitlc, 'load_stone_ids', lambda: ['1'])
+    for job in build_job_configs('stone', None):
+        script = build_sbatch_script('probe', job, args, None, None, object_ids_path=Path('/tmp/ids'))
+        assert script.count('--load_stone_lcs') == int(enabled)
+        assert subprocess.run(['bash', '-n'], input=script, text=True, capture_output=True).returncode == 0
