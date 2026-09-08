@@ -376,7 +376,8 @@ def test_builder_priors_and_explicit_parameters():
 
 @pytest.mark.parametrize(
     "profile,expected",
-    [(None, "modified"), ("default", "default"), ("modified", "modified")],
+    [(None, "modified"), ("default", "default"), ("modified", "modified"),
+     ("modified_tight", "modified_tight")],
 )
 def test_profile_resolution(profile, expected):
     obj, lam = object_data()

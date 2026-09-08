@@ -75,6 +75,23 @@ but does **not** order f below every band pole. Band-pole crossings are allowed
 without clipping or swapping. `eta_tau` describes the relaxation-pole law, not
 the exact slope of the disk-filtered integral timescales.
 
+For an explicitly tighter slope prior, use `--eta_prior_profile modified_tight`
+(or `--eta-prior-profile modified_tight`), including through `hpc_scripts/sfitlc.py`:
+
+```bash
+python hpc_scripts/sfitlc.py --fit stone \
+  --model_variant shared_latent_band_poles_blr \
+  --eta_prior_profile modified_tight
+```
+
+This selects `eta_sigma ~ TruncatedNormal(-0.8, 0.25, low=-1.5, high=0)`
+and `eta_tau ~ TruncatedNormal(0.5, 0.25, low=0, high=1.5)`. Locations and
+scales refer to the underlying Normal, not the truncated distribution's mean
+and standard deviation. Inference and KL diagnostics use the same normalized
+priors; output metadata records `eta_prior_profile=modified_tight`. Existing
+profiles and model defaults are unchanged. Original SLB can also select this
+profile for `eta_sigma` but continues to omit `eta_tau`.
+
 ## Numerical construction
 
 The new kernel lives in
