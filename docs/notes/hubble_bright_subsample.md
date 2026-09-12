@@ -3,8 +3,8 @@
 `--bright-subsample-completeness-min 0.1 --bright-subsample-margin 0.25`
 selects AGN at least 0.25 mag brighter than the faintest grid center reaching
 10% of the completeness peak at each redshift. Thresholds are interpolated
-in redshift. The options require the NumPy/Dynesty `--run single` pipeline,
-AGN, and 2D completeness. Omit the minimum to disable the cut.
+in redshift. The options support the NumPy/Dynesty `--run single` and `--run full` pipelines
+with AGN and 2D completeness. Omit the minimum to disable the cut.
 `--bright-subsample-absolute` interprets the minimum as an absolute map value.
 
 The map is constructed from the completeness population before the bright
@@ -25,3 +25,18 @@ The threshold grid and per-redshift retained counts are written to
 names include `_brightsub-rel0p1-dm0p25`; checkpoint metadata records the full
 cut and resume rejects mismatched definitions. Plot directories use the
 cosmological model and data combination; use a distinct prefix for each run.
+
+
+`--run full` forwards the selected LF (including Wang Type-1), attenuation mode,
+pre-cut completeness population, and bright-cut definition to each AGN fit.
+The shared-pivot resume check verifies the bright-cut definition before reuse.
+Its SNe-only comparison disables AGN completeness, completeness plots, and the
+bright cut. Direct `--only_sna` runs also ignore these AGN selection options.
+The original selection and completeness settings still apply to joint and
+AGN-only fits; JAX bright-selected fits remain unsupported.
+
+Comparison plots are written to `plots/hubble/<prefix>/model_compare/`.
+Use a distinct prefix when retaining comparison plots from different runs.
+Comparison HDF5 filenames retain the speed, redshift/sample settings, LF,
+attenuation mode, map variant, and bright-cut tag. Individual cosmology plot
+directories keep their existing layout.

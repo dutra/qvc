@@ -533,7 +533,10 @@ def test_run_all_saves_cosmo_results_under_result_dir(monkeypatch, tmp_path):
         prefix="unit",
     )
 
-    expected = result_root / "cosmo" / "unit" / "cosmo_results_all_z0p44_3p16.hdf5"
+    expected = result_root / "cosmo" / "unit" / (
+        "cosmo_results_model_compare_joint_fastest_all_z0p44_3p16_"
+        "2d_compmag-dereddened_lf-shen_attsel-fixed-offset.hdf5"
+    )
     assert captured["filename"] == str(expected)
     assert expected.parent.is_dir()
 

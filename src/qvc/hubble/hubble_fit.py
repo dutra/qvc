@@ -565,13 +565,13 @@ def get_dynesty_speed_settings(speed, ndim, *, warm_start=False):
     elif speed == "quicker":
         settings = dict(dlogz_init=0.01, n_effective=500, nlive_init=50, nlive_batch=25)
     elif speed == "quick":
-        settings = dict(dlogz_init=0.01, n_effective=2000, nlive_init=100, nlive_batch=50)
+        settings = dict(dlogz_init=0.01, n_effective=5000, nlive_init=100, nlive_batch=50)
     elif speed == "standard":
         settings = dict(dlogz_init=0.01, n_effective=10000, nlive_init=250, nlive_batch=100)
     elif speed == "production":
         settings = dict(
             dlogz_init=0.01,
-            n_effective=2000,
+            n_effective=10000,
             nlive_init=max(1000, 50 * ndim),
             nlive_batch=max(500, 25 * ndim),
         )
@@ -2355,6 +2355,7 @@ def _prepare_shared_agn_pivot_context(
     resume_replot_with_cuts=False,
     round_pivots=True,
     bright_subsample_cut=None,
+    selection_attenuation_mode="fixed-offset",
 ):
     """Build once, or strictly load once, for cosmologies sharing a fit sample."""
 
@@ -2402,6 +2403,7 @@ def _prepare_shared_agn_pivot_context(
             light_curve_uncertainty_mode=light_curve_uncertainty_mode,
             pivot_rule=expected_pivot_rule,
             bright_subsample_cut=bright_subsample_cut,
+            selection_attenuation_mode=selection_attenuation_mode,
         )
         checkpoint_paths = _build_checkpoint_paths(prefix, run_tag)
         apply_two_pass = (
@@ -2420,6 +2422,7 @@ def _prepare_shared_agn_pivot_context(
                 checkpoint_paths["single"],
             )
         results = load_chains(checkpoint_file)
+        _validate_checkpoint_bright_subsample(results, checkpoint_file, bright_subsample_cut)
         context = _load_agn_pivot_context_from_checkpoint(
             results,
             checkpoint_file=checkpoint_file,
@@ -3354,45 +3357,57 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       completeness_z_range=None,
                       bright_subsample_cut=None,
                       ):
-    validate_completeness_mode(completeness_mode)
-    if bright_subsample_cut is not None and not isinstance(bright_subsample_cut, BrightSubsampleCut):
-        raise TypeError("bright_subsample_cut must be a BrightSubsampleCut or None.")
-    completeness_magnitude = normalize_completeness_magnitude(
-        df_agn.attrs.get("completeness_magnitude", completeness_magnitude)
-    )
-    selection_attenuation_mode = validate_selection_attenuation_configuration(
-        df_agn,
-        selection_attenuation_mode=selection_attenuation_mode,
-        completeness=completeness,
-        completeness_magnitude=completeness_magnitude,
-        only_sna=only_sna,
-    )
-    light_curve_uncertainty_mode = validate_light_curve_uncertainty_configuration(
-        df_agn,
-        light_curve_uncertainty_mode=light_curve_uncertainty_mode,
-        selection_attenuation_mode=selection_attenuation_mode,
-        only_sna=only_sna,
-        df_calibrators=df_calibrators,
-    )
-    if completeness and COMPLETENESS_MAG_COL not in df_agn.columns:
-        df_agn = prepare_completeness_magnitude_columns(
+    if only_sna:
+        completeness = False
+        plot_completeness = False
+        bright_subsample_cut = None
+        completeness_mode = "2d"
+        completeness_magnitude = "dereddened"
+        selection_attenuation_mode = "fixed-offset"
+        light_curve_uncertainty_mode = "covariance"
+        df_agn_completeness = None
+        completeness_z_range = None
+        completeness_params_override = None
+    else:
+        validate_completeness_mode(completeness_mode)
+        if bright_subsample_cut is not None and not isinstance(bright_subsample_cut, BrightSubsampleCut):
+            raise TypeError("bright_subsample_cut must be a BrightSubsampleCut or None.")
+        completeness_magnitude = normalize_completeness_magnitude(
+            df_agn.attrs.get("completeness_magnitude", completeness_magnitude)
+        )
+        selection_attenuation_mode = validate_selection_attenuation_configuration(
             df_agn,
-            completeness_magnitude,
+            selection_attenuation_mode=selection_attenuation_mode,
+            completeness=completeness,
+            completeness_magnitude=completeness_magnitude,
+            only_sna=only_sna,
         )
-    if completeness and COMPLETENESS_MAG_COL not in df_agn_all.columns:
-        df_agn_all = prepare_completeness_magnitude_columns(
-            df_agn_all,
-            completeness_magnitude,
+        light_curve_uncertainty_mode = validate_light_curve_uncertainty_configuration(
+            df_agn,
+            light_curve_uncertainty_mode=light_curve_uncertainty_mode,
+            selection_attenuation_mode=selection_attenuation_mode,
+            only_sna=only_sna,
+            df_calibrators=df_calibrators,
         )
-    if (
-        completeness
-        and df_agn_completeness is not None
-        and COMPLETENESS_MAG_COL not in df_agn_completeness.columns
-    ):
-        df_agn_completeness = prepare_completeness_magnitude_columns(
-            df_agn_completeness,
-            completeness_magnitude,
-        )
+        if completeness and COMPLETENESS_MAG_COL not in df_agn.columns:
+            df_agn = prepare_completeness_magnitude_columns(
+                df_agn,
+                completeness_magnitude,
+            )
+        if completeness and COMPLETENESS_MAG_COL not in df_agn_all.columns:
+            df_agn_all = prepare_completeness_magnitude_columns(
+                df_agn_all,
+                completeness_magnitude,
+            )
+        if (
+            completeness
+            and df_agn_completeness is not None
+            and COMPLETENESS_MAG_COL not in df_agn_completeness.columns
+        ):
+            df_agn_completeness = prepare_completeness_magnitude_columns(
+                df_agn_completeness,
+                completeness_magnitude,
+            )
     speed = normalize_speed(speed)
     prior_profile = normalize_prior_profile(prior_profile)
     if completeness_z_range is None and completeness and df_agn_completeness is not None:
@@ -4174,91 +4189,103 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                agn_pivot_context=None,
                df_agn_completeness_parent=None,
                bright_subsample_cut=None):
-    validate_completeness_mode(completeness_mode)
-    if bright_subsample_cut is not None and not isinstance(bright_subsample_cut, BrightSubsampleCut):
-        raise TypeError("bright_subsample_cut must be a BrightSubsampleCut or None.")
-    completeness_magnitude = normalize_completeness_magnitude(
-        completeness_magnitude
-    )
-    completeness_lf_model = str(completeness_lf_model).strip().lower().replace("-", "_")
-    if completeness_lf_model not in COMPLETENESS_LF_MODELS:
-        raise ValueError(
-            f"Unknown completeness LF model {completeness_lf_model!r}; "
-            f"expected one of {COMPLETENESS_LF_MODELS}."
-        )
-    shen_lf_mode = (
-        normalize_shen_lf_mode(
-            os.environ.get(SHEN_LF_MODE_ENV, SHEN_DEFAULT_LF_MODE)
-        )
-        if completeness_lf_model == "shen"
-        else None
-    )
-    expected_magnitude = (
-        shen_lf_expected_completeness_magnitude(shen_lf_mode)
-        if shen_lf_mode is not None
-        else "attenuated"
-    )
-    if (
-        completeness_magnitude != expected_magnitude
-        and shen_lf_mode != SHEN_DEFAULT_LF_MODE
-    ):
-        if shen_lf_mode is None:
-            raise ValueError(
-                "Empirical Type-1 completeness LFs require "
-                "completeness_magnitude='attenuated'."
-            )
-        raise ValueError(
-            f"Completeness LF {completeness_lf_model!r}"
-            + (
-                f"/{shen_lf_mode!s}" if shen_lf_mode is not None else ""
-            )
-            + f" requires completeness_magnitude={expected_magnitude!r}."
-        )
-    df_agn = prepare_completeness_magnitude_columns(
-        df_agn,
-        completeness_magnitude,
-    )
-    df_agn_all = prepare_completeness_magnitude_columns(
-        df_agn_all,
-        completeness_magnitude,
-    )
-    selection_attenuation_mode = validate_selection_attenuation_configuration(
-        df_agn,
-        selection_attenuation_mode=selection_attenuation_mode,
-        completeness=completeness,
-        completeness_magnitude=completeness_magnitude,
-        only_sna=only_sna,
-    )
-    light_curve_uncertainty_mode = validate_light_curve_uncertainty_configuration(
-        df_agn,
-        light_curve_uncertainty_mode=light_curve_uncertainty_mode,
-        selection_attenuation_mode=selection_attenuation_mode,
-        only_sna=only_sna,
-        df_calibrators=df_calibrators,
-    )
-    if df_agn_completeness_parent is None:
-        df_agn_completeness_parent = df_agn.copy()
+    if only_sna:
+        completeness = False
+        plot_completeness = False
+        bright_subsample_cut = None
+        completeness_mode = "2d"
+        completeness_magnitude = "dereddened"
+        selection_attenuation_mode = "fixed-offset"
+        light_curve_uncertainty_mode = "covariance"
+        completeness_lf_model = "shen"
+        df_agn_completeness_parent = None
+        completeness_z_range = None
     else:
-        df_agn_completeness_parent = prepare_completeness_magnitude_columns(
-            df_agn_completeness_parent,
+        validate_completeness_mode(completeness_mode)
+        if bright_subsample_cut is not None and not isinstance(bright_subsample_cut, BrightSubsampleCut):
+            raise TypeError("bright_subsample_cut must be a BrightSubsampleCut or None.")
+        completeness_magnitude = normalize_completeness_magnitude(
+            completeness_magnitude
+        )
+        completeness_lf_model = str(completeness_lf_model).strip().lower().replace("-", "_")
+        if completeness_lf_model not in COMPLETENESS_LF_MODELS:
+            raise ValueError(
+                f"Unknown completeness LF model {completeness_lf_model!r}; "
+                f"expected one of {COMPLETENESS_LF_MODELS}."
+            )
+        shen_lf_mode = (
+            normalize_shen_lf_mode(
+                os.environ.get(SHEN_LF_MODE_ENV, SHEN_DEFAULT_LF_MODE)
+            )
+            if completeness_lf_model == "shen"
+            else None
+        )
+        expected_magnitude = (
+            shen_lf_expected_completeness_magnitude(shen_lf_mode)
+            if shen_lf_mode is not None
+            else "attenuated"
+        )
+        if (
+            completeness_magnitude != expected_magnitude
+            and shen_lf_mode != SHEN_DEFAULT_LF_MODE
+        ):
+            if shen_lf_mode is None:
+                raise ValueError(
+                    "Empirical Type-1 completeness LFs require "
+                    "completeness_magnitude='attenuated'."
+                )
+            raise ValueError(
+                f"Completeness LF {completeness_lf_model!r}"
+                + (
+                    f"/{shen_lf_mode!s}" if shen_lf_mode is not None else ""
+                )
+                + f" requires completeness_magnitude={expected_magnitude!r}."
+            )
+        df_agn = prepare_completeness_magnitude_columns(
+            df_agn,
             completeness_magnitude,
         )
-    completeness_z_range = (
-        resolve_completeness_redshift_support(
-            df_agn_completeness_parent, z_range
+        df_agn_all = prepare_completeness_magnitude_columns(
+            df_agn_all,
+            completeness_magnitude,
         )
-        if completeness
-        else None
-    )
-    if completeness:
-        record_completeness_support_metadata(
-            (df_agn, df_agn_all, df_agn_completeness_parent),
-            magnitude_support=(
-                COMPLETENESS_MAG_2500_MIN,
-                COMPLETENESS_MAG_2500_MAX,
-            ),
-            redshift_support=(COMPLETENESS_Z_MIN, COMPLETENESS_Z_MAX),
+        selection_attenuation_mode = validate_selection_attenuation_configuration(
+            df_agn,
+            selection_attenuation_mode=selection_attenuation_mode,
+            completeness=completeness,
+            completeness_magnitude=completeness_magnitude,
+            only_sna=only_sna,
         )
+        light_curve_uncertainty_mode = validate_light_curve_uncertainty_configuration(
+            df_agn,
+            light_curve_uncertainty_mode=light_curve_uncertainty_mode,
+            selection_attenuation_mode=selection_attenuation_mode,
+            only_sna=only_sna,
+            df_calibrators=df_calibrators,
+        )
+        if df_agn_completeness_parent is None:
+            df_agn_completeness_parent = df_agn.copy()
+        else:
+            df_agn_completeness_parent = prepare_completeness_magnitude_columns(
+                df_agn_completeness_parent,
+                completeness_magnitude,
+            )
+        completeness_z_range = (
+            resolve_completeness_redshift_support(
+                df_agn_completeness_parent, z_range
+            )
+            if completeness
+            else None
+        )
+        if completeness:
+            record_completeness_support_metadata(
+                (df_agn, df_agn_all, df_agn_completeness_parent),
+                magnitude_support=(
+                    COMPLETENESS_MAG_2500_MIN,
+                    COMPLETENESS_MAG_2500_MAX,
+                ),
+                redshift_support=(COMPLETENESS_Z_MIN, COMPLETENESS_Z_MAX),
+            )
     speed = normalize_speed(speed)
     prior_profile = normalize_prior_profile(prior_profile)
     _fit_mode_label(only_sna, only_agn)
@@ -4454,10 +4481,12 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
 
     def _get_direct_completeness_params():
         nonlocal direct_completeness_params
+        if not completeness:
+            return None
         if direct_completeness_params is None:
             direct_completeness_params = wrap_completeness_params(
                 _build_completeness_params(
-                    df_agn_full_sample_preclip,
+                    df_agn_completeness_parent,
                     df_agn_all,
                     completeness=completeness,
                     completeness_mode=completeness_mode,
@@ -5834,12 +5863,22 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             use_redshift_log_f_term=False,
             early_de_guard=False,
             light_curve_uncertainty_mode="covariance",
-            round_pivots=True):
+            round_pivots=True,
+            completeness_lf_model="shen",
+            selection_attenuation_mode="fixed-offset",
+            df_agn_completeness_parent=None,
+            bright_subsample_cut=None):
 
     validate_completeness_mode(completeness_mode)
     completeness_magnitude = normalize_completeness_magnitude(
         completeness_magnitude
     )
+    completeness_lf_model = str(completeness_lf_model).strip().lower().replace("-", "_")
+    if completeness_lf_model not in COMPLETENESS_LF_MODELS:
+        raise ValueError(f"Unknown completeness LF model {completeness_lf_model!r}")
+    selection_attenuation_mode = normalize_selection_attenuation_mode(selection_attenuation_mode)
+    if bright_subsample_cut is not None and not isinstance(bright_subsample_cut, BrightSubsampleCut):
+        raise TypeError("bright_subsample_cut must be a BrightSubsampleCut or None.")
     speed = normalize_speed(speed)
     prior_profile = normalize_prior_profile(prior_profile)
     if only_agn:
@@ -5875,7 +5914,15 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         light_curve_uncertainty_mode
     ) == "posterior-draws":
         compare_run_tag += "_lcpost64"
-    compare_plot_path = f"plots/hubble/{prefix}/model_compare_{mode_tag}"
+    selection_tag = ""
+    if completeness:
+        selection_tag += f"_lf-{completeness_lf_model}"
+        selection_tag += f"_attsel-{selection_attenuation_mode}"
+        selection_tag += completeness_map_variant_tag()
+    if bright_subsample_cut is not None:
+        selection_tag += bright_subsample_cut.run_tag()
+    compare_run_tag += selection_tag
+    compare_plot_path = f"plots/hubble/{prefix}/model_compare"
     os.makedirs(compare_plot_path, exist_ok=True)
 
     cosmo_models_result_dict = {k: {} for k in cosmo_models}
@@ -5911,6 +5958,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         prefix=prefix,
         light_curve_uncertainty_mode=light_curve_uncertainty_mode,
         round_pivots=round_pivots,
+        bright_subsample_cut=bright_subsample_cut,
+        selection_attenuation_mode=selection_attenuation_mode,
     )
     for cosmo_model in cosmo_models:
         model_resume = resume_by_model[cosmo_model]
@@ -5945,7 +5994,11 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        use_redshift_log_f_term=use_redshift_log_f_term,
                        light_curve_uncertainty_mode=light_curve_uncertainty_mode,
                        early_de_guard=early_de_guard,
-                       agn_pivot_context=agn_pivot_context)
+                       agn_pivot_context=agn_pivot_context,
+                       completeness_lf_model=completeness_lf_model,
+                       selection_attenuation_mode=selection_attenuation_mode,
+                       df_agn_completeness_parent=df_agn_completeness_parent,
+                       bright_subsample_cut=bright_subsample_cut)
         
         samples_joint, model_labels_joint, dm_interp_joint, logZ_joint, logZerr_joint, debiased_residuals_joint, age_joint, age_err_joint = r
         #print(f"For model {cosmo_model}, universe age: {age:.3f} Gyr")
@@ -5959,7 +6012,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         else:
             r = run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                            cosmo_model=cosmo_model, only_sna=True, 
-                           completeness=completeness,
+                           completeness=False,
                            skip_plots=skip_plots,
                            residuals_sigma_clip=residuals_sigma_clip,
                            disable_sigma_clip_pass=disable_sigma_clip_pass,
@@ -5969,12 +6022,12 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                            z_range=z_range,
                            resume=model_resume, speed=speed, N=N,
                            prefix=prefix, uniform_redshift_distribution=uniform_redshift_distribution,
-                           completeness_sim_file=completeness_sim_file,
-                           completeness_mode=completeness_mode,
-                           completeness_magnitude=completeness_magnitude,
+                           completeness_sim_file=None,
+                           completeness_mode="2d",
+                           completeness_magnitude="dereddened",
                            compare_sigma_only=compare_sigma_only,
                            minimal_plots=minimal_plots,
-                           plot_completeness=plot_completeness,
+                           plot_completeness=False,
                            disable_ceph_dist_calibration=disable_ceph_dist_calibration,
                            use_planck_h0_prior=use_planck_h0_prior,
                            use_planck_om_prior=use_planck_om_prior,
@@ -5986,7 +6039,9 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                            use_redshift_log_f_term=use_redshift_log_f_term,
                            light_curve_uncertainty_mode="covariance",
                            early_de_guard=early_de_guard,
-                           agn_pivot_context=None)
+                           agn_pivot_context=None,
+                           bright_subsample_cut=None,
+                           df_agn_completeness_parent=None)
             samples_sna, model_labels_sna, dm_interp_sna, logZ_sna, logZerr_sna, debiased_residuals_sna, age_sna, age_sna_err = r
         if not compare_sigma_only and not minimal_plots and not only_agn:
             plot_cosmo_corner(samples_sna, samples_joint, cosmo_model, z_pivot_sna, z_pivot_agn, show=False, 
@@ -6100,12 +6155,60 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     cosmo_output_dir = get_qvc_result_dir() / "cosmo" / prefix
     cosmo_output_dir.mkdir(parents=True, exist_ok=True)
     save_cosmo_results_hdf5(
-        str(cosmo_output_dir / f"cosmo_results_{n_tag}_{z_tag}.hdf5"),
+        str(cosmo_output_dir / f"cosmo_results_{compare_run_tag}.hdf5"),
         cosmo_models_result_dict
     )
     
     print("================================================================\n\n")
     return cosmo_models_result_dict, cosmo_model_joint_samples, results_latex, compare_r
+
+
+def configure_completeness_run_args(args):
+    """Validate AGN selection modes, or ignore them for direct SNe-only fits."""
+    if args.only_sna:
+        args.disable_completeness = True
+        args.plot_completeness = False
+        args.bright_subsample_completeness_min = None
+        args.completeness_mode = "2d"
+        args.completeness_magnitude = "dereddened"
+        args.completeness_lf_model = "shen"
+        args.selection_attenuation_mode = "fixed-offset"
+        args.light_curve_uncertainty_mode = "covariance"
+        args.completeness_smooth_sigma_mag = None
+        args.completeness_smooth_sigma_z = None
+        return
+    if args.bright_subsample_completeness_min is not None:
+        if not (0.0 < args.bright_subsample_completeness_min <= 1.0):
+            raise ValueError("--bright-subsample-completeness-min must lie in (0, 1].")
+        if args.bright_subsample_margin < 0.0:
+            raise ValueError("--bright-subsample-margin must be nonnegative.")
+        if args.disable_completeness:
+            raise ValueError(
+                "--bright-subsample-completeness-min needs the completeness map; "
+                "do not combine it with --disable_completeness."
+            )
+        if args.completeness_mode != "2d":
+            raise NotImplementedError(
+                "--bright-subsample-completeness-min supports only --completeness_mode 2d."
+            )
+        if args.run not in {"single", "full"} or args.use_jax:
+            raise NotImplementedError(
+                "--bright-subsample-completeness-min supports only the NumPy/Dynesty --run single or full pipelines."
+            )
+    if args.selection_attenuation_mode == "joint-posterior" and (
+        args.run not in {"single", "full"} or args.use_jax
+    ):
+        raise NotImplementedError(
+            "joint-posterior selection attenuation currently supports only "
+            "the default non-JAX single or full Hubble runs."
+        )
+    if args.completeness_lf_model != "shen" and (
+        args.run not in {"single", "full"} or args.use_jax
+    ):
+        raise NotImplementedError(
+            "Empirical completeness LF selection currently supports only "
+            "the default non-JAX single or full Hubble runs."
+        )
 
 
 def validate_plot_mode_args(args):
@@ -6601,6 +6704,7 @@ if __name__ == "__main__":
         ),
     )
     args = parser.parse_args()
+    configure_completeness_run_args(args)
     # The completeness-map variants are consumed by the map builder through
     # environment variables (shared with run_hubble.xonsh); the flags set them
     # before any map is built so run tags, checkpoints and the map agree.
@@ -6645,46 +6749,11 @@ if __name__ == "__main__":
             "only the default NumPy/Dynesty pipeline."
         )
     validate_plot_mode_args(args)
-    if args.bright_subsample_completeness_min is not None:
-        if not (0.0 < args.bright_subsample_completeness_min <= 1.0):
-            raise ValueError("--bright-subsample-completeness-min must lie in (0, 1].")
-        if args.bright_subsample_margin < 0.0:
-            raise ValueError("--bright-subsample-margin must be nonnegative.")
-        if args.disable_completeness:
-            raise ValueError(
-                "--bright-subsample-completeness-min needs the completeness map; "
-                "do not combine it with --disable_completeness."
-            )
-        if args.completeness_mode != "2d":
-            raise NotImplementedError(
-                "--bright-subsample-completeness-min supports only --completeness_mode 2d."
-            )
-        if args.run != "single" or args.use_jax:
-            raise NotImplementedError(
-                "--bright-subsample-completeness-min supports only the NumPy/Dynesty --run single pipeline."
-            )
-        if args.only_sna:
-            raise ValueError("--bright-subsample-completeness-min requires AGN in the fit.")
-    if args.selection_attenuation_mode == "joint-posterior" and (
-        args.run != "single" or args.use_jax
-    ):
-        raise NotImplementedError(
-            "joint-posterior selection attenuation currently supports only "
-            "the default non-JAX single Hubble run."
-        )
-    if args.completeness_lf_model != "shen" and (
-        args.run != "single" or args.use_jax
-    ):
-        raise NotImplementedError(
-            "Empirical completeness LF selection currently supports only "
-            "the default non-JAX single Hubble run."
-        )
-
     print(_wrap_text_in_purple(render_hubble_mode_table(args)))
 
     if args.disable_full_covariance:
         print("Warning: Running without full covariance may lead to underestimated uncertainties.")
-    if args.disable_completeness:
+    if args.disable_completeness and not args.only_sna:
         print("Warning: Running without completeness correction may lead to biased results.")
     if args.disable_ceph_dist_calibration:
         print("Warning: Running without CEPH_DIST calibration; using the Planck H0 prior instead.")
@@ -6905,7 +6974,7 @@ if __name__ == "__main__":
                 agn_pivot_context=agn_pivot_context,
                 df_agn_completeness_parent=df_agn_completeness_parent,
             )
-    elif args.run == "single": # default
+    elif args.run == "single" or args.only_sna: # direct SNe-only uses the single pipeline
         cosmo_models_dict = {k: {} for k in args.cosmo_models}
         agn_pivot_context = _prepare_shared_agn_pivot_context(
             df_agn,
@@ -6936,6 +7005,7 @@ if __name__ == "__main__":
             resume_replot_with_cuts=args.resume_replot_with_cuts,
             round_pivots=not args.disable_pivot_rounding,
             bright_subsample_cut=bright_subsample_cut,
+            selection_attenuation_mode=args.selection_attenuation_mode,
         )
         for cosmo_model in args.cosmo_models:
             r = run_single(df_agn=df_agn, df_agn_all=df_agn_all, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 
@@ -7059,6 +7129,10 @@ if __name__ == "__main__":
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
                 light_curve_uncertainty_mode=args.light_curve_uncertainty_mode,
                 early_de_guard=args.early_de_guard,
-                round_pivots=not args.disable_pivot_rounding)
+                round_pivots=not args.disable_pivot_rounding,
+                completeness_lf_model=args.completeness_lf_model,
+                selection_attenuation_mode=args.selection_attenuation_mode,
+                df_agn_completeness_parent=df_agn_completeness_parent,
+                bright_subsample_cut=bright_subsample_cut)
     
     print(f"Finished running Hubble fit pipeline for {args.cosmo_models}")

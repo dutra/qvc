@@ -1984,7 +1984,8 @@ def test_run_single_threads_direct_full_sample_debias_arrays_to_plots(monkeypatc
     np.testing.assert_allclose(blr_calls[0]["dmi_values"], direct_dmi)
 
 
-def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
+@pytest.mark.parametrize("requested_completeness", [False, True])
+def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path, requested_completeness):
     df_agn, df_pantheon = fake_data
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=True)
     theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
@@ -1999,8 +2000,17 @@ def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
     monkeypatch.setattr(hubble_fit, "report_pivots", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "display_results_summary", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "compute_age_universe_with_error", lambda *args, **kwargs: (13.7, 0.2))
+    def forbidden(*args, **kwargs):
+        pytest.fail("SNe-only fit entered AGN completeness")
+    for name in ("prepare_completeness_magnitude_columns", "_build_completeness_params",
+                 "generate_fresh_completeness_sim_file", "validate_completeness_mode",
+                 "validate_selection_attenuation_configuration"):
+        monkeypatch.setattr(hubble_fit, name, forbidden)
     def fake_sna_pipeline(*args, **kwargs):
         assert kwargs["agn_pivot_context"] is None
+        assert kwargs["completeness"] is False
+        assert kwargs["bright_subsample_cut"] is None
+        assert kwargs["plot_completeness"] is False
         return (
             flat_samples,
             model_labels,
@@ -2023,7 +2033,12 @@ def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
         _sna_Lower=True,
         _sna_LogdetCov=None,
         cosmo_model="FlatLambdaCDM",
-        completeness=False,
+        completeness=requested_completeness,
+        completeness_lf_model="wang2026_type1_lade_a",
+        completeness_magnitude="attenuated",
+        selection_attenuation_mode="joint-posterior",
+        plot_completeness=True,
+        bright_subsample_cut=object(),
         use_full_cov=False,
         only_sna=True,
         speed="fastest",
@@ -3747,7 +3762,11 @@ def test_normalize_resume_by_model_rejects_mismatched_path_count(resume_values):
         hubble_fit.normalize_resume_by_model(resume_values, models)
 
 
-def test_run_all_dispatches_resume_path_per_cosmo_model(monkeypatch, tmp_path):
+@pytest.mark.parametrize("bright_state", ["none", "matching", "mismatched"])
+def test_run_all_dispatches_resume_path_per_cosmo_model(monkeypatch, tmp_path, bright_state):
+    from qvc.hubble.hubble_bright_subsample import BrightSubsampleCut
+    from qvc.hubble.hubble_bright_subsample import BRIGHT_SUBSAMPLE_JSON_ATTR
+    cut = None if bright_state == "none" else BrightSubsampleCut(.1, .25, (.44, 3.16), (21., 21.))
     calls = []
     shared_context = None
     observed_joint_contexts = []
@@ -3756,6 +3775,7 @@ def test_run_all_dispatches_resume_path_per_cosmo_model(monkeypatch, tmp_path):
         if kwargs["only_sna"]:
             assert kwargs["agn_pivot_context"] is None
         else:
+            assert kwargs["bright_subsample_cut"] is cut
             assert kwargs["agn_pivot_context"] == shared_context
             observed_joint_contexts.append(kwargs["agn_pivot_context"])
             assert kwargs["agn_pivot_context"] is observed_joint_contexts[0]
@@ -3799,6 +3819,7 @@ def test_run_all_dispatches_resume_path_per_cosmo_model(monkeypatch, tmp_path):
         hubble_fit.save_chains(
             resume_path,
             **hubble_fit._agn_pivot_checkpoint_payload(shared_context),
+            **{BRIGHT_SUBSAMPLE_JSON_ATTR: cut.to_json() if bright_state == "matching" else ""},
             sigma_clip_pass_stage="single",
             object_id_fit_selection=np.asarray(
                 shared_context.reference_object_ids,
@@ -3806,20 +3827,28 @@ def test_run_all_dispatches_resume_path_per_cosmo_model(monkeypatch, tmp_path):
             ),
         )
 
-    hubble_fit.run_all(
-        df_agn,
-        df_agn,
-        df_pantheon,
-        np.eye(len(df_pantheon)),
-        np.eye(len(df_pantheon)),
-        0.0,
-        cosmo_models=["FlatLambdaCDM", "FlatwCDM"],
-        resume=resume_paths,
-        speed="fastest",
-        compare_sigma_only=True,
-        disable_sigma_clip_pass=True,
-        prefix=str(tmp_path / "plots"),
-    )
+    from contextlib import nullcontext
+    expected = (pytest.raises(RuntimeError, match="bright-subsample definition")
+                if bright_state == "mismatched" else nullcontext())
+    with expected:
+        hubble_fit.run_all(
+            df_agn,
+            df_agn,
+            df_pantheon,
+            np.eye(len(df_pantheon)),
+            np.eye(len(df_pantheon)),
+            0.0,
+            cosmo_models=["FlatLambdaCDM", "FlatwCDM"],
+            resume=resume_paths,
+            speed="fastest",
+            compare_sigma_only=True,
+            disable_sigma_clip_pass=True,
+            prefix=str(tmp_path / "plots"),
+            bright_subsample_cut=cut,
+        )
+    if bright_state == "mismatched":
+        assert not calls
+        return
 
     assert calls == [
         {"cosmo_model": "FlatLambdaCDM", "only_sna": False, "resume": resume_paths[0]},
@@ -6017,3 +6046,133 @@ def test_resume_rejects_changed_coverage_sn_information_cut(column, threshold, o
             payload, 'old.h5', 3, 2, expected_cut_tier='2',
             expected_cut_configuration_json=json.dumps(current, sort_keys=True),
         )
+
+
+@pytest.mark.parametrize("only_agn", [False, True])
+@pytest.mark.parametrize("attenuation", ["fixed-offset", "joint-posterior"])
+def test_full_bright_selection_dispatch_and_output_identity(monkeypatch, tmp_path, only_agn, attenuation):
+    from qvc.hubble.hubble_bright_subsample import BrightSubsampleCut, apply_bright_subsample_cut
+    parent = _make_fake_agn_sample(n_agn=8)
+    cut = BrightSubsampleCut(0.1, 0.25, (0.44, 3.16), (20.5, 20.5))
+    selected, _ = apply_bright_subsample_cut(parent, cut, completeness_magnitude="attenuated")
+    assert 0 < len(selected) < len(parent)
+    pantheon = _make_fake_pantheon_sample(n_sne=4)
+    calls, pivot_calls, output_paths = [], [], []
+    context = object()
+    def pivots(frame, **kwargs):
+        assert frame.object_id.tolist() == selected.object_id.tolist()
+        assert kwargs["bright_subsample_cut"] is cut
+        assert kwargs["selection_attenuation_mode"] == attenuation
+        pivot_calls.append(kwargs)
+        return context
+    def fit(*args, **kwargs):
+        calls.append((args, kwargs))
+        return np.ones((4, 2)), ["H0", "Om0"], None, -10., .1, None, 13.8, .1
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(hubble_fit, "_prepare_shared_agn_pivot_context", pivots)
+    monkeypatch.setattr(hubble_fit, "run_single", fit)
+    monkeypatch.setattr(hubble_fit, "compare_models_by_log_evidence_all", lambda *a, **k: {})
+    monkeypatch.setattr(hubble_fit, "extract_cosmo_results_from_samples", lambda *a, **k: {})
+    monkeypatch.setattr(hubble_fit, "write_results_tex_variables", lambda *a, **k: None)
+    monkeypatch.setattr(hubble_fit, "save_cosmo_results_hdf5", lambda path, *a: output_paths.append(path))
+    monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: tmp_path)
+    hubble_fit.run_all(selected, parent, pantheon, None, True, None,
+        cosmo_models=["Flatw0waCDM", "FlatLambdaCDM"], only_agn=only_agn,
+        completeness=True, completeness_lf_model="wang2026_type1_lade_a",
+        completeness_magnitude="attenuated", selection_attenuation_mode=attenuation,
+        df_agn_completeness_parent=parent, bright_subsample_cut=cut,
+        completeness_sim_file="shared-mock.h5", plot_completeness=True,
+        minimal_plots=True, disable_sigma_clip_pass=True, prefix="full-bright")
+    assert len(pivot_calls) == 1
+    assert len(calls) == (2 if only_agn else 4)
+    for args, kwargs in calls:
+        if kwargs["only_sna"]:
+            assert kwargs["completeness"] is False
+            assert kwargs["plot_completeness"] is False
+            assert kwargs["bright_subsample_cut"] is None
+            assert kwargs["df_agn_completeness_parent"] is None
+            assert kwargs["agn_pivot_context"] is None
+            assert kwargs["completeness_sim_file"] is None
+        else:
+            assert args[0].object_id.tolist() == selected.object_id.tolist()
+            assert kwargs["df_agn_completeness_parent"] is parent
+            assert kwargs["bright_subsample_cut"] is cut
+            assert kwargs["completeness_lf_model"] == "wang2026_type1_lade_a"
+            assert kwargs["selection_attenuation_mode"] == attenuation
+            assert kwargs["agn_pivot_context"] is context
+            assert kwargs["completeness_sim_file"] == "shared-mock.h5"
+    assert len(output_paths) == 1
+    assert "lf-wang2026_type1_lade_a" in output_paths[0]
+    assert f"attsel-{attenuation}" in output_paths[0]
+    assert cut.run_tag() in output_paths[0]
+    assert (tmp_path / "plots" / "hubble" / "full-bright" / "model_compare").is_dir()
+
+
+def test_sna_pipeline_ignores_completeness_and_preserves_likelihood(fake_data, monkeypatch, tmp_path):
+    from contextlib import nullcontext
+    df_agn, pantheon = fake_data
+    values = []
+    class Evaluated(Exception):
+        pass
+    def sampler(loglike, transform, ndim, **kwargs):
+        options = kwargs["logl_kwargs"]
+        assert options["completeness_params"] is None
+        assert options["only_sna"] is True
+        theta = transform(np.full(ndim, .5), **kwargs["ptform_kwargs"])
+        values.append(loglike(theta, **options)[0])
+        raise Evaluated
+    def forbidden(*a, **k):
+        pytest.fail("SNe-only sampler entered AGN completeness")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: tmp_path)
+    monkeypatch.setattr(hubble_fit, "DynamicNestedSampler", sampler)
+    monkeypatch.setattr(hubble_fit.multiprocessing, "get_context",
+        lambda *a: SimpleNamespace(Pool=lambda **k: nullcontext(None)))
+    for name in ("prepare_completeness_magnitude_columns", "_build_completeness_params",
+                 "generate_fresh_completeness_sim_file", "validate_completeness_mode",
+                 "validate_selection_attenuation_configuration"):
+        monkeypatch.setattr(hubble_fit, name, forbidden)
+    for requested in (False, True):
+        with pytest.raises(Evaluated):
+            hubble_fit.run_mcmc_pipeline(df_agn, df_agn.copy(), pantheon, None, True, None,
+                agn_pivot_context=None, cosmo_model="FlatLambdaCDM", only_sna=True,
+                completeness=requested, completeness_mode="ignored", completeness_magnitude="ignored",
+                completeness_params_override=object(), bright_subsample_cut=object(),
+                selection_attenuation_mode="joint-posterior", plot_completeness=True,
+                use_full_cov=False, speed="fastest", prefix="sna")
+    assert np.isfinite(values).all()
+    assert values[0] == values[1]
+
+
+def test_single_and_full_deliver_same_selected_and_parent_ids(monkeypatch, tmp_path):
+    from qvc.hubble.hubble_bright_subsample import BrightSubsampleCut, apply_bright_subsample_cut
+    parent = _make_fake_agn_sample(n_agn=8)
+    cut = BrightSubsampleCut(.1, .25, (.44, 3.16), (20.5, 20.5))
+    selected, _ = apply_bright_subsample_cut(parent, cut, completeness_magnitude="attenuated")
+    pantheon = _make_fake_pantheon_sample(n_sne=4)
+    calls = []
+    class ReachedSampler(Exception):
+        pass
+    def sample(frame, *args, **kwargs):
+        calls.append((frame.object_id.tolist(), kwargs["df_agn_completeness"].object_id.tolist(),
+                      kwargs["bright_subsample_cut"], kwargs["completeness_sim_file"]))
+        raise ReachedSampler
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: tmp_path / "results")
+    monkeypatch.setattr(hubble_fit, "run_mcmc_pipeline", sample)
+    monkeypatch.setattr(hubble_fit, "plot_redshift_histograms", lambda *a, **k: None)
+    monkeypatch.setattr(hubble_fit, "plot_delta_m_flux_recal_vs_redshift", lambda *a, **k: None)
+    kwargs = dict(completeness=True, completeness_lf_model="wang2026_type1_lade_a",
+        completeness_magnitude="attenuated", df_agn_completeness_parent=parent,
+        bright_subsample_cut=cut, completeness_sim_file="shared-mock.h5",
+        disable_sigma_clip_pass=True, skip_plots=True, speed="quicker", prefix="matched")
+    with pytest.raises(ReachedSampler):
+        hubble_fit.run_single(selected, parent, pantheon, None, True, None,
+            cosmo_model="FlatLambdaCDM", **kwargs)
+    with pytest.raises(ReachedSampler):
+        hubble_fit.run_all(selected, parent, pantheon, None, True, None,
+            cosmo_models=["FlatLambdaCDM"], **kwargs)
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    assert calls[0][0] == selected.object_id.tolist()
+    assert calls[0][1] == parent.object_id.tolist()

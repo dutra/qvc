@@ -323,9 +323,40 @@ def test_single_cli_forwards_population_before_bright_cut():
                 and any(isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
                         and child.func.id == 'run_single' for child in ast.walk(n)))
     calls = [n for n in ast.walk(main) if isinstance(n, ast.Call)
-             and isinstance(n.func, ast.Name) and n.func.id == 'run_single']
+             and isinstance(n.func, ast.Name) and n.func.id in {'run_single', 'run_all'}]
     assert calls
     for call in calls:
         kwargs = {k.arg: k.value for k in call.keywords}
         assert ast.unparse(kwargs['df_agn_completeness_parent']) == 'df_agn_completeness_parent'
         assert ast.unparse(kwargs['bright_subsample_cut']) == 'bright_subsample_cut'
+
+
+@pytest.mark.parametrize("run", ["single", "full"])
+def test_cli_full_bright_and_empirical_lf_supported(run):
+    from qvc.hubble.hubble_fit import configure_completeness_run_args
+    args = SimpleNamespace(run=run, only_sna=False, use_jax=False,
+        bright_subsample_completeness_min=.1, bright_subsample_margin=.25,
+        disable_completeness=False, completeness_mode="2d",
+        completeness_lf_model="wang2026_type1_lade_a",
+        selection_attenuation_mode="joint-posterior")
+    configure_completeness_run_args(args)
+    args.use_jax = True
+    with pytest.raises(NotImplementedError):
+        configure_completeness_run_args(args)
+    args.use_jax = False
+    args.completeness_mode = "3d_fhost"
+    with pytest.raises(NotImplementedError, match="2d"):
+        configure_completeness_run_args(args)
+
+
+def test_cli_sna_ignores_agn_completeness_options():
+    from qvc.hubble.hubble_fit import configure_completeness_run_args
+    args = SimpleNamespace(only_sna=True, use_jax=False, run="single",
+        bright_subsample_completeness_min=2., bright_subsample_margin=-1.,
+        completeness_lf_model="wang2026_type1_lade_a", plot_completeness=True,
+        selection_attenuation_mode="joint-posterior", disable_completeness=False)
+    configure_completeness_run_args(args)
+    assert args.disable_completeness is True
+    assert args.plot_completeness is False
+    assert args.bright_subsample_completeness_min is None
+    assert args.selection_attenuation_mode == "fixed-offset"
