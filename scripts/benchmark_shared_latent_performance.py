@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Isolated before/after performance worker; synthetic data, no scientific fits.
 
-Run each case in a fresh process. Baseline methods come from --baseline-revision
-without checking out or editing source. See scripts/shared_latent_performance.md.
+Run each case in a fresh process. Baseline uses dense conditioning or dense LOO
+with the same SLB kernel. See scripts/shared_latent_performance.md.
 """
 
 import argparse
@@ -11,19 +11,7 @@ import json
 import os
 from pathlib import Path
 import resource
-import subprocess
-import sys
 import time
-import types
-
-
-def load_baseline(path, name, revision):
-    source = subprocess.check_output(["git", "show", f"{revision}:{path}"], text=True)
-    module = types.ModuleType(name)
-    module.__file__ = f"{revision}:{path}"
-    sys.modules[name] = module
-    exec(compile(source, module.__file__, "exec"), module.__dict__)
-    return module
 
 
 def main():
@@ -35,7 +23,6 @@ def main():
     parser.add_argument("--queries", type=int, default=800)
     parser.add_argument("--cpus", type=int, default=3)
     parser.add_argument("--repeats", type=int, default=5)
-    parser.add_argument("--baseline-revision", default="ea191f99e2b098ecba7a133908c6da7cce98eee3")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     if hasattr(os, "sched_getaffinity"):
@@ -45,7 +32,6 @@ def main():
     import jax
     import jax.numpy as jnp
     import numpy as np
-    from tinygp import GaussianProcess
     from qvc.light_curve.multiband_model_shared_latent_blr import make_multiband_shared_latent_blr_model as slb_factory
 
     jax.config.update("jax_enable_x64", True)

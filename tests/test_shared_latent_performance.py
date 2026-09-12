@@ -8,7 +8,6 @@ from scipy.linalg import expm, solve_continuous_lyapunov
 from tinygp import GaussianProcess
 
 from qvc.light_curve import fit_light_curves as fit
-from qvc.light_curve import multiband_fit_utils as utils
 from qvc.light_curve.multiband_model_shared_latent_blr import (
     make_multiband_shared_latent_blr_model,
 )
