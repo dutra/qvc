@@ -478,9 +478,8 @@ def save_all_samples_to_hdf5(samples):
     logging.info(f"Saved all samples to {file_path}")
     print(f"Saved all samples to {file_path}")
 
-def load_obj_samples_from_hdf5(object_id=None, file_path=None):
-    """
-    """
+def load_obj_samples_from_hdf5(object_id=None, file_path=None, *, return_metadata=False):
+    """Load posterior datasets; optionally return a second dictionary of HDF5 attributes."""
     if file_path is None:
         object_id = str(object_id)
         output_dir = os.path.join("results", "samples", prefix)
@@ -514,13 +513,14 @@ def load_obj_samples_from_hdf5(object_id=None, file_path=None):
 
     samples = {}
     with h5py.File(file_path, "r") as hdf:
+        metadata = dict(hdf.attrs)
         for key in hdf.keys():
             if key in _RUN_METADATA_KEYS:
                 continue
             samples[key] = np.array(hdf[key])
 
     logging.info(f"Loaded {len(samples)} datasets from {file_path}")
-    return samples
+    return (samples, metadata) if return_metadata else samples
 
 def save_obj_samples_to_hdf5(samples, object_id, scalar_diagnostics=None):
     """
@@ -546,8 +546,15 @@ def save_obj_samples_to_hdf5(samples, object_id, scalar_diagnostics=None):
             )
         for key, value in samples.items():
             hdf.create_dataset(key, data=value)
+        from .slow_driver_diagnostics import SLOW_DIAGNOSTIC_FIELDS
         for key, value in (scalar_diagnostics or {}).items():
-            hdf.create_dataset(key, data=np.asarray(value, dtype=float))
+            if key in SLOW_DIAGNOSTIC_FIELDS:
+                scalar = np.asarray(value, dtype=float)
+                if scalar.ndim != 0:
+                    raise ValueError(f"{key} must be scalar")
+                hdf.attrs[key] = float(scalar)
+            else:
+                hdf.create_dataset(key, data=np.asarray(value, dtype=float))
     logging.info(f"Saved samples for object_id {object_id} to {file_path}")
 
 def delete_file(file_path):

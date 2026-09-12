@@ -177,7 +177,7 @@ LC_SURVEY_NAMES = tuple(SURVEY_NAMES)
 LC_SURVEY_TO_IDX = {name: idx for idx, name in enumerate(LC_SURVEY_NAMES)}
 
 
-def _normalize_survey_name(value):
+def _normalize_survey_name(value, survey_names=LC_SURVEY_NAMES):
     if value is None:
         return "sdss"
     text = str(value).strip().lower()
@@ -189,11 +189,11 @@ def _normalize_survey_name(value):
         return "ps1"
     if text == "z":
         return "ztf"
-    if text in LC_SURVEY_TO_IDX:
+    if text in survey_names:
         return text
     if text.startswith("panstarr") or text.startswith("pan-starr") or text == "panstarrs":
         return "ps1"
-    raise ValueError(f"Unsupported survey label {value!r}. Expected one of {LC_SURVEY_NAMES}.")
+    raise ValueError(f"Unsupported survey label {value!r}. Expected one of {survey_names}.")
 
 
 def _default_survey_labels_for_band(band, size):
@@ -206,20 +206,20 @@ def _default_survey_labels_for_band(band, size):
     return np.full(int(size), default, dtype=f"<U{len(default)}")
 
 
-def _survey_indices_from_labels(labels):
+def _survey_indices_from_labels(labels, survey_names=LC_SURVEY_NAMES):
     labels = np.asarray(labels, dtype=str)
     if labels.size == 0:
         return np.array([], dtype=np.int32), np.array([], dtype=str)
-    normalized = np.asarray([_normalize_survey_name(value) for value in labels], dtype=str)
-    survey_idx = np.asarray([LC_SURVEY_TO_IDX[value] for value in normalized], dtype=np.int32)
+    normalized = np.asarray([_normalize_survey_name(value, survey_names) for value in labels], dtype=str)
+    survey_idx = np.asarray([tuple(survey_names).index(value) for value in normalized], dtype=np.int32)
     return survey_idx, normalized
 
 
-def _compute_log_jitter_mean_grid(yerr, band_idx, survey_idx, n_bands):
+def _compute_log_jitter_mean_grid(yerr, band_idx, survey_idx, n_bands, survey_names=LC_SURVEY_NAMES):
     yerr = np.asarray(yerr, dtype=float)
     band_idx = np.asarray(band_idx, dtype=np.int32)
     survey_idx = np.asarray(survey_idx, dtype=np.int32)
-    n_surveys = len(LC_SURVEY_NAMES)
+    n_surveys = len(survey_names)
     log_jitter_mean = np.full((n_bands, n_surveys), np.log(1e-3), dtype=float)
     active_mask = np.zeros((n_bands, n_surveys), dtype=bool)
     fallback = np.log(1e-3)
@@ -239,10 +239,10 @@ def _compute_log_jitter_mean_grid(yerr, band_idx, survey_idx, n_bands):
     return jnp.asarray(log_jitter_mean, dtype=float), active_mask
 
 
-def _compute_survey_offset_active_mask(band_idx, survey_idx, n_bands):
+def _compute_survey_offset_active_mask(band_idx, survey_idx, n_bands, survey_names=LC_SURVEY_NAMES):
     band_idx = np.asarray(band_idx, dtype=np.int32)
     survey_idx = np.asarray(survey_idx, dtype=np.int32)
-    n_surveys = len(LC_SURVEY_NAMES)
+    n_surveys = len(survey_names)
     active_mask = np.zeros((n_bands, n_surveys), dtype=bool)
     for i in range(int(n_bands)):
         band_surveys = survey_idx[band_idx == i]
@@ -271,6 +271,7 @@ def _get_object_active_noise_calibration_masks(obj_dict, n_bands):
             band_idx,
             survey_idx,
             n_bands,
+            survey_names=obj_dict.get("survey_names", LC_SURVEY_NAMES),
         )
     survey_offset_active_mask = obj_dict.get("survey_offset_active_mask")
     if survey_offset_active_mask is None:
@@ -278,6 +279,7 @@ def _get_object_active_noise_calibration_masks(obj_dict, n_bands):
             band_idx,
             survey_idx,
             n_bands,
+            survey_names=obj_dict.get("survey_names", LC_SURVEY_NAMES),
         )
     return (
         np.asarray(log_jitter_active_mask, dtype=bool),
@@ -285,18 +287,18 @@ def _get_object_active_noise_calibration_masks(obj_dict, n_bands):
     )
 
 
-def _coerce_log_jitter_mean_grid(log_jitter_mean, n_bands):
+def _coerce_log_jitter_mean_grid(log_jitter_mean, n_bands, survey_names=LC_SURVEY_NAMES):
     log_jitter_mean = np.asarray(log_jitter_mean, dtype=float)
     if log_jitter_mean.ndim == 2:
         return jnp.asarray(log_jitter_mean, dtype=float)
     if log_jitter_mean.ndim == 1 and log_jitter_mean.shape[0] == int(n_bands):
         return jnp.asarray(
-            np.repeat(log_jitter_mean[:, None], len(LC_SURVEY_NAMES), axis=1),
+            np.repeat(log_jitter_mean[:, None], len(survey_names), axis=1),
             dtype=float,
         )
     raise ValueError(
         f"log_jitter_mean must have shape ({int(n_bands)},) or "
-        f"({int(n_bands)}, {len(LC_SURVEY_NAMES)}); got {log_jitter_mean.shape}."
+        f"({int(n_bands)}, {len(survey_names)}); got {log_jitter_mean.shape}."
     )
 
 
@@ -363,16 +365,16 @@ def _sample_seeing_effect_grids(active_mask):
     )
 
 
-def _normalized_seeing_covariate(seeing, band_idx, survey_idx, n_bands):
+def _normalized_seeing_covariate(seeing, band_idx, survey_idx, n_bands, survey_names=LC_SURVEY_NAMES):
     """Return centered log-FWHM and groups with enough leverage to fit it."""
 
     seeing = np.asarray(seeing, dtype=float)
     band_idx = np.asarray(band_idx, dtype=np.int32)
     survey_idx = np.asarray(survey_idx, dtype=np.int32)
     covariate = np.zeros(seeing.shape, dtype=float)
-    active_mask = np.zeros((int(n_bands), len(LC_SURVEY_NAMES)), dtype=bool)
+    active_mask = np.zeros((int(n_bands), len(survey_names)), dtype=bool)
     for band in range(int(n_bands)):
-        for survey in range(len(LC_SURVEY_NAMES)):
+        for survey in range(len(survey_names)):
             mask = (
                 (band_idx == band)
                 & (survey_idx == survey)
@@ -1145,16 +1147,22 @@ def compute_loo_short_lag_residual_diagnostics(
         gp, inds = model._build_gp(params)
         y_sorted = np.asarray(model._observed_y_sorted(params, inds), dtype=float)
         mean_sorted = np.asarray(gp.loc, dtype=float)
-        covariance = np.asarray(gp.covariance, dtype=float)
-        covariance = 0.5 * (covariance + covariance.T)
-        scale = max(float(np.nanmedian(np.diag(covariance))), 1.0)
-        covariance = covariance + np.eye(covariance.shape[0]) * (1e-10 * scale)
-        chol = np.linalg.cholesky(covariance)
         centered = y_sorted - mean_sorted
-        alpha = np.linalg.solve(chol.T, np.linalg.solve(chol, centered))
-        precision = np.linalg.solve(chol.T, np.linalg.solve(chol, np.eye(chol.shape[0])))
-        precision_diag = np.diag(precision)
-        loo_standardized = alpha / np.sqrt(np.maximum(precision_diag, 1e-300))
+        from .quasisep_prediction import regularized_loo_residuals, supports_shared_prediction
+        if supports_shared_prediction(gp.kernel):
+            loo_standardized = np.asarray(
+                regularized_loo_residuals(gp.solver.matrix, jnp.asarray(centered))
+            )
+        else:
+            covariance = np.asarray(gp.covariance, dtype=float)
+            covariance = 0.5 * (covariance + covariance.T)
+            scale = max(float(np.nanmedian(np.diag(covariance))), 1.0)
+            covariance = covariance + np.eye(covariance.shape[0]) * (1e-10 * scale)
+            chol = np.linalg.cholesky(covariance)
+            alpha = np.linalg.solve(chol.T, np.linalg.solve(chol, centered))
+            precision = np.linalg.solve(chol.T, np.linalg.solve(chol, np.eye(chol.shape[0])))
+            precision_diag = np.diag(precision)
+            loo_standardized = alpha / np.sqrt(np.maximum(precision_diag, 1e-300))
         finite_loo = np.isfinite(loo_standardized)
         loo_standardized_finite = loo_standardized[finite_loo]
         if not loo_standardized_finite.size:
@@ -2961,12 +2969,14 @@ def tau_shift_to_uv(eta_tau, lambda_center_rf, lambda_uv=2500.0):
 
 DEFAULT_ETA_PRIOR_PROFILE = "default"
 ETA_PRIOR_PROFILES = (
-    DEFAULT_ETA_PRIOR_PROFILE,
+    "relaxed",
     "modified",
+    DEFAULT_ETA_PRIOR_PROFILE,
 )
 MODIFIED_ETA_SIGMA_LOC = -0.8
 MODIFIED_ETA_TAU_LOC = 0.5
 MODIFIED_ETA_PRIOR_SCALE = 0.5
+MODIFIED_TIGHT_ETA_PRIOR_SCALE = 0.25
 
 
 def _validate_eta_prior_profile(eta_prior_profile):
@@ -2981,6 +2991,11 @@ def eta_sigma_prior(eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE):
     """Wavelength-scaling prior for the stationary continuum RMS."""
 
     _validate_eta_prior_profile(eta_prior_profile)
+    if eta_prior_profile == "default":
+        return dist.TruncatedNormal(
+            MODIFIED_ETA_SIGMA_LOC, MODIFIED_TIGHT_ETA_PRIOR_SCALE,
+            low=-1.5, high=0.0, validate_args=True,
+        )
     if eta_prior_profile == "modified":
         return dist.Normal(MODIFIED_ETA_SIGMA_LOC, MODIFIED_ETA_PRIOR_SCALE)
     return dist.TruncatedNormal(-0.5, 0.5, low=-1.5, high=0.25)
@@ -2990,6 +3005,11 @@ def eta_tau_prior(eta_prior_profile=DEFAULT_ETA_PRIOR_PROFILE):
     """Wavelength-scaling prior for the DRW-style timescale."""
 
     _validate_eta_prior_profile(eta_prior_profile)
+    if eta_prior_profile == "default":
+        return dist.TruncatedNormal(
+            MODIFIED_ETA_TAU_LOC, MODIFIED_TIGHT_ETA_PRIOR_SCALE,
+            low=0.0, high=1.5, validate_args=True,
+        )
     if eta_prior_profile == "modified":
         return dist.Normal(MODIFIED_ETA_TAU_LOC, MODIFIED_ETA_PRIOR_SCALE)
     return dist.TruncatedNormal(0.2, 0.5, low=-0.5, high=1.25)
@@ -3724,6 +3744,7 @@ def make_lc(
     mags = data["mags"]
     magerrs = data["magerrs"]
     surveys = data.get("surveys", {})
+    survey_names = tuple(data.get("survey_names", LC_SURVEY_NAMES))
     seeing_by_band = data.get("psf_fwhm_arcsec", {})
 
     if len(bands) == 0:
@@ -3861,12 +3882,13 @@ def make_lc(
             all_mags[m] = all_mags[m] - mu
 
     time0 = np.min(all_times)
-    survey_idx, survey_labels = _survey_indices_from_labels(all_surveys)
+    survey_idx, survey_labels = _survey_indices_from_labels(all_surveys, survey_names)
     seeing_covariate, seeing_active_mask = _normalized_seeing_covariate(
         all_seeing,
         band_idx,
         survey_idx,
         B,
+        survey_names=survey_names,
     )
     X = (jnp.array(all_times) - jnp.min(all_times), jnp.array(band_idx))
     y = jnp.array(all_mags)
@@ -3880,7 +3902,7 @@ def make_lc(
         "band_idx": band_idx,
         "survey_idx": survey_idx,
         "survey_labels": survey_labels,
-        "survey_names": LC_SURVEY_NAMES,
+        "survey_names": survey_names,
         "psf_fwhm_arcsec": all_seeing,
         "seeing_covariate": seeing_covariate,
         "seeing_active_mask": seeing_active_mask,
@@ -4490,6 +4512,7 @@ def build_single_object_model_mag_flux_linearized(
         bidx_np,
         np.asarray(survey_idx, dtype=np.int32),
         B,
+        survey_names=obj_dict.get("survey_names", LC_SURVEY_NAMES),
     )
     _, survey_offset_active_mask = _get_object_active_noise_calibration_masks(obj_dict, B)
 
@@ -4992,7 +5015,11 @@ def _model_params_at_values(model, rng_key, values):
 def _flux_linearized_pseudo_data_from_prediction(obj_dict, model, params):
     """Build one Gauss-Newton pseudo-data update for the magnitude likelihood."""
 
-    r_star, _ = model.pred(params, obj_dict["X"])
+    from .quasisep_prediction import supports_shared_prediction
+    if supports_shared_prediction(model):
+        r_star = model.pred_training_mean(params)
+    else:
+        r_star, _ = model.pred(params, obj_dict["X"])
     r_star = np.asarray(device_get(r_star), dtype=float)
     y_mag = np.asarray(obj_dict["y"], dtype=float)
     yerr_mag = np.asarray(obj_dict["yerr"], dtype=float)
@@ -5371,6 +5398,19 @@ def apply_resume_sample_save_policy(args):
 
 
 
+def apply_only_light_curve_plot_policy(args):
+    """Select the combined light-curve/PSD figure without changing diagnostics."""
+    if not getattr(args, "only_light_curve_plot", False):
+        return args
+    for flag in ("disable_combined_plot", "disable_plot_psd"):
+        if getattr(args, flag, False):
+            raise ValueError(f"--only-light-curve-plot is incompatible with --{flag}")
+    args.plot = True
+    for name in ("trace", "color_magnitude", "correlation", "histogram", "corner",
+                 "sigma_tau_lambda", "recovery"):
+        setattr(args, f"disable_{name}_plot", True)
+    return args
+
 def main():
     logging.basicConfig(
         format="%(asctime)s - %(message)s",
@@ -5393,6 +5433,8 @@ def main():
     )
     parser.add_argument("--filter_file", type=str, help="Path to file containing object IDs.")
     parser.add_argument("--plot", action="store_true", help="Enable plotting of results.")
+    parser.add_argument("--only_light_curve_plot", "--only-light-curve-plot", action="store_true",
+                        help="Only create the combined light-curve figure with PSD; implies --plot.")
     parser.add_argument("--progress", action="store_true", help="Show progress bar.")
     parser.add_argument("--nwarm", type=int, default=500, help="Warmup steps for MCMC.")
     parser.add_argument("--nsamp", type=int, default=250, help="Samples per chain for MCMC.")
@@ -5586,10 +5628,12 @@ def main():
         choices=ETA_PRIOR_PROFILES,
         default=DEFAULT_ETA_PRIOR_PROFILE,
         help=(
-            "Wavelength-scaling prior profile. 'default' preserves the existing "
+            "Wavelength-scaling prior profile. 'relaxed' restores the previous "
             "eta_sigma and model-specific eta_tau behavior; 'modified' uses "
             "eta_sigma ~ Normal(-0.8, 0.5) and eta_tau ~ Normal(0.5, 0.5) "
-            "for variants with wavelength-dependent drivers. shared_latent_blr "
+            "for variants with wavelength-dependent drivers. 'default' uses "
+            "truncated eta_sigma Normal(-0.8, 0.25) on [-1.5, 0] and eta_tau "
+            "Normal(0.5, 0.25) on [0, 1.5]. shared_latent_blr "
             "has one wavelength-independent driver and does not use eta_tau."
         ),
     )
@@ -5630,6 +5674,10 @@ def main():
         ),
     )
     args = parser.parse_args()
+    try:
+        apply_only_light_curve_plot_policy(args)
+    except ValueError as exc:
+        parser.error(str(exc))
     if (
         not np.isfinite(args.outlier_half_window_days)
         or args.outlier_half_window_days <= 0
@@ -5639,7 +5687,7 @@ def main():
     print("Args:", args)
 
     if args.load_stone_lcs:
-        objs = load_stone_lcs(filter_object_ids=args.filter_object_id)
+        objs = load_stone_lcs(filter_object_ids=args.filter_object_id, skip=args.skip, N=args.N)
         print(f"Loaded {len(objs)} Stone light curves.")
     elif args.load_nearby_lc_csv is not None:
         objs = load_nearby_lcs(args.load_nearby_lc_csv)
@@ -5654,7 +5702,9 @@ def main():
         )
     print(f"Loaded {len(objs)} objects.")
 
-    objs = populate_sdss_fields(objs, progress_bar=args.progress)
+    objs = populate_sdss_fields(
+        objs, progress_bar=args.progress, preserve_stone_redshift=args.load_stone_lcs,
+    )
     for obj in objs:
         obj["psf_constant_flux_n_bands_corrected"] = 0
         obj["psf_constant_flux_corrected"] = False
@@ -5808,11 +5858,13 @@ def main():
                 bidx,
                 survey_idx,
                 B,
+                survey_names=obj["survey_names"],
             )
             survey_offset_active_mask = _compute_survey_offset_active_mask(
                 bidx,
                 survey_idx,
                 B,
+                survey_names=obj["survey_names"],
             )
             obj["log_jitter_active_mask"] = log_jitter_active_mask
             obj["survey_offset_active_mask"] = survey_offset_active_mask
@@ -5828,6 +5880,7 @@ def main():
                     bidx,
                     survey_idx,
                     B,
+                    survey_names=obj["survey_names"],
                 )
             if args.n_blr_terms != 1:
                 raise ValueError(
@@ -5847,9 +5900,10 @@ def main():
             stage_diagnostics = unavailable_nuts_diagnostics()
             flux_linearized_fit_obj = None
             posterior_summary = {}
+            saved_sample_metadata = {}
             if args.resume:
                 logging.warning("[DEBUG] Loading saved samples (flat) — developer mode.")
-                obj_flat_samples = load_obj_samples_from_hdf5(oid)
+                obj_flat_samples, saved_sample_metadata = load_obj_samples_from_hdf5(oid, return_metadata=True)
                 samples_per_chain = None
             else:
                 key = random.PRNGKey(0)
@@ -6109,6 +6163,14 @@ def main():
                 disk_order=args.disk_order,
                 erlang_order=args.erlang_order,
             )
+            slow_driver_diagnostics = {}
+            if args.model_variant == SHARED_LATENT_BLR_VARIANT:
+                from .slow_driver_diagnostics import slow_pole_convergence
+                slow_driver_diagnostics = slow_pole_convergence(
+                    samples_per_chain, args.model_variant, obj["z"],
+                    saved_diagnostics=saved_sample_metadata,
+                )
+                result.update(slow_driver_diagnostics)
             adf_result = compute_object_adf_diagnostics(
                 obj_flat_samples_flatten_per_band,
                 obj,
@@ -6145,6 +6207,7 @@ def main():
                         "loo_chi2_eff": loo_residual_result["loo_chi2_eff"],
                         "loo_rms": loo_residual_result["loo_rms"],
                         **ls_fixed_diagnostics,
+                        **slow_driver_diagnostics,
                     },
                 )
             sf_result = compute_structure_function_diagnostics(
@@ -6208,41 +6271,42 @@ def main():
                             time0=obj["time0"],
                             bands=bands,
                         )
-                    drift_plot_result = compute_g_band_residual_drift_diagnostics(
-                        obj_flat_samples_flatten_per_band,
-                        obj,
-                        bands,
-                        z=float(obj["z"]),
-                        return_series=True,
-                    )
-                    save_g_band_binned_residual_drift_plot(
-                        drift_plot_result,
-                        obj | dict(prefix=prefix, suffix=suffix),
-                    )
-                    sf_plot_result = compute_structure_function_diagnostics(
-                        obj_flat_samples_flatten_per_band,
-                        obj,
-                        float(obj["z"]),
-                        return_series=True,
-                    )
-                    save_structure_function_plot(
-                        sf_plot_result,
-                        obj | dict(prefix=prefix, suffix=suffix),
-                    )
-                    normality_plot_result = compute_multiband_residual_normality_diagnostics(
-                        obj_flat_samples_flatten_per_band,
-                        obj,
-                        bands,
-                        z=float(obj["z"]),
-                        return_series=True,
-                    )
-                    save_multiband_residual_normality_plot(
-                        normality_plot_result,
-                        obj | dict(prefix=prefix, suffix=suffix, bands=bands),
-                    )
-                    save_dm_df_over_f_distribution_plot(
-                        obj | dict(prefix=prefix, suffix=suffix, bands=bands),
-                    )
+                    if not args.only_light_curve_plot:
+                        drift_plot_result = compute_g_band_residual_drift_diagnostics(
+                            obj_flat_samples_flatten_per_band,
+                            obj,
+                            bands,
+                            z=float(obj["z"]),
+                            return_series=True,
+                        )
+                        save_g_band_binned_residual_drift_plot(
+                            drift_plot_result,
+                            obj | dict(prefix=prefix, suffix=suffix),
+                        )
+                        sf_plot_result = compute_structure_function_diagnostics(
+                            obj_flat_samples_flatten_per_band,
+                            obj,
+                            float(obj["z"]),
+                            return_series=True,
+                        )
+                        save_structure_function_plot(
+                            sf_plot_result,
+                            obj | dict(prefix=prefix, suffix=suffix),
+                        )
+                        normality_plot_result = compute_multiband_residual_normality_diagnostics(
+                            obj_flat_samples_flatten_per_band,
+                            obj,
+                            bands,
+                            z=float(obj["z"]),
+                            return_series=True,
+                        )
+                        save_multiband_residual_normality_plot(
+                            normality_plot_result,
+                            obj | dict(prefix=prefix, suffix=suffix, bands=bands),
+                        )
+                        save_dm_df_over_f_distribution_plot(
+                            obj | dict(prefix=prefix, suffix=suffix, bands=bands),
+                        )
                     if not args.disable_correlation_plot:
                         plot_correlation_matrix(obj_flat_samples_flatten_per_band, obj)
                     if not args.disable_histogram_plot:

@@ -317,7 +317,9 @@ def test_main_stops_before_writing_when_exclusions_remove_every_object(monkeypat
         sfitlc.main()
 
 
-def test_eta_prior_profile_is_forwarded_to_light_curve_fitter(monkeypatch):
+@pytest.mark.parametrize("profile", ["relaxed", "modified", "default"])
+@pytest.mark.parametrize("flag", ["--eta_prior_profile", "--eta-prior-profile"])
+def test_eta_prior_profile_is_forwarded_to_light_curve_fitter(monkeypatch, profile, flag):
     monkeypatch.setattr(
         sys,
         "argv",
@@ -325,14 +327,14 @@ def test_eta_prior_profile_is_forwarded_to_light_curve_fitter(monkeypatch):
             "sfitlc.py",
             "--fit",
             "stone",
-            "--eta_prior_profile",
-            "modified",
+            flag,
+            profile,
         ],
     )
 
     args = parse_args()
 
-    assert args.extra_fit_flags == ("--eta_prior_profile", "modified")
+    assert args.extra_fit_flags == (flag, profile)
 
 
 @pytest.mark.parametrize(
@@ -415,3 +417,42 @@ def test_regular_merge_keeps_variability_recomputation():
     assert "--compute-variability" in script
     assert "--skip-populate-sdss" not in script
     assert "#SBATCH --mem=40G" in script
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_stone_photometry_flag_forwarded(monkeypatch, enabled):
+    monkeypatch.setattr(sys, 'argv', ['sfitlc.py', '--fit', 'stone'] + (['--load_stone_lcs'] if enabled else []))
+    args = sfitlc.parse_args()
+    assert args.load_stone_lcs is enabled
+    assert '--load_stone_lcs' not in args.extra_fit_flags
+    monkeypatch.setattr(sfitlc, 'load_stone_ids', lambda: ['1'])
+    for job in build_job_configs('stone', None):
+        script = build_sbatch_script('probe', job, args, None, None, object_ids_path=Path('/tmp/ids'))
+        assert script.count('--load_stone_lcs') == int(enabled)
+        assert subprocess.run(['bash', '-n'], input=script, text=True, capture_output=True).returncode == 0
+
+
+@pytest.mark.parametrize('flag', ['--only-light-curve-plot', '--only_light_curve_plot'])
+def test_only_light_curve_flag_forwarding(monkeypatch, flag):
+    monkeypatch.setattr(sys, 'argv', ['sfitlc', '--fit', 'stone', flag])
+    args = parse_args()
+    assert args.only_light_curve_plot
+    script = build_sbatch_script('probe', JobConfig(description='stone', object_ids=['1']),
+                                args, None, None, object_ids_path=Path('/tmp/ids.txt'))
+    assert '--only-light-curve-plot' in script
+    merge = build_merge_sbatch_script('probe', 'stone', args,
+        enable_stone_identity_plot=True, enable_macleod_identity_plot=True,
+        enable_suberlak_identity_plot=True)
+    assert '--plot-stone-' not in merge
+    assert '--plot-macleod-' not in merge
+    assert '--plot-suberlak-' not in merge
+    assert 'qvc.light_curve.merge_results' in merge
+    assert '--skip-populate-sdss' in merge
+
+
+@pytest.mark.parametrize('conflict', ['--disable_combined_plot', '--disable_plot_psd'])
+def test_only_light_curve_conflicts_rejected_before_submission(monkeypatch, conflict):
+    monkeypatch.setattr(sys, 'argv', ['sfitlc', '--fit', 'stone', '--only-light-curve-plot', conflict])
+    with pytest.raises(SystemExit) as error:
+        parse_args()
+    assert error.value.code == 2

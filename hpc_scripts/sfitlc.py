@@ -51,6 +51,8 @@ def parse_args():
             "standard linear-trend fit, or only the no-linear-trend fit."
         ),
     )
+    parser.add_argument("--load_stone_lcs", action="store_true",
+                        help="Fit original Stone g/r/i photometry for the selected objects.")
     parser.add_argument("--chisq-csv", type=str, default=None, help="CSV file with object_id column for --fit chisq.")
     parser.add_argument(
         "--spectra-fit-h5",
@@ -95,7 +97,13 @@ def parse_args():
             "PREFIX_BASE plus the job description, for example PREFIX_BASE_stone."
         ),
     )
+    parser.add_argument("--only_light_curve_plot", "--only-light-curve-plot",
+                        action="store_true", help="Only create light-curve fit figures with PSD; suppress merge comparison plots.")
     args, extra_fit_flags = parser.parse_known_args()
+    if args.only_light_curve_plot:
+        for flag in ("--disable_combined_plot", "--disable_plot_psd"):
+            if flag in extra_fit_flags:
+                parser.error(f"--only-light-curve-plot is incompatible with {flag}")
     args.extra_fit_flags = tuple(extra_fit_flags)
     if args.fit == "chisq" and not args.chisq_csv:
         parser.error("--chisq-csv is required when --fit chisq is used.")
@@ -477,7 +485,11 @@ def build_sbatch_script(
                 spectra_fit_h5,
             ]
         )
+    if getattr(args, "load_stone_lcs", False):
+        base_flags.append("--load_stone_lcs")
     base_flags.extend(job.extra_flags)
+    if getattr(args, "only_light_curve_plot", False):
+        base_flags.append("--only-light-curve-plot")
     base_flags.extend(getattr(args, "extra_fit_flags", ()))
     submission = submission_record(
         "hpc_scripts/sfitlc.py",
@@ -619,17 +631,17 @@ def build_merge_sbatch_script(
     merge_cmd = (
         f'python -m qvc.light_curve.merge_results "{prefix}" {merge_mode_flag}'
     )
-    if enable_stone_identity_plot:
+    if enable_stone_identity_plot and not getattr(args, "only_light_curve_plot", False):
         merge_cmd += (
             " --plot-stone-sigma-tau-identity-grid"
             f' --stone-identity-plot-out "{build_stone_identity_plot_path(prefix, job_description)}"'
         )
-    if enable_macleod_identity_plot:
+    if enable_macleod_identity_plot and not getattr(args, "only_light_curve_plot", False):
         merge_cmd += (
             " --plot-macleod-sigma-tau-identity-grid"
             f' --macleod-identity-plot-out "{build_macleod_identity_plot_path(prefix, job_description)}"'
         )
-    if enable_suberlak_identity_plot:
+    if enable_suberlak_identity_plot and not getattr(args, "only_light_curve_plot", False):
         merge_cmd += (
             " --plot-suberlak-sigma-tau-identity-grid"
             f' --suberlak-identity-plot-out "{build_suberlak_identity_plot_path(prefix, job_description)}"'
@@ -937,7 +949,7 @@ def main():
         if args.fit == "samelength":
             samelength_merge_job_ids.append(merge_job_id)
 
-    if args.fit == "samelength":
+    if args.fit == "samelength" and not args.only_light_curve_plot:
         comparison_sbatch_script = build_samelength_comparison_sbatch_script(run_prefix_base, args)
         comparison_sbatch_path = write_job_script(
             f"{run_prefix_base}_samelength_comparison",

@@ -179,6 +179,7 @@ class ContiBLR_SHO_Model(MultiVarModel):
     n_band: int
     t_in_bands: list[JAXArray]
     concat_inds_in_bands: list[JAXArray]
+    input_inverse_order: JAXArray
 
     def __init__(
         self,
@@ -201,6 +202,7 @@ class ContiBLR_SHO_Model(MultiVarModel):
         y = jnp.asarray(y)
         yerr = jnp.asarray(yerr)
         inds = jnp.argsort(t)
+        self.input_inverse_order = jnp.argsort(inds)
 
         self.X = (t[inds], band[inds])
         self.diag = (yerr**2)[inds]
@@ -372,11 +374,27 @@ class ContiBLR_SHO_Model(MultiVarModel):
         return jnp.log(n) * k - 2 * log_likelihood
 
     @eqx.filter_jit
+    def pred_training_mean(self, params: dict[str, JAXArray]) -> JAXArray:
+        """Conditional mean in original constructor observation order."""
+        gp, inds = self._build_gp(params)
+        y = self._observed_y_sorted(params, inds)
+        alpha = gp.solver.solve_triangular(y - gp.loc)
+        alpha = gp.solver.solve_triangular(alpha, transpose=True)
+        mean = y - gp.noise @ alpha
+        return mean[jnp.argsort(inds)][self.input_inverse_order]
+
+    @eqx.filter_jit
     def pred(
         self, params: dict[str, JAXArray], X: JAXArray
     ) -> tuple[JAXArray, JAXArray]:
         new_X, _ = self.lag_transform(self.has_lag, params, X)
         gp, inds = self._build_gp(params)
+        from .quasisep_prediction import marginal_prediction, supports_shared_prediction
+        if supports_shared_prediction(gp.kernel):
+            mean, variance = marginal_prediction(
+                gp, self._observed_y_sorted(params, inds), new_X
+            )
+            return mean, jnp.sqrt(variance)
         _, cond = gp.condition(self._observed_y_sorted(params, inds), new_X)
         return cond.loc, jnp.sqrt(cond.variance)
 
