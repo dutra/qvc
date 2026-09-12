@@ -69,6 +69,7 @@ from qvc.hubble.hubble_completeness_refactored import (
     prepare_completeness_magnitude_columns,
 )
 from qvc.hubble.hubble_fit import (
+    model_plot_path,
     DEFAULT_COMPLETENESS_SIM_FILE,
     SPEED_CHOICES,
     VALID_COMPLETENESS_MODES,
@@ -916,6 +917,7 @@ def run_single_jax(
     *,
     cosmo_model="Flatw0waCDM",
     completeness=True,
+    plot_completeness=False,
     z_range=(0.44, 3.16),
     speed="fastest",
     prefix="default_jax",
@@ -989,7 +991,7 @@ def run_single_jax(
             else AGN_PIVOT_RULE
         ),
     )
-    plot_path = f"plots/hubble/{prefix}/{run_tag}"
+    plot_path = model_plot_path(prefix, cosmo_model, only_sna=only_sna, only_agn=only_agn)
     os.makedirs(plot_path, exist_ok=True)
     print("Saving plots to", plot_path)
     if completeness:
@@ -1071,7 +1073,7 @@ def run_single_jax(
             completeness_params = get_completeness_function_4d_fhost_alpha(
                 df_agn_completeness_parent,
                 sim_file=completeness_sim_file,
-                plot=True,
+                plot=plot_completeness,
                 plot_path=plot_path,
                 df_agn_fhost_population=df_agn_all,
                 z_range=completeness_z_range,
@@ -1081,7 +1083,7 @@ def run_single_jax(
             completeness_params = get_completeness_function_3d_fhost(
                 df_agn_completeness_parent,
                 sim_file=completeness_sim_file,
-                plot=True,
+                plot=plot_completeness,
                 plot_path=plot_path,
                 df_agn_fhost_population=df_agn_all,
                 z_range=completeness_z_range,
@@ -1091,7 +1093,7 @@ def run_single_jax(
             completeness_params = get_completeness_function_2d(
                 df_agn_completeness_parent,
                 sim_file=completeness_sim_file,
-                plot=True,
+                plot=plot_completeness,
                 plot_path=plot_path,
                 z_range=completeness_z_range,
                 magnitude_support_mode=magnitude_support_mode,
@@ -1525,14 +1527,15 @@ def run_single_jax(
         f"{chisq_red_hubble_debiased_data_only:.3f}"
     )
 
-    plot_completeness_diagnostics(
-        dmi_posterior_median,
-        agn_data["z"],
-        agn_data[COMPLETENESS_MAG_COL] if completeness else agn_data["apparent_mag_2500"],
-        integrals_max_w,
-        plot_path=plot_path,
-        z_range=z_range,
-    )
+    if plot_completeness and completeness:
+        plot_completeness_diagnostics(
+            dmi_posterior_median,
+            agn_data["z"],
+            agn_data[COMPLETENESS_MAG_COL] if completeness else agn_data["apparent_mag_2500"],
+            integrals_max_w,
+            plot_path=plot_path,
+            z_range=z_range,
+        )
     return flat_samples, model_labels, logZ, logZerr, age, age_err
 
 
@@ -1540,6 +1543,7 @@ def main():
     parser = argparse.ArgumentParser(description="Experimental JAX/NumPyro nested-sampling Hubble-fit pipeline.", allow_abbrev=True)
     parser.add_argument("agn_data_filepath", type=str, help="Path to AGN data file")
     parser.add_argument("--cosmo_model", type=str, default="Flatw0waCDM", choices=["FlatLambdaCDM", "FlatwCDM", "Flatw0waCDM", "FlatwpwaCDM"])
+    parser.add_argument("--plot-completeness", action="store_true", default=False, help="Generate completeness diagnostic plots.")
     parser.add_argument("--speed", type=str, choices=SPEED_CHOICES, default="production")
     spectra_group = parser.add_mutually_exclusive_group(required=True)
     spectra_group.add_argument("--spectra_fit_csv", type=str, nargs="+")
@@ -1670,6 +1674,7 @@ def main():
         _sna_Lower,
         _sna_LogdetCov,
         cosmo_model=args.cosmo_model,
+        plot_completeness=args.plot_completeness,
         completeness=not args.disable_completeness,
         z_range=tuple(args.z_range),
         speed=args.speed,

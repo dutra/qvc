@@ -20,6 +20,8 @@ sample fully complete or establish a causal explanation for residual trends.
 The existing per-object likelihood normalization is retained.
 
 The threshold grid and per-redshift retained counts are written to
-`bright_subsample_thresholds.csv` and `bright_subsample_counts.csv`. Checkpoint
+`bright_subsample_thresholds.csv` and `bright_subsample_counts.csv`. With
+`--plot-completeness`, the threshold diagnostic is also plotted. Checkpoint
 names include `_brightsub-rel0p1-dm0p25`; checkpoint metadata records the full
-cut and resume rejects mismatched definitions. Use a distinct prefix for each run.
+cut and resume rejects mismatched definitions. Plot directories use the
+cosmological model and data combination; use a distinct prefix for each run.

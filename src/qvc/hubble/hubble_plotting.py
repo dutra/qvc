@@ -6294,6 +6294,30 @@ def compute_hubble_redshift_trend(
     }
 
 
+def _hubble_linear_bin_edges(z, z_range):
+    """Sixteen equal bins within the fit range, extended on the same grid.
+
+    Construct the fit endpoints exactly so range partitioning cannot create
+    tiny boundary bins through floating-point rounding.
+    """
+    lower, upper = map(float, z_range)
+    if not np.isfinite(lower) or not np.isfinite(upper) or upper <= lower:
+        raise ValueError("z_range must contain finite, increasing bounds")
+    fit_edges = np.linspace(lower, upper, 17)
+    width = (upper - lower) / 16
+    values = np.asarray(z, dtype=float)
+    finite = values[np.isfinite(values)]
+    minimum = min(lower, float(finite.min())) if finite.size else lower
+    maximum = max(upper, float(finite.max())) if finite.size else upper
+    n_below = int(np.ceil((lower - minimum) / width))
+    n_above = int(np.ceil((maximum - upper) / width))
+    return np.concatenate((
+        lower - width * np.arange(n_below, 0, -1),
+        fit_edges,
+        upper + width * np.arange(1, n_above + 1),
+    ))
+
+
 def _interval_bin_edges(bins, lower, upper):
     """Return ``bins`` clipped to one non-empty interval."""
     bins = np.asarray(bins, dtype=float)
@@ -6455,6 +6479,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 residuals_csv_filename="residuals.csv",
                 compute_only=False,
                 *,
+                fit_quality_summary=None,
                 dmi_posterior_draws=None,
                 posterior_sample_indices=None,
                 agn_pivot_context: AgnPivotContext):
@@ -6841,9 +6866,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     mu_zscore = np.abs(residuals) / clipping_sigma
 
     # ----------------- BINNING -----------------
-    # Linear-z bins for MAIN & RESIDUALS panel
-    #bins_linear = np.arange(0.4, 3.36, 0.1)
-    bins_linear = np.arange(0.4, 3.41, 0.2)
+    # Sixteen fitted bins; outside objects use the same spacing.
+    bins_linear = _hubble_linear_bin_edges(df_agn["z"].values, z_range)
 
     print("Using linear-z bins:", bins_linear)
     linear_main_in, linear_main_out = _range_partitioned_weighted_bin_stats(
@@ -6852,7 +6876,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         binning_sigma,
         bins_linear,
         z_range,
-        min_count=5,
+        min_count=3,
         center="mid",
         fit_membership_mask=fit_membership_mask,
     )
@@ -6865,7 +6889,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         clipping_sigma,
         bins_linear,
         z_range,
-        min_count=5,
+        min_count=3,
         center="mid",
         fit_membership_mask=fit_membership_mask,
     )
@@ -6877,7 +6901,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     bins_per_decade = 6
     decades = np.log10(zmax_inset) - np.log10(zmin_inset)
     n_bins_log = max(1, int(np.ceil(decades * bins_per_decade)))
-    bins_log = np.logspace(np.log10(bins_linear[0]), np.log10(bins_linear[-1]), n_bins_log + 1)
+    bins_log = np.logspace(np.log10(0.4), np.log10(3.4), n_bins_log + 1)
     #bins_log = bins_linear
     log_main_in, log_main_out = _range_partitioned_weighted_bin_stats(
         df_agn["z"].values,
@@ -7328,6 +7352,33 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         chi2_full, chi2_data_only = _paired_reduced_chi2(
             chi2_redshift_mask
         )
+        if fit_quality_summary is not None and debias:
+            selected_mask = (
+                chi2_redshift_mask & np.isfinite(sigma_sel) & (sigma_sel > 0)
+                if sigma_sel is not None else np.zeros_like(chi2_redshift_mask)
+            )
+            chi2_selected = np.nan
+            if np.count_nonzero(selected_mask) > n_agn_params:
+                chi2_selected, _ = reduced_chi_squared(
+                    residuals[selected_mask], sigma_sel[selected_mask], n_params=n_agn_params,
+                )
+            median_sigmas = []
+            for width in (mu_pred_std_with_scatter, mu_pred_std, sigma_sel):
+                if width is None:
+                    median_sigmas.append(np.nan)
+                    continue
+                valid = chi2_redshift_mask & np.isfinite(width) & (width > 0)
+                median_sigmas.append(float(np.median(width[valid])) if np.any(valid) else np.nan)
+            fit_quality_summary.update(
+                n_fit=int(np.count_nonzero(chi2_redshift_mask)),
+                n_selected=int(np.count_nonzero(selected_mask)),
+                z_range=tuple(z_range),
+                chi2_full=float(chi2_full), chi2_data_only=float(chi2_data_only),
+                chi2_selected=float(chi2_selected), median_sigmas=median_sigmas,
+                residual_rms=float(np.sqrt(np.mean(residuals[chi2_redshift_mask] ** 2)))
+                if np.any(chi2_redshift_mask) else np.nan,
+                redshift_trend=redshift_trend,
+            )
         high_z_chi2_mask = chi2_redshift_mask & (z_values > 1.0)
         chi2_full_zgt1, chi2_data_only_zgt1 = _paired_reduced_chi2(
             high_z_chi2_mask
@@ -7336,7 +7387,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         if np.isfinite(chi2_full) and np.isfinite(chi2_data_only):
             chi2_kind = "Debiased" if debias else "Biased"
             chi2_annotation_lines = [
-                rf"{chi2_kind} $\chi^2_\nu$ (full / data only)",
+                rf"{chi2_kind} $\chi^2_\nu$ (full / data only / selected)",
                 (
                     rf"${z_range[0]:.2f}\leq z\leq{z_range[1]:.2f}$: "
                     f"{chi2_full:.2f} / {chi2_data_only:.2f}"
@@ -7353,6 +7404,32 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                         f"{chi2_data_only_zgt1:.2f}"
                     )
                 )
+            if sigma_sel is not None:
+                for line_index, mask in ((1, chi2_redshift_mask), (2, high_z_chi2_mask)):
+                    if line_index >= len(chi2_annotation_lines):
+                        continue
+                    valid = mask & np.isfinite(sigma_sel) & (sigma_sel > 0.0)
+                    selected_chi2, _ = reduced_chi_squared(
+                        residuals[valid], sigma_sel[valid], n_params=n_agn_params,
+                    )
+                    chi2_annotation_lines[line_index] += f" / {selected_chi2:.2f}"
+            else:
+                chi2_annotation_lines[0] = chi2_annotation_lines[0].replace(
+                    " / selected", ""
+                )
+            widths = [mu_pred_std_with_scatter, mu_pred_std]
+            if sigma_sel is not None:
+                widths.append(sigma_sel)
+            median_widths = []
+            for width in widths:
+                valid = chi2_redshift_mask & np.isfinite(width) & (width > 0.0)
+                median_widths.append(f"{np.median(width[valid]):.3f}")
+            chi2_annotation_lines.append(
+                r"Median $\sigma$ (mag): " + " / ".join(median_widths)
+            )
+            chi2_annotation_lines.append(
+                f"Residual RMS: {np.sqrt(np.mean(residuals[chi2_redshift_mask] ** 2)):.3f} mag"
+            )
             if (
                 redshift_trend is not None
                 and np.isfinite(redshift_trend["slope_mag_per_dex"])
@@ -7367,22 +7444,41 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                         rf"\Delta\chi^2={redshift_trend['delta_chi2']:.1f})$"
                     )
                 )
-            ax_resid.text(
-                0.02,
-                0.08,
-                "\n".join(chi2_annotation_lines),
-                transform=ax_resid.transAxes,
-                ha="left",
-                va="bottom",
-                fontsize=11,
-                bbox=dict(boxstyle="round,pad=0.02", facecolor="white", alpha=0.0, edgecolor="none"),
-                zorder=20,                
+            # Keep the fit-range summary compact enough to sit below the
+            # residual points; the CSV retains the per-object diagnostics.
+            range_summary = chi2_annotation_lines[1].split(": ", 1)[1]
+            compact_lines = [chi2_annotation_lines[0] + ": " + range_summary]
+            compact_lines.extend(
+                line for line in chi2_annotation_lines[2:]
+                if not line.startswith(r"$1.00<z")
             )
+            compact_lines = [
+                line + rf" (${z_range[0]:.2f}\leq z\leq{z_range[1]:.2f}$)"
+                if line.startswith("Residual RMS:") else line
+                for line in compact_lines
+            ]
+            for line_index, line in enumerate(compact_lines):
+                line_transform = mtransforms.offset_copy(
+                    ax_resid.transAxes, fig=fig, x=0,
+                    y=9 * (len(compact_lines) - 1 - line_index), units="points",
+                )
+                ax_resid.text(
+                    0.02, 0.05, line,
+                    transform=line_transform,
+                    ha="left", va="bottom", fontsize=7,
+                    bbox=dict(
+                        boxstyle="round,pad=0.12", facecolor="white",
+                        alpha=0.6, edgecolor="none",
+                    ),
+                    gid="hubble-fit-statistic-line",
+                    zorder=20,
+                )
         if df_calibrators is not None:
-            ax_resid.set_ylim(-0.5, 0.5)
+            ax_resid.set_ylim(-0.7, 0.7)
             ax_resid.set_xlim(df_calibrators['z'].min()*0.2, df_calibrators['z'].max()*1.1)
         else:
-            ax_resid.set_ylim(-0.5, 0.5)
+            ax_resid.set_ylim(-0.7, 0.7)
+        ax_resid.set_yticks([-0.5, 0.0, 0.5])
         #ax_resid.legend(frameon=True, loc="upper left", fontsize=10)
 
     for axi in (ax, inset_ax, ax_resid):
@@ -7506,6 +7602,18 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 )
 
     ax.legend(frameon=False, loc="lower center", bbox_to_anchor=(0.24, 0.06), fontsize=10)
+
+    # Fit membership is independent of display-only and highlighted clipped rows.
+    n_fitted_agn = int(np.count_nonzero(fit_membership_mask))
+    n_plotted_agn = int(np.count_nonzero(
+        np.isfinite(z_values) & np.isfinite(mu_pred_plot)
+    ))
+    ax.text(
+        0.03, 0.97,
+        f"AGNs: {n_fitted_agn:,} fitted; {n_plotted_agn:,} plotted",
+        transform=ax.transAxes, ha="left", va="top", fontsize=10,
+        zorder=20, gid="agn-sample-counts",
+    )
 
     # Save/show
     fig.tight_layout()

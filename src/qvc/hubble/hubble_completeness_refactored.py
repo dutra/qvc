@@ -11,6 +11,8 @@ from scipy.interpolate import interp1d
 from scipy.optimize import curve_fit
 from scipy.special import expit, logit
 from functools import partial
+from contextlib import contextmanager, nullcontext
+from time import perf_counter
 
 from qvc.hubble.hubble_utils import convert_M2500_to_logL2500, resolve_qvc_data_path
 from qvc.hubble.cuts import (
@@ -31,6 +33,30 @@ from qvc.hubble.cuts import (
 
 
 COSMO = FlatLambdaCDM(H0=70.0, Om0=0.3)
+
+
+@contextmanager
+def trace_completeness_step(label):
+    """Flush progress before work so batch logs identify an unfinished stage."""
+    started = perf_counter()
+    print(f"[Completeness timing] START {label}", flush=True)
+    try:
+        yield
+    except BaseException:
+        print(f"[Completeness timing] FAILED {label} ({perf_counter() - started:.3f}s)", flush=True)
+        raise
+    else:
+        print(f"[Completeness timing] DONE {label} ({perf_counter() - started:.3f}s)", flush=True)
+
+
+def _save_completeness_figure(fig, path, *, dpi):
+    """Separate layout (including text rendering) from PDF export timings."""
+    with trace_completeness_step(f"{path}: tight_layout"):
+        fig.tight_layout()
+    with trace_completeness_step(f"{path}: savefig (dpi={dpi})"):
+        fig.savefig(path, dpi=dpi)
+
+
 COMPLETENESS_MAG_COL = "completeness_m_2500"
 COMPLETENESS_MAG_ERR_COL = "completeness_m_2500_err"
 COMPLETENESS_FHOST_COL = "f_host_2500_psf"
@@ -1154,8 +1180,7 @@ def _plot_magnitude_tail_diagnostics(model, plot_dir):
     ax.axvline(model.mag_max, color="k", ls="--", lw=1)
     ax.set(xlabel=r"$m_{2500}$ (mag)", ylabel=r"$p(\mathrm{detect})$", xlim=(lower, upper))
     ax.legend(frameon=False)
-    fig.tight_layout()
-    fig.savefig(os.path.join(plot_dir, "completeness_magnitude_tails.pdf"), dpi=300)
+    _save_completeness_figure(fig, os.path.join(plot_dir, "completeness_magnitude_tails.pdf"), dpi=300)
     plt.close(fig)
     diagnostics = dict(model.faint_tail_diagnostics or {})
     diagnostics.update(
@@ -1548,6 +1573,7 @@ def counts_comparison_table(
     return pd.concat(rows, ignore_index=True)
 
 
+@trace_completeness_step("completeness_counts_comparison.csv + .pdf")
 def _plot_counts_comparison(
     H_obs,
     H_true,
@@ -1621,12 +1647,12 @@ def _plot_counts_comparison(
     fig.suptitle(
         f"Catalog versus LF-mock counts (mock count scale {count_scale:.3g})", fontsize=10
     )
-    fig.tight_layout()
-    fig.savefig(os.path.join(plot_dir, "completeness_counts_comparison.pdf"), dpi=200)
+    _save_completeness_figure(fig, os.path.join(plot_dir, "completeness_counts_comparison.pdf"), dpi=200)
     plt.close(fig)
     return table
 
 
+@trace_completeness_step("completeness_map_with_relative_percent_contours.pdf")
 def _plot_relative_completeness_percent(
     C_plot,
     H_true_s,
@@ -1636,8 +1662,9 @@ def _plot_relative_completeness_percent(
     z_edges,
     plot_dir,
 ):
-    """Plot robustly normalized relative completeness with percentage contours."""
+    """Logarithmic relative-completeness colors with unchanged percent contours."""
     import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
 
     relative_percent, reference, n_reference_bins = _relative_completeness_percent(
         C_plot,
@@ -1645,13 +1672,12 @@ def _plot_relative_completeness_percent(
     )
     fig, ax = plt.subplots(figsize=(7, 5))
     im = ax.imshow(
-        relative_percent.T,
+        np.ma.masked_less_equal(relative_percent.T, 0.0),
         origin="lower",
         aspect="auto",
         extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
         cmap="viridis",
-        vmin=0.0,
-        vmax=100.0,
+        norm=LogNorm(vmin=0.01, vmax=100.0, clip=True),
     )
     data_min = float(np.nanmin(relative_percent))
     data_max = float(np.nanmax(relative_percent))
@@ -1678,13 +1704,14 @@ def _plot_relative_completeness_percent(
     ax.set_ylabel(r"$z$")
     ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
     cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label("Relative completeness (%)")
-    fig.tight_layout()
+    cbar.set_ticks([0.01, 0.1, 1.0, 10.0, 100.0])
+    cbar.set_ticklabels(["0.01", "0.1", "1", "10", "100"])
+    cbar.set_label("relative completeness (%)")
     output_path = os.path.join(
         plot_dir,
         "completeness_map_with_relative_percent_contours.pdf",
     )
-    fig.savefig(output_path, dpi=600)
+    _save_completeness_figure(fig, output_path, dpi=600)
     plt.close(fig)
     print(
         "Relative completeness display: "
@@ -1825,56 +1852,56 @@ def get_completeness_function_2d(
         base_plot_path = plot_path or "plots/hubble"
         plot_dir = os.path.join(base_plot_path, "completeness")
         os.makedirs(plot_dir, exist_ok=True)
-        # Plot completeness map
-        C_plot = gaussian_filter(C, sigma=(1, 1), mode="nearest")
-        log_C_plot = np.log10(np.clip(C_plot, 1e-12, None))
-        plt.figure(figsize=(7, 5))
-        im = plt.imshow(
-            log_C_plot.T, origin="lower", aspect="auto",
-            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]], cmap="viridis",
-            vmin=-4, vmax=0
-        )
-        plt.ylabel(r'$z$')
-        # plt.xlabel(r'$L_{2500\,\mathrm{\AA}}$ (erg s$^{-1}$)')
-        #plt.xlabel(r"$m_{2500\,\mathrm{\AA}} \; (\mathrm{mag})$")
-        plt.xlabel(r'$m_{2500\,\mathrm{\AA}}$ (mag)')
+        with trace_completeness_step("completeness_map.pdf"):
+            # Plot completeness map
+            C_plot = gaussian_filter(C, sigma=(1, 1), mode="nearest")
+            log_C_plot = np.log10(np.clip(C_plot, 1e-12, None))
+            plt.figure(figsize=(7, 5))
+            im = plt.imshow(
+                log_C_plot.T, origin="lower", aspect="auto",
+                extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]], cmap="viridis",
+                vmin=-4, vmax=0
+            )
+            plt.ylabel(r'$z$')
+            # plt.xlabel(r'$L_{2500\,\mathrm{\AA}}$ (erg s$^{-1}$)')
+            #plt.xlabel(r"$m_{2500\,\mathrm{\AA}} \; (\mathrm{mag})$")
+            plt.xlabel(r'$m_{2500\,\mathrm{\AA}}$ (mag)')
 
-        cbar = plt.colorbar(im); 
-        cbar.set_label(r"Completeness $\log\,p(I{=}1\,|\,m,z)$")
-        plt.tight_layout()
-        plt.savefig(os.path.join(plot_dir, "completeness_map.pdf"), dpi=600)
-        plt.close()
+            cbar = plt.colorbar(im)
+            cbar.set_label(r"Completeness $\log\,p(I{=}1\,|\,m,z)$")
+            _save_completeness_figure(plt.gcf(), os.path.join(plot_dir, "completeness_map.pdf"), dpi=600)
+            plt.close()
 
-        # Plot the same map with automatically located log-completeness contours.
-        fig, ax = plt.subplots(figsize=(7, 5))
-        displayed_log_C = np.clip(log_C_plot, -4.0, 0.0)
-        im = ax.imshow(
-            displayed_log_C.T,
-            origin="lower",
-            aspect="auto",
-            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
-            cmap="viridis",
-            vmin=-4,
-            vmax=0,
-        )
-        contours = ax.contour(
-            mag_centers,
-            z_centers,
-            displayed_log_C.T,
-            colors="white",
-            linewidths=1.3,
-        )
-        ax.clabel(contours, inline=True, fmt="%.1f", fontsize=7)
-        ax.set_ylabel(r"$z$")
-        ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
-        cbar = fig.colorbar(im, ax=ax)
-        cbar.set_label(r"Completeness $\log\,p(I{=}1\,|\,m,z)$")
-        fig.tight_layout()
-        fig.savefig(
-            os.path.join(plot_dir, "completeness_map_with_log_contours.pdf"),
-            dpi=600,
-        )
-        plt.close(fig)
+        with trace_completeness_step("completeness_map_with_log_contours.pdf"):
+            # Plot the same map with automatically located log-completeness contours.
+            fig, ax = plt.subplots(figsize=(7, 5))
+            displayed_log_C = np.clip(log_C_plot, -4.0, 0.0)
+            im = ax.imshow(
+                displayed_log_C.T,
+                origin="lower",
+                aspect="auto",
+                extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
+                cmap="viridis",
+                vmin=-4,
+                vmax=0,
+            )
+            contours = ax.contour(
+                mag_centers,
+                z_centers,
+                displayed_log_C.T,
+                colors="white",
+                linewidths=1.3,
+            )
+            ax.clabel(contours, inline=True, fmt="%.1f", fontsize=7)
+            ax.set_ylabel(r"$z$")
+            ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
+            cbar = fig.colorbar(im, ax=ax)
+            cbar.set_label(r"Completeness $\log\,p(I{=}1\,|\,m,z)$")
+            _save_completeness_figure(fig,
+                os.path.join(plot_dir, "completeness_map_with_log_contours.pdf"),
+                dpi=600,
+            )
+            plt.close(fig)
         _plot_relative_completeness_percent(
             C_plot,
             H_true_s,
@@ -1896,51 +1923,53 @@ def get_completeness_function_2d(
             completeness_final=C,
             plot_dir=plot_dir,
         )
-        # Plot H_obs
-        plt.figure(figsize=(7, 5))
-        im = plt.imshow(
-            np.log10(np.clip(H_obs.T, 1e-12, None)), origin="lower", aspect="auto",
-            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]], cmap="plasma"
-        )
-        plt.ylabel(r"$z$")
-        plt.xlabel(r"$m_{2500\,\text{\AA}} \; (\mathrm{mag})$")
-        cbar = plt.colorbar(im); cbar.set_label(r"$\log\,H_{\rm obs}$")
-        plt.tight_layout()
-        plt.savefig(os.path.join(plot_dir, "H_obs_map.pdf"), dpi=600)
-        plt.close()
-        # Plot H_true
-        plt.figure(figsize=(7, 5))
-        im = plt.imshow(
-            np.log10(np.clip(H_true.T, 1e-12, None)), origin="lower", aspect="auto",
-            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]], cmap="cividis"
-        )
-        plt.ylabel(r"$z$")
-        plt.xlabel(r"Apparent Magnitude $m_{i,\mathrm{rest}} \; (\mathrm{mag})$")
-        cbar = plt.colorbar(im); cbar.set_label(r"$\log\,H_{\rm true}$")
-        plt.tight_layout()
-        plt.savefig(os.path.join(plot_dir, "H_true_map.pdf"), dpi=600)
-        plt.close()
+        with trace_completeness_step("H_obs_map.pdf"):
+            # Plot H_obs
+            plt.figure(figsize=(7, 5))
+            im = plt.imshow(
+                np.log10(np.clip(H_obs.T, 1e-12, None)), origin="lower", aspect="auto",
+                extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]], cmap="plasma"
+            )
+            plt.ylabel(r"$z$")
+            plt.xlabel(r"$m_{2500\,\text{\AA}} \; (\mathrm{mag})$")
+            cbar = plt.colorbar(im); cbar.set_label(r"$\log\,H_{\rm obs}$")
+            _save_completeness_figure(plt.gcf(), os.path.join(plot_dir, "H_obs_map.pdf"), dpi=600)
+            plt.close()
+        with trace_completeness_step("H_true_map.pdf"):
+            # Plot H_true
+            plt.figure(figsize=(7, 5))
+            im = plt.imshow(
+                np.log10(np.clip(H_true.T, 1e-12, None)), origin="lower", aspect="auto",
+                extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]], cmap="cividis"
+            )
+            plt.ylabel(r"$z$")
+            plt.xlabel(r"Apparent Magnitude $m_{i,\mathrm{rest}} \; (\mathrm{mag})$")
+            cbar = plt.colorbar(im); cbar.set_label(r"$\log\,H_{\rm true}$")
+            _save_completeness_figure(plt.gcf(), os.path.join(plot_dir, "H_true_map.pdf"), dpi=600)
+            plt.close()
     support_mode = normalize_completeness_magnitude_support_mode(magnitude_support_mode)
     selection_support = (
         (COMPLETENESS_TAIL_MAG_2500_MIN, COMPLETENESS_TAIL_MAG_2500_MAX)
         if support_mode == "tails"
         else (COMPLETENESS_MAG_2500_MIN, COMPLETENESS_MAG_2500_MAX)
     )
-    completeness2d = Completeness2D(
-        mag_centers,
-        z_centers,
-        C,
-        magnitude_support=(mag_min, mag_max),
-        redshift_support=(z_min, z_max),
-        selection_magnitude_support=selection_support,
-        magnitude_support_mode=support_mode,
-        tail_parent_counts_2d=H_true,
-        tail_observed_counts_2d=H_obs,
-    )
-    if plot:
-        _plot_magnitude_tail_diagnostics(
-            completeness2d, os.path.join(plot_path or "plots/hubble", "completeness")
+    with trace_completeness_step("2D interpolator and magnitude tails") if plot else nullcontext():
+        completeness2d = Completeness2D(
+            mag_centers,
+            z_centers,
+            C,
+            magnitude_support=(mag_min, mag_max),
+            redshift_support=(z_min, z_max),
+            selection_magnitude_support=selection_support,
+            magnitude_support_mode=support_mode,
+            tail_parent_counts_2d=H_true,
+            tail_observed_counts_2d=H_obs,
         )
+    if plot and completeness2d.magnitude_support_mode == "tails":
+        with trace_completeness_step("completeness_magnitude_tails.pdf + .json"):
+            _plot_magnitude_tail_diagnostics(
+                completeness2d, os.path.join(plot_path or "plots/hubble", "completeness")
+            )
     return completeness2d, mag_centers, z_centers, dm, dz, sigma_mag
 
 

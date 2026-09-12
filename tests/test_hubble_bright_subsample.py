@@ -115,6 +115,30 @@ def test_apply_cut_filters_frame_and_summarizes():
     np.testing.assert_allclose(summary["bright_cut_magnitude_at_center"], threshold)
 
 
+def test_plot_bright_subsample_cut_writes_figure(tmp_path):
+    from qvc.hubble.hubble_bright_subsample import plot_bright_subsample_cut
+
+    model, mag_grid, z_grid, _, _ = analytic_completeness_params(23.0, 0.3)
+    cut = derive_bright_subsample_cut(model, mag_grid, z_grid, completeness_min=0.75, margin=0.5)
+    rng = np.random.default_rng(1)
+    n = 300
+    frame = pd.DataFrame(
+        {
+            "object_id": [f"o{i}" for i in range(n)],
+            "z": rng.uniform(0.2, 3.5, n),
+            "m_2500_dereddened": rng.uniform(19.0, 23.5, n),
+            "m_2500_dereddened_err": np.full(n, 0.02),
+        }
+    )
+    _, keep = apply_bright_subsample_cut(frame, cut, completeness_magnitude="dereddened")
+    output = plot_bright_subsample_cut(
+        model, mag_grid, z_grid, cut, frame, keep,
+        z_range=(0.44, 3.16), completeness_magnitude="dereddened", plot_path=str(tmp_path),
+    )
+    assert output.endswith("bright_subsample_cut.pdf")
+    assert (tmp_path / "bright_subsample_cut.pdf").stat().st_size > 5000
+
+
 def test_likelihood_treats_bright_cut_as_hard_selection():
     """The Malmquist blob under the wrapped model matches a truncated-Gaussian expectation."""
     from astropy.cosmology import FlatLambdaCDM
@@ -199,7 +223,7 @@ def test_run_tag_checkpoint_validation_and_mode_table():
 
     args = SimpleNamespace(
         only_sna=False, only_agn=True, light_curve_uncertainty_mode="covariance",
-        correct_sigma_uv_host=False, hubble_tau_regressor="continuum_integral",
+        correct_sigma_uv_host=False,
         fit_alpha_lambda_term=False, fit_eta_sigma_term=False,
         fit_f_agn_psf_2500_sigmoid_term=False, fit_f_agn_psf_2500_flux_fraction_term=False,
         fit_redshift_log_f_term=False, disable_pivot_rounding=True, disable_completeness=False,
@@ -207,8 +231,8 @@ def test_run_tag_checkpoint_validation_and_mode_table():
         completeness_magnitude_support_mode="hard-cut", selection_attenuation_mode="fixed-offset",
         disable_sigma_clip_pass=True, disable_full_covariance=False, use_jax=False,
         cosmo_models=["Flatw0waCDM"], prior_profile="default", cut_tier="2",
-        magnitude_convention="dereddened", eiv_mode="none", eiv_error_scale="fixed",
-        eiv_error_scale_value=1.0, bright_subsample_completeness_min=0.9,
+        magnitude_convention="dereddened",
+        bright_subsample_completeness_min=0.9,
         bright_subsample_margin=1.0, bright_subsample_absolute=False,
     )
     table = hubble_fit.render_hubble_mode_table(args)
@@ -284,4 +308,24 @@ def test_run_single_wraps_completeness_and_records_cut(monkeypatch, tmp_path):
     )
     assert seen["pipeline_cut"] == cut
     plot_dirs = list(tmp_path.rglob("bright_subsample_thresholds.csv"))
-    assert len(plot_dirs) == 1 and "brightsub-rel0p9-dm1" in str(plot_dirs[0])
+    assert len(plot_dirs) == 1 and plot_dirs[0].parent.name == "FlatLambdaCDM_joint"
+
+
+def test_single_cli_forwards_population_before_bright_cut():
+    """A bright-selected fit must not rebuild its map from the selected rows."""
+    import ast
+    from pathlib import Path
+    from qvc.hubble import hubble_fit
+
+    tree = ast.parse(Path(hubble_fit.__file__).read_text())
+    main = next(n for n in tree.body if isinstance(n, ast.If)
+                and ast.unparse(n.test) == "__name__ == '__main__'"
+                and any(isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+                        and child.func.id == 'run_single' for child in ast.walk(n)))
+    calls = [n for n in ast.walk(main) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == 'run_single']
+    assert calls
+    for call in calls:
+        kwargs = {k.arg: k.value for k in call.keywords}
+        assert ast.unparse(kwargs['df_agn_completeness_parent']) == 'df_agn_completeness_parent'
+        assert ast.unparse(kwargs['bright_subsample_cut']) == 'bright_subsample_cut'

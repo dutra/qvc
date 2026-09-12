@@ -308,7 +308,12 @@ def test_run_mcmc_pipeline_explicit_resume_path_bypasses_default(monkeypatch, tm
     assert captured["path"] == str(explicit)
 
 
-def test_run_mcmc_pipeline_new_checkpoint_writes_fit_object_ids(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "minimal_plots, compare_sigma_only", [(False, False), (True, False), (False, True)]
+)
+def test_run_mcmc_pipeline_new_checkpoint_writes_fit_object_ids(
+    monkeypatch, tmp_path, minimal_plots, compare_sigma_only
+):
     df_agn = _minimal_agn_df()
     agn_pivot_context = _agn_pivot_context(df_agn)
     df_pantheon = _minimal_pantheon_df()
@@ -352,7 +357,8 @@ def test_run_mcmc_pipeline_new_checkpoint_writes_fit_object_ids(monkeypatch, tmp
     monkeypatch.setattr(hubble_fit, "get_model_params", lambda *args, **kwargs: ({"H0": (60.0, 80.0)}, ["H0"], ["H0"]))
     monkeypatch.setattr(hubble_fit, "get_agn_model_spec", lambda *args, **kwargs: ((), (), ()))
     monkeypatch.setattr(hubble_fit, "make_dm_function", lambda *args, **kwargs: "interp")
-    monkeypatch.setattr(hubble_fit, "plot_dynesty", lambda *args, **kwargs: None)
+    corner_calls = []
+    monkeypatch.setattr(hubble_fit, "plot_dynesty", lambda *args, **kwargs: corner_calls.append(args))
     monkeypatch.setattr(hubble_fit, "plot_completeness_diagnostics", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "evaluate_log_f", lambda *args, **kwargs: np.zeros(1, dtype=float))
     monkeypatch.setattr(hubble_fit.dyfunc, "resample_equal", lambda idx, weights: idx)
@@ -371,8 +377,11 @@ def test_run_mcmc_pipeline_new_checkpoint_writes_fit_object_ids(monkeypatch, tmp
         use_full_cov=False,
         speed="fastest",
         prefix="unit",
+        minimal_plots=minimal_plots,
+        compare_sigma_only=compare_sigma_only,
     )
 
+    assert len(corner_calls) == (0 if compare_sigma_only else 1)
     np.testing.assert_array_equal(captured["object_id_fit_selection"], df_agn["object_id"].astype(str).to_numpy())
     assert set(hubble_fit.AGN_PIVOT_CHECKPOINT_KEYS).issubset(captured)
     restored_context = hubble_fit._load_agn_pivot_context_from_checkpoint(
@@ -652,3 +661,15 @@ def test_run_all_minimal_plots_keeps_joint_and_sna_fits_and_skips_corners(monkey
     ]
     assert len(compare_calls) == 2
     assert corner_calls == []
+
+
+@pytest.mark.parametrize("only_sna,only_agn,mode", [(False, False, "joint"), (True, False, "sna"), (False, True, "agn")])
+def test_model_plot_path_has_only_model_and_fit_mode(only_sna, only_agn, mode):
+    assert hubble_fit.model_plot_path("campaign", "Flatw0waCDM", only_sna=only_sna, only_agn=only_agn) == f"plots/hubble/campaign/Flatw0waCDM_{mode}"
+
+
+def test_model_plot_routing_does_not_use_scientific_run_tag():
+    for filename in ("hubble_fit.py", "hubble_fit_jax.py"):
+        text = (SRC / "qvc" / "hubble" / filename).read_text()
+        assert 'plot_path = f"plots/hubble/{prefix}/{run_tag}"' not in text
+        assert 'plot_path = model_plot_path(prefix, cosmo_model, only_sna=only_sna, only_agn=only_agn)' in text

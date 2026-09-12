@@ -1519,15 +1519,20 @@ def test_strict_padded_resume_rejects_checkpoint_without_map_metadata():
         )
 
 
+@pytest.mark.parametrize("n_samples", [4, 1000])
 def test_compute_direct_full_sample_completeness_summaries_optionally_returns_selected_draws(
     fake_data,
     monkeypatch,
+    n_samples,
 ):
     df_agn, df_pantheon = fake_data
     df_fit = df_agn.iloc[:2].copy()
     df_plot = df_agn.iloc[:3].copy()
-    flat_samples = np.array([[10.0], [20.0], [30.0], [40.0]])
-    draw_indices = np.array([0, 2], dtype=int)
+    flat_samples = (10.0 * np.arange(1, n_samples + 1))[:, None]
+    draw_indices = (
+        np.array([0, 2], dtype=int) if n_samples == 4
+        else np.linspace(0, n_samples - 1, 256, dtype=int)[::-1]
+    )
     observed_prior_profiles = []
 
     def fake_log_likelihood(theta, *, agn_data, **kwargs):
@@ -1586,10 +1591,13 @@ def test_compute_direct_full_sample_completeness_summaries_optionally_returns_se
         0.1 * flat_samples[:, 0, None]
         + np.arange(len(df_plot), dtype=float)[None, :]
     )
-    np.testing.assert_allclose(dmi_median, np.median(all_draws, axis=0))
+    summary_indices = np.linspace(0, n_samples - 1, min(n_samples, 256), dtype=int)
+    np.testing.assert_allclose(legacy_result[0], np.median(all_draws[summary_indices], axis=0))
+    assert len(observed_prior_profiles) == len(summary_indices) + len(draw_indices)
+    np.testing.assert_allclose(dmi_median, np.median(all_draws[draw_indices], axis=0))
     np.testing.assert_allclose(
         sigma_sel_median,
-        np.median(all_sigma_sel_draws, axis=0),
+        np.median(all_sigma_sel_draws[draw_indices], axis=0),
     )
     assert isinstance(
         selected_draws,
@@ -2919,16 +2927,18 @@ def test_plot_hubble_residual_chi2_annotation_uses_debiased_full_and_data_errors
     theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
     flat_samples = np.tile(theta[None, :], (6, 1))
 
+    fit_quality_summary = {}
     text_calls = []
     original_text = Axes.text
 
     def capture_text(self, x, y, s, *args, **kwargs):
-        if r"\chi^2" in str(s):
+        if kwargs.get("gid") == "hubble-fit-statistic-line":
             text_calls.append(
                 {
                     "x": x,
                     "y": y,
                     "text": str(s),
+                    "bbox": kwargs.get("bbox"),
                     "ha": kwargs.get("ha"),
                     "va": kwargs.get("va"),
                 }
@@ -2963,6 +2973,7 @@ def test_plot_hubble_residual_chi2_annotation_uses_debiased_full_and_data_errors
         z_range=z_range,
         only_agn=only_agn,
         residuals_csv_filename=None,
+        fit_quality_summary=fit_quality_summary,
         agn_pivot_context=pivot_context,
     )
 
@@ -3007,10 +3018,13 @@ def test_plot_hubble_residual_chi2_annotation_uses_debiased_full_and_data_errors
     assert full_meta["n_params"] == data_meta["n_params"] == n_agn_params
 
     annotation = next(call for call in text_calls if "Debiased" in call["text"])
-    annotation_text = annotation["text"]
-    assert "full / data only" in annotation_text
+    annotation_text = "\n".join(call["text"] for call in text_calls)
+    assert len(text_calls) == 4
+    assert all(call["bbox"]["facecolor"] == "white" and call["bbox"]["alpha"] == 0.6 for call in text_calls)
+    assert "full / data only / selected" in annotation_text
+    assert "Median" in annotation_text
+    assert "Residual RMS:" in annotation_text
     assert r"0.44\leq z\leq3.16" in annotation_text
-    assert r"1.00<z\leq3.16" in annotation_text
     assert "Selection-weighted" in annotation_text
     assert r"\gamma_z=" in annotation_text
     assert r"\Delta\chi^2=" in annotation_text
@@ -3018,15 +3032,22 @@ def test_plot_hubble_residual_chi2_annotation_uses_debiased_full_and_data_errors
         f"{expected_full:.2f} / {expected_data:.2f}"
         in annotation_text
     )
-    assert (
-        f"{expected_high_full:.2f} / {expected_high_data:.2f}"
-        in annotation_text
-    )
-    assert "\n" in annotation["text"]
+    assert all("\n" not in call["text"] for call in text_calls)
     assert annotation["x"] == 0.02
-    assert annotation["y"] == 0.08
+    assert annotation["y"] == 0.05
     assert annotation["ha"] == "left"
     assert annotation["va"] == "bottom"
+
+    assert fit_quality_summary["n_fit"] == 15
+    assert fit_quality_summary["chi2_full"] == pytest.approx(expected_full)
+    assert fit_quality_summary["chi2_data_only"] == pytest.approx(expected_data)
+    expected_selected, _ = hubble_utils.reduced_chi_squared(
+        residuals[common_mask], sigma_sel[common_mask], n_params=n_agn_params)
+    assert fit_quality_summary["chi2_selected"] == pytest.approx(expected_selected)
+    assert fit_quality_summary["residual_rms"] == pytest.approx(np.sqrt(np.mean(residuals[common_mask] ** 2)))
+    trend = fit_quality_summary["redshift_trend"]
+    assert f"{trend['slope_mag_per_dex']:+.2f}" in annotation_text
+    assert f"{trend['slope_err_mag_per_dex']:.2f}" in annotation_text
 
 
 def test_plot_hubble_has_no_likelihood_space_chi2_override_arguments():
@@ -3224,6 +3245,7 @@ def test_run_single_only_agn_two_pass_passes_only_agn_to_pass1_clipped_plot(monk
 
 
 def test_run_single_calls_agn_table_only_for_joint_flatw0wa(monkeypatch, tmp_path):
+    monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: tmp_path / "results")
     df_agn = _make_fake_agn_sample()
     df_pantheon = _make_fake_pantheon_sample()
     priors, model_labels, _ = hubble_model.get_model_params("Flatw0waCDM", only_sna=False)
@@ -3497,7 +3519,7 @@ def test_run_single_compare_sigma_only_skips_plotting_but_keeps_fit_outputs(monk
     assert delta_m_calls == []
 
 
-def test_run_single_minimal_plots_keeps_only_debiased_hubble_plot(monkeypatch, tmp_path):
+def test_run_single_minimal_plots_keeps_debiased_hubble_and_luminosity_plots(monkeypatch, tmp_path):
     df_agn = _make_fake_agn_sample(n_agn=6)
     df_pantheon = _make_fake_pantheon_sample()
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
@@ -3505,6 +3527,7 @@ def test_run_single_minimal_plots_keeps_only_debiased_hubble_plot(monkeypatch, t
     flat_samples = np.tile(theta[None, :], (8, 1))
     pipeline_kwargs = []
     hubble_calls = []
+    luminosity_calls = []
     partial_control_calls = []
     expensive_calls = []
 
@@ -3512,7 +3535,6 @@ def test_run_single_minimal_plots_keeps_only_debiased_hubble_plot(monkeypatch, t
     _patch_run_single_plot_stack(monkeypatch)
     for name in (
         "plot_sigma_uv_mpred_correction",
-        "plot_predicted_L2500_vs_sigmahat",
         "plot_blr_diagnostics_summary",
         "plot_completeness_diagnostics",
         "plot_cosmo_corner",
@@ -3523,6 +3545,11 @@ def test_run_single_minimal_plots_keeps_only_debiased_hubble_plot(monkeypatch, t
             name,
             lambda *args, _name=name, **kwargs: expensive_calls.append(_name),
         )
+
+    monkeypatch.setattr(
+        hubble_fit, "plot_predicted_L2500_vs_sigmahat",
+        lambda *args, **kwargs: luminosity_calls.append((args, kwargs)),
+    )
 
     def fake_run_mcmc_pipeline(df_agn_arg, *args, **kwargs):
         pipeline_kwargs.append(kwargs)
@@ -3617,11 +3644,18 @@ def test_run_single_minimal_plots_keeps_only_debiased_hubble_plot(monkeypatch, t
     assert hubble_calls[0]["dmi_posterior_draws"].object_ids == tuple(
         df_agn["object_id"].astype(str)
     )
-    assert len(partial_control_calls) == 1
-    partial_args, partial_kwargs = partial_control_calls[0]
-    assert partial_args[0]["object_id"].tolist() == df_agn["object_id"].tolist()
-    np.testing.assert_array_equal(partial_args[1], np.arange(len(df_agn)))
-    assert partial_kwargs["z_range"] == (0.44, 3.16)
+    assert len(luminosity_calls) == 1
+    lum_args, lum_kwargs = luminosity_calls[0]
+    np.testing.assert_array_equal(lum_args[0], flat_samples)
+    assert lum_args[1]["object_id"].tolist() == df_agn["object_id"].tolist()
+    assert lum_kwargs["debias"] is True
+    assert lum_kwargs["show_residuals"] is True
+    assert lum_kwargs["show"] is False
+    for key in ("dmi_values", "dmi_selection_sigma"):
+        np.testing.assert_array_equal(lum_kwargs[key], hubble_calls[0][key])
+    assert lum_kwargs["plot_path"] == hubble_calls[0]["plot_path"]
+    assert lum_kwargs["agn_pivot_context"] is hubble_calls[0]["agn_pivot_context"]
+    assert partial_control_calls == []
     assert expensive_calls == []
     assert result[5].tolist() == list(range(len(df_agn)))
 
@@ -4074,7 +4108,8 @@ def test_run_mcmc_pipeline_compare_sigma_only_skips_completeness_plots_on_resume
     assert completeness_calls == [False]
 
 
-def test_run_mcmc_pipeline_uses_explicit_parent_sample_for_completeness_map(monkeypatch, tmp_path):
+@pytest.mark.parametrize("plot_completeness", [False, True])
+def test_run_mcmc_pipeline_uses_explicit_parent_sample_for_completeness_map(monkeypatch, tmp_path, plot_completeness):
     df_fit = _make_fake_agn_sample(n_agn=2)
     df_parent = _make_fake_agn_sample(n_agn=4)
     df_pantheon = _make_fake_pantheon_sample()
@@ -4144,6 +4179,7 @@ def test_run_mcmc_pipeline_uses_explicit_parent_sample_for_completeness_map(monk
         agn_pivot_context=pivot_context,
         cosmo_model="FlatLambdaCDM",
         completeness=True,
+        plot_completeness=plot_completeness,
         use_full_cov=False,
         speed="fastest",
         prefix="unit",
@@ -4160,8 +4196,9 @@ def test_run_mcmc_pipeline_uses_explicit_parent_sample_for_completeness_map(monk
             "*/completeness_audit_pre_post_cuts.pdf"
         )
     )
-    assert len(audit_paths) == 1
-    assert audit_paths[0].stat().st_size > 0
+    assert len(audit_paths) == int(plot_completeness)
+    if plot_completeness:
+        assert audit_paths[0].stat().st_size > 0
 
 
 def _patch_run_single_plot_stack(monkeypatch):
@@ -4425,7 +4462,7 @@ def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_c
     assert plot_hubble_calls[0]["dmi_posterior_draws"].object_ids == tuple(
         df_agn["object_id"].astype(str)
     )
-    assert completeness_plot_calls == [str(generated_completeness), str(generated_completeness)]
+    assert completeness_plot_calls == [str(generated_completeness)]
 
 
 def test_remap_resume_replot_checkpoint_rejects_current_cut_ids_missing_from_checkpoint():
@@ -4569,7 +4606,7 @@ def test_run_single_two_pass_sigma_clip_filters_outliers_and_writes_diagnostics(
     assert plot_hubble_calls[1]["filename"] == "hubble_diagram_pass1_full_sample_clipped_debiased.pdf"
     assert plot_hubble_calls[1]["sigma_clip_threshold"] == 3.0
 
-    run_dir = tmp_path / "plots" / "hubble" / "unit" / "FlatLambdaCDM_joint_fastest_all_z0p44_3p16_disable_completeness"
+    run_dir = tmp_path / hubble_fit.model_plot_path("unit", "FlatLambdaCDM")
     run_tag = hubble_fit.make_run_tag("FlatLambdaCDM", False, "fastest", None, (0.44, 3.16), completeness=False)
     checkpoint_paths = hubble_fit._build_checkpoint_paths("unit", run_tag)
     pass1_df = pd.read_csv(run_dir / "residuals_pass1.csv")
@@ -4949,7 +4986,7 @@ def test_run_single_two_pass_sigma_clip_keeps_new_pass2_outlier(monkeypatch, tmp
         prefix="unit",
     )
 
-    run_dir = tmp_path / "plots" / "hubble" / "unit" / "FlatLambdaCDM_joint_fastest_all_z0p44_3p16_disable_completeness"
+    run_dir = tmp_path / hubble_fit.model_plot_path("unit", "FlatLambdaCDM")
     final_df = pd.read_csv(run_dir / "residuals.csv")
     assert set(final_df["object_id"]) == set(df_agn["object_id"])
     assert final_df.loc[final_df["object_id"] == "agn_001", "mu_zscore_pass1"].item() < 3.0
@@ -5084,7 +5121,7 @@ def test_run_single_two_pass_sigma_clip_keeps_out_of_range_survivor_in_stage2_pl
     assert debias_impact_calls[0] == expected_stage2_plot_ids
     assert alphaox_calls[0] == expected_stage2_plot_ids
 
-    run_dir = tmp_path / "plots" / "hubble" / "unit" / "FlatLambdaCDM_joint_fastest_all_z0p44_3p16_disable_completeness"
+    run_dir = tmp_path / hubble_fit.model_plot_path("unit", "FlatLambdaCDM")
     final_df = pd.read_csv(run_dir / "residuals.csv")
     pass2_membership_df = pd.read_csv(run_dir / "sigma_clip_membership_pass2.csv")
     assert set(final_df["object_id"]) == set(expected_stage2_plot_ids)
@@ -5941,7 +5978,7 @@ def test_run_hubble_forwards_configurable_cumulative_cut_tier():
     assert '"QVC_HUBBLE_COMPLETENESS_MAGNITUDE_SUPPORT_MODE", "hard-cut"' in runner
     assert "--completeness-magnitude-support-mode @(completeness_magnitude_support_mode)" in runner
     assert '"QVC_CUT_A_2500_TOTAL_MAX": "none"' in runner
-    assert '"QVC_CUT_EBV_GAL_PLUS_EBV_AGN_MAX": "1.0"' in runner
+    assert '"QVC_CUT_EBV_GAL_PLUS_EBV_AGN_MAX": "none"' in runner
 
 
 @pytest.mark.parametrize('changed', [
