@@ -22,8 +22,9 @@ from qvc.hubble.hubble_utils import (
 
 
 def test_speed_names_are_ordered_and_do_not_accept_legacy_aliases():
-    assert hubble_fit.SPEED_CHOICES == ("fastest", "quick", "standard", "production")
+    assert hubble_fit.SPEED_CHOICES == ("fastest", "quicker", "quick", "standard", "production")
     assert hubble_fit.normalize_speed("fastest") == "fastest"
+    assert hubble_fit.normalize_speed("quicker") == "quicker"
     assert hubble_fit.normalize_speed("quick") == "quick"
     assert hubble_fit.normalize_speed("standard") == "standard"
     assert hubble_fit.normalize_speed("production") == "production"
@@ -673,3 +674,17 @@ def test_model_plot_routing_does_not_use_scientific_run_tag():
         text = (SRC / "qvc" / "hubble" / filename).read_text()
         assert 'plot_path = f"plots/hubble/{prefix}/{run_tag}"' not in text
         assert 'plot_path = model_plot_path(prefix, cosmo_model, only_sna=only_sna, only_agn=only_agn)' in text
+
+
+def test_quicker_dynesty_preset_and_warm_start():
+    assert hubble_fit.get_dynesty_speed_settings("quicker", 8) == {
+        "dlogz_init": 0.01, "nlive_init": 50, "nlive_batch": 25, "n_effective": 500,
+    }
+    assert hubble_fit.get_dynesty_speed_settings("quicker", 8, warm_start=True) == {
+        "dlogz_init": 0.01, "nlive_init": 17, "nlive_batch": 5, "n_effective": 50,
+    }
+
+
+def test_quicker_numpyro_preset_uses_existing_quick_settings():
+    from qvc.hubble.hubble_fit_jax import _nested_speed_preset
+    assert _nested_speed_preset("quicker", 8) == _nested_speed_preset("quick", 8)

@@ -848,7 +848,8 @@ def _nested_speed_preset(speed: str, ndim: int) -> tuple[int, int, float]:
         return 20, 10_000, 10.0
     if speed == "production":
         return max(1000, 50 * ndim), 500_000, 0.01
-    if speed == "quick":
+    # NumPyro has no Dynesty batch/effective-sample controls; reuse quick.
+    if speed in {"quicker", "quick"}:
         return 25, 10_000, 0.01
     if speed == "standard":
         return 250, 100_000, 0.01

@@ -200,7 +200,7 @@ from qvc.hubble.completeness_mock_catalog import (
 )
 
 VALID_COMPLETENESS_MODES = ("2d", "3d_fhost", "4d_fhost_alpha")
-SPEED_CHOICES = ("fastest", "quick", "standard", "production")
+SPEED_CHOICES = ("fastest", "quicker", "quick", "standard", "production")
 SIGMA_CLIP_SECOND_PASS_MODES = ("warm", "fresh")
 SHEN_LF_MODE_ENV = "QVC_HUBBLE_SHEN_LF_MODE"
 AGN_PIVOT_CHECKPOINT_KEYS = (
@@ -227,7 +227,7 @@ def normalize_speed(speed):
     else:
         raise ValueError(
             f"Invalid speed={speed!r}. Expected one of {SPEED_CHOICES}. "
-            "Ordered fastest to slowest: fastest, quick, standard, production."
+            "Ordered fastest to slowest: fastest, quicker, quick, standard, production."
         )
 
 
@@ -562,6 +562,8 @@ def get_dynesty_speed_settings(speed, ndim, *, warm_start=False):
     speed = normalize_speed(speed)
     if speed == "fastest":
         settings = dict(dlogz_init=10, n_effective=50, nlive_init=20, nlive_batch=5)
+    elif speed == "quicker":
+        settings = dict(dlogz_init=0.01, n_effective=500, nlive_init=50, nlive_batch=25)
     elif speed == "quick":
         settings = dict(dlogz_init=0.01, n_effective=2000, nlive_init=100, nlive_batch=50)
     elif speed == "standard":
@@ -6294,7 +6296,7 @@ if __name__ == "__main__":
         default="production",
         help=(
             "Sampling speed preset. Preferred names, fastest to slowest: "
-            "fastest, quick, standard, production."
+            "fastest, quicker, quick, standard, production."
         ),
     )
     parser.add_argument("--N", type=int, default=None, help="Number of AGNs to run (default: all)")
