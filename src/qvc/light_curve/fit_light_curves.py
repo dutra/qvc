@@ -1147,16 +1147,22 @@ def compute_loo_short_lag_residual_diagnostics(
         gp, inds = model._build_gp(params)
         y_sorted = np.asarray(model._observed_y_sorted(params, inds), dtype=float)
         mean_sorted = np.asarray(gp.loc, dtype=float)
-        covariance = np.asarray(gp.covariance, dtype=float)
-        covariance = 0.5 * (covariance + covariance.T)
-        scale = max(float(np.nanmedian(np.diag(covariance))), 1.0)
-        covariance = covariance + np.eye(covariance.shape[0]) * (1e-10 * scale)
-        chol = np.linalg.cholesky(covariance)
         centered = y_sorted - mean_sorted
-        alpha = np.linalg.solve(chol.T, np.linalg.solve(chol, centered))
-        precision = np.linalg.solve(chol.T, np.linalg.solve(chol, np.eye(chol.shape[0])))
-        precision_diag = np.diag(precision)
-        loo_standardized = alpha / np.sqrt(np.maximum(precision_diag, 1e-300))
+        from .quasisep_prediction import regularized_loo_residuals, supports_shared_prediction
+        if supports_shared_prediction(gp.kernel):
+            loo_standardized = np.asarray(
+                regularized_loo_residuals(gp.solver.matrix, jnp.asarray(centered))
+            )
+        else:
+            covariance = np.asarray(gp.covariance, dtype=float)
+            covariance = 0.5 * (covariance + covariance.T)
+            scale = max(float(np.nanmedian(np.diag(covariance))), 1.0)
+            covariance = covariance + np.eye(covariance.shape[0]) * (1e-10 * scale)
+            chol = np.linalg.cholesky(covariance)
+            alpha = np.linalg.solve(chol.T, np.linalg.solve(chol, centered))
+            precision = np.linalg.solve(chol.T, np.linalg.solve(chol, np.eye(chol.shape[0])))
+            precision_diag = np.diag(precision)
+            loo_standardized = alpha / np.sqrt(np.maximum(precision_diag, 1e-300))
         finite_loo = np.isfinite(loo_standardized)
         loo_standardized_finite = loo_standardized[finite_loo]
         if not loo_standardized_finite.size:
@@ -4997,7 +5003,11 @@ def _model_params_at_values(model, rng_key, values):
 def _flux_linearized_pseudo_data_from_prediction(obj_dict, model, params):
     """Build one Gauss-Newton pseudo-data update for the magnitude likelihood."""
 
-    r_star, _ = model.pred(params, obj_dict["X"])
+    from .quasisep_prediction import supports_shared_prediction
+    if supports_shared_prediction(model):
+        r_star = model.pred_training_mean(params)
+    else:
+        r_star, _ = model.pred(params, obj_dict["X"])
     r_star = np.asarray(device_get(r_star), dtype=float)
     y_mag = np.asarray(obj_dict["y"], dtype=float)
     yerr_mag = np.asarray(obj_dict["yerr"], dtype=float)
