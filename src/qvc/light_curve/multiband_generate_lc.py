@@ -512,33 +512,6 @@ def concat_light_curves(
             dtype=float,
         )
 
-    def _cadence_stats(all_times):
-        all_times = np.asarray(all_times, dtype=float)
-        all_times = all_times[np.isfinite(all_times)]
-        all_times = np.sort(all_times)
-
-        tol_min = 30
-        tol = tol_min / 1440.0
-        if len(all_times) > 1:
-            keep = np.ones_like(all_times, dtype=bool)
-            keep[1:] = np.diff(all_times) > tol
-            all_times = all_times[keep]
-
-        gap_days = 30
-        if len(all_times) > 1:
-            dt = np.diff(all_times)
-            dt = dt[(dt > 0) & (dt < gap_days)]
-        else:
-            dt = np.array([])
-
-        if len(dt) > 0:
-            cadence = float(np.median(dt))
-            cadence_err = float(np.percentile(dt, 84) - np.percentile(dt, 16))
-        else:
-            cadence = np.nan
-            cadence_err = np.nan
-        return cadence, cadence_err
-
     cat_ps1 = cat.loc[pd.notna(cat["ps1objID"])].copy()
     if not cat_ps1.empty:
         cat_ps1 = cat_ps1[
@@ -794,7 +767,36 @@ def load_nearby_lcs(name):
         'magerrs': magerrs,
     }]
 
-def load_stone_lcs(filter_object_ids=[], skip=None, N=None):
+def _cadence_stats(all_times):
+    all_times = np.asarray(all_times, dtype=float)
+    all_times = all_times[np.isfinite(all_times)]
+    all_times = np.sort(all_times)
+
+    tol_min = 30
+    tol = tol_min / 1440.0
+    if len(all_times) > 1:
+        keep = np.ones_like(all_times, dtype=bool)
+        keep[1:] = np.diff(all_times) > tol
+        all_times = all_times[keep]
+
+    gap_days = 30
+    if len(all_times) > 1:
+        dt = np.diff(all_times)
+        dt = dt[(dt > 0) & (dt < gap_days)]
+    else:
+        dt = np.array([])
+
+    if len(dt) > 0:
+        cadence = float(np.median(dt))
+        cadence_err = float(np.percentile(dt, 84) - np.percentile(dt, 16))
+    else:
+        cadence = np.nan
+        cadence_err = np.nan
+    return cadence, cadence_err
+
+
+def load_stone_lcs(filter_object_ids=None, skip=None, N=None):
+    """Load original g/r/i photometry; filter matched IDs before slicing."""
     # Load Stone et al. (2022) data
     fits_file = resolve_qvc_data_path(STONE_FITS_RELATIVE_PATH)
     with fits.open(fits_file) as hdul:
@@ -809,10 +811,6 @@ def load_stone_lcs(filter_object_ids=[], skip=None, N=None):
     stone_lcs = OrderedDict()
 
     for i in range(len(data)):
-        if skip is not None and i < skip:
-            continue
-        if N is not None and i >= skip + N:
-            break
         dbid = data['DBID'][i]
         stone_lcs[dbid] = {
             'stone_DBID': dbid,
@@ -827,17 +825,22 @@ def load_stone_lcs(filter_object_ids=[], skip=None, N=None):
             'mags': {},
             'magerrs': {},
             'times': {},
+            'surveys': {},
+            'survey_names': ('sdss', 'ps1', 'des', 'decam'),
         }
         for band in bands:
             # Mask NaNs for MJD, MAG, and MAG_ERR fields
             mjd = data[f'MJD_{band}'][i]
             mag = data[f'MAG_{band}'][i]
             mag_err = data[f'MAG_ERR_{band}'][i]
-            mask = ~np.isnan(mjd) & ~np.isnan(mag) & ~np.isnan(mag_err)
+            mask = np.isfinite(mjd) & np.isfinite(mag) & np.isfinite(mag_err) & (mag_err > 0)
 
             stone_lcs[dbid]['mags'][band] = mag[mask]
             stone_lcs[dbid]['magerrs'][band] = mag_err[mask]
             stone_lcs[dbid]['times'][band] = mjd[mask]
+            stone_lcs[dbid]['surveys'][band] = np.char.lower(
+                np.asarray(data[f'SURVEY_{band}'][i][mask], dtype=str)
+            )
 
             stone_lcs[dbid] |= {
                 # f'MJD_{band}': mjd[mask],
@@ -868,10 +871,20 @@ def load_stone_lcs(filter_object_ids=[], skip=None, N=None):
             continue
         stone_lcs[stone_dbid]['object_id'] = object_id
 
+    objects = list(stone_lcs.values())
     if filter_object_ids:
-        stone_lcs = {k: v for k, v in stone_lcs.items() if v.get('object_id') in filter_object_ids}
-        print(f"After filtering, {len(stone_lcs)} Stone objects remain.")
-    return list(stone_lcs.values())
+        requested = {str(oid) for oid in filter_object_ids}
+        objects = [obj for obj in objects if obj['object_id'] in requested]
+    start = 0 if skip is None else skip
+    if start < 0 or (N is not None and N < 0):
+        raise ValueError("Stone skip and N must be nonnegative")
+    objects = objects[start:None if N is None else start + N]
+    for obj in objects:
+        all_times = np.concatenate(list(obj['times'].values()))
+        obj['cadence'], obj['cadence_err'] = _cadence_stats(all_times)
+        obj['number_points'] = len(all_times)
+    return objects
+
 
 def load_s82_from_hdf5(file_path="s82_objs.h5"):
     s82_objs = []
@@ -898,7 +911,7 @@ def load_s82_from_hdf5(file_path="s82_objs.h5"):
 
     return s82_objs
 
-def populate_sdss_fields(s82_objs, progress_bar=False):
+def populate_sdss_fields(s82_objs, progress_bar=False, *, preserve_stone_redshift=False):
     redshift_tolerance = 1.0e-3
     _ = progress_bar
     if not s82_objs:
@@ -1054,4 +1067,8 @@ def populate_sdss_fields(s82_objs, progress_bar=False):
             raise ValueError(f"populate_sdss_fields did not populate finite z for object_id={obj['object_id']}")
         if "z_err" not in obj or not np.isfinite(obj["z_err"]):
             raise ValueError(f"populate_sdss_fields did not populate finite z_err for object_id={obj['object_id']}")
+    if preserve_stone_redshift:
+        for obj in s82_objs:
+            obj["catalog_z"] = obj["z"]
+            obj["z"] = obj["stone_Z"]
     return s82_objs
