@@ -120,4 +120,3 @@ def test_cli_accepts_profile_without_running_fit(monkeypatch, flag, variant):
     monkeypatch.setattr(sys, "argv", ["fit_light_curves", "--model_variant", variant, flag, PROFILE])
     with pytest.raises(Parsed):
         fit.main()
-

@@ -160,4 +160,3 @@ def test_marginal_prediction_gradients(variant, pole_case):
         assert all(np.isfinite(x).all() for x in actual)
         for x, y in zip(actual, expected):
             np.testing.assert_allclose(x, y, atol=2e-9, rtol=2e-7)
-

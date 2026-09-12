@@ -5900,9 +5900,10 @@ def main():
             stage_diagnostics = unavailable_nuts_diagnostics()
             flux_linearized_fit_obj = None
             posterior_summary = {}
+            saved_sample_metadata = {}
             if args.resume:
                 logging.warning("[DEBUG] Loading saved samples (flat) — developer mode.")
-                obj_flat_samples = load_obj_samples_from_hdf5(oid)
+                obj_flat_samples, saved_sample_metadata = load_obj_samples_from_hdf5(oid, return_metadata=True)
                 samples_per_chain = None
             else:
                 key = random.PRNGKey(0)
@@ -6162,6 +6163,14 @@ def main():
                 disk_order=args.disk_order,
                 erlang_order=args.erlang_order,
             )
+            slow_driver_diagnostics = {}
+            if args.model_variant == SHARED_LATENT_BLR_VARIANT:
+                from .slow_driver_diagnostics import slow_pole_convergence
+                slow_driver_diagnostics = slow_pole_convergence(
+                    samples_per_chain, args.model_variant, obj["z"],
+                    saved_diagnostics=saved_sample_metadata,
+                )
+                result.update(slow_driver_diagnostics)
             adf_result = compute_object_adf_diagnostics(
                 obj_flat_samples_flatten_per_band,
                 obj,
@@ -6198,6 +6207,7 @@ def main():
                         "loo_chi2_eff": loo_residual_result["loo_chi2_eff"],
                         "loo_rms": loo_residual_result["loo_rms"],
                         **ls_fixed_diagnostics,
+                        **slow_driver_diagnostics,
                     },
                 )
             sf_result = compute_structure_function_diagnostics(
