@@ -19,11 +19,26 @@ completeness remains active inside the cut. This does not make the retained
 sample fully complete or establish a causal explanation for residual trends.
 The existing per-object likelihood normalization is retained.
 
-The threshold grid and per-redshift retained counts are written to
-`bright_subsample_thresholds.csv` and `bright_subsample_counts.csv`. With
-`--plot-completeness`, the threshold diagnostic is also plotted. Checkpoint
-names include `_brightsub-rel0p1-dm0p25`; checkpoint metadata records the full
-cut and resume rejects mismatched definitions. Plot directories use the
+All completeness maps, audits, posterior correction plots, and bright-cut
+artifacts live under `plots/hubble/<prefix>/<cosmology_mode>/completeness/`.
+No completeness folder is generated directly under the prefix. Each AGN
+cosmology gets its own complete set, using the same original bright selection
+and completeness parent; SNe-only fits produce none. The shared mock catalog
+used to derive the bright cut is generated under the first AGN model and
+reused by subsequent models. Existing output directories are not migrated.
+Python callers can supply `bright_subsample_plot_data=BrightSubsamplePlotData(...)`
+to `run_single` or `run_all` to export the original pre-bright sample counts
+and selection plot. Omitting it retains threshold-only export for callers
+that do not have the original selection inputs.
+
+Relative to each model directory, the threshold grid and retained counts are written to
+`completeness/bright_subsample_thresholds.csv` and
+`completeness/bright_subsample_counts.csv`. With `--plot-completeness`, the
+threshold diagnostic is written to `completeness/bright_subsample_cut.pdf`.
+The redshift-binned cut report remains at
+`plots/hubble/<prefix>/diagnostics/cut_diagnostics_by_z.csv`. Checkpoint
+metadata records the full cut and the detailed `run_tag` (including
+`_brightsub-rel0p1-dm0p25`); resume rejects mismatched cut definitions. Plot directories use the
 cosmological model and data combination; use a distinct prefix for each run.
 
 
@@ -40,3 +55,12 @@ Use a distinct prefix when retaining comparison plots from different runs.
 Comparison HDF5 filenames retain the speed, redshift/sample settings, LF,
 attenuation mode, map variant, and bright-cut tag. Individual cosmology plot
 directories keep their existing layout.
+
+Posterior files use the same cosmology/mode name as the plot folder, under
+`hubble_posteriors/<prefix>/` in the configured results directory:
+`Flatw0waCDM_joint.h5`, `Flatw0waCDM_agn.h5`, or `Flatw0waCDM_sna.h5`.
+Two-pass fits retain `_pass1.h5` and `_pass2.h5` suffixes; JAX files use
+`<cosmology>_<mode>_jax.h5`. Automatic resume searches these shorter names.
+Existing files are not renamed; use an explicit resume path for legacy names.
+Use separate prefixes to retain different configurations. Detailed settings
+remain in checkpoint metadata, including `run_tag`, rather than filenames.

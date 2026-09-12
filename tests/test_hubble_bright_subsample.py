@@ -136,7 +136,7 @@ def test_plot_bright_subsample_cut_writes_figure(tmp_path):
         z_range=(0.44, 3.16), completeness_magnitude="dereddened", plot_path=str(tmp_path),
     )
     assert output.endswith("bright_subsample_cut.pdf")
-    assert (tmp_path / "bright_subsample_cut.pdf").stat().st_size > 5000
+    assert (tmp_path / "completeness" / "bright_subsample_cut.pdf").stat().st_size > 5000
 
 
 def test_likelihood_treats_bright_cut_as_hard_selection():
@@ -308,7 +308,9 @@ def test_run_single_wraps_completeness_and_records_cut(monkeypatch, tmp_path):
     )
     assert seen["pipeline_cut"] == cut
     plot_dirs = list(tmp_path.rglob("bright_subsample_thresholds.csv"))
-    assert len(plot_dirs) == 1 and plot_dirs[0].parent.name == "FlatLambdaCDM_joint"
+    assert len(plot_dirs) == 1
+    assert plot_dirs[0].parent.name == "completeness"
+    assert plot_dirs[0].parent.parent.name == "FlatLambdaCDM_joint"
 
 
 def test_single_cli_forwards_population_before_bright_cut():
@@ -329,6 +331,7 @@ def test_single_cli_forwards_population_before_bright_cut():
         kwargs = {k.arg: k.value for k in call.keywords}
         assert ast.unparse(kwargs['df_agn_completeness_parent']) == 'df_agn_completeness_parent'
         assert ast.unparse(kwargs['bright_subsample_cut']) == 'bright_subsample_cut'
+        assert ast.unparse(kwargs['bright_subsample_plot_data']) == 'bright_subsample_plot_data'
 
 
 @pytest.mark.parametrize("run", ["single", "full"])
@@ -360,3 +363,144 @@ def test_cli_sna_ignores_agn_completeness_options():
     assert args.plot_completeness is False
     assert args.bright_subsample_completeness_min is None
     assert args.selection_attenuation_mode == "fixed-offset"
+
+
+@pytest.mark.parametrize("dispatch", ["single", "full"])
+@pytest.mark.parametrize("only_agn", [False, True])
+def test_model_completeness_outputs_preserve_selection(monkeypatch, tmp_path, dispatch, only_agn):
+    from pathlib import Path
+    from test_hubble_fit_smoke import (
+        _make_fake_agn_sample, _make_fake_pantheon_sample, _patch_run_single_plot_stack,
+    )
+    from qvc.hubble import hubble_fit, hubble_plotting
+    from qvc.hubble.hubble_bright_subsample import BrightSubsamplePlotData
+    from qvc.hubble.hubble_model import get_model_params
+
+    parent = _make_fake_agn_sample(n_agn=8)
+    before = parent.iloc[1:].copy()  # Earlier cuts differ from the map population.
+    prepared = hubble_fit.prepare_completeness_magnitude_columns(before, "attenuated")
+    threshold = float(prepared[COMPLETENESS_MAG_COL].median())
+    params = analytic_completeness_params(23., .3)
+    cut = BrightSubsampleCut(.1, .25, tuple(params[2]), (threshold,) * len(params[2]))
+    selected, keep = apply_bright_subsample_cut(before, cut, completeness_magnitude="attenuated")
+    assert 0 < len(selected) < len(before) < len(parent)
+    plot_data = BrightSubsamplePlotData(params, before.copy(), keep.copy())
+    sample_calls, map_calls = [], []
+
+    def sample(frame, *args, **kwargs):
+        if kwargs["only_sna"]:
+            assert not kwargs["completeness"]
+        else:
+            assert frame.object_id.tolist() == selected.object_id.tolist()
+            assert kwargs["df_agn_completeness"].object_id.tolist() == parent.object_id.tolist()
+        sample_calls.append(kwargs["only_sna"])
+        priors, labels, _ = get_model_params(kwargs["cosmo_model"], only_sna=kwargs["only_sna"], only_agn=only_agn and not kwargs["only_sna"])
+        theta = np.array([(priors[key][0] + priors[key][1]) / 2 for key in labels])
+        return (np.tile(theta, (8, 1)), list(labels), None, None, -21., .2,
+                np.zeros(len(frame)), np.full(len(frame), .05), None)
+
+    def build(frame, *args, **kwargs):
+        assert frame.object_id.tolist() == parent.object_id.tolist()
+        if kwargs["plot"]:
+            map_calls.append(kwargs["plot_path"])
+        return params
+
+    def direct(samples, *, df_agn_plot_sample, dmi_draw_indices, **kwargs):
+        n = len(df_agn_plot_sample)
+        return (np.zeros(n), np.full(n, .02), np.full(n, .07),
+                hubble_plotting.HubblePosteriorDrawSelection(
+                    values=np.zeros((len(dmi_draw_indices), n)),
+                    sample_indices=np.asarray(dmi_draw_indices),
+                    object_ids=tuple(df_agn_plot_sample.object_id.astype(str))))
+
+    monkeypatch.chdir(tmp_path)
+    _patch_run_single_plot_stack(monkeypatch)
+    monkeypatch.setattr(hubble_fit, "run_mcmc_pipeline", sample)
+    monkeypatch.setattr(hubble_fit, "_build_completeness_params", build)
+    monkeypatch.setattr(hubble_fit, "_compute_direct_full_sample_completeness_summaries", direct)
+    monkeypatch.setattr(hubble_fit, "plot_completeness_diagnostics", hubble_plotting.plot_completeness_diagnostics)
+    monkeypatch.setattr(hubble_fit, "plot_hubble", lambda *a, **k: tuple(np.zeros(len(a[1])) for _ in range(5)))
+    monkeypatch.setattr(hubble_fit, "compare_models_by_log_evidence_all", lambda *a, **k: {})
+    monkeypatch.setattr(hubble_fit, "extract_cosmo_results_from_samples", lambda *a, **k: {})
+    monkeypatch.setattr(hubble_fit, "write_results_tex_variables", lambda *a, **k: None)
+    monkeypatch.setattr(hubble_fit, "save_cosmo_results_hdf5", lambda *a, **k: None)
+    kwargs = dict(completeness=True, completeness_sim_file="shared-mock.h5",
+                  completeness_lf_model="wang2026_type1_lade_a", completeness_magnitude="attenuated",
+                  df_agn_completeness_parent=parent, bright_subsample_cut=cut,
+                  bright_subsample_plot_data=plot_data, plot_completeness=True,
+                  minimal_plots=True, disable_sigma_clip_pass=True, only_agn=only_agn,
+                  prefix="outputs", speed="quicker")
+    models = ["Flatw0waCDM", "FlatLambdaCDM"] if dispatch == "full" else ["FlatLambdaCDM"]
+    args = (selected, parent, _make_fake_pantheon_sample(), None, True, None)
+    if dispatch == "full":
+        hubble_fit.run_all(*args, cosmo_models=models, **kwargs)
+    else:
+        hubble_fit.run_single(*args, cosmo_model=models[0], **kwargs)
+    root = Path("plots/hubble/outputs")
+    assert not (root / "completeness").exists()
+    assert len(map_calls) == len(models)
+    assert sample_calls.count(False) == len(models)
+    assert sample_calls.count(True) == (len(models) if dispatch == "full" and not only_agn else 0)
+    expected_counts = summarize_bright_subsample_cut(before, keep, cut, z_range=(.44, 3.16))
+    for model in models:
+        folder = root / f"{model}_{'agn' if only_agn else 'joint'}" / "completeness"
+        assert (folder / "bright_subsample_thresholds.csv").is_file()
+        counts = pd.read_csv(folder / "bright_subsample_counts.csv")
+        np.testing.assert_array_equal(counts.n_before, expected_counts.n_before)
+        np.testing.assert_array_equal(counts.n_kept, expected_counts.n_kept)
+        for name in ("bright_subsample_cut.pdf", "completeness_vs_mag_at_redshifts.pdf",
+                     "dmi_vs_z_posterior_median.pdf", "dmi_vs_m2500_posterior_median.pdf"):
+            assert (folder / name).read_bytes().startswith(b"%PDF")
+        assert not (root / f"{model}_sna" / "completeness").exists()
+
+
+@pytest.mark.parametrize("only_agn", [False, True])
+def test_cli_bright_preparation_uses_first_model_folder(monkeypatch, tmp_path, only_agn):
+    """Execute the shared CLI preparation block without loading catalogs or sampling."""
+    import ast
+    from pathlib import Path
+    from test_hubble_fit_smoke import _make_fake_agn_sample
+    from qvc.hubble import hubble_fit
+
+    parent = _make_fake_agn_sample(n_agn=8)
+    before = parent.iloc[1:].copy()
+    args = SimpleNamespace(
+        prefix="cli", cosmo_models=["Flatw0waCDM", "FlatLambdaCDM"], only_agn=only_agn,
+        z_range=(.44, 3.16), completeness_magnitude="attenuated", completeness_sim_file=None,
+        completeness_lf_model="wang2026_type1_lade_a", completeness_magnitude_support_mode="hard-cut",
+        bright_subsample_completeness_min=.1, bright_subsample_margin=.25,
+        bright_subsample_absolute=False,
+    )
+    expected = f"plots/hubble/cli/Flatw0waCDM_{'agn' if only_agn else 'joint'}"
+    mock_calls, map_calls = [], []
+
+    def mock_catalog(plot_path, **kwargs):
+        assert plot_path == expected
+        assert kwargs["lf_model"] == "wang2026_type1_lade_a"
+        mock_calls.append(plot_path)
+        folder = Path(plot_path) / "completeness"
+        folder.mkdir(parents=True)
+        return str(folder / "mock.h5")
+
+    def build(frame, *unused, **kwargs):
+        assert frame.object_id.tolist() == parent.object_id.tolist()
+        assert kwargs["plot_path"] == expected
+        assert kwargs["plot"] is False
+        map_calls.append(frame)
+        return analytic_completeness_params(23., .3)
+
+    monkeypatch.chdir(tmp_path)
+    tree = ast.parse(Path(hubble_fit.__file__).read_text())
+    block = next(node for node in ast.walk(tree) if isinstance(node, ast.If)
+                 and ast.unparse(node.test) == "args.bright_subsample_completeness_min is not None"
+                 and any(isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+                         and child.func.id == "derive_bright_subsample_cut" for child in ast.walk(node)))
+    namespace = dict(vars(hubble_fit), args=args, df_agn=before.copy(), df_agn_all=parent,
+                     df_agn_completeness_parent=parent, loaded_agn=(before, parent, parent),
+                     generate_fresh_completeness_sim_file=mock_catalog, _build_completeness_params=build)
+    exec(compile(ast.Module(body=[block], type_ignores=[]), "<CLI bright preparation>", "exec"), namespace)
+    assert len(mock_calls) == len(map_calls) == 1
+    assert not Path("plots/hubble/cli/completeness").exists()
+    data = namespace["bright_subsample_plot_data"]
+    assert data.before.object_id.tolist() == before.object_id.tolist()
+    assert namespace["df_agn"].object_id.tolist() == before.loc[data.keep].object_id.tolist()

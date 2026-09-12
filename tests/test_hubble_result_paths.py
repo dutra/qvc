@@ -183,7 +183,7 @@ def test_run_mcmc_pipeline_default_resume_uses_result_dir(monkeypatch, tmp_path)
     pivot_payload = hubble_fit._agn_pivot_checkpoint_payload(agn_pivot_context)
     df_pantheon = _minimal_pantheon_df()
     result_root = tmp_path / "result_root"
-    expected = result_root / "hubble_posteriors" / "unit" / "posteriors_FlatLambdaCDM_joint_fastest_all_z0p44_3p16_disable_completeness.h5"
+    expected = result_root / "hubble_posteriors" / "unit" / "FlatLambdaCDM_joint.h5"
     captured = {}
 
     monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: result_root)
@@ -383,6 +383,9 @@ def test_run_mcmc_pipeline_new_checkpoint_writes_fit_object_ids(
     )
 
     assert len(corner_calls) == (0 if compare_sigma_only else 1)
+    assert captured["run_tag"] == hubble_fit.make_run_tag(
+        "FlatLambdaCDM", False, "fastest", None, (.44, 3.16), completeness=False
+    )
     np.testing.assert_array_equal(captured["object_id_fit_selection"], df_agn["object_id"].astype(str).to_numpy())
     assert set(hubble_fit.AGN_PIVOT_CHECKPOINT_KEYS).issubset(captured)
     restored_context = hubble_fit._load_agn_pivot_context_from_checkpoint(
@@ -691,3 +694,43 @@ def test_quicker_dynesty_preset_and_warm_start():
 def test_quicker_numpyro_preset_uses_existing_quick_settings():
     from qvc.hubble.hubble_fit_jax import _nested_speed_preset
     assert _nested_speed_preset("quicker", 8) == _nested_speed_preset("quick", 8)
+
+
+@pytest.mark.parametrize("only_sna,only_agn,mode", [(False, False, "joint"), (True, False, "sna"), (False, True, "agn")])
+def test_short_checkpoint_names_and_stage_metadata(monkeypatch, tmp_path, only_sna, only_agn, mode):
+    monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: tmp_path)
+    paths = hubble_fit._build_checkpoint_paths("campaign", "Flatw0waCDM", only_sna=only_sna, only_agn=only_agn)
+    name = f"Flatw0waCDM_{mode}"
+    folder = tmp_path / "hubble_posteriors" / "campaign"
+    assert paths == {stage: str(folder / f"{name}{suffix}.h5") for stage, suffix in
+                     (("single", ""), ("pass1", "_pass1"), ("pass2", "_pass2"))}
+    tag = hubble_fit.make_run_tag("Flatw0waCDM", only_sna, "quicker", None, (.44, 3.16), only_agn=only_agn)
+    hubble_fit.save_chains(paths["single"], run_tag=tag, flat_samples=np.ones((2, 3)))
+    assert hubble_fit.resolve_resume_checkpoint_path(True, paths["single"]) == paths["single"]
+    for stage in ("pass1", "pass2"):
+        hubble_fit._write_stage_checkpoint(paths[stage], source_checkpoint_file=paths["single"], sigma_clip_pass_stage=stage)
+        saved = hubble_fit.load_chains(paths[stage])
+        assert saved["run_tag"] == tag
+        assert saved["sigma_clip_pass_stage"] == stage
+    assert hubble_fit._resolve_two_pass_resume_checkpoint(True, "both", paths) == paths["pass2"]
+    assert hubble_fit._resolve_two_pass_resume_checkpoint(True, "pass1", paths) == paths["pass1"]
+    legacy = folder / f"posteriors_{tag}.h5"
+    hubble_fit.save_chains(legacy, run_tag=tag)
+    assert hubble_fit.resolve_resume_checkpoint_path(str(legacy), paths["single"]) == str(legacy)
+
+
+@pytest.mark.parametrize("only_sna,only_agn,mode", [(False, False, "joint"), (True, False, "sna"), (False, True, "agn")])
+def test_jax_checkpoint_filename_and_run_tag_metadata(tmp_path, only_sna, only_agn, mode):
+    """Exercise the JAX output expressions without launching its sampler."""
+    import ast
+    tree = ast.parse((SRC / "qvc/hubble/hubble_fit_jax.py").read_text())
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_single_jax")
+    names = {"output_name", "checkpoint_file", "checkpoint_payload"}
+    assignments = [node for node in function.body if isinstance(node, ast.Assign)
+                   and any(isinstance(target, ast.Name) and target.id in names for target in node.targets)]
+    payload = next(node.value for node in assignments if node.targets[0].id == "checkpoint_payload")
+    assert next(kw.value.id for kw in payload.keywords if kw.arg == "run_tag") == "run_tag"
+    namespace = dict(checkpoint_folder=tmp_path, cosmo_model="Flatw0waCDM", only_sna=only_sna,
+                     only_agn=only_agn, model_output_name=hubble_fit.model_output_name)
+    exec(compile(ast.Module(body=assignments[:2], type_ignores=[]), "<JAX output paths>", "exec"), namespace)
+    assert namespace["checkpoint_file"] == str(tmp_path / f"Flatw0waCDM_{mode}_jax.h5")

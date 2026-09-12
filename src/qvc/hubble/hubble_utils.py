@@ -1364,7 +1364,8 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         report_path = Path(cut_report_path)
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(table_text + "\n", encoding="utf-8")
-        diagnostics_path = report_path.parent / "cut_diagnostics_by_z.csv"
+        diagnostics_path = report_path.parent / "diagnostics" / "cut_diagnostics_by_z.csv"
+        diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(cut_rows).to_csv(diagnostics_path, index=False)
 
     def _plot_sigma_tau_ls_identity(frame, *, suffix, sigma_limits=None, tau_limits=None):

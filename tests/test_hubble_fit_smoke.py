@@ -2039,6 +2039,7 @@ def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path, requested_c
         selection_attenuation_mode="joint-posterior",
         plot_completeness=True,
         bright_subsample_cut=object(),
+        bright_subsample_plot_data=SimpleNamespace(write=forbidden),
         use_full_cov=False,
         only_sna=True,
         speed="fastest",
@@ -2056,6 +2057,7 @@ def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path, requested_c
     assert residuals is None
     assert age == 13.7
     assert age_err == 0.2
+    assert not list(tmp_path.rglob("completeness"))
 
 
 def test_run_single_only_agn_keeps_agn_hubble_plots(fake_data, monkeypatch, tmp_path):
@@ -4071,8 +4073,7 @@ def test_run_mcmc_pipeline_compare_sigma_only_skips_completeness_plots_on_resume
         / "hubble_posteriors"
         / "unit"
         / (
-                "posteriors_FlatLambdaCDM_joint_fastest_all_z0p44_3p16_"
-                "2d_compmag-dereddened_compsupport-hardcut.h5"
+                "FlatLambdaCDM_joint.h5"
             )
         )
     completeness_calls = []
@@ -4636,8 +4637,7 @@ def test_run_single_two_pass_sigma_clip_filters_outliers_and_writes_diagnostics(
     assert plot_hubble_calls[1]["sigma_clip_threshold"] == 3.0
 
     run_dir = tmp_path / hubble_fit.model_plot_path("unit", "FlatLambdaCDM")
-    run_tag = hubble_fit.make_run_tag("FlatLambdaCDM", False, "fastest", None, (0.44, 3.16), completeness=False)
-    checkpoint_paths = hubble_fit._build_checkpoint_paths("unit", run_tag)
+    checkpoint_paths = hubble_fit._build_checkpoint_paths("unit", "FlatLambdaCDM")
     pass1_df = pd.read_csv(run_dir / "residuals_pass1.csv")
     clipped_df = pd.read_csv(run_dir / "clipped_objects_pass1.csv")
     final_df = pd.read_csv(run_dir / "residuals.csv")
@@ -5187,8 +5187,7 @@ def test_run_single_resume_stage_pass2_skips_first_pass(monkeypatch, tmp_path):
         ),
     )
 
-    run_tag = hubble_fit.make_run_tag("FlatLambdaCDM", False, "fastest", None, (0.44, 3.16), completeness=False)
-    checkpoint_paths = hubble_fit._build_checkpoint_paths("unit", run_tag)
+    checkpoint_paths = hubble_fit._build_checkpoint_paths("unit", "FlatLambdaCDM")
     flat_samples_pass1 = np.tile(theta[None, :], (8, 1))
     pivot_context = _agn_pivot_context(df_agn, (0.44, 3.16))
     _write_fake_checkpoint(
@@ -5290,8 +5289,7 @@ def test_run_single_resume_stage_pass2_rejects_legacy_checkpoint(monkeypatch, tm
     monkeypatch.chdir(tmp_path)
     _patch_run_single_plot_stack(monkeypatch)
 
-    run_tag = hubble_fit.make_run_tag("FlatLambdaCDM", False, "fastest", None, (0.44, 3.16), completeness=False)
-    checkpoint_paths = hubble_fit._build_checkpoint_paths("unit", run_tag)
+    checkpoint_paths = hubble_fit._build_checkpoint_paths("unit", "FlatLambdaCDM")
     _write_fake_checkpoint(checkpoint_paths["single"], np.tile(theta[None, :], (8, 1)), np.zeros(len(df_agn)), np.full(len(df_agn), 0.05), logz=-9.0)
 
     with pytest.raises(RuntimeError, match="missing required immutable pivot metadata"):
@@ -5582,7 +5580,7 @@ def test_load_agn_data_residuals_csv_cut_remains_available(monkeypatch, tmp_path
     assert "removed z < 1.5" in cut_report_text
     assert "removed z >= 1.5" in cut_report_text
 
-    diagnostics_path = cut_report_path.parent / "cut_diagnostics_by_z.csv"
+    diagnostics_path = cut_report_path.parent / "diagnostics" / "cut_diagnostics_by_z.csv"
     diagnostics_df = pd.read_csv(diagnostics_path)
     assert {
         "removed_z_lt_0p44",

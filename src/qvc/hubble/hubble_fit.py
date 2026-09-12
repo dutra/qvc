@@ -162,9 +162,9 @@ from qvc.hubble.hubble_model import (
 from qvc.hubble.hubble_bright_subsample import (
     BRIGHT_SUBSAMPLE_JSON_ATTR,
     BrightSubsampleCut,
+    BrightSubsamplePlotData,
     apply_bright_subsample_cut,
     derive_bright_subsample_cut,
-    plot_bright_subsample_cut,
     summarize_bright_subsample_cut,
     wrap_completeness_params,
 )
@@ -689,13 +689,19 @@ def build_warm_start_live_points(
     return [live_u, live_v, live_logl]
 
 
+def model_output_name(cosmo_model, *, only_sna=False, only_agn=False):
+    """Common name for a cosmology and data combination's output artifacts."""
+    return f"{cosmo_model}_{_fit_mode_label(only_sna, only_agn)}"
+
+
 def model_plot_path(prefix, cosmo_model, *, only_sna=False, only_agn=False):
     """Plot destinations depend only on the campaign, cosmology, and fit mode.
 
-    Detailed run tags remain part of checkpoint/result paths. Use distinct
-    campaign prefixes when retaining plots from different configurations.
+    Posterior filenames use the same cosmology/mode name. Use distinct
+    campaign prefixes when retaining outputs from different configurations.
     """
-    return f"plots/hubble/{prefix}/{cosmo_model}_{_fit_mode_label(only_sna, only_agn)}"
+    name = model_output_name(cosmo_model, only_sna=only_sna, only_agn=only_agn)
+    return f"plots/hubble/{prefix}/{name}"
 
 
 def make_run_tag(
@@ -1647,14 +1653,15 @@ def _normalize_resume_stage(resume_stage):
     return stage
 
 
-def _build_checkpoint_paths(prefix, run_tag):
+def _build_checkpoint_paths(prefix, cosmo_model, *, only_sna=False, only_agn=False):
+    name = model_output_name(cosmo_model, only_sna=only_sna, only_agn=only_agn)
     checkpoint_folder = get_qvc_result_dir() / "hubble_posteriors" / prefix
     checkpoint_folder.mkdir(parents=True, exist_ok=True)
-    base = checkpoint_folder / f"posteriors_{run_tag}.h5"
+    base = checkpoint_folder / f"{name}.h5"
     return {
         "single": str(base),
-        "pass1": str(checkpoint_folder / f"posteriors_{run_tag}_pass1.h5"),
-        "pass2": str(checkpoint_folder / f"posteriors_{run_tag}_pass2.h5"),
+        "pass1": str(checkpoint_folder / f"{name}_pass1.h5"),
+        "pass2": str(checkpoint_folder / f"{name}_pass2.h5"),
     }
 
 
@@ -2378,34 +2385,7 @@ def _prepare_shared_agn_pivot_context(
         model_resume = resume_by_model[cosmo_model]
         if not model_resume:
             continue
-        run_tag = make_run_tag(
-            cosmo_model,
-            only_sna,
-            speed,
-            N,
-            z_range,
-            only_agn=only_agn,
-            completeness=completeness,
-            completeness_mode=completeness_mode,
-            completeness_magnitude=completeness_magnitude,
-            completeness_magnitude_support_mode=reference_selection.attrs.get(
-                "completeness_magnitude_support_mode", "hard-cut"
-            ),
-            disable_ceph_dist_calibration=disable_ceph_dist_calibration,
-            use_planck_h0_prior=use_planck_h0_prior,
-            use_planck_om_prior=use_planck_om_prior,
-            prior_profile=prior_profile,
-            use_alpha_lambda_term=use_alpha_lambda_term,
-            use_eta_sigma_term=use_eta_sigma_term,
-            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
-        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
-            use_redshift_log_f_term=use_redshift_log_f_term,
-            light_curve_uncertainty_mode=light_curve_uncertainty_mode,
-            pivot_rule=expected_pivot_rule,
-            bright_subsample_cut=bright_subsample_cut,
-            selection_attenuation_mode=selection_attenuation_mode,
-        )
-        checkpoint_paths = _build_checkpoint_paths(prefix, run_tag)
+        checkpoint_paths = _build_checkpoint_paths(prefix, cosmo_model, only_sna=only_sna, only_agn=only_agn)
         apply_two_pass = (
             not disable_sigma_clip_pass
             and not resume_replot_with_cuts
@@ -3670,7 +3650,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     checkpoint_file = (
         str(checkpoint_file_override)
         if checkpoint_file_override is not None
-        else _build_checkpoint_paths(prefix, run_tag)["single"]
+        else _build_checkpoint_paths(prefix, cosmo_model, only_sna=only_sna, only_agn=only_agn)["single"]
     )
     print(f"Checkpoint file: {checkpoint_file}")
     n_sne = len(pantheon_data["zHD"]) if "zHD" in pantheon_data else 0
@@ -3994,6 +3974,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             )
 
         checkpoint_payload = dict(
+            run_tag=run_tag,
             bright_subsample_json=(
                 "" if bright_subsample_cut is None else bright_subsample_cut.to_json()
             ),
@@ -4188,7 +4169,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                resume_replot_with_cuts=False,
                agn_pivot_context=None,
                df_agn_completeness_parent=None,
-               bright_subsample_cut=None):
+               bright_subsample_cut=None,
+               bright_subsample_plot_data=None):
     if only_sna:
         completeness = False
         plot_completeness = False
@@ -4291,39 +4273,22 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     _fit_mode_label(only_sna, only_agn)
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
     sigma_clip_second_pass_mode = normalize_sigma_clip_second_pass_mode(sigma_clip_second_pass_mode)
-    run_tag = make_run_tag(
-        cosmo_model,
-        only_sna,
-        speed,
-        N,
-        z_range,
-        only_agn=only_agn,
-        completeness=completeness,
-        completeness_mode=completeness_mode,
-        completeness_magnitude=completeness_magnitude,
-        completeness_magnitude_support_mode=df_agn.attrs.get(
-            "completeness_magnitude_support_mode", "hard-cut"
-        ),
-        disable_ceph_dist_calibration=disable_ceph_dist_calibration,
-        use_planck_h0_prior=use_planck_h0_prior,
-        use_planck_om_prior=use_planck_om_prior,
-        prior_profile=prior_profile,
-        use_alpha_lambda_term=use_alpha_lambda_term,
-        use_eta_sigma_term=use_eta_sigma_term,
-        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
-        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
-        use_redshift_log_f_term=use_redshift_log_f_term,
-        selection_attenuation_mode=selection_attenuation_mode,
-        light_curve_uncertainty_mode=light_curve_uncertainty_mode,
-        bright_subsample_cut=bright_subsample_cut,
-    )
     plot_path = model_plot_path(prefix, cosmo_model, only_sna=only_sna, only_agn=only_agn)
     os.makedirs(plot_path, exist_ok=True)
     print(f"Saving plots to ", plot_path)
     if bright_subsample_cut is not None:
-        bright_subsample_cut.summary_frame().to_csv(
-            os.path.join(plot_path, "bright_subsample_thresholds.csv"), index=False
-        )
+        completeness_plot_path = Path(plot_path) / "completeness"
+        completeness_plot_path.mkdir(parents=True, exist_ok=True)
+        if bright_subsample_plot_data is not None:
+            bright_subsample_plot_data.write(
+                bright_subsample_cut, plot_path=plot_path, z_range=z_range,
+                completeness_magnitude=completeness_magnitude,
+                plot=plot_completeness and not skip_plots and not compare_sigma_only,
+            )
+        else:
+            bright_subsample_cut.summary_frame().to_csv(
+                completeness_plot_path / "bright_subsample_thresholds.csv", index=False
+            )
         print(
             "Bright-subsample diagnostic: fitting only objects at least "
             f"{bright_subsample_cut.margin:g} mag brighter than the completeness >= "
@@ -4405,7 +4370,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         )
     pass1_diagnostics_df = None
     keep_mask_full = None
-    checkpoint_paths = _build_checkpoint_paths(prefix, run_tag)
+    checkpoint_paths = _build_checkpoint_paths(prefix, cosmo_model, only_sna=only_sna, only_agn=only_agn)
     pass1_checkpoint_file = checkpoint_paths["pass1"]
     pass2_checkpoint_file = checkpoint_paths["pass2"]
     single_checkpoint_file = checkpoint_paths["single"]
@@ -4986,36 +4951,22 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         return flat_samples, model_labels, dm_interp, logZ, logZerr, None, age, age_err
 
     if plot_completeness and completeness:
-        df_agn_completeness_plot_sample = df_agn_full_sample_preclip
-        if completeness_mode == "4d_fhost_alpha":
-            print("Plotting host-aware/color-aware 4D completeness diagnostics...")
-            get_completeness_function_4d_fhost_alpha(
-                df_agn_completeness_plot_sample,
-                sim_file=completeness_sim_file,
-                plot=True,
-                plot_path=plot_path,
-                df_agn_fhost_population=df_agn_all,
-                z_range=completeness_z_range,
-            )
-        elif completeness_mode == "3d_fhost":
-            print("Plotting host-aware 3D completeness diagnostics...")
-            get_completeness_function_3d_fhost(
-                df_agn_completeness_plot_sample,
-                sim_file=completeness_sim_file,
-                plot=True,
-                plot_path=plot_path,
-                df_agn_fhost_population=df_agn_all,
-                z_range=completeness_z_range,
-            )
-        else:
-            print("Plotting completeness vs magnitude at redshifts...")
-            p_detect, mag_centers, z_centers, dm, dz, completeness_scatter = get_completeness_function_2d(
-                df_agn_completeness_plot_sample, sim_file=completeness_sim_file,
-                plot=True, plot_path=plot_path, z_range=completeness_z_range
-            )
+        # Plot the same parent and configuration used by inference. Rebuilding
+        # from bright-selected or sigma-clipped rows changes the map numerator.
+        plot_completeness_params = _build_completeness_params(
+            df_agn_completeness_parent,
+            df_agn_all,
+            completeness=True,
+            completeness_mode=completeness_mode,
+            completeness_sim_file=completeness_sim_file,
+            plot=True,
+            plot_path=plot_path,
+            completeness_z_range=completeness_z_range,
+        )
+        if completeness_mode == "2d":
             with trace_completeness_step("completeness_vs_mag_at_redshifts.pdf"):
                 plot_completeness_vs_mag_at_redshifts(
-                    p_detect, mag_centers, z_centers, plot_path=plot_path
+                    *plot_completeness_params[:3], plot_path=plot_path
                 )
 
     fit_quality_summary = {}
@@ -5867,7 +5818,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             completeness_lf_model="shen",
             selection_attenuation_mode="fixed-offset",
             df_agn_completeness_parent=None,
-            bright_subsample_cut=None):
+            bright_subsample_cut=None,
+            bright_subsample_plot_data=None):
 
     validate_completeness_mode(completeness_mode)
     completeness_magnitude = normalize_completeness_magnitude(
@@ -5998,7 +5950,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        completeness_lf_model=completeness_lf_model,
                        selection_attenuation_mode=selection_attenuation_mode,
                        df_agn_completeness_parent=df_agn_completeness_parent,
-                       bright_subsample_cut=bright_subsample_cut)
+                       bright_subsample_cut=bright_subsample_cut,
+                       bright_subsample_plot_data=bright_subsample_plot_data)
         
         samples_joint, model_labels_joint, dm_interp_joint, logZ_joint, logZerr_joint, debiased_residuals_joint, age_joint, age_err_joint = r
         #print(f"For model {cosmo_model}, universe age: {age:.3f} Gyr")
@@ -6041,6 +5994,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                            early_de_guard=early_de_guard,
                            agn_pivot_context=None,
                            bright_subsample_cut=None,
+                           bright_subsample_plot_data=None,
                            df_agn_completeness_parent=None)
             samples_sna, model_labels_sna, dm_interp_sna, logZ_sna, logZerr_sna, debiased_residuals_sna, age_sna, age_sna_err = r
         if not compare_sigma_only and not minimal_plots and not only_agn:
@@ -6807,6 +6761,7 @@ if __name__ == "__main__":
     else:
         df_agn, df_agn_all, df_agn_completeness_parent = loaded_agn
     bright_subsample_cut = None
+    bright_subsample_plot_data = None
     if args.bright_subsample_completeness_min is not None:
         # The cut must be applied before the shared pivot context is built,
         # so build the 2D completeness map here (generating the mock catalog
@@ -6817,9 +6772,14 @@ if __name__ == "__main__":
         prepared_parent = prepare_completeness_magnitude_columns(
             df_agn_completeness_parent, args.completeness_magnitude
         )
+        # Shared preparation uses the first AGN model's destination. The same
+        # mock and selection inputs are reused for all subsequent cosmologies.
+        bright_plot_path = model_plot_path(
+            args.prefix, args.cosmo_models[0], only_agn=args.only_agn
+        )
         if args.completeness_sim_file is None:
             args.completeness_sim_file = generate_fresh_completeness_sim_file(
-                agn_plot_path,
+                bright_plot_path,
                 area_deg2=estimate_sky_box_area_deg2(df_agn_all),
                 z_range=completeness_z_range,
                 completeness_magnitude=args.completeness_magnitude,
@@ -6831,7 +6791,7 @@ if __name__ == "__main__":
             completeness=True,
             completeness_mode="2d",
             completeness_sim_file=args.completeness_sim_file,
-            plot_path=agn_plot_path,
+            plot_path=bright_plot_path,
             plot=False,
             completeness_z_range=completeness_z_range,
             magnitude_support_mode=args.completeness_magnitude_support_mode,
@@ -6848,26 +6808,12 @@ if __name__ == "__main__":
         df_agn, keep_mask = apply_bright_subsample_cut(
             df_agn, bright_subsample_cut, completeness_magnitude=args.completeness_magnitude
         )
-        os.makedirs(agn_plot_path, exist_ok=True)
-        bright_subsample_cut.summary_frame().to_csv(
-            Path(agn_plot_path) / "bright_subsample_thresholds.csv", index=False
+        bright_subsample_plot_data = BrightSubsamplePlotData(
+            tuple(bright_completeness_params), loaded_agn[0].copy(), keep_mask.copy()
         )
         bright_summary = summarize_bright_subsample_cut(
             loaded_agn[0], keep_mask, bright_subsample_cut, z_range=tuple(args.z_range)
         )
-        bright_summary.to_csv(Path(agn_plot_path) / "bright_subsample_counts.csv", index=False)
-        if args.plot_completeness:
-            plot_bright_subsample_cut(
-                bright_completeness_params[0],
-                bright_completeness_params[1],
-                bright_completeness_params[2],
-                bright_subsample_cut,
-                loaded_agn[0],
-                keep_mask,
-                z_range=tuple(args.z_range),
-                completeness_magnitude=args.completeness_magnitude,
-                plot_path=agn_plot_path,
-            )
         print(
             "Bright-subsample diagnostic: kept "
             f"{len(df_agn)} of {n_before} AGN (completeness >= "
@@ -7040,6 +6986,7 @@ if __name__ == "__main__":
                 early_de_guard=args.early_de_guard,
                 resume_replot_with_cuts=args.resume_replot_with_cuts,
                 bright_subsample_cut=bright_subsample_cut,
+                bright_subsample_plot_data=bright_subsample_plot_data,
                 df_agn_completeness_parent=df_agn_completeness_parent,
                 agn_pivot_context=agn_pivot_context)
             samples_joint, model_labels, dm_interp, logZ_joint, logZerr_joint, debiased_residuals, age, age_err = r
@@ -7133,6 +7080,7 @@ if __name__ == "__main__":
                 completeness_lf_model=args.completeness_lf_model,
                 selection_attenuation_mode=args.selection_attenuation_mode,
                 df_agn_completeness_parent=df_agn_completeness_parent,
-                bright_subsample_cut=bright_subsample_cut)
+                bright_subsample_cut=bright_subsample_cut,
+                bright_subsample_plot_data=bright_subsample_plot_data)
     
     print(f"Finished running Hubble fit pipeline for {args.cosmo_models}")

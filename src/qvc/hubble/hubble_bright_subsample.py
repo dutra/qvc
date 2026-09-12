@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -20,6 +21,33 @@ from qvc.hubble.hubble_completeness_refactored import (
 )
 
 BRIGHT_SUBSAMPLE_JSON_ATTR = "bright_subsample_json"
+
+
+@dataclass(frozen=True)
+class BrightSubsamplePlotData:
+    """Original selection inputs shared across cosmology-specific exports.
+
+    The pre-bright sample is distinct from the completeness parent: earlier
+    catalog cuts may already have removed objects from the fit sample.
+    """
+
+    completeness_params: tuple
+    before: pd.DataFrame
+    keep: np.ndarray
+
+    def write(self, cut, *, plot_path, z_range, completeness_magnitude, plot):
+        destination = Path(plot_path) / "completeness"
+        destination.mkdir(parents=True, exist_ok=True)
+        cut.summary_frame().to_csv(destination / "bright_subsample_thresholds.csv", index=False)
+        summarize_bright_subsample_cut(self.before, self.keep, cut, z_range=z_range).to_csv(
+            destination / "bright_subsample_counts.csv", index=False
+        )
+        if plot:
+            plot_bright_subsample_cut(
+                *self.completeness_params[:3], cut, self.before, self.keep,
+                z_range=z_range, completeness_magnitude=completeness_magnitude,
+                plot_path=plot_path,
+            )
 
 
 @dataclass(frozen=True)
@@ -353,7 +381,9 @@ def plot_bright_subsample_cut(
     import os
 
     os.makedirs(plot_path, exist_ok=True)
-    output = os.path.join(plot_path, filename)
+    completeness_path = os.path.join(plot_path, "completeness")
+    os.makedirs(completeness_path, exist_ok=True)
+    output = os.path.join(completeness_path, filename)
     fig.savefig(output, dpi=200)
     plt.close(fig)
     return output

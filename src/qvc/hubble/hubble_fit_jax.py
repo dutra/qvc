@@ -82,6 +82,7 @@ from qvc.hubble.hubble_fit import (
     estimate_sky_box_area_deg2,
     generate_fresh_completeness_sim_file,
     make_run_tag,
+    model_output_name,
     normalize_speed,
     record_completeness_support_metadata,
     record_completeness_tail_metadata,
@@ -1220,8 +1221,10 @@ def run_single_jax(
 
     checkpoint_folder = get_qvc_result_dir() / "hubble_posteriors" / prefix
     checkpoint_folder.mkdir(parents=True, exist_ok=True)
-    checkpoint_file = str(checkpoint_folder / f"posteriors_{run_tag}_jax.h5")
+    output_name = model_output_name(cosmo_model, only_sna=only_sna, only_agn=only_agn)
+    checkpoint_file = str(checkpoint_folder / f"{output_name}_jax.h5")
     checkpoint_payload = dict(
+        run_tag=run_tag,
         flat_samples=flat_samples,
         model_labels=np.asarray(model_labels, dtype=str),
         prior_profile=prior_profile,

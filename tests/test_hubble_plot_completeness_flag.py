@@ -58,14 +58,17 @@ def test_map_suite_guard_executes_only_when_requested(enabled, completeness):
     map_call, slices = Mock(return_value=(None,) * 6), Mock()
     from contextlib import nullcontext
     scope = dict(plot_completeness=enabled, completeness=completeness,
-                 df_agn_full_sample_preclip=object(), completeness_mode='2d',
+                 df_agn_completeness_parent=object(), df_agn_all=object(), completeness_mode='2d',
                  completeness_sim_file='unused', plot_path='unused', completeness_z_range=(0, 4.5),
-                 get_completeness_function_2d=map_call,
+                 _build_completeness_params=map_call,
                  plot_completeness_vs_mag_at_redshifts=slices,
                  trace_completeness_step=lambda *a: nullcontext())
     exec(compile(ast.fix_missing_locations(ast.Module(body=[block], type_ignores=[])), '<map suite>', 'exec'), scope)
     assert map_call.call_count == int(enabled and completeness)
     assert slices.call_count == int(enabled and completeness)
+    if enabled and completeness:
+        assert map_call.call_args.args[0] is scope['df_agn_completeness_parent']
+        assert map_call.call_args.kwargs['plot'] is True
     # This suite must run before the minimal branch returns.
     assert fn.body.index(block) < next(i for i, n in enumerate(fn.body)
         if isinstance(n, ast.If) and ast.unparse(n.test) == 'minimal_plots')
