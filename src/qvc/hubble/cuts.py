@@ -7,6 +7,8 @@ import re
 import numpy as np
 import pandas as pd
 
+from .completeness_grid import grid_bin_count, MAG_WIDTH_ENV, Z_WIDTH_ENV
+
 
 SDSS_TARGET_SELECTION_CHOICES = (
     "all",
@@ -284,10 +286,16 @@ NUM_DIVERGENCES_MAX = _cut_env_float("QVC_CUT_NUM_DIVERGENCES_MAX", None)
 # hull, so no magnitude/redshift extrapolation or clipping is needed.
 COMPLETENESS_MAP_MAG_EDGE_MIN = 16.5
 COMPLETENESS_MAP_MAG_EDGE_MAX = 27.5
-COMPLETENESS_N_MAG_BINS = 110
+COMPLETENESS_N_MAG_BINS = grid_bin_count(
+    COMPLETENESS_MAP_MAG_EDGE_MAX - COMPLETENESS_MAP_MAG_EDGE_MIN,
+    os.environ.get(MAG_WIDTH_ENV, "0.1"),
+)
 COMPLETENESS_MAP_Z_EDGE_MIN = 0.0
 COMPLETENESS_MAP_Z_EDGE_MAX = 4.5
-COMPLETENESS_N_Z_BINS = 45
+COMPLETENESS_N_Z_BINS = grid_bin_count(
+    COMPLETENESS_MAP_Z_EDGE_MAX - COMPLETENESS_MAP_Z_EDGE_MIN,
+    os.environ.get(Z_WIDTH_ENV, "0.1"),
+)
 COMPLETENESS_Z_BIN_WIDTH = (
     COMPLETENESS_MAP_Z_EDGE_MAX - COMPLETENESS_MAP_Z_EDGE_MIN
 ) / COMPLETENESS_N_Z_BINS

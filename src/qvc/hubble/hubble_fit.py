@@ -1,3 +1,11 @@
+# Grid constants are imported throughout the scientific modules. Resolve direct
+# CLI overrides first, before any of those imports bind their defaults.
+if __name__ == "__main__":
+    import os as _grid_os
+    import sys as _grid_sys
+    from qvc.hubble.completeness_grid import configure_grid_from_argv
+    configure_grid_from_argv(_grid_sys.argv[1:], _grid_os.environ)
+
 import os
 import multiprocessing
 import traceback
@@ -149,6 +157,14 @@ from qvc.hubble.hubble_model import (
     M_model_agn_err,
     normalize_prior_profile,
     resolve_model_option_flags,
+)
+from qvc.hubble.hubble_bright_subsample import (
+    BRIGHT_SUBSAMPLE_JSON_ATTR,
+    BrightSubsampleCut,
+    apply_bright_subsample_cut,
+    derive_bright_subsample_cut,
+    summarize_bright_subsample_cut,
+    wrap_completeness_params,
 )
 from qvc.hubble.hubble_completeness_refactored import (
     COMPLETENESS_SMOOTH_SIGMA_MAG_ENV,
@@ -692,6 +708,7 @@ def make_run_tag(
     selection_attenuation_mode="fixed-offset",
     light_curve_uncertainty_mode="covariance",
     pivot_rule=AGN_PIVOT_RULE,
+    bright_subsample_cut=None,
 ):
     speed = normalize_speed(speed)
     prior_profile = normalize_prior_profile(prior_profile)
@@ -759,7 +776,44 @@ def make_run_tag(
         f"{completeness_tag}{completeness_support_tag}{attenuation_tag}{light_curve_uncertainty_tag}"
         f"{ceph_tag}{planck_h0_tag}{fixed_h0_tag}{planck_om_tag}{prior_profile_tag}{alpha_tag}{eta_sigma_tag}"
         f"{fagn_sigmoid_tag}{fagn_flux_fraction_tag}{logf_tag}{pivot_tag}"
+        + ("" if bright_subsample_cut is None or only_sna else bright_subsample_cut.run_tag())
+        + (completeness_map_variant_tag() if completeness and not only_sna else "")
     )
+
+
+def completeness_map_variant_tag():
+    """Run-tag fragment for nondefault completeness-map construction settings.
+
+    The smoothing widths are read from the same
+    environment variables the map builder uses, so the tag always reflects
+    the map that was actually built.
+    """
+    tag = ""
+    if (COMPLETENESS_N_MAG_BINS, COMPLETENESS_N_Z_BINS) != (110, 45):
+        tag += f"_compgrid{COMPLETENESS_N_MAG_BINS}x{COMPLETENESS_N_Z_BINS}"
+    sigma_mag = float(os.environ.get(COMPLETENESS_SMOOTH_SIGMA_MAG_ENV, DEFAULT_COMPLETENESS_SMOOTH_SIGMA_MAG))
+    sigma_z = float(os.environ.get(COMPLETENESS_SMOOTH_SIGMA_Z_ENV, DEFAULT_COMPLETENESS_SMOOTH_SIGMA_Z))
+    if not (
+        np.isclose(sigma_mag, DEFAULT_COMPLETENESS_SMOOTH_SIGMA_MAG)
+        and np.isclose(sigma_z, DEFAULT_COMPLETENESS_SMOOTH_SIGMA_Z)
+    ):
+        tag += f"_compsm{sigma_mag:g}x{sigma_z:g}".replace(".", "p")
+    return tag
+
+
+def _validate_checkpoint_bright_subsample(results, checkpoint_file, bright_subsample_cut=None):
+    """Require the stored bright-subsample definition to match the run."""
+    expected = "" if bright_subsample_cut is None else bright_subsample_cut.to_json()
+    stored = _checkpoint_scalar_string(
+        results.get(BRIGHT_SUBSAMPLE_JSON_ATTR, ""),
+        field_name=BRIGHT_SUBSAMPLE_JSON_ATTR,
+        checkpoint_file=checkpoint_file,
+    )
+    if stored != expected:
+        raise RuntimeError(
+            f"Checkpoint '{checkpoint_file}' bright-subsample definition does not "
+            "match the current run."
+        )
 
 
 def canonical_prior_bounds_json(priors):
@@ -1106,7 +1160,9 @@ def validate_resume_checkpoint(
     expected_prior_profile=DEFAULT_PRIOR_PROFILE,
     expected_prior_bounds_json=None,
     expected_early_de_guard=False,
+    bright_subsample_cut=None,
 ):
+    _validate_checkpoint_bright_subsample(results, checkpoint_file, bright_subsample_cut)
     _validate_strict_padded_checkpoint_metadata(
         results, checkpoint_file, expected_cut_configuration_json
     )
@@ -1280,7 +1336,9 @@ def _validate_resume_replot_checkpoint_params(
     expected_prior_profile=DEFAULT_PRIOR_PROFILE,
     expected_prior_bounds_json=None,
     expected_early_de_guard=False,
+    bright_subsample_cut=None,
 ):
+    _validate_checkpoint_bright_subsample(results, checkpoint_file, bright_subsample_cut)
     _validate_strict_padded_checkpoint_metadata(
         results, checkpoint_file, expected_cut_configuration_json
     )
@@ -1403,6 +1461,7 @@ def _remap_resume_replot_checkpoint(
     expected_prior_profile=DEFAULT_PRIOR_PROFILE,
     expected_prior_bounds_json=None,
     expected_early_de_guard=False,
+    bright_subsample_cut=None,
 ):
     """Return checkpoint payload remapped to the current cut AGN fit selection."""
 
@@ -1426,6 +1485,7 @@ def _remap_resume_replot_checkpoint(
         expected_prior_profile=expected_prior_profile,
         expected_prior_bounds_json=expected_prior_bounds_json,
         expected_early_de_guard=expected_early_de_guard,
+        bright_subsample_cut=bright_subsample_cut,
     )
     if "object_id_fit_selection" not in results:
         raise RuntimeError(
@@ -1956,6 +2016,9 @@ def record_completeness_support_metadata(frames, *, magnitude_support, redshift_
                 "completeness_smooth_sigma_z": float(os.environ.get(
                     COMPLETENESS_SMOOTH_SIGMA_Z_ENV, DEFAULT_COMPLETENESS_SMOOTH_SIGMA_Z
                 )),
+                "completeness_monotone_magnitude": bool(
+                    False
+                ),
                 "completeness_interpolation_policy": (
                     "constant-bright-supported-transition-faint-v2"
                     if support_mode == "tails"
@@ -2105,6 +2168,9 @@ def completeness_checkpoint_metadata(
                 COMPLETENESS_SMOOTH_SIGMA_Z_ENV,
                 DEFAULT_COMPLETENESS_SMOOTH_SIGMA_Z,
             )
+        ),
+        "completeness_monotone_magnitude": bool(
+            False
         ),
         "completeness_mock_provenance_json": json.dumps(
             provenance, sort_keys=True, separators=(",", ":")
@@ -2274,6 +2340,7 @@ def _prepare_shared_agn_pivot_context(
     light_curve_uncertainty_mode="covariance",
     resume_replot_with_cuts=False,
     round_pivots=True,
+    bright_subsample_cut=None,
 ):
     """Build once, or strictly load once, for cosmologies sharing a fit sample."""
 
@@ -2320,6 +2387,7 @@ def _prepare_shared_agn_pivot_context(
             use_redshift_log_f_term=use_redshift_log_f_term,
             light_curve_uncertainty_mode=light_curve_uncertainty_mode,
             pivot_rule=expected_pivot_rule,
+            bright_subsample_cut=bright_subsample_cut,
         )
         checkpoint_paths = _build_checkpoint_paths(prefix, run_tag)
         apply_two_pass = (
@@ -2941,6 +3009,7 @@ def _run_fit_stage(
     logZ_is_approximate=False,
     df_agn_completeness=None,
     completeness_z_range=None,
+    bright_subsample_cut=None,
 ):
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
     (
@@ -2998,6 +3067,7 @@ def _run_fit_stage(
         logZ_is_approximate=logZ_is_approximate,
         df_agn_completeness=df_agn_completeness,
         completeness_z_range=completeness_z_range,
+        bright_subsample_cut=bright_subsample_cut,
     )
     display_results_summary(
         flat_samples,
@@ -3222,8 +3292,11 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       logZ_is_approximate=False,
                       df_agn_completeness=None,
                       completeness_z_range=None,
+                      bright_subsample_cut=None,
                       ):
     validate_completeness_mode(completeness_mode)
+    if bright_subsample_cut is not None and not isinstance(bright_subsample_cut, BrightSubsampleCut):
+        raise TypeError("bright_subsample_cut must be a BrightSubsampleCut or None.")
     completeness_magnitude = normalize_completeness_magnitude(
         df_agn.attrs.get("completeness_magnitude", completeness_magnitude)
     )
@@ -3321,6 +3394,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             if agn_pivot_context is not None
             else AGN_PIVOT_RULE
         ),
+        bright_subsample_cut=bright_subsample_cut,
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
@@ -3456,6 +3530,12 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 plot=not (compare_sigma_only or minimal_plots),
                 completeness_z_range=completeness_z_range,
             )
+        # Bright-subsample diagnostic: the likelihood must see the hard bright
+        # cut as part of the selection so the Malmquist term normalizes over
+        # the truncated magnitude range.
+        completeness_params = wrap_completeness_params(
+            completeness_params, bright_subsample_cut
+        )
         if completeness_params is not None:
             record_completeness_tail_metadata(
                 (df_agn, df_agn_all, df_agn_completeness),
@@ -3572,6 +3652,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     expected_prior_profile=prior_profile,
                     expected_prior_bounds_json=prior_bounds_json,
                     expected_early_de_guard=early_de_guard,
+                    bright_subsample_cut=bright_subsample_cut,
                 )
                 print(
                     "Resume-replot with cuts: loaded posterior samples and remapped "
@@ -3605,6 +3686,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     expected_prior_profile=prior_profile,
                     expected_prior_bounds_json=prior_bounds_json,
                     expected_early_de_guard=early_de_guard,
+                    bright_subsample_cut=bright_subsample_cut,
                 )
             if not only_sna:
                 if stored_pivot_context != agn_pivot_context:
@@ -3837,6 +3919,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             )
 
         checkpoint_payload = dict(
+            bright_subsample_json=(
+                "" if bright_subsample_cut is None else bright_subsample_cut.to_json()
+            ),
             flat_samples=flat_samples,
             model_labels=np.asarray(model_labels, dtype=str),
             prior_profile=prior_profile,
@@ -3976,8 +4061,11 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                early_de_guard=False,
                resume_replot_with_cuts=False,
                agn_pivot_context=None,
-               df_agn_completeness_parent=None):
+               df_agn_completeness_parent=None,
+               bright_subsample_cut=None):
     validate_completeness_mode(completeness_mode)
+    if bright_subsample_cut is not None and not isinstance(bright_subsample_cut, BrightSubsampleCut):
+        raise TypeError("bright_subsample_cut must be a BrightSubsampleCut or None.")
     completeness_magnitude = normalize_completeness_magnitude(
         completeness_magnitude
     )
@@ -4089,10 +4177,21 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_redshift_log_f_term=use_redshift_log_f_term,
         selection_attenuation_mode=selection_attenuation_mode,
         light_curve_uncertainty_mode=light_curve_uncertainty_mode,
+        bright_subsample_cut=bright_subsample_cut,
     )
     plot_path = f"plots/hubble/{prefix}/{run_tag}"
     os.makedirs(plot_path, exist_ok=True)
     print(f"Saving plots to ", plot_path)
+    if bright_subsample_cut is not None:
+        bright_subsample_cut.summary_frame().to_csv(
+            os.path.join(plot_path, "bright_subsample_thresholds.csv"), index=False
+        )
+        print(
+            "Bright-subsample diagnostic: fitting only objects at least "
+            f"{bright_subsample_cut.margin:g} mag brighter than the completeness >= "
+            f"{bright_subsample_cut.completeness_min:g} limit; the likelihood treats "
+            "the cut as a hard selection."
+        )
     if completeness:
         print(
             "Completeness magnitude: "
@@ -4245,15 +4344,18 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     def _get_direct_completeness_params():
         nonlocal direct_completeness_params
         if direct_completeness_params is None:
-            direct_completeness_params = _build_completeness_params(
-                df_agn_full_sample_preclip,
-                df_agn_all,
-                completeness=completeness,
-                completeness_mode=completeness_mode,
-                completeness_sim_file=completeness_sim_file,
-                plot_path=plot_path,
-                plot=False,
-                completeness_z_range=completeness_z_range,
+            direct_completeness_params = wrap_completeness_params(
+                _build_completeness_params(
+                    df_agn_full_sample_preclip,
+                    df_agn_all,
+                    completeness=completeness,
+                    completeness_mode=completeness_mode,
+                    completeness_sim_file=completeness_sim_file,
+                    plot_path=plot_path,
+                    plot=False,
+                    completeness_z_range=completeness_z_range,
+                ),
+                bright_subsample_cut,
             )
         return direct_completeness_params
 
@@ -4355,6 +4457,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 resume_replot_with_cuts=False,
                 df_agn_completeness=df_agn_completeness_parent,
                 completeness_z_range=completeness_z_range,
+                bright_subsample_cut=bright_subsample_cut,
             )
             posterior_sample_indices_pass1 = (
                 get_hubble_posterior_sample_indices(
@@ -4590,6 +4693,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                         expected_resume_priors
                     ),
                     expected_early_de_guard=early_de_guard,
+                    bright_subsample_cut=bright_subsample_cut,
                 )
                 pass2_warm_start_flat_samples = selected_resume_results["flat_samples"]
             _write_sigma_clip_diagnostics(
@@ -4716,6 +4820,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         logZ_is_approximate=warm_start_pass2,
         df_agn_completeness=df_agn_completeness_parent,
         completeness_z_range=completeness_z_range,
+        bright_subsample_cut=bright_subsample_cut,
     )
     if apply_two_pass_sigma_clip:
         _write_stage_checkpoint(
@@ -5920,10 +6025,22 @@ def render_hubble_mode_table(args):
         completeness = (
             f"{args.completeness_mode}; m2500={args.completeness_magnitude}; "
             f"LF={args.completeness_lf_model}; "
-            f"support={getattr(args, 'completeness_magnitude_support_mode', 'hard-cut')}"
+            f"support={getattr(args, 'completeness_magnitude_support_mode', 'hard-cut')}; "
+            f"smooth=({os.environ.get(COMPLETENESS_SMOOTH_SIGMA_MAG_ENV, DEFAULT_COMPLETENESS_SMOOTH_SIGMA_MAG)} mag, "
+            f"{os.environ.get(COMPLETENESS_SMOOTH_SIGMA_Z_ENV, DEFAULT_COMPLETENESS_SMOOTH_SIGMA_Z)} z)"
         )
         selection_attenuation = args.selection_attenuation_mode
 
+    bright_min = getattr(args, "bright_subsample_completeness_min", None)
+    if args.only_sna or bright_min is None:
+        bright_subsample = "off (full selected sample)"
+    else:
+        bright_subsample = (
+            f"only AGN >= {getattr(args, 'bright_subsample_margin', 1.0):g} mag brighter "
+            f"than the completeness >= {bright_min:g}"
+            + (" (absolute)" if getattr(args, "bright_subsample_absolute", False) else " x peak")
+            + " limit; hard cut in the likelihood"
+        )
     if args.disable_sigma_clip_pass:
         sigma_clipping = "disabled"
     else:
@@ -5954,6 +6071,7 @@ def render_hubble_mode_table(args):
         {"mode": "intrinsic scatter", "setting": intrinsic_scatter},
         {"mode": "completeness", "setting": completeness},
         {"mode": "selection attenuation", "setting": selection_attenuation},
+        {"mode": "bright-subsample diagnostic", "setting": bright_subsample},
         {"mode": "sigma clipping", "setting": sigma_clipping},
         {"mode": "SN covariance", "setting": sn_covariance},
     ]
@@ -6275,7 +6393,72 @@ if __name__ == "__main__":
         ),
     )
 
+    parser.add_argument(
+        "--completeness-smooth-sigma-mag",
+        "--completeness_smooth_sigma_mag",
+        type=float,
+        default=None,
+        help=(
+            "Map-sensitivity test: Gaussian smoothing width in magnitude for the "
+            f"completeness histograms (default {DEFAULT_COMPLETENESS_SMOOTH_SIGMA_MAG}; "
+            f"overrides {COMPLETENESS_SMOOTH_SIGMA_MAG_ENV})."
+        ),
+    )
+    parser.add_argument(
+        "--completeness-smooth-sigma-z",
+        "--completeness_smooth_sigma_z",
+        type=float,
+        default=None,
+        help=(
+            "Map-sensitivity test: Gaussian smoothing width in redshift for the "
+            f"completeness histograms (default {DEFAULT_COMPLETENESS_SMOOTH_SIGMA_Z}; "
+            f"overrides {COMPLETENESS_SMOOTH_SIGMA_Z_ENV})."
+        ),
+    )
+    parser.add_argument(
+        "--bright-subsample-completeness-min",
+        "--bright_subsample_completeness_min",
+        type=float,
+        default=None,
+        help=(
+            "Bright-subsample diagnostic: keep only AGN whose selection "
+            "magnitude is brighter than the faintest magnitude at which the "
+            "2D completeness map still exceeds this value at their redshift, "
+            "minus --bright-subsample-margin. The likelihood then models the "
+            "cut as a hard selection. Omit to disable."
+        ),
+    )
+    parser.add_argument(
+        "--bright-subsample-margin",
+        "--bright_subsample_margin",
+        type=float,
+        default=1.0,
+        help="Magnitude margin below the completeness limit for the bright subsample (default 1).",
+    )
+    parser.add_argument(
+        "--bright-subsample-absolute",
+        "--bright_subsample_absolute",
+        action="store_true",
+        default=False,
+        help=(
+            "Interpret --bright-subsample-completeness-min as an absolute "
+            "detection probability. By default it is a fraction of the peak "
+            "completeness at each redshift, because the absolute level of the "
+            "estimated map only reflects the catalog size relative to the LF mock."
+        ),
+    )
     args = parser.parse_args()
+    # The completeness-map variants are consumed by the map builder through
+    # environment variables (shared with run_hubble.xonsh); the flags set them
+    # before any map is built so run tags, checkpoints and the map agree.
+    for value, env_name in (
+        (args.completeness_smooth_sigma_mag, COMPLETENESS_SMOOTH_SIGMA_MAG_ENV),
+        (args.completeness_smooth_sigma_z, COMPLETENESS_SMOOTH_SIGMA_Z_ENV),
+    ):
+        if value is not None:
+            if not np.isfinite(value) or value < 0.0:
+                raise ValueError(f"{env_name} override must be finite and nonnegative; got {value!r}.")
+            os.environ[env_name] = repr(float(value))
     args.speed = normalize_speed(args.speed)
 
     print("Running Hubble fit with the following settings:")
@@ -6309,6 +6492,26 @@ if __name__ == "__main__":
             "only the default NumPy/Dynesty pipeline."
         )
     validate_plot_mode_args(args)
+    if args.bright_subsample_completeness_min is not None:
+        if not (0.0 < args.bright_subsample_completeness_min <= 1.0):
+            raise ValueError("--bright-subsample-completeness-min must lie in (0, 1].")
+        if args.bright_subsample_margin < 0.0:
+            raise ValueError("--bright-subsample-margin must be nonnegative.")
+        if args.disable_completeness:
+            raise ValueError(
+                "--bright-subsample-completeness-min needs the completeness map; "
+                "do not combine it with --disable_completeness."
+            )
+        if args.completeness_mode != "2d":
+            raise NotImplementedError(
+                "--bright-subsample-completeness-min supports only --completeness_mode 2d."
+            )
+        if args.run != "single" or args.use_jax:
+            raise NotImplementedError(
+                "--bright-subsample-completeness-min supports only the NumPy/Dynesty --run single pipeline."
+            )
+        if args.only_sna:
+            raise ValueError("--bright-subsample-completeness-min requires AGN in the fit.")
     if args.selection_attenuation_mode == "joint-posterior" and (
         args.run != "single" or args.use_jax
     ):
@@ -6381,6 +6584,81 @@ if __name__ == "__main__":
         df_agn_completeness_parent = df_agn.copy()
     else:
         df_agn, df_agn_all, df_agn_completeness_parent = loaded_agn
+    bright_subsample_cut = None
+    if args.bright_subsample_completeness_min is not None:
+        # The cut must be applied before the shared pivot context is built,
+        # so build the 2D completeness map here (generating the mock catalog
+        # once and reusing it downstream) and filter the fit/plot sample.
+        completeness_z_range = resolve_completeness_redshift_support(
+            df_agn_completeness_parent, tuple(args.z_range)
+        )
+        prepared_parent = prepare_completeness_magnitude_columns(
+            df_agn_completeness_parent, args.completeness_magnitude
+        )
+        if args.completeness_sim_file is None:
+            args.completeness_sim_file = generate_fresh_completeness_sim_file(
+                agn_plot_path,
+                area_deg2=estimate_sky_box_area_deg2(df_agn_all),
+                z_range=completeness_z_range,
+                completeness_magnitude=args.completeness_magnitude,
+                lf_model=args.completeness_lf_model,
+            )
+        bright_completeness_params = _build_completeness_params(
+            prepared_parent,
+            df_agn_all,
+            completeness=True,
+            completeness_mode="2d",
+            completeness_sim_file=args.completeness_sim_file,
+            plot_path=agn_plot_path,
+            plot=False,
+            completeness_z_range=completeness_z_range,
+            magnitude_support_mode=args.completeness_magnitude_support_mode,
+        )
+        bright_subsample_cut = derive_bright_subsample_cut(
+            bright_completeness_params[0],
+            bright_completeness_params[1],
+            bright_completeness_params[2],
+            completeness_min=args.bright_subsample_completeness_min,
+            margin=args.bright_subsample_margin,
+            relative=not args.bright_subsample_absolute,
+        )
+        n_before = len(df_agn)
+        df_agn, keep_mask = apply_bright_subsample_cut(
+            df_agn, bright_subsample_cut, completeness_magnitude=args.completeness_magnitude
+        )
+        os.makedirs(agn_plot_path, exist_ok=True)
+        bright_subsample_cut.summary_frame().to_csv(
+            Path(agn_plot_path) / "bright_subsample_thresholds.csv", index=False
+        )
+        bright_summary = summarize_bright_subsample_cut(
+            loaded_agn[0], keep_mask, bright_subsample_cut, z_range=tuple(args.z_range)
+        )
+        bright_summary.to_csv(Path(agn_plot_path) / "bright_subsample_counts.csv", index=False)
+        print(
+            "Bright-subsample diagnostic: kept "
+            f"{len(df_agn)} of {n_before} AGN (completeness >= "
+            f"{args.bright_subsample_completeness_min:g}"
+            + (" absolute" if args.bright_subsample_absolute else " of the per-redshift peak")
+            + f", margin {args.bright_subsample_margin:g} mag)."
+        )
+        print(render_ascii_table(
+            [
+                {
+                    "z_bin": str(row.z_bin),
+                    "n_before": int(row.n_before),
+                    "n_kept": int(row.n_kept),
+                    "cut_mag": f"{row.bright_cut_magnitude_at_center:.2f}",
+                    "peak": f"{row.peak_completeness_at_center:.3f}",
+                }
+                for row in bright_summary.itertuples(index=False)
+            ],
+            (
+                ("z_bin", "z bin"), ("n_before", "before"), ("n_kept", "kept"),
+                ("cut_mag", "bright cut"), ("peak", "peak completeness"),
+            ),
+        ))
+        if len(df_agn) == 0:
+            raise ValueError("The bright-subsample cut removed every AGN; relax the margin or completeness minimum.")
     effective_N = args.N
     if args.agn_calibrators:
         if args.agn_calibrators.endswith('.h5'):
@@ -6491,6 +6769,7 @@ if __name__ == "__main__":
             light_curve_uncertainty_mode=args.light_curve_uncertainty_mode,
             resume_replot_with_cuts=args.resume_replot_with_cuts,
             round_pivots=not args.disable_pivot_rounding,
+            bright_subsample_cut=bright_subsample_cut,
         )
         for cosmo_model in args.cosmo_models:
             r = run_single(df_agn=df_agn, df_agn_all=df_agn_all, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 
@@ -6523,6 +6802,8 @@ if __name__ == "__main__":
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
                 early_de_guard=args.early_de_guard,
                 resume_replot_with_cuts=args.resume_replot_with_cuts,
+                bright_subsample_cut=bright_subsample_cut,
+                df_agn_completeness_parent=df_agn_completeness_parent,
                 agn_pivot_context=agn_pivot_context)
             samples_joint, model_labels, dm_interp, logZ_joint, logZerr_joint, debiased_residuals, age, age_err = r
             cosmo_models_dict[cosmo_model]['logZ'] = logZ_joint
@@ -6573,6 +6854,7 @@ if __name__ == "__main__":
             f"{completeness_tag}{light_curve_uncertainty_tag}{ceph_tag}"
             f"{planck_h0_tag}{planck_om_tag}{prior_profile_tag}{alpha_tag}{eta_sigma_tag}"
             f"{fagn_sigmoid_tag}{fagn_flux_fraction_tag}{logf_tag}{pivot_tag}"
+        + ("" if bright_subsample_cut is None else bright_subsample_cut.run_tag())
         )
         os.makedirs(compare_path, exist_ok=True)
         if len(cosmo_models_dict) >= 2:

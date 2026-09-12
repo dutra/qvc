@@ -1471,6 +1471,162 @@ def _relative_completeness_percent(
     return relative_percent, reference, int(reference_values.size)
 
 
+COUNTS_COMPARISON_Z_EDGES = (0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.2, 4.5)
+
+
+def counts_comparison_table(
+    H_obs,
+    H_true,
+    H_obs_s,
+    H_true_s,
+    mag_centers,
+    z_centers,
+    *,
+    count_scale,
+    completeness_raw=None,
+    completeness_final=None,
+    z_slice_edges=COUNTS_COMPARISON_Z_EDGES,
+):
+    """Observed versus scaled-mock magnitude counts in coarse redshift slices.
+
+    The completeness map is the ratio of these two histograms, so the table
+    exposes directly where the mock (LF plus K-corrections) disagrees with
+    the catalog.  For a flux-limited survey the ratio should be flat on the
+    bright side and fall on the faint side; a rise toward fainter magnitudes
+    on the bright side indicates a mock/data mismatch rather than selection.
+    """
+    import pandas as pd
+
+    mag_centers = np.asarray(mag_centers, dtype=float)
+    z_centers = np.asarray(z_centers, dtype=float)
+    edges = np.asarray(z_slice_edges, dtype=float)
+    rows = []
+    for lower, upper in zip(edges[:-1], edges[1:]):
+        columns = np.flatnonzero((z_centers >= lower) & (z_centers < upper))
+        if columns.size == 0:
+            continue
+        n_obs = H_obs[:, columns].sum(axis=1)
+        n_obs_s = H_obs_s[:, columns].sum(axis=1)
+        n_mock = count_scale * H_true[:, columns].sum(axis=1)
+        n_mock_s = count_scale * H_true_s[:, columns].sum(axis=1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.where(n_mock_s > 0, n_obs_s / n_mock_s, np.nan)
+            ratio_err = np.where(
+                (n_mock_s > 0) & (n_obs > 0), np.sqrt(n_obs) / n_mock_s, np.nan
+            )
+        frame = pd.DataFrame(
+            {
+                "z_lo": lower,
+                "z_hi": upper,
+                "mag": mag_centers,
+                "n_obs": n_obs,
+                "n_obs_smoothed": n_obs_s,
+                "n_mock_scaled": n_mock,
+                "n_mock_scaled_smoothed": n_mock_s,
+                "ratio_obs_over_mock": ratio,
+                "ratio_poisson_err": ratio_err,
+            }
+        )
+        if completeness_raw is not None:
+            weights = np.clip(H_true_s[:, columns], 0.0, None)
+            weight_sum = weights.sum(axis=1)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                frame["completeness_map_raw"] = np.where(
+                    weight_sum > 0,
+                    (completeness_raw[:, columns] * weights).sum(axis=1) / weight_sum,
+                    np.nan,
+                )
+                if completeness_final is not None:
+                    frame["completeness_map_final"] = np.where(
+                        weight_sum > 0,
+                        (completeness_final[:, columns] * weights).sum(axis=1) / weight_sum,
+                        np.nan,
+                    )
+        rows.append(frame)
+    if not rows:
+        return pd.DataFrame()
+    return pd.concat(rows, ignore_index=True)
+
+
+def _plot_counts_comparison(
+    H_obs,
+    H_true,
+    H_obs_s,
+    H_true_s,
+    mag_centers,
+    z_centers,
+    *,
+    count_scale,
+    completeness_raw=None,
+    completeness_final=None,
+    plot_dir,
+    z_slice_edges=COUNTS_COMPARISON_Z_EDGES,
+):
+    """Write ``completeness_counts_comparison.{csv,pdf}`` into ``plot_dir``."""
+    import matplotlib.pyplot as plt
+
+    table = counts_comparison_table(
+        H_obs,
+        H_true,
+        H_obs_s,
+        H_true_s,
+        mag_centers,
+        z_centers,
+        count_scale=count_scale,
+        completeness_raw=completeness_raw,
+        completeness_final=completeness_final,
+        z_slice_edges=z_slice_edges,
+    )
+    os.makedirs(plot_dir, exist_ok=True)
+    csv_path = os.path.join(plot_dir, "completeness_counts_comparison.csv")
+    table.to_csv(csv_path, index=False)
+    if table.empty:
+        return table
+    slices = list(table.groupby(["z_lo", "z_hi"], sort=True))
+    n = len(slices)
+    fig, axes = plt.subplots(
+        2, n, figsize=(3.4 * n, 6.4), sharex=True, squeeze=False,
+        gridspec_kw={"height_ratios": (2.0, 1.2)},
+    )
+    monotone_applied = (
+        completeness_final is not None
+        and completeness_raw is not None
+        and np.any(np.asarray(completeness_final) > np.asarray(completeness_raw) + 1e-12)
+    )
+    for index, ((lower, upper), frame) in enumerate(slices):
+        top, bottom = axes[0, index], axes[1, index]
+        top.step(frame["mag"], np.clip(frame["n_obs"], 0.5, None), where="mid", color="k", lw=1.2, label="observed")
+        top.plot(frame["mag"], np.clip(frame["n_mock_scaled_smoothed"], 0.5, None), color="C3", lw=1.4, label="mock x scale (smoothed)")
+        top.plot(frame["mag"], np.clip(frame["n_obs_smoothed"], 0.5, None), color="C0", lw=1.0, ls="--", label="observed (smoothed)")
+        top.set_yscale("log")
+        top.set_title(f"{lower:.1f} <= z < {upper:.1f}  (N={int(frame['n_obs'].sum())})", fontsize=9)
+        finite = np.isfinite(frame["ratio_obs_over_mock"])
+        bottom.errorbar(
+            frame["mag"][finite], frame["ratio_obs_over_mock"][finite],
+            yerr=frame["ratio_poisson_err"][finite], fmt=".", color="k", ms=3, lw=0.7,
+            label="observed / (scale x mock)",
+        )
+        if "completeness_map_raw" in frame:
+            bottom.plot(frame["mag"], frame["completeness_map_raw"], color="C3", lw=1.2, label="map (raw ratio)")
+        if monotone_applied and "completeness_map_final" in frame:
+            bottom.plot(frame["mag"], frame["completeness_map_final"], color="C2", lw=1.2, ls="--", label="map (monotone)")
+        peak = np.nanmax(frame["ratio_obs_over_mock"]) if finite.any() else 1.0
+        bottom.set_ylim(0.0, max(1.05 * peak, 1e-3))
+        bottom.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
+        if index == 0:
+            top.set_ylabel("counts per magnitude bin")
+            bottom.set_ylabel("ratio")
+            top.legend(fontsize=7, loc="upper left")
+            bottom.legend(fontsize=7, loc="upper right")
+    fig.suptitle(
+        f"Catalog versus LF-mock counts (mock count scale {count_scale:.3g})", fontsize=10
+    )
+    fig.tight_layout()
+    fig.savefig(os.path.join(plot_dir, "completeness_counts_comparison.pdf"), dpi=200)
+    plt.close(fig)
+    return table
+
+
 def _plot_relative_completeness_percent(
     C_plot,
     H_true_s,
@@ -1624,6 +1780,11 @@ def get_completeness_function_2d(
         sigma_mag = 0.0
         H_true_s, H_obs_s = H_true, H_obs
     eps = 1e-12
+    count_scale_used = (
+        _estimate_mock_count_scale(H_obs_s, H_true_s, mag_centers, eps=eps)
+        if mock_count_scale is None
+        else max(float(mock_count_scale), eps)
+    )
     C = _scaled_completeness_ratio(
         H_obs_s,
         H_true_s,
@@ -1632,7 +1793,6 @@ def get_completeness_function_2d(
         count_scale=mock_count_scale,
         eps=eps,
     )
-
     if fill_along_mag:
     # fill non-decreasing completeness along mag (for each z)
         tol = 1e-12
@@ -1723,6 +1883,18 @@ def get_completeness_function_2d(
             mag_edges,
             z_edges,
             plot_dir,
+        )
+        _plot_counts_comparison(
+            H_obs,
+            H_true,
+            H_obs_s,
+            H_true_s,
+            mag_centers,
+            z_centers,
+            count_scale=count_scale_used,
+            completeness_raw=C,
+            completeness_final=C,
+            plot_dir=plot_dir,
         )
         # Plot H_obs
         plt.figure(figsize=(7, 5))

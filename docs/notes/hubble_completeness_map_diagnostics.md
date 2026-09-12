@@ -13,3 +13,21 @@ QVC_CUT_ETA_SIGMA_KL_MIN, and QVC_CUT_F_HOST_2500_PSF_MAX respectively.
 Use none to disable a cut including required-column and finiteness checks.
 Point counts retain the existing sum over available bands excluding u.
 Enabled thresholds are inclusive and are recorded for resume validation.
+
+## Completeness grid and smoothing
+
+The library defaults to 0.1-mag and 0.1-redshift target bin widths. Use
+--completeness-mag-bin-width and --completeness-z-bin-width or the corresponding
+QVC_HUBBLE_COMPLETENESS_MAG_BIN_WIDTH and QVC_HUBBLE_COMPLETENESS_Z_BIN_WIDTH
+environment variables. The grid preserves padded physical coverage and uses
+integer bin counts. Direct CLI overrides are resolved before scientific imports.
+
+--completeness-smooth-sigma-mag and --completeness-smooth-sigma-z set Gaussian
+count smoothing widths (defaults 0.1 mag and 0.3 in z), with corresponding
+QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG/Z environment variables. Counts are
+smoothed separately before division. These are not physical magnitude errors
+in the likelihood. Checkpoints record the resolved support and smoothing.
+
+Counts-comparison PDF/CSV diagnostics expose observed and mock histograms
+and the map values by magnitude and redshift. The mock parent and original
+magnitude-dependent completeness remain active when a bright cut is applied.
