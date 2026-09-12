@@ -1,4 +1,4 @@
-"""Opt-in truncated eta profile: support, inference, diagnostics and provenance."""
+"""Default truncated eta profile: support, inference, diagnostics and provenance."""
 
 import sys
 import warnings
@@ -67,10 +67,12 @@ def test_distribution_matches_normalized_scipy_and_support(name, loc, low, high)
 
 
 @pytest.mark.parametrize("variant", ["shared_latent_blr", "mag_flux_linearized_erlang"])
-def test_inference_and_kl_use_the_selected_truncated_profile(variant):
+@pytest.mark.parametrize("explicit", [False, True])
+def test_inference_and_kl_use_the_selected_truncated_profile(variant, explicit):
     obj, lam = object_data()
     shared = variant == "shared_latent_blr"
-    kwargs = dict(eta_prior_profile=PROFILE, disable_linear_trend=True, erlang_order=1)
+    profile_kwargs = {"eta_prior_profile": PROFILE} if explicit else {}
+    kwargs = dict(disable_linear_trend=True, erlang_order=1, **profile_kwargs)
     model = fit.build_single_object_model_mag_flux_linearized(
         obj, lam, None, shared_latent=shared, disk_order=1, **kwargs)
     sites = fit.trace(fit.seed(model, jax.random.PRNGKey(4))).get_trace()
@@ -93,7 +95,7 @@ def test_inference_and_kl_use_the_selected_truncated_profile(variant):
     result = fit.compute_parameter_kls(flat, bands=obj["bands"], survey_names=obj["survey_names"],
         t_ref=obj["X"][0], z=obj["z"], lambda_center_rf=float(raw["lambda_center_rf"]),
         log_jitter_mean=np.full((2, 3), -4.), model_variant=variant,
-        disable_linear_trend=True, eta_prior_profile=PROFILE)
+        disable_linear_trend=True, **profile_kwargs)
     assert ("eta_tau_kl" in result) == (not shared)
     for name in names:
         x = draws[name]
@@ -106,16 +108,36 @@ def test_inference_and_kl_use_the_selected_truncated_profile(variant):
 
 @pytest.mark.parametrize("flag", ["--eta_prior_profile", "--eta-prior-profile"])
 @pytest.mark.parametrize("variant", ["shared_latent_blr", "mag_flux_linearized_erlang"])
-def test_cli_accepts_profile_without_running_fit(monkeypatch, flag, variant):
+@pytest.mark.parametrize("profile", [None, "modified_tight", "relaxed", "modified"])
+def test_cli_accepts_profile_without_running_fit(monkeypatch, flag, variant, profile):
     class Parsed(Exception):
         pass
 
     def stop(args):
-        assert args.eta_prior_profile == PROFILE
+        assert args.eta_prior_profile == (profile or PROFILE)
         assert args.model_variant == variant
         raise Parsed
 
     monkeypatch.setattr(fit, "apply_resume_sample_save_policy", stop)
-    monkeypatch.setattr(sys, "argv", ["fit_light_curves", "--model_variant", variant, flag, PROFILE])
+    monkeypatch.setattr(sys, "argv", ["fit_light_curves", "--model_variant", variant] + ([flag, profile] if profile else []))
     with pytest.raises(Parsed):
         fit.main()
+
+
+@pytest.mark.parametrize("name", ["eta_sigma", "eta_tau"])
+def test_default_helpers_match_tight_and_reject_retired_name(name):
+    helper = getattr(fit, f"{name}_prior")
+    default, explicit = helper(), helper(PROFILE)
+    grid = jnp.linspace(float(explicit.low), float(explicit.high), 51)
+    np.testing.assert_array_equal(default.log_prob(grid), explicit.log_prob(grid))
+    with pytest.raises(ValueError, match="eta_prior_profile must be one of"):
+        helper("default")
+
+
+@pytest.mark.parametrize("flag", ["--eta_prior_profile", "--eta-prior-profile"])
+def test_cli_rejects_retired_default_name(monkeypatch, capsys, flag):
+    monkeypatch.setattr(sys, "argv", ["fit_light_curves", flag, "default"])
+    with pytest.raises(SystemExit) as exc:
+        fit.main()
+    assert exc.value.code == 2
+    assert "invalid choice: 'default'" in capsys.readouterr().err

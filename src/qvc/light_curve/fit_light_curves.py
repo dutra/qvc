@@ -2967,11 +2967,11 @@ def tau_shift_to_uv(eta_tau, lambda_center_rf, lambda_uv=2500.0):
     return jnp.log(10.0) * log_single_pl(lambda_uv, lambda_center_rf, eta_tau)
 
 
-DEFAULT_ETA_PRIOR_PROFILE = "default"
+DEFAULT_ETA_PRIOR_PROFILE = "modified_tight"
 ETA_PRIOR_PROFILES = (
-    DEFAULT_ETA_PRIOR_PROFILE,
+    "relaxed",
     "modified",
-    "modified_tight",
+    DEFAULT_ETA_PRIOR_PROFILE,
 )
 MODIFIED_ETA_SIGMA_LOC = -0.8
 MODIFIED_ETA_TAU_LOC = 0.5
@@ -5628,10 +5628,10 @@ def main():
         choices=ETA_PRIOR_PROFILES,
         default=DEFAULT_ETA_PRIOR_PROFILE,
         help=(
-            "Wavelength-scaling prior profile. 'default' preserves the existing "
+            "Wavelength-scaling prior profile. 'relaxed' restores the previous "
             "eta_sigma and model-specific eta_tau behavior; 'modified' uses "
             "eta_sigma ~ Normal(-0.8, 0.5) and eta_tau ~ Normal(0.5, 0.5) "
-            "for variants with wavelength-dependent drivers. modified_tight uses "
+            "for variants with wavelength-dependent drivers. modified_tight (default) uses "
             "truncated eta_sigma Normal(-0.8, 0.25) on [-1.5, 0] and eta_tau "
             "Normal(0.5, 0.25) on [0, 1.5]. shared_latent_blr "
             "has one wavelength-independent driver and does not use eta_tau."
