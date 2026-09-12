@@ -38,6 +38,8 @@ def _minimal_agn_frame(n=10):
             "dlog_amp_blr_r": np.full(n, -1.0),
             "dlog_amp_blr_i": np.full(n, -1.0),
             "log_tau_uv_rf": np.full(n, 2.5),
+            "SN_MEDIAN_ALL": np.full(n, 3.0),
+            "eta_sigma_kl": np.full(n, 0.05),
             "wrms": np.full(n, 0.5),
             "t_rf_length": np.full(n, 2000.0),
             "f_host_2500": np.full(n, 5e-4),
@@ -1053,3 +1055,49 @@ def test_completeness_diagnostics_color_by_complementary_variable(
     assert (
         tmp_path / "completeness" / "dmi_vs_m2500_posterior_median.pdf"
     ).exists()
+
+
+@pytest.mark.parametrize('tier', ['0', '1', '2'])
+def test_psf_host_cut_tiers_and_provenance(tmp_path, monkeypatch, tier):
+    source = tmp_path / 'agn.h5'
+    source.touch()
+    frame = _minimal_agn_frame(n=7)
+    frame['f_host_2500_psf'] = [0., .90, .90001, -.01, np.nan, np.inf, -np.inf]
+    monkeypatch.setattr(hubble_utils, 'read_quasars_from_hdf5_flat', lambda *a, **k: frame.copy())
+    monkeypatch.setattr(hubble_utils, 'populate_xray', lambda x: x)
+    monkeypatch.setattr(hubble_utils, 'LOW_L2500_FHOST_LOG_L_MAX', None)
+    _patch_load_agn_plotters(monkeypatch)
+    selected, _ = hubble_utils.load_agn_data(source, magnitude_convention='dereddened', cut_tier=tier, plot_diagnostics=False, plot_path=str(tmp_path))
+    assert selected.object_id.tolist() == (['obj0', 'obj1'] if tier == '2' else frame.object_id.tolist())
+    config = json.loads(selected.attrs['cut_configuration_json'])
+    assert (['f_host_2500_psf', 0., .9] in config['tier2']) == (tier == '2')
+    assert config['completeness_magnitude_support'] == [17., 27.]
+    if tier == '2':
+        frame.drop(columns='f_host_2500_psf', inplace=True)
+        with pytest.raises(ValueError, match="Tier 2 cut requires missing column 'f_host_2500_psf'"):
+            hubble_utils.load_agn_data(source, magnitude_convention='dereddened', cut_tier=tier, plot_diagnostics=False, plot_path=str(tmp_path))
+
+
+@pytest.mark.parametrize('tier', ['0', '1', '2'])
+@pytest.mark.parametrize('column,lower', [('light_curve_n_points', 400.), ('SN_MEDIAN_ALL', 3.), ('eta_sigma_kl', .05)])
+def test_coverage_sn_information_selection_and_provenance(tmp_path, monkeypatch, tier, column, lower):
+    source = tmp_path / 'agn.h5'
+    source.touch()
+    frame = _minimal_agn_frame(n=3)
+    if column == 'light_curve_n_points':
+        frame['number_points_g'] = [200, 199, 201]
+        frame['number_points_r'] = 200
+        frame['number_points_u'] = 1000  # excluded from the science count
+    else:
+        frame[column] = [lower, np.nextafter(lower, -np.inf), lower + 1.]
+    monkeypatch.setattr(hubble_utils, 'read_quasars_from_hdf5_flat', lambda *a, **k: frame.copy())
+    monkeypatch.setattr(hubble_utils, 'populate_xray', lambda x: x)
+    _patch_load_agn_plotters(monkeypatch)
+    selected, _ = hubble_utils.load_agn_data(source, magnitude_convention='dereddened', cut_tier=tier, plot_diagnostics=False, plot_path=str(tmp_path))
+    assert selected.object_id.tolist() == (['obj0', 'obj2'] if tier == '2' else frame.object_id.tolist())
+    config = json.loads(selected.attrs['cut_configuration_json'])
+    assert ([column, lower, None] in config['tier2']) == (tier == '2')
+    if tier == '2':
+        frame.drop(columns=['number_points_g', 'number_points_r', 'number_points_u'] if column == 'light_curve_n_points' else [column], inplace=True)
+        with pytest.raises(ValueError, match=f"Tier 2 cut requires missing column '{column}'"):
+            hubble_utils.load_agn_data(source, magnitude_convention='dereddened', cut_tier=tier, plot_diagnostics=False, plot_path=str(tmp_path))

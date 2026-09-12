@@ -783,12 +783,37 @@ def _resolve_redshift_edges(z_true, z_range, declared_min=np.nan, declared_max=n
     return z_min, z_max
 
 
-def _validate_mock_magnitude_coverage(m_true):
+def _mock_magnitude_support_from_attrs(attrs):
+    """Read generator support, rather than the desired map's metadata."""
+    keys = ("m2500_support_min", "m2500_support_max")
+    if not any(key in attrs for key in keys):
+        return None
+    return tuple(attrs.get(key, np.nan) for key in keys)
+
+
+def _validate_mock_magnitude_coverage(m_true, *, declared_support=None):
     finite = np.asarray(m_true, dtype=float)
     finite = finite[np.isfinite(finite)]
     if finite.size == 0:
         raise ValueError("Completeness mock contains no finite magnitudes.")
     mock_min, mock_max = float(np.min(finite)), float(np.max(finite))
+    if declared_support is not None:
+        support = np.asarray(declared_support, dtype=float)
+        if (support.shape != (2,) or not np.all(np.isfinite(support))
+                or support[0] >= support[1]):
+            raise ValueError("Invalid mock m2500_support metadata; regenerate the artifact.")
+        lower, upper = support
+        if lower > COMPLETENESS_MAP_MAG_EDGE_MIN or upper < COMPLETENESS_MAP_MAG_EDGE_MAX:
+            raise ValueError(
+                f"Declared mock magnitude support [{lower}, {upper}] does not cover "
+                f"the fixed map [{COMPLETENESS_MAP_MAG_EDGE_MIN}, {COMPLETENESS_MAP_MAG_EDGE_MAX}]. "
+                "Regenerate the completeness artifact."
+            )
+        if mock_min < lower - 1e-10 or mock_max > upper + 1e-10:
+            raise ValueError("Mock magnitudes lie outside declared m2500_support metadata.")
+        # Poisson realizations need not populate either endpoint of their
+        # sampling support, especially at the sparsely populated bright end.
+        return
     tolerance = 0.01 * (COMPLETENESS_MAP_MAG_EDGE_MAX - COMPLETENESS_MAP_MAG_EDGE_MIN)
     if (
         mock_min > COMPLETENESS_MAP_MAG_EDGE_MIN + tolerance
@@ -797,7 +822,9 @@ def _validate_mock_magnitude_coverage(m_true):
         raise ValueError(
             "Completeness mock magnitude support does not cover the fixed map: "
             f"mock=[{mock_min:.6g}, {mock_max:.6g}], required="
-            f"[{COMPLETENESS_MAP_MAG_EDGE_MIN}, {COMPLETENESS_MAP_MAG_EDGE_MAX}]."
+            f"[{COMPLETENESS_MAP_MAG_EDGE_MIN}, {COMPLETENESS_MAP_MAG_EDGE_MAX}]. "
+            "Regenerate the completeness artifact or omit --completeness_sim_file "
+            "to generate a fresh mock."
         )
 
 
@@ -1539,6 +1566,7 @@ def get_completeness_function_2d(
     # Simulation inputs: apparent-magnitude proxy at rest-frame 2500 A and z
     sim_file = resolve_qvc_data_path(sim_file)
     with h5py.File(sim_file, "r") as f:
+        declared_magnitude_support = _mock_magnitude_support_from_attrs(f.attrs)
         if "apparent_mag_2500" in f:
             m_true = np.asarray(f["apparent_mag_2500"][:], dtype=float)
         else:
@@ -1556,7 +1584,7 @@ def get_completeness_function_2d(
     ok_true = np.isfinite(m_true) & np.isfinite(z_true)
     m_obs,  z_obs  = m_obs[ok_obs],  z_obs[ok_obs]
     m_true, z_true = m_true[ok_true], z_true[ok_true]
-    _validate_mock_magnitude_coverage(m_true)
+    _validate_mock_magnitude_coverage(m_true, declared_support=declared_magnitude_support)
     # Grid
     mag_min, mag_max = COMPLETENESS_MAP_MAG_EDGE_MIN, COMPLETENESS_MAP_MAG_EDGE_MAX
     z_min, z_max = _resolve_redshift_edges(
@@ -1973,6 +2001,7 @@ def get_completeness_function_3d_fhost(
 
     sim_file = resolve_qvc_data_path(sim_file)
     with h5py.File(sim_file, "r") as f:
+        declared_magnitude_support = _mock_magnitude_support_from_attrs(f.attrs)
         if "apparent_mag_2500" in f:
             m_true = np.asarray(f["apparent_mag_2500"][:], dtype=float)
         else:
@@ -2013,7 +2042,7 @@ def get_completeness_function_3d_fhost(
         )
     m_obs, z_obs, fhost_obs = m_obs[ok_obs], z_obs[ok_obs], fhost_obs[ok_obs]
     m_true, z_true = m_true[ok_true], z_true[ok_true]
-    _validate_mock_magnitude_coverage(m_true)
+    _validate_mock_magnitude_coverage(m_true, declared_support=declared_magnitude_support)
 
     host_model = _fit_fhost_population_model(
         df_agn.loc[ok_obs],
@@ -2203,6 +2232,7 @@ def get_completeness_function_4d_fhost_alpha(
 
     sim_file = resolve_qvc_data_path(sim_file)
     with h5py.File(sim_file, "r") as f:
+        declared_magnitude_support = _mock_magnitude_support_from_attrs(f.attrs)
         if "apparent_mag_2500" in f:
             m_true = np.asarray(f["apparent_mag_2500"][:], dtype=float)
         else:
@@ -2258,7 +2288,7 @@ def get_completeness_function_4d_fhost_alpha(
         )
     m_obs, z_obs, fhost_obs, alpha_obs = m_obs[ok_obs], z_obs[ok_obs], fhost_obs[ok_obs], alpha_obs[ok_obs]
     m_true, z_true = m_true[ok_true], z_true[ok_true]
-    _validate_mock_magnitude_coverage(m_true)
+    _validate_mock_magnitude_coverage(m_true, declared_support=declared_magnitude_support)
     if alpha_true_raw is not None:
         alpha_true = np.clip(alpha_true_raw[ok_true], _ALPHA_MIN, _ALPHA_MAX)
         alpha_model = _alpha_lambda_model_from_values(

@@ -282,9 +282,9 @@ NUM_DIVERGENCES_MAX = _cut_env_float("QVC_CUT_NUM_DIVERGENCES_MAX", None)
 # The completeness map is tabulated at histogram-bin centers on a deliberately
 # padded physical grid. Science-selection coordinates lie inside that center
 # hull, so no magnitude/redshift extrapolation or clipping is needed.
-COMPLETENESS_MAP_MAG_EDGE_MIN = 18.0
-COMPLETENESS_MAP_MAG_EDGE_MAX = 24.5
-COMPLETENESS_N_MAG_BINS = 65
+COMPLETENESS_MAP_MAG_EDGE_MIN = 16.5
+COMPLETENESS_MAP_MAG_EDGE_MAX = 27.5
+COMPLETENESS_N_MAG_BINS = 110
 COMPLETENESS_MAP_Z_EDGE_MIN = 0.0
 COMPLETENESS_MAP_Z_EDGE_MAX = 4.5
 COMPLETENESS_N_Z_BINS = 45
@@ -299,8 +299,8 @@ COMPLETENESS_Z_MAX = (
 )
 
 # The Hubble sample selection is deliberately narrower than the padded map.
-COMPLETENESS_MAG_EDGE_MIN = 18.5
-COMPLETENESS_MAG_EDGE_MAX = 24.0
+COMPLETENESS_MAG_EDGE_MIN = 17.0
+COMPLETENESS_MAG_EDGE_MAX = 27.0
 COMPLETENESS_MAG_BIN_WIDTH = (
     COMPLETENESS_MAP_MAG_EDGE_MAX - COMPLETENESS_MAP_MAG_EDGE_MIN
 ) / COMPLETENESS_N_MAG_BINS
@@ -353,7 +353,16 @@ LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS = ("u",)
 # COMPLETENESS_MAG_2500_MAX=None; ALPHA_LAMBDA=(None, None)
 WRMS_MAX = None
 T_RF_LENGTH_MIN = None
-LIGHT_CURVE_N_POINTS_MIN = None
+LIGHT_CURVE_N_POINTS_MIN = _cut_env_float("QVC_CUT_LIGHT_CURVE_N_POINTS_MIN", 400.0)
+SN_MEDIAN_ALL_MIN = _cut_env_float("QVC_CUT_SN_MEDIAN_ALL_MIN", 3.0)
+ETA_SIGMA_KL_MIN = _cut_env_float("QVC_CUT_ETA_SIGMA_KL_MIN", 0.05)
+for _name, _threshold in (
+    ("QVC_CUT_LIGHT_CURVE_N_POINTS_MIN", LIGHT_CURVE_N_POINTS_MIN),
+    ("QVC_CUT_SN_MEDIAN_ALL_MIN", SN_MEDIAN_ALL_MIN),
+    ("QVC_CUT_ETA_SIGMA_KL_MIN", ETA_SIGMA_KL_MIN),
+):
+    if _threshold is not None and not (np.isfinite(_threshold) and _threshold >= 0):
+        raise ValueError(f"{_name} must be finite and nonnegative or none.")
 ALPHA_LAMBDA_MIN = None
 ALPHA_LAMBDA_MAX = None
 
@@ -363,6 +372,9 @@ REDDENING_EBV_MAX = None
 
 VARIABILITY_CHI_SQ_RED_G_MIN = None
 F_HOST_2500_MAX = None
+F_HOST_2500_PSF_MAX = _cut_env_float("QVC_CUT_F_HOST_2500_PSF_MAX", 0.90)
+if F_HOST_2500_PSF_MAX is not None and not 0.0 <= F_HOST_2500_PSF_MAX <= 1.0:
+    raise ValueError("QVC_CUT_F_HOST_2500_PSF_MAX must be within [0, 1] or none.")
 LOW_L2500_FHOST_LOG_L_MAX = _cut_env_float(
     "QVC_CUT_LOW_L2500_FHOST_LOG_L_MAX", 45.0
 )
@@ -424,6 +436,9 @@ AGN_TIER1_FIT_QUALITY_CUTS = (
 )
 
 AGN_TIER2_PARAMETER_CUTS = (
+    (LIGHT_CURVE_N_POINTS_COLUMN, LIGHT_CURVE_N_POINTS_MIN, None),
+    ("SN_MEDIAN_ALL", SN_MEDIAN_ALL_MIN, None),
+    ("eta_sigma_kl", ETA_SIGMA_KL_MIN, None),
     ("log_tau_uv_rf", LOG_TAU_UV_RF_MIN, LOG_TAU_UV_RF_MAX),
     *(
         ((T_RF_OVER_TAU_UV_RF_COLUMN, T_RF_OVER_TAU_UV_RF_MIN, None),)
@@ -433,6 +448,11 @@ AGN_TIER2_PARAMETER_CUTS = (
     ("fracAGN_5100_fit", FRAC_AGN_5100_MIN, None),
     ("apparent_mag_2500_err", None, APPARENT_MAG_2500_ERR_MAX),
     (EBV_GAL_PLUS_EBV_AGN_COLUMN, None, EBV_GAL_PLUS_EBV_AGN_MAX),
+    *(
+        (("f_host_2500_psf", 0.0, F_HOST_2500_PSF_MAX),)
+        if F_HOST_2500_PSF_MAX is not None
+        else ()
+    ),
 )
 
 # Tier-1 convergence diagnostics are mandatory when Tier 1 is active.

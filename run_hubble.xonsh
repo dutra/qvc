@@ -68,6 +68,12 @@ if light_curve_uncertainty_mode not in {"covariance", "posterior-draws"}:
 # with the corresponding environment variable. Use "none" for thresholds that
 # are optional; the four tier-1 chi-square and R-hat limits must stay numeric.
 cut_threshold_defaults = {
+    "QVC_CUT_COMPLETENESS_MAG_2500_MIN": "17",
+    "QVC_CUT_COMPLETENESS_MAG_2500_MAX": "27",
+    "QVC_CUT_F_HOST_2500_PSF_MAX": "0.90",
+    "QVC_CUT_LIGHT_CURVE_N_POINTS_MIN": "400",
+    "QVC_CUT_SN_MEDIAN_ALL_MIN": "3",
+    "QVC_CUT_ETA_SIGMA_KL_MIN": "0.05",
     # Tier 1: spectral/light-curve fit quality and convergence.
     "QVC_CUT_JAXSEDFIT_JOINT_REDUCED_CHI2_MAX": "1.2",
     "QVC_CUT_SED_REDUCED_CHI2_MAX": "1.3",

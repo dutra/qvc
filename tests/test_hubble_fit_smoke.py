@@ -1491,16 +1491,16 @@ def test_strict_padded_support_is_recorded_in_checkpoint_selection_metadata():
 
     hubble_fit.record_completeness_support_metadata(
         (frame,),
-        magnitude_support=(18.5, 24.0),
+        magnitude_support=(17.0, 27.0),
         redshift_support=(0.2, 3.5),
     )
 
     configuration = json.loads(frame.attrs["cut_configuration_json"])
-    assert configuration["completeness_magnitude_support"] == [18.5, 24.0]
+    assert configuration["completeness_magnitude_support"] == [17.0, 27.0]
     assert configuration["completeness_redshift_support"] == [0.2, 3.5]
-    assert configuration["completeness_map_magnitude_support"] == [18.0, 24.5]
+    assert configuration["completeness_map_magnitude_support"] == [16.5, 27.5]
     assert configuration["completeness_map_redshift_support"] == [0.0, 4.5]
-    assert configuration["completeness_map_n_magnitude_bins"] == 65
+    assert configuration["completeness_map_n_magnitude_bins"] == 110
     assert configuration["completeness_map_n_redshift_bins"] == 45
     assert configuration["completeness_interpolation_policy"] == "strict-padded-v1"
 
@@ -5942,3 +5942,41 @@ def test_run_hubble_forwards_configurable_cumulative_cut_tier():
     assert "--completeness-magnitude-support-mode @(completeness_magnitude_support_mode)" in runner
     assert '"QVC_CUT_A_2500_TOTAL_MAX": "none"' in runner
     assert '"QVC_CUT_EBV_GAL_PLUS_EBV_AGN_MAX": "1.0"' in runner
+
+
+@pytest.mark.parametrize('changed', [
+    {'completeness_magnitude_support': [18.5, 24.]},
+    {'tier2': []},
+    {'tier2': [['f_host_2500_psf', 0., .8]]},
+])
+def test_resume_rejects_changed_magnitude_or_psf_host_selection(changed):
+    config = {'completeness_magnitude_support': [17., 27.], 'tier2': [['f_host_2500_psf', 0., .9]]}
+    payload = {
+        'flat_samples': np.zeros((4, 3)), 'dmi_max_w': np.zeros(2),
+        'dmi_posterior_sigma': np.ones(2), 'integrals_max_w': np.zeros(2),
+        'logZ': 0., 'logZerr': 0., 'cut_tier': '2',
+        'cut_configuration_json': json.dumps(dict(config, **changed), sort_keys=True),
+    }
+    with pytest.raises(RuntimeError, match='different Hubble cut'):
+        hubble_fit.validate_resume_checkpoint(payload, 'old.h5', 3, 2,
+            expected_cut_tier='2', expected_cut_configuration_json=json.dumps(config, sort_keys=True))
+
+
+@pytest.mark.parametrize('column,threshold', [
+    ('light_curve_n_points', 400.), ('SN_MEDIAN_ALL', 3.), ('eta_sigma_kl', .05),
+])
+@pytest.mark.parametrize('old_threshold', [None, 0.])
+def test_resume_rejects_changed_coverage_sn_information_cut(column, threshold, old_threshold):
+    current = {'cut_tier': '2', 'tier2': [[column, threshold, None]]}
+    previous = {'cut_tier': '2', 'tier2': [] if old_threshold is None else [[column, old_threshold, None]]}
+    payload = {
+        'flat_samples': np.zeros((4, 3)), 'dmi_max_w': np.zeros(2),
+        'dmi_posterior_sigma': np.ones(2), 'integrals_max_w': np.zeros(2),
+        'logZ': 0., 'logZerr': 0., 'cut_tier': '2',
+        'cut_configuration_json': json.dumps(previous, sort_keys=True),
+    }
+    with pytest.raises(RuntimeError, match='different Hubble cut'):
+        hubble_fit.validate_resume_checkpoint(
+            payload, 'old.h5', 3, 2, expected_cut_tier='2',
+            expected_cut_configuration_json=json.dumps(current, sort_keys=True),
+        )

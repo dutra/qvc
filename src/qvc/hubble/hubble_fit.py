@@ -6184,7 +6184,7 @@ if __name__ == "__main__":
         default=DEFAULT_COMPLETENESS_MAGNITUDE_SUPPORT_MODE,
         help=(
             "Magnitude selection support: 'tails' uses the physical 14--32 "
-            "guard with map extrapolation; 'hard-cut' retains 18.5--24.0."
+            "guard with map extrapolation; 'hard-cut' retains 17.0--27.0."
         ),
     )
     parser.add_argument(

@@ -73,11 +73,15 @@ def test_build_agn_cuts_are_partitioned_in_tier_order():
     assert tuple(build_tier0_cuts()) == AGN_TIER0_ELIGIBILITY_CUTS
     assert tuple(build_tier1_cuts()) == AGN_TIER1_FIT_QUALITY_CUTS
     assert cut_map == {
+        "light_curve_n_points": (400.0, None),
+        "SN_MEDIAN_ALL": (3.0, None),
+        "eta_sigma_kl": (0.05, None),
         "z": (COMPLETENESS_Z_MIN, COMPLETENESS_Z_MAX),
         "log_tau_uv_rf": (1.5, 4.0),
         T_RF_OVER_TAU_UV_RF_COLUMN: (5.0, None),
         "apparent_mag_2500_err": (None, APPARENT_MAG_2500_ERR_MAX),
         "a_2500_total": (None, A_2500_TOTAL_MAX),
+        "f_host_2500_psf": (0.0, 0.90),
         EBV_GAL_PLUS_EBV_AGN_COLUMN: (None, EBV_GAL_PLUS_EBV_AGN_MAX),
         "m_2500_dereddened": (
             COMPLETENESS_MAG_2500_MIN,
@@ -94,8 +98,8 @@ def test_build_agn_cuts_are_partitioned_in_tier_order():
     }
     assert LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS == ("u",)
     assert A_2500_TOTAL_MAX == 3.5
-    assert COMPLETENESS_MAG_2500_MIN == 18.5
-    assert COMPLETENESS_MAG_2500_MAX == 24.0
+    assert COMPLETENESS_MAG_2500_MIN == 17.0
+    assert COMPLETENESS_MAG_2500_MAX == 27.0
     assert COMPLETENESS_Z_BIN_WIDTH == 0.1
     assert COMPLETENESS_Z_MIN == 0.05
     assert COMPLETENESS_Z_MAX == 4.45
@@ -136,7 +140,6 @@ def test_previous_scalar_and_component_defaults_are_disabled():
         {
             "wrms",
             "t_rf_length",
-            LIGHT_CURVE_N_POINTS_COLUMN,
             "f_host_2500",
             "alpha_lambda",
             "variability_chi_sq_red_g",
@@ -586,3 +589,71 @@ def test_render_cut_summary_table_shows_low_and_high_redshift_removals_after_tot
         "1",
         "applied",
     ]
+
+
+def test_widened_support_and_psf_host_boundaries():
+    from qvc.hubble import cuts
+    assert (cuts.COMPLETENESS_MAP_MAG_EDGE_MIN, cuts.COMPLETENESS_MAP_MAG_EDGE_MAX) == (16.5, 27.5)
+    assert cuts.COMPLETENESS_N_MAG_BINS == 110
+    assert cuts.COMPLETENESS_MAG_BIN_WIDTH == 0.1
+    for column, lower, upper in [('m_2500_attenuated_model', 17., 27.), ('f_host_2500_psf', 0., .9)]:
+        values = [lower, upper, np.nextafter(lower, -np.inf), np.nextafter(upper, np.inf), np.nan, np.inf, -np.inf]
+        mask = _scalar_parameter_cut_mask(pd.DataFrame({column: values}), column, lower, upper)
+        np.testing.assert_array_equal(mask, [True, True, False, False, False, False, False])
+
+
+def test_psf_host_cut_environment_disable_and_override():
+    for value, expected in [('none', None), ('0.8', ('f_host_2500_psf', 0., .8))]:
+        env = dict(os.environ, QVC_CUT_F_HOST_2500_PSF_MAX=value, PYTHONPATH=str(SRC))
+        result = subprocess.run([sys.executable, '-c', "from qvc.hubble.hubble_cut_config import build_tier2_cuts; print(next((c for c in build_tier2_cuts() if c[0]=='f_host_2500_psf'), None))"], env=env, capture_output=True, text=True, check=True)
+        assert literal_eval(result.stdout.strip()) == expected
+
+
+def test_new_tier2_quality_cut_boundaries_and_tier_scope():
+    thresholds = {'light_curve_n_points': 400., 'SN_MEDIAN_ALL': 3., 'eta_sigma_kl': .05}
+    early_columns = {c[0] for c in build_tier0_cuts() + build_tier1_cuts()}
+    for column, lower in thresholds.items():
+        assert column not in early_columns
+        assert (column, lower, None) in build_tier2_cuts()
+        values = [lower, np.nextafter(lower, np.inf), np.nextafter(lower, -np.inf), -1., np.nan, np.inf, -np.inf]
+        mask = _scalar_parameter_cut_mask(pd.DataFrame({column: values}), column, lower, None)
+        np.testing.assert_array_equal(mask, [True, True, False, False, False, False, False])
+
+
+def test_new_tier2_quality_cut_environment_controls():
+    names = ['QVC_CUT_LIGHT_CURVE_N_POINTS_MIN', 'QVC_CUT_SN_MEDIAN_ALL_MIN', 'QVC_CUT_ETA_SIGMA_KL_MIN']
+    columns = ['light_curve_n_points', 'SN_MEDIAN_ALL', 'eta_sigma_kl']
+    code = f"from qvc.hubble.hubble_cut_config import build_tier2_cuts; print([c for c in build_tier2_cuts() if c[0] in {columns!r}])"
+    for values, expected in [(['none'] * 3, []), (['500', '5', '.1'], [(columns[0], 500., None), (columns[1], 5., None), (columns[2], .1, None)])]:
+        env = dict(os.environ, PYTHONPATH=str(SRC), **dict(zip(names, values)))
+        result = subprocess.run([sys.executable, '-c', code], env=env, capture_output=True, text=True, check=True)
+        assert literal_eval(result.stdout.strip()) == expected
+    for name in names:
+        for value in ['nan', 'inf', '-1']:
+            env = dict(os.environ, PYTHONPATH=str(SRC), **{name: value})
+            result = subprocess.run([sys.executable, '-c', code], env=env, capture_output=True, text=True)
+            assert result.returncode != 0
+            assert f'{name} must be finite and nonnegative or none' in result.stderr
+
+
+def test_launcher_faint_limit_override_sets_hard_selection_support():
+    code = """
+import numpy as np
+import pandas as pd
+from qvc.hubble import cuts
+from qvc.hubble.hubble_cut_config import build_tier0_cuts
+from qvc.hubble.hubble_utils import _scalar_parameter_cut_mask
+from qvc.hubble.hubble_likelihood import _magnitude_integration_grid
+cut = next(c for c in build_tier0_cuts(completeness_magnitude='attenuated') if c[0] == 'm_2500_attenuated_model')
+assert cut == ('m_2500_attenuated_model', 17., 22.5)
+frame = pd.DataFrame({cut[0]: [17., 22.5, np.nextafter(22.5, np.inf), np.nan]})
+assert _scalar_parameter_cut_mask(frame, *cut).tolist() == [True, True, False, False]
+assert (cuts.COMPLETENESS_MAP_MAG_EDGE_MIN, cuts.COMPLETENESS_MAP_MAG_EDGE_MAX, cuts.COMPLETENESS_N_MAG_BINS) == (16.5, 27.5, 110)
+edges = np.linspace(16.5, 27.5, 111)
+grid = _magnitude_integration_grid((edges[:-1] + edges[1:]) / 2, cut[1:])
+assert grid[0] == 17. and grid[-1] == 22.5
+"""
+    env = dict(os.environ, QVC_CUT_COMPLETENESS_MAG_2500_MAX='22.5', PYTHONPATH=str(SRC))
+    subprocess.run([sys.executable, '-c', code], env=env, capture_output=True, text=True, check=True)
+    launcher = (ROOT / 'run_hubble.xonsh').read_text()
+    assert '"QVC_CUT_COMPLETENESS_MAG_2500_MAX"' in launcher
