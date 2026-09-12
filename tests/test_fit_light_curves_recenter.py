@@ -99,7 +99,7 @@ def test_modified_eta_prior_profile_has_requested_normal_priors():
     sigma_prior = eta_sigma_prior("modified")
     tau_prior = eta_tau_prior("modified")
 
-    assert fit_lc.ETA_PRIOR_PROFILES == ("relaxed", "modified", "modified_tight")
+    assert fit_lc.ETA_PRIOR_PROFILES == ("relaxed", "modified", "default")
     assert isinstance(sigma_prior, fit_lc.dist.Normal)
     assert float(sigma_prior.loc) == pytest.approx(-0.8)
     assert float(sigma_prior.scale) == pytest.approx(0.5)

@@ -13,7 +13,7 @@ from qvc.light_curve import fit_light_curves as fit
 from qvc.light_curve import multiband_fit_utils as utils
 
 jax.config.update("jax_enable_x64", True)
-PROFILE = "modified_tight"
+PROFILE = "default"
 
 def object_data():
     X = (jnp.array([0., 1., 3., 5., 8., 13.]), jnp.array([0, 1, 0, 1, 0, 1]))
@@ -108,7 +108,7 @@ def test_inference_and_kl_use_the_selected_truncated_profile(variant, explicit):
 
 @pytest.mark.parametrize("flag", ["--eta_prior_profile", "--eta-prior-profile"])
 @pytest.mark.parametrize("variant", ["shared_latent_blr", "mag_flux_linearized_erlang"])
-@pytest.mark.parametrize("profile", [None, "modified_tight", "relaxed", "modified"])
+@pytest.mark.parametrize("profile", [None, "default", "relaxed", "modified"])
 def test_cli_accepts_profile_without_running_fit(monkeypatch, flag, variant, profile):
     class Parsed(Exception):
         pass
@@ -131,13 +131,13 @@ def test_default_helpers_match_tight_and_reject_retired_name(name):
     grid = jnp.linspace(float(explicit.low), float(explicit.high), 51)
     np.testing.assert_array_equal(default.log_prob(grid), explicit.log_prob(grid))
     with pytest.raises(ValueError, match="eta_prior_profile must be one of"):
-        helper("default")
+        helper("modified_tight")
 
 
 @pytest.mark.parametrize("flag", ["--eta_prior_profile", "--eta-prior-profile"])
-def test_cli_rejects_retired_default_name(monkeypatch, capsys, flag):
-    monkeypatch.setattr(sys, "argv", ["fit_light_curves", flag, "default"])
+def test_cli_rejects_retired_modified_tight_name(monkeypatch, capsys, flag):
+    monkeypatch.setattr(sys, "argv", ["fit_light_curves", flag, "modified_tight"])
     with pytest.raises(SystemExit) as exc:
         fit.main()
     assert exc.value.code == 2
-    assert "invalid choice: 'default'" in capsys.readouterr().err
+    assert "invalid choice: 'modified_tight'" in capsys.readouterr().err

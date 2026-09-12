@@ -317,7 +317,7 @@ def test_main_stops_before_writing_when_exclusions_remove_every_object(monkeypat
         sfitlc.main()
 
 
-@pytest.mark.parametrize("profile", ["relaxed", "modified", "modified_tight"])
+@pytest.mark.parametrize("profile", ["relaxed", "modified", "default"])
 @pytest.mark.parametrize("flag", ["--eta_prior_profile", "--eta-prior-profile"])
 def test_eta_prior_profile_is_forwarded_to_light_curve_fitter(monkeypatch, profile, flag):
     monkeypatch.setattr(
