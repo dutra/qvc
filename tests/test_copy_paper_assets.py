@@ -53,6 +53,10 @@ def test_exact_corner_sources_and_added_draft_assets(tmp_path, legacy):
     assert not list(dest.glob('*_noalphabeta.pdf'))
     assert (dest / 'agn_table.tex').read_bytes() == (run / 'agn_table.tex').read_bytes()
     assert (dest / 'bpl_psd_vs_uv_variability_precut.pdf').exists()
+    assert (dest / 'completeness_map_with_relative_percent_contours.pdf').exists()
+    assert (dest / 'tier1_cuts_vs_redshift_precut.pdf').exists()
+    assert not (dest / 'completeness_map.pdf').exists()
+    assert not (dest / 'spectral_fraction_vs_redshift_cuts.pdf').exists()
 
 
 def test_missing_sources_leave_existing_assets_untouched(tmp_path):
