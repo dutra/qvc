@@ -2542,9 +2542,7 @@ def initialization_spectrum_figure_path(fig_dir, rec, stage):
 
 
 def fit_with_saved_initialization_plots(fitter, rec, args):
-    """Run the fit while saving initialization plots without GUI windows."""
-    if not bool(getattr(args, "plot_init", False)):
-        return fitter.fit(progress_bar=args.progress)
+    """Run the fit with residual-free SED plots and saved MAP diagnostics."""
 
     title_stages = {
         "Stage 1 continuum/host MAP initialization": "stage1",
@@ -2561,6 +2559,7 @@ def fit_with_saved_initialization_plots(fitter, rec, args):
         # diagnostics. The batch runner must never honor that request: even an
         # unfamiliar future stage title remains non-interactive.
         call_kwargs["show"] = False
+        call_kwargs["plot_residual"] = False
         if stage is None:
             return original_plot_sed(*call_args, **call_kwargs)
         output_path = initialization_figure_path(args.fig_dir, rec, stage)
@@ -3031,7 +3030,7 @@ def _complete_resumed_fit(rec, args, source_path, fitter):
     if args.save_fig:
         sed_path = sed_figure_path(args.fig_dir, rec)
         sed_path.parent.mkdir(parents=True, exist_ok=True)
-        sed_fig = fitter.plot_sed(output_path=sed_path, show=False)
+        sed_fig = fitter.plot_sed(output_path=sed_path, show=False, plot_residual=False)
         if sed_fig is not None:
             plt.close(sed_fig)
         if not sed_path.is_file():
