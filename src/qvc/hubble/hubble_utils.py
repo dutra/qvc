@@ -484,6 +484,7 @@ def populate_xray(df, table_fpath="data/cscresults.vot"):
             stacklevel=2,
         )
         df_out = df.copy()
+        df_out["xray_matched"] = False
         for col in xray_cols:
             if col not in df_out.columns:
                 df_out[col] = np.nan
@@ -507,6 +508,9 @@ def populate_xray(df, table_fpath="data/cscresults.vot"):
         max_sep_arcsec=1.0
     )
     print(f"Matched {len(df_matched) - len(unmatched_object_ids)} out of {len(df)} objects to CSC3 catalog.")
+    # Preserve X-ray membership independently of generic matching columns and
+    # flux availability (a counterpart can lack a usable broad-band flux).
+    df_matched["xray_matched"] = df_matched["matched_idx_b"].to_numpy() >= 0
 
     # Ensure the matched flux columns are numeric.
     for c in ["flux_aper_b", "flux_aper_hilim_b", "flux_aper_lolim_b"]:
@@ -4108,6 +4112,7 @@ def write_results_tex_variables(
     compare_r_sna=None,
     *,
     agn_pivot_context: AgnPivotContext,
+    agn_xray_counts=None,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
 ):
@@ -4162,6 +4167,19 @@ def write_results_tex_variables(
     lines.append(_cmd("NumAGNPlotted", len(df_agn)))
     lines.append(_cmd("NumAGNFitted", n_fitted))
     lines.append(_cmd("NumAGNOutOfRange", len(df_agn) - n_fitted))
+    # Prefer the paper's Flatw0waCDM diagnostic sample; also export each model
+    # explicitly because clipping/finite residuals can differ between models.
+    xray_counts = agn_xray_counts or {}
+    reference_model = "Flatw0waCDM" if "Flatw0waCDM" in xray_counts else next(iter(xray_counts), None)
+    reference_counts = xray_counts.get(reference_model, {
+        "NumAGNXrayMatched": int(df_agn.get("xray_matched", pd.Series(False, index=df_agn.index)).fillna(False).sum()),
+        "NumAGNAlphaOXPlotted": 0,
+    })
+    lines.append(f"% X-ray count reference model: {reference_model or 'no plots requested'}")
+    for name in ("NumAGNXrayMatched", "NumAGNAlphaOXPlotted"):
+        lines.append(_cmd(name, reference_counts[name]))
+        for model_name, counts in xray_counts.items():
+            lines.append(_cmd(name, counts[name], model_suffix=model_name))
 
     is_calib_bool = np.asarray(df_pantheon['IS_CALIBRATOR'], dtype=bool)
     mask = (df_pantheon['zHD'] > 0.01) | is_calib_bool

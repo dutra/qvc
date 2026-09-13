@@ -4172,7 +4172,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                df_agn_completeness_parent=None,
                bright_subsample_cut=None,
                bright_subsample_plot_data=None,
-               skip_debiased_residual_plot=False):
+               skip_debiased_residual_plot=False,
+               agn_xray_counts=None):
     if only_sna:
         completeness = False
         plot_completeness = False
@@ -4948,6 +4949,11 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             pass1_diagnostics_df=pass1_diagnostics_df,
         )
 
+    if agn_xray_counts is not None:
+        agn_xray_counts["NumAGNXrayMatched"] = int(
+            df_agn_pass2_plot_sample.get("xray_matched", pd.Series(False, index=df_agn_pass2_plot_sample.index)).fillna(False).sum()
+        )
+        agn_xray_counts["NumAGNAlphaOXPlotted"] = 0
     if compare_sigma_only or skip_plots or only_sna:
         print("Skipping plots, returning results...")
         return flat_samples, model_labels, dm_interp, logZ, logZerr, None, age, age_err
@@ -5784,6 +5790,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         debiased_clipping_sigma,
         show=False,
         plot_path=plot_path,
+        sample_counts=agn_xray_counts,
     )
 
     print_debiased_fit_quality(fit_quality_summary, cosmo_model=cosmo_model, prefix=prefix)
@@ -5887,6 +5894,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     cosmo_models_sna_result_dict = {k: {} for k in cosmo_models}
     results_latex = []
     cosmo_model_joint_samples = {}
+    agn_xray_counts = {}
     cosmo_model_sna_samples = {}
     resume_by_model = normalize_resume_by_model(resume, cosmo_models)
     agn_pivot_context = _prepare_shared_agn_pivot_context(
@@ -5921,8 +5929,13 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     )
     for cosmo_model in cosmo_models:
         model_resume = resume_by_model[cosmo_model]
+        agn_xray_counts[cosmo_model] = {
+            "NumAGNXrayMatched": int(df_agn.get("xray_matched", pd.Series(False, index=df_agn.index)).fillna(False).sum()),
+            "NumAGNAlphaOXPlotted": 0,
+        }
         r = run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                        cosmo_model=cosmo_model, only_sna=False, 
+                       agn_xray_counts=agn_xray_counts[cosmo_model],
                        only_agn=only_agn,
                        completeness=completeness,
                        resume=model_resume, speed=speed, N=N,
@@ -6107,6 +6120,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                                 cosmo_models_sna_result_dict=cosmo_models_sna_result_dict,
                                 compare_r_sna=compare_r_sna,
                                 agn_pivot_context=agn_pivot_context,
+                                agn_xray_counts=agn_xray_counts,
                                 use_f_agn_psf_2500_sigmoid_term=(
                                     use_f_agn_psf_2500_sigmoid_term
                                 ),

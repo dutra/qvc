@@ -12323,6 +12323,7 @@ def plot_residuals_vs_alphaOX(
     min_per_bin=4,           # hide bins with too few points
     z_range=(0.44, 3.16),
     clipped_mask=None,
+    sample_counts=None,
 ):
     """
     Plot residuals vs delta_alphaOX and alphaOX, colored by redshift, with binned means.
@@ -12354,6 +12355,8 @@ def plot_residuals_vs_alphaOX(
         if np.isfinite(xerr).any():
             m &= np.isfinite(xerr) | np.isnan(xerr)
         x, xerr, y, yerr, z = x[m], xerr[m], y[m], yerr[m], z[m]
+        if sample_counts is not None and xcol == "alphaOX":
+            sample_counts["NumAGNAlphaOXPlotted"] = len(x)
         if clipped_local is not None:
             clipped_local = clipped_local[m]
 
