@@ -4161,6 +4161,7 @@ def write_results_tex_variables(
 
     lines.append(_cmd("NumAGNPlotted", len(df_agn)))
     lines.append(_cmd("NumAGNFitted", n_fitted))
+    lines.append(_cmd("NumAGNOutOfRange", len(df_agn) - n_fitted))
 
     is_calib_bool = np.asarray(df_pantheon['IS_CALIBRATOR'], dtype=bool)
     mask = (df_pantheon['zHD'] > 0.01) | is_calib_bool
