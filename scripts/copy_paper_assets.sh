@@ -13,7 +13,7 @@ Usage:
     [--draft path/to/draft.tex] [--dry-run] [--dest-dir path/to/assets]
 
 Description:
-  Copy paper-ready plots and TeX parameter files into plots/paper/.
+  Copy paper-ready plots and TeX parameter files into <fiducial-dir>/paper/.
 
 Notes:
   - Run this from the repository root.
@@ -22,6 +22,7 @@ Notes:
   - Missing or ambiguous sources abort before any destination files are changed.
   - Restricted parameters are copied only when --restricted-dir is supplied.
   - --dry-run validates and prints the manifest without copying files.
+  - --dest-dir overrides the default <fiducial-dir>/paper destination.
   - The manifest is hardcoded for the current paper draft.
   - --draft is accepted for logging only and is not parsed.
   - --only filters the copy to a single asset group.
@@ -74,7 +75,7 @@ copy_from_dir() {
 }
 
 REPO_ROOT="$(pwd)"
-DEST_ROOT="$REPO_ROOT/plots/paper"
+DEST_ROOT=""
 SPEED=""
 FIDUCIAL_DIR=""
 RESTRICTED_DIR=""
@@ -155,6 +156,9 @@ require_repo_root
 
 if [[ "$FIDUCIAL_DIR" != /* ]]; then
   FIDUCIAL_DIR="$REPO_ROOT/$FIDUCIAL_DIR"
+fi
+if [[ -z "$DEST_ROOT" ]]; then
+  DEST_ROOT="$FIDUCIAL_DIR/paper"
 fi
 if [[ -n "$RESTRICTED_DIR" && "$RESTRICTED_DIR" != /* ]]; then
   RESTRICTED_DIR="$REPO_ROOT/$RESTRICTED_DIR"

@@ -43,10 +43,10 @@ def test_exact_corner_sources_and_added_draft_assets(tmp_path, legacy):
     _, run, compare = setup_sources(tmp_path, legacy)
     result = execute(tmp_path, '--dry-run')
     assert result.returncode == 0, result.stderr
-    assert not (tmp_path / 'plots/paper').exists()
+    assert not (tmp_path / 'plots/run/paper').exists()
     result = execute(tmp_path)
     assert result.returncode == 0, result.stderr
-    dest = tmp_path / 'plots/paper/hubble'
+    dest = tmp_path / 'plots/run/paper/hubble'
     for model in ('FlatLambdaCDM', 'FlatwCDM', 'Flatw0waCDM'):
         name = f'cosmo_corner_{model}_alphabeta.pdf'
         assert (dest / name).read_bytes() == (compare / name).read_bytes()
@@ -62,7 +62,7 @@ def test_exact_corner_sources_and_added_draft_assets(tmp_path, legacy):
 def test_missing_sources_leave_existing_assets_untouched(tmp_path):
     _, run, _ = setup_sources(tmp_path)
     (run / 'completeness/completeness_map_with_relative_percent_contours.pdf').unlink()
-    dest = tmp_path / 'plots/paper/hubble'
+    dest = tmp_path / 'plots/run/paper/hubble'
     dest.mkdir(parents=True)
     (dest / 'hubble_diagram.pdf').write_text('previous paper figure')
     result = execute(tmp_path)
@@ -78,4 +78,4 @@ def test_ambiguous_run_directories_are_rejected(tmp_path):
     result = execute(tmp_path)
     assert result.returncode != 0
     assert 'expected exactly one' in result.stderr
-    assert not (tmp_path / 'plots/paper').exists()
+    assert not (tmp_path / 'plots/run/paper').exists()
