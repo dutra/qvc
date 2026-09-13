@@ -1662,7 +1662,7 @@ def _plot_relative_completeness_percent(
     z_edges,
     plot_dir,
 ):
-    """Logarithmic relative-completeness colors with unchanged percent contours."""
+    """Smoothed colors and contours with one shared reference."""
     import matplotlib.pyplot as plt
     from matplotlib.colors import LogNorm
 
@@ -1873,7 +1873,7 @@ def get_completeness_function_2d(
             plt.close()
 
         with trace_completeness_step("completeness_map_with_log_contours.pdf"):
-            # Plot the same map with automatically located log-completeness contours.
+            # Derive contour geometry from the same smoothed grid as the image.
             fig, ax = plt.subplots(figsize=(7, 5))
             displayed_log_C = np.clip(log_C_plot, -4.0, 0.0)
             im = ax.imshow(

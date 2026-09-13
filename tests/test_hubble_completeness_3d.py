@@ -5,10 +5,12 @@ import types
 from pathlib import Path
 
 import h5py
+from matplotlib.axes import Axes
 import numpy as np
 import pandas as pd
 import pytest
 from astropy.cosmology import FlatLambdaCDM
+from scipy.ndimage import gaussian_filter
 from scipy.special import ndtr
 
 
@@ -994,10 +996,29 @@ def _write_fake_sim_file(
             handle.create_dataset("f_host_2500_psf", data=f_host)
 
 
-def test_completeness_2d_plot_smoothing_is_display_only(tmp_path):
+def test_completeness_2d_plot_smoothing_is_display_only(tmp_path, monkeypatch):
     df_agn = _make_fake_agn_sample_with_fhost(n_agn=36)
     sim_file = tmp_path / "mock2d.h5"
     _write_fake_sim_file(sim_file, n=1200)
+
+    contour_grids = []
+    relative_grids = []
+    original_contour = Axes.contour
+    original_relative_percent = hcr._relative_completeness_percent
+
+    def capture_contour(self, x, y, grid, *args, **kwargs):
+        contour_grids.append(np.asarray(grid))
+        return original_contour(self, x, y, grid, *args, **kwargs)
+
+    def capture_relative_percent(*args, **kwargs):
+        result = original_relative_percent(*args, **kwargs)
+        relative_grids.append(result[0])
+        return result
+
+    monkeypatch.setattr(Axes, "contour", capture_contour)
+    monkeypatch.setattr(
+        hcr, "_relative_completeness_percent", capture_relative_percent
+    )
 
     comp_no_plot, mag_centers, z_centers, *_ = hcr.get_completeness_function_2d(
         df_agn,
@@ -1019,6 +1040,14 @@ def test_completeness_2d_plot_smoothing_is_display_only(tmp_path):
     np.testing.assert_allclose(mag_centers_plot, mag_centers)
     np.testing.assert_allclose(z_centers_plot, z_centers)
     np.testing.assert_allclose(comp_with_plot(mag_grid, z_grid), comp_no_plot(mag_grid, z_grid))
+    raw_grid = np.asarray(comp_with_plot._interp.values)
+    expected_log_contours = np.clip(
+        np.log10(np.clip(gaussian_filter(raw_grid, sigma=(1, 1), mode="nearest"), 1e-12, None)),
+        -4.0,
+        0.0,
+    ).T
+    np.testing.assert_allclose(contour_grids[0], expected_log_contours)
+    np.testing.assert_allclose(contour_grids[1], relative_grids[0].T)
     assert (tmp_path / "completeness" / "completeness_map.pdf").exists()
     assert (
         tmp_path / "completeness" / "completeness_map_with_log_contours.pdf"
