@@ -518,6 +518,14 @@ def test_plot_blr_diagnostics_summary_marks_out_of_range_redshifts(tmp_path, mon
     assert "D" in formats
     assert any(call.get("markersize") == 4 for call in errorbar_calls if call.get("fmt") == "o")
     assert any(call.get("markersize") == 3 for call in errorbar_calls if call.get("fmt") == "D")
+    for call in errorbar_calls:
+        if call.get("fmt") == "D":
+            np.testing.assert_allclose(
+                call["mfc"], hubble_plotting.mpl.colors.to_rgba("tab:green", alpha=0.2)
+            )
+            np.testing.assert_allclose(
+                call["ecolor"], hubble_plotting.mpl.colors.to_rgba("tab:green", alpha=0.05)
+            )
 
 
 def test_plot_blr_diagnostics_summary_returns_none_when_columns_missing(tmp_path, monkeypatch):
@@ -1038,9 +1046,12 @@ def test_completeness_diagnostics_color_by_complementary_variable(
 
     assert len(scatter_calls) == 4
     np.testing.assert_allclose(scatter_calls[0]["c"], m2500[fit_mask])
-    np.testing.assert_allclose(scatter_calls[1]["c"], m2500[out_mask])
+    assert scatter_calls[1]["c"] == hubble_plotting._OUT_OF_RANGE_AGN_COLOR
     np.testing.assert_allclose(scatter_calls[2]["c"], z[fit_mask])
-    np.testing.assert_allclose(scatter_calls[3]["c"], z[out_mask])
+    assert scatter_calls[3]["c"] == hubble_plotting._OUT_OF_RANGE_AGN_COLOR
+    for call in (scatter_calls[1], scatter_calls[3]):
+        assert call["marker"] == "D"
+        assert "cmap" not in call and "norm" not in call
     assert len(contour_calls) == 2
     for contour_call in contour_calls:
         levels = np.asarray(contour_call["levels"])

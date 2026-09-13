@@ -369,9 +369,9 @@ def plot_blr_diagnostics_summary(
                 fmt="D",
                 linestyle="none",
                 markersize=3,
-                mfc=point_color,
+                mfc=mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.2),
                 mec="none",
-                ecolor=error_color,
+                ecolor=mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.05),
                 elinewidth=0.8,
                 capsize=2,
                 capthick=0.8,
@@ -1934,9 +1934,9 @@ def plot_mean_function_slope_vs_tau(
                     fmt=marker,
                     linestyle="none",
                     markersize=3,
-                    mfc=(0, 0, 0, 0.4),
+                    mfc=(mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.4) if marker == "D" else (0, 0, 0, 0.4)),
                     mec="none",
-                    ecolor=(0.2, 0.2, 0.2, 0.1),
+                    ecolor=(mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.1) if marker == "D" else (0.2, 0.2, 0.2, 0.1)),
                     elinewidth=0.8,
                     capsize=2,
                     capthick=0.8,
@@ -1951,7 +1951,7 @@ def plot_mean_function_slope_vs_tau(
                     slope[marker_noerr],
                     s=10 if marker == "o" else 12,
                     marker=marker,
-                    c="black",
+                    c=(_OUT_OF_RANGE_AGN_COLOR if marker == "D" else 'black'),
                     alpha=0.4,
                     linewidths=0,
                     rasterized=True,
@@ -3512,9 +3512,9 @@ def plot_bpl_psd_vs_uv_variability(
                         fmt=marker,
                         linestyle="none",
                         markersize=3,
-                        mfc=(0, 0, 0, 0.4),
+                        mfc=(mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.4) if marker == "D" else (0, 0, 0, 0.4)),
                         mec="none",
-                        ecolor=(0.2, 0.2, 0.2, 0.1),
+                        ecolor=(mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.1) if marker == "D" else (0.2, 0.2, 0.2, 0.1)),
                         elinewidth=0.8,
                         capsize=2,
                         capthick=0.8,
@@ -3529,7 +3529,7 @@ def plot_bpl_psd_vs_uv_variability(
                         y[marker_noerr],
                         s=10 if marker == "o" else 12,
                         marker=marker,
-                        c="black",
+                        c=(_OUT_OF_RANGE_AGN_COLOR if marker == "D" else 'black'),
                         alpha=0.4,
                         linewidths=0,
                         rasterized=True,
@@ -5313,10 +5313,7 @@ def _plot_dm_by_band(
         cut_in_z = (~keep_mask) & in_z
         cut_out_z = (~keep_mask) & (~in_z)
 
-        cmap_obj = mpl.cm.get_cmap("viridis")
         norm = colors.Normalize(vmin=vmin, vmax=vmax)
-        color_keep_out_z = cmap_obj(norm(petro_plot[keep_out_z])) if np.any(keep_out_z) else None
-        color_cut_out_z = cmap_obj(norm(petro_plot[cut_out_z])) if np.any(cut_out_z) else None
 
         sc = ax.scatter(
             x_masked[keep_in_z],
@@ -5345,7 +5342,7 @@ def _plot_dm_by_band(
         ax.scatter(
             x_masked[keep_out_z],
             y_masked[keep_out_z],
-            c=color_keep_out_z,
+            c=_OUT_OF_RANGE_AGN_COLOR,
             s=s,
             alpha=1.0,
             marker="D",
@@ -5355,7 +5352,7 @@ def _plot_dm_by_band(
         ax.scatter(
             x_masked[cut_out_z],
             y_masked[cut_out_z],
-            c=color_cut_out_z,
+            c=_OUT_OF_RANGE_AGN_COLOR,
             s=s,
             alpha=1.0,
             marker="D",
@@ -5363,7 +5360,7 @@ def _plot_dm_by_band(
             rasterized=True,
         )
         cbar = fig.colorbar(sc, ax=ax)
-        cbar.set_label(rf"$\log_{{10}}(\mathrm{{petroRad}}_{{{band}}})$")
+        cbar.set_label(rf"$\log_{{10}}(\mathrm{{petroRad}}_{{{band}}})$ (in z range)")
 
         # Overlay a rolling median in redshift to highlight broad trends by band.
         if np.count_nonzero(mask) >= 5:
@@ -5561,7 +5558,7 @@ def plot_log_fhost_vs_petrorad_by_band(
             y[keep_out_z],
             s=s,
             alpha=1.0,
-            color="tab:blue",
+            color=_OUT_OF_RANGE_AGN_COLOR,
             marker="D",
             linewidths=1.5,
             rasterized=True,
@@ -5571,7 +5568,7 @@ def plot_log_fhost_vs_petrorad_by_band(
             y[cut_out_z],
             s=s,
             alpha=1.0,
-            color="tab:orange",
+            color=_OUT_OF_RANGE_AGN_COLOR,
             marker="D",
             linewidths=1.5,
             rasterized=True,
@@ -6991,7 +6988,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             mu_pred_plot[clipped_out],
             s=18,
             marker="D",
-            c="tab:green",
+            c=_OUT_OF_RANGE_AGN_COLOR,
             alpha=0.95,
             linewidths=0,
             zorder=3,
@@ -7013,8 +7010,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         inset_ax.errorbar(
             z_log_out, mu_log_mean_out, yerr=mu_log_sem_out,
             fmt='D', linestyle='none',
-            markersize=4, mfc='red', mec='none',
-            ecolor='red', elinewidth=2.2, capsize=3.5,
+            markersize=4, mfc=_OUT_OF_RANGE_AGN_COLOR, mec='none',
+            ecolor=_OUT_OF_RANGE_AGN_COLOR, elinewidth=2.2, capsize=3.5,
             alpha=0.98, zorder=14, label="AGN (z-binned, log)",
         )
 
@@ -7107,7 +7104,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             mu_pred_plot[clipped_out],
             s=24,
             marker="D",
-            c="tab:green",
+            c=_OUT_OF_RANGE_AGN_COLOR,
             alpha=0.95,
             linewidths=0,
             zorder=2,
@@ -7153,8 +7150,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         ax.errorbar(
             z_lin_out, mu_lin_mean_out, yerr=mu_lin_sem_out,
             fmt='D', linestyle='none',
-            markersize=5, mfc='red', mec='none',
-            ecolor='red', elinewidth=2.2, capsize=3.5,
+            markersize=5, mfc=_OUT_OF_RANGE_AGN_COLOR, mec='none',
+            ecolor=_OUT_OF_RANGE_AGN_COLOR, elinewidth=2.2, capsize=3.5,
             alpha=0.98, zorder=14
         )
 
@@ -7285,7 +7282,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             ax_resid.errorbar(
                 z_res_out, resid_lin_mean_out, yerr=resid_lin_sem_out,
                 fmt='D', linestyle='none', markersize=6,
-                mfc='red', mec='none', ecolor='red', elinewidth=2.0, capsize=3.0,
+                mfc=_OUT_OF_RANGE_AGN_COLOR, mec='none', ecolor=_OUT_OF_RANGE_AGN_COLOR, elinewidth=2.0, capsize=3.0,
                 alpha=0.98, zorder=15
             )
 
@@ -8607,7 +8604,7 @@ def plot_predicted_vs_actual_M2500(
         colors_bin = np.where(cats_bin >= 0, palette[np.clip(cats_bin, 0, 4)], "#999999")  # gray for NaN
 
         # Filled circles are in range; out-of-range objects follow the Hubble
-        # diagram's dark blue-gray diamond styling.
+        # diagram's green diamond styling.
         z_bin = z[bin_mask]
         mask_closed = (z_bin >= z_range[0]) & (z_bin <= z_range[1])
         mask_open = ~mask_closed
@@ -8661,8 +8658,8 @@ def plot_predicted_vs_actual_M2500(
                 ax.scatter(
                     x[clipped_open],
                     y_plot[clipped_open],
-                    facecolors="tab:green",
-                    edgecolors="tab:green",
+                    facecolors=_OUT_OF_RANGE_AGN_COLOR,
+                    edgecolors=_OUT_OF_RANGE_AGN_COLOR,
                     marker="D",
                     s=28,
                     alpha=0.95,
@@ -10778,7 +10775,7 @@ def plot_predicted_L2500_vs_sigmahat(
 ):
     d = df_agn.copy()
     clipped_mask = _resolve_clipped_mask(d, clipped_mask)
-    out_of_range_color = "#354B5B"
+    out_of_range_color = _OUT_OF_RANGE_AGN_COLOR
     out_of_range_marker_color = mpl.colors.to_rgba(out_of_range_color, alpha=0.4)
     out_of_range_error_color = mpl.colors.to_rgba(out_of_range_color, alpha=0.1)
     out_of_range_residual_error_color = mpl.colors.to_rgba(out_of_range_color, alpha=0.18)
@@ -11085,7 +11082,7 @@ def plot_predicted_L2500_vs_sigmahat(
             10**actual_logL2500_plot[clipped_out],
             s=28,
             marker="D",
-            c="tab:green",
+            c=_OUT_OF_RANGE_AGN_COLOR,
             alpha=0.95,
             linewidths=0,
             zorder=2,
@@ -11453,7 +11450,7 @@ def plot_predicted_L2500_vs_sigmahat(
                     residuals_plot[clipped_good_out],
                     s=26,
                     marker="D",
-                    c="tab:green",
+                    c=_OUT_OF_RANGE_AGN_COLOR,
                     alpha=0.95,
                     linewidths=0,
                     zorder=7,
@@ -11758,9 +11755,9 @@ def plot_L2500_vs_sigma_tau_separate(
                     fmt=marker,
                     linestyle="none",
                     markersize=size,
-                    mfc=(0, 0, 0, 0.4),
+                    mfc=(mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.4) if marker == "D" else (0, 0, 0, 0.4)),
                     mec="none",
-                    ecolor=(0.2, 0.2, 0.2, 0.12),
+                    ecolor=(mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.12) if marker == "D" else (0.2, 0.2, 0.2, 0.12)),
                     elinewidth=0.8,
                     capsize=2,
                     capthick=0.8,
@@ -11775,7 +11772,7 @@ def plot_L2500_vs_sigma_tau_separate(
                     10.0**actual_logL2500_plot[clipped],
                     s=28,
                     marker="D",
-                    c="tab:green",
+                    c=_OUT_OF_RANGE_AGN_COLOR,
                     alpha=0.95,
                     linewidths=0,
                     zorder=4,
@@ -11837,9 +11834,9 @@ def plot_L2500_vs_sigma_tau_separate(
                 fmt="D",
                 linestyle="none",
                 markersize=2.8,
-                mfc=(0, 0, 0, 0.4),
+                mfc=mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.4),
                 mec="none",
-                ecolor=(0.2, 0.2, 0.2, 0.18),
+                ecolor=mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.18),
                 elinewidth=0.6,
                 capsize=0,
                 zorder=6,
@@ -11997,9 +11994,9 @@ def plot_catalog_quantity_vs_sigma_tau_separate(
                     fmt=marker,
                     linestyle="none",
                     markersize=size,
-                    mfc=(0, 0, 0, 0.4),
+                    mfc=(mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.4) if marker == "D" else (0, 0, 0, 0.4)),
                     mec="none",
-                    ecolor=(0.2, 0.2, 0.2, 0.12),
+                    ecolor=(mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.12) if marker == "D" else (0.2, 0.2, 0.2, 0.12)),
                     elinewidth=0.8,
                     capsize=2,
                     capthick=0.8,
@@ -12014,7 +12011,7 @@ def plot_catalog_quantity_vs_sigma_tau_separate(
                     y[clipped],
                     s=28,
                     marker="D",
-                    c="tab:green",
+                    c=_OUT_OF_RANGE_AGN_COLOR,
                     alpha=0.95,
                     linewidths=0,
                     zorder=4,
@@ -12443,9 +12440,9 @@ def plot_residuals_vs_alphaOX(
                     x[out_clipped],
                     y[out_clipped],
                     s=28,
-                    c="tab:green",
+                    c=_OUT_OF_RANGE_AGN_COLOR,
                     marker="D",
-                    edgecolors="tab:green",
+                    edgecolors=_OUT_OF_RANGE_AGN_COLOR,
                     linewidths=0.8,
                     zorder=3,
                 )
@@ -13077,7 +13074,7 @@ def plot_spectral_fraction_vs_redshift(
                 fmt="D",
                 markersize=3.2,
                 alpha=0.1,
-                color=kept_color,
+                color=_OUT_OF_RANGE_AGN_COLOR,
                 elinewidth=0.4,
                 zorder=6,
                 label=component_label if not np.any(in_z) else None,
@@ -13801,9 +13798,7 @@ def plot_completeness_diagnostics(
         ax.scatter(
             z[out_mask],
             -dmi_plot[out_mask],
-            c=m2500[out_mask],
-            cmap=cmap,
-            norm=magnitude_norm,
+            c=_OUT_OF_RANGE_AGN_COLOR,
             s=28,
             marker="D",
             label="outside $z$ range",
@@ -13822,7 +13817,7 @@ def plot_completeness_diagnostics(
     magnitude_mappable = mpl.cm.ScalarMappable(norm=magnitude_norm, cmap=cmap)
     magnitude_mappable.set_array([])
     cbar = fig.colorbar(magnitude_mappable, ax=ax)
-    cbar.set_label(r"Apparent magnitude $m_{2500}$ (mag)")
+    cbar.set_label(r"$m_{2500}$ (mag; in-range)")
 
     fig.tight_layout()
 
@@ -13852,9 +13847,7 @@ def plot_completeness_diagnostics(
         ax.scatter(
             m2500[out_mask],
             -dmi_plot[out_mask],
-            c=z[out_mask],
-            cmap=cmap,
-            norm=redshift_norm,
+            c=_OUT_OF_RANGE_AGN_COLOR,
             alpha=0.5,
             s=28,
             marker="D",
@@ -13873,7 +13866,7 @@ def plot_completeness_diagnostics(
     redshift_mappable = mpl.cm.ScalarMappable(norm=redshift_norm, cmap=cmap)
     redshift_mappable.set_array([])
     cbar = fig.colorbar(redshift_mappable, ax=ax)
-    cbar.set_label(r"Redshift $z$")
+    cbar.set_label(r"Redshift $z$ (in z range)")
 
     fig.tight_layout()
 
@@ -14110,6 +14103,14 @@ def plot_m2500_vs_z_colorpanels(
                markersize=6, linestyle="None", label="Cut in z-range"),
     ]
 
+    if z_range is not None and (~base["_in_z_range"]).any():
+        legend_handles.append(
+            Line2D([0], [0], marker="D", color="none",
+                   markerfacecolor=_OUT_OF_RANGE_AGN_COLOR,
+                   markeredgecolor=_OUT_OF_RANGE_AGN_COLOR,
+                   markersize=6, linestyle="None", label="Outside z-range")
+        )
+
     for ax, ccol in zip(axes, color_cols):
         d = base.dropna(subset=[ccol]).copy()
         if thin and thin > 1:
@@ -14148,26 +14149,18 @@ def plot_m2500_vs_z_colorpanels(
         d_cut_in_z = d.iloc[cut_in_z]
         d_cut_out_z = d.iloc[cut_out_z]
         c_keep_in_z = c_all[keep_in_z]
-        c_keep_out_z = c_all[keep_out_z]
         c_cut_in_z = c_all[cut_in_z]
-        c_cut_out_z = c_all[cut_out_z]
 
         # Per-panel clipping
         clip_lo, clip_hi = color_clip.get(ccol, (None, None))
         c_keep_in_z_plot = c_keep_in_z.copy()
-        c_keep_out_z_plot = c_keep_out_z.copy()
         c_cut_in_z_plot = c_cut_in_z.copy()
-        c_cut_out_z_plot = c_cut_out_z.copy()
         if clip_lo is not None:
             c_keep_in_z_plot = np.clip(c_keep_in_z_plot, clip_lo, None)
-            c_keep_out_z_plot = np.clip(c_keep_out_z_plot, clip_lo, None)
             c_cut_in_z_plot = np.clip(c_cut_in_z_plot, clip_lo, None)
-            c_cut_out_z_plot = np.clip(c_cut_out_z_plot, clip_lo, None)
         if clip_hi is not None:
             c_keep_in_z_plot = np.clip(c_keep_in_z_plot, None, clip_hi)
-            c_keep_out_z_plot = np.clip(c_keep_out_z_plot, None, clip_hi)
             c_cut_in_z_plot = np.clip(c_cut_in_z_plot, None, clip_hi)
-            c_cut_out_z_plot = np.clip(c_cut_out_z_plot, None, clip_hi)
 
         # Colorbar limits from clipped all-points (keep+cut)
         c_all_plot = c_all.copy()
@@ -14179,8 +14172,6 @@ def plot_m2500_vs_z_colorpanels(
         vmin = clip_lo if clip_lo is not None else np.nanmin(c_all_plot)
         vmax = clip_hi if clip_hi is not None else np.nanmax(c_all_plot)
         norm = colors.Normalize(vmin=vmin, vmax=vmax)
-        color_keep_out_z = mpl.cm.get_cmap(cmap)(norm(c_keep_out_z_plot)) if len(c_keep_out_z_plot) else None
-        color_cut_out_z = mpl.cm.get_cmap(cmap)(norm(c_cut_out_z_plot)) if len(c_cut_out_z_plot) else None
 
         print(
             f"[m2500_vs_z:{ccol}] kept_in_z={len(d_keep_in_z)} "
@@ -14198,7 +14189,7 @@ def plot_m2500_vs_z_colorpanels(
         ax.scatter(
             d_keep_out_z[xcol],
             d_keep_out_z[ycol],
-            c=color_keep_out_z,
+            c=_OUT_OF_RANGE_AGN_COLOR,
             s=s,
             alpha=1.0,
             marker="D",
@@ -14209,7 +14200,7 @@ def plot_m2500_vs_z_colorpanels(
         ax.scatter(
             d_cut_out_z[xcol],
             d_cut_out_z[ycol],
-            c=color_cut_out_z,
+            c=_OUT_OF_RANGE_AGN_COLOR,
             s=s,
             alpha=1.0,
             marker="D",
@@ -14223,7 +14214,8 @@ def plot_m2500_vs_z_colorpanels(
         cbar = fig.colorbar(sm, ax=ax)
 
         base_label = label_map.get(ccol, ccol)
-        cbar.set_label(rf"$\log_{{10}}({base_label})$" if log_color else base_label)
+        cbar_label = rf"$\log_{{10}}({base_label})$" if log_color else base_label
+        cbar.set_label(cbar_label + (" (in z range)" if z_range is not None else ""))
 
         ax.set_ylabel(r"$m_{2500\,\mathrm{\AA}}$")
 
