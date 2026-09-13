@@ -212,18 +212,17 @@ def _configuration(args, truth: ValidationTruth) -> dict:
         },
         "arms": list(args.arms),
     }
-    if args.prior_profile != DEFAULT_PRIOR_PROFILE:
-        priors, _, _ = get_model_params(
-            "Flatw0waCDM",
-            only_agn=True,
-            fixed_h0=args.h0,
-            prior_profile=args.prior_profile,
-        )
-        configuration["fit"]["prior_profile"] = args.prior_profile
-        configuration["fit"]["prior_bounds"] = {
-            name: [float(bounds[0]), float(bounds[1])]
-            for name, bounds in priors.items()
-        }
+    priors, _, _ = get_model_params(
+        "Flatw0waCDM",
+        only_agn=True,
+        fixed_h0=args.h0,
+        prior_profile=args.prior_profile,
+    )
+    configuration["fit"]["prior_profile"] = args.prior_profile
+    configuration["fit"]["prior_bounds"] = {
+        name: [float(bounds[0]), float(bounds[1])]
+        for name, bounds in priors.items()
+    }
     return configuration
 
 

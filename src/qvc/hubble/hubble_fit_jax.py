@@ -1599,7 +1599,7 @@ def main():
         default=DEFAULT_PRIOR_PROFILE,
         help=(
             "Named top-hat prior profile. centered_lcdm uses "
-            "M0_agn=[-26,-18], w0=[-3,1], and wa=[-10,10] where applicable."
+            "M0_agn=[-26,-18], w0=[-3,1], and wa=[-20,20] where applicable."
         ),
     )
     parser.add_argument(

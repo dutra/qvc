@@ -146,6 +146,7 @@ from qvc.hubble.hubble_model import (
     AGN_PIVOT_RULE,
     AGN_UNROUNDED_PIVOT_RULE,
     DEFAULT_PRIOR_PROFILE,
+    LEGACY_PRIOR_PROFILE,
     PRIOR_PROFILE_CHOICES,
     AgnPivotContext,
     agn_model_pack_obs,
@@ -758,7 +759,7 @@ def make_run_tag(
     fixed_h0_tag = "" if fixed_h0 is None else f"_fixedh0-{float(fixed_h0):g}"
     planck_om_tag = "_planckom" if use_planck_om_prior else ""
     prior_profile_tag = (
-        "" if prior_profile == DEFAULT_PRIOR_PROFILE
+        "" if prior_profile == LEGACY_PRIOR_PROFILE
         else f"_prior-{prior_profile}"
     )
     alpha_tag = "_alphaLam" if use_alpha_lambda_term else ""
@@ -948,7 +949,7 @@ def _validate_checkpoint_prior_metadata(
     has_profile = "prior_profile" in results
     has_bounds = "prior_bounds_json" in results
     if not has_profile and not has_bounds:
-        if expected_prior_profile != DEFAULT_PRIOR_PROFILE:
+        if expected_prior_profile != LEGACY_PRIOR_PROFILE:
             raise RuntimeError(
                 f"Checkpoint '{checkpoint_file}' predates prior-profile metadata "
                 f"and cannot be resumed with {expected_prior_profile!r}."
@@ -5854,7 +5855,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     planck_h0_tag = "_planckh0" if use_planck_h0_prior and not disable_ceph_dist_calibration else ""
     planck_om_tag = "_planckom" if use_planck_om_prior else ""
     prior_profile_tag = (
-        "" if prior_profile == DEFAULT_PRIOR_PROFILE
+        "" if prior_profile == LEGACY_PRIOR_PROFILE
         else f"_prior-{prior_profile}"
     )
     mode_tag = _fit_mode_label(False, only_agn)
@@ -6327,7 +6328,7 @@ if __name__ == "__main__":
         default=DEFAULT_PRIOR_PROFILE,
         help=(
             "Named top-hat prior profile. centered_lcdm uses "
-            "M0_agn=[-26,-18], w0=[-3,1], and wa=[-10,10] where applicable."
+            "M0_agn=[-26,-18], w0=[-3,1], and wa=[-20,20] where applicable."
         ),
     )
     parser.add_argument(
@@ -7021,7 +7022,7 @@ if __name__ == "__main__":
         planck_h0_tag = "_planckh0" if effective_use_planck_h0_prior and not args.disable_ceph_dist_calibration else ""
         planck_om_tag = "_planckom" if args.use_planck_om_prior else ""
         prior_profile_tag = (
-            "" if args.prior_profile == DEFAULT_PRIOR_PROFILE
+            "" if args.prior_profile == LEGACY_PRIOR_PROFILE
             else f"_prior-{args.prior_profile}"
         )
         alpha_tag = "_alphaLam" if args.fit_alpha_lambda_term else ""

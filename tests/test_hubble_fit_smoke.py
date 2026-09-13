@@ -245,7 +245,7 @@ def test_unrounded_pivot_rule_changes_run_tag_only_when_requested():
     assert "_pivots-median" in unrounded_tag
 
 
-def test_centered_lcdm_prior_profile_changes_run_tag_only_when_requested():
+def test_centered_lcdm_default_preserves_distinct_legacy_run_tag():
     common = ("Flatw0waCDM", False, "fastest", None, (0.44, 3.16))
 
     default_tag = hubble_fit.make_run_tag(*common)
@@ -256,8 +256,8 @@ def test_centered_lcdm_prior_profile_changes_run_tag_only_when_requested():
         *common, prior_profile="centered_lcdm"
     )
 
-    assert default_tag == explicit_default_tag
-    assert "_prior-" not in default_tag
+    assert default_tag == centered_tag
+    assert "_prior-" not in explicit_default_tag
     assert "_prior-centered_lcdm" in centered_tag
 
 
@@ -268,7 +268,7 @@ def test_centered_lcdm_prior_profile_changes_run_tag_only_when_requested():
         ("FlatwCDM", {"w0": (-3.0, 1.0)}),
         (
             "Flatw0waCDM",
-            {"w0": (-3.0, 1.0), "wa": (-10.0, 10.0)},
+            {"w0": (-3.0, 1.0), "wa": (-20.0, 20.0)},
         ),
         ("FlatwpwaCDM", {"wp": (-10.0, 1.0), "wa": (-50, 500)}),
     ],
@@ -279,6 +279,7 @@ def test_centered_lcdm_prior_profile_bounds(cosmo_model, expected_dark_energy):
         cosmo_model, prior_profile="centered_lcdm"
     )
 
+    assert default_priors == centered_priors
     assert default_priors["M0_agn"] == (-26.0, -18.0)
     assert centered_priors["M0_agn"] == (-26.0, -18.0)
     for parameter, bounds in expected_dark_energy.items():
@@ -308,6 +309,14 @@ def test_checkpoint_prior_metadata_allows_legacy_default_and_checks_centered(tmp
         "prior_bounds_json": bounds_json,
         "early_de_guard": True,
     }
+    old_priors = dict(priors, wa=(-10.0, 10.0))
+    with pytest.raises(RuntimeError, match="incompatible resolved prior bounds"):
+        hubble_fit._validate_checkpoint_prior_metadata(
+            dict(metadata, prior_bounds_json=hubble_fit.canonical_prior_bounds_json(old_priors)),
+            "old_centered.h5",
+            expected_prior_bounds_json=bounds_json,
+            expected_early_de_guard=True,
+        )
     checkpoint_path = tmp_path / "centered.h5"
     hubble_fit.save_chains(checkpoint_path, **metadata)
     metadata = hubble_fit.load_chains(checkpoint_path)
@@ -570,7 +579,7 @@ def test_alpha_ox_cosmology_uses_equal_weight_posterior_medians(monkeypatch):
     assert out.loc[0, "alphaOX"] == pytest.approx(1.23)
 
 
-def test_log_f_prior_uses_wider_symmetric_range():
+def test_log_f_prior_uses_tight_symmetric_range():
     priors, _, _ = hubble_model.get_model_params("FlatLambdaCDM")
     expected_center = np.log(hubble_model.AGN_INTRINSIC_SCATTER_MAG_CENTER)
 
@@ -580,7 +589,7 @@ def test_log_f_prior_uses_wider_symmetric_range():
             expected_center + hubble_model.AGN_LOG_F_PRIOR_HALF_WIDTH,
         )
     )
-    assert hubble_model.AGN_LOG_F_PRIOR_HALF_WIDTH == pytest.approx(1.6)
+    assert hubble_model.AGN_LOG_F_PRIOR_HALF_WIDTH == pytest.approx(0.8)
 
 
 @pytest.mark.parametrize(
@@ -4498,6 +4507,10 @@ def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_c
 def test_remap_resume_replot_checkpoint_rejects_current_cut_ids_missing_from_checkpoint():
     df_agn = pd.DataFrame({"object_id": ["agn_000", "agn_new"]})
     results = {
+        "prior_profile": "centered_lcdm",
+        "prior_bounds_json": hubble_fit.canonical_prior_bounds_json(
+            hubble_model.get_model_params("Flatw0waCDM")[0]
+        ),
         "flat_samples": np.ones((4, 2), dtype=float),
         "object_id_fit_selection": np.array(["agn_000"], dtype=str),
         "dmi_max_w": np.zeros(1, dtype=float),
@@ -5936,6 +5949,10 @@ def test_hubble_fit_cli_declares_and_forwards_minimal_plots():
 def test_resume_checkpoint_validates_cut_and_redshift_metadata():
     n_agn = 2
     payload = {
+        "prior_profile": "centered_lcdm",
+        "prior_bounds_json": hubble_fit.canonical_prior_bounds_json(
+            hubble_model.get_model_params("Flatw0waCDM")[0]
+        ),
         "flat_samples": np.zeros((4, 3)),
         "dmi_max_w": np.zeros(n_agn),
         "dmi_posterior_sigma": np.ones(n_agn),

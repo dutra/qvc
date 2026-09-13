@@ -763,15 +763,15 @@ def test_runner_accepts_configurable_agn_count():
     assert runner._parser().parse_args(["--num-agns", "456"]).n_agn == 456
 
 
-def test_validation_manifest_records_only_nondefault_prior_profile():
+def test_validation_manifest_records_default_prior_profile():
     runner = _load_runner_module()
 
     default_args = runner._parser().parse_args([])
     default_configuration = runner._configuration(
         default_args, runner._truth_from_args(default_args)
     )
-    assert "prior_profile" not in default_configuration["fit"]
-    assert "prior_bounds" not in default_configuration["fit"]
+    assert default_configuration["fit"]["prior_profile"] == "centered_lcdm"
+    assert default_configuration["fit"]["prior_bounds"]["wa"] == [-20.0, 20.0]
 
     centered_args = runner._parser().parse_args(
         ["--prior-profile", "centered_lcdm"]
@@ -783,7 +783,7 @@ def test_validation_manifest_records_only_nondefault_prior_profile():
     assert fit["prior_profile"] == "centered_lcdm"
     assert fit["prior_bounds"]["M0_agn"] == [-26.0, -18.0]
     assert fit["prior_bounds"]["w0"] == [-3.0, 1.0]
-    assert fit["prior_bounds"]["wa"] == [-10.0, 10.0]
+    assert fit["prior_bounds"]["wa"] == [-20.0, 20.0]
 
 
 def test_initialize_only_writes_manifest_and_complete_seed_ledger(tmp_path, monkeypatch):
