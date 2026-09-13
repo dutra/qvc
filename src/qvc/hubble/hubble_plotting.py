@@ -7010,8 +7010,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         inset_ax.errorbar(
             z_log_out, mu_log_mean_out, yerr=mu_log_sem_out,
             fmt='D', linestyle='none',
-            markersize=4, mfc=_OUT_OF_RANGE_AGN_COLOR, mec='none',
-            ecolor=_OUT_OF_RANGE_AGN_COLOR, elinewidth=2.2, capsize=3.5,
+            markersize=4, mfc='red', mec='none',
+            ecolor='red', elinewidth=2.2, capsize=3.5,
             alpha=0.98, zorder=14, label="AGN (z-binned, log)",
         )
 
@@ -7150,8 +7150,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         ax.errorbar(
             z_lin_out, mu_lin_mean_out, yerr=mu_lin_sem_out,
             fmt='D', linestyle='none',
-            markersize=5, mfc=_OUT_OF_RANGE_AGN_COLOR, mec='none',
-            ecolor=_OUT_OF_RANGE_AGN_COLOR, elinewidth=2.2, capsize=3.5,
+            markersize=5, mfc='red', mec='none',
+            ecolor='red', elinewidth=2.2, capsize=3.5,
             alpha=0.98, zorder=14
         )
 
@@ -7282,7 +7282,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             ax_resid.errorbar(
                 z_res_out, resid_lin_mean_out, yerr=resid_lin_sem_out,
                 fmt='D', linestyle='none', markersize=6,
-                mfc=_OUT_OF_RANGE_AGN_COLOR, mec='none', ecolor=_OUT_OF_RANGE_AGN_COLOR, elinewidth=2.0, capsize=3.0,
+                mfc='red', mec='none', ecolor='red', elinewidth=2.0, capsize=3.0,
                 alpha=0.98, zorder=15
             )
 
@@ -10776,7 +10776,7 @@ def plot_predicted_L2500_vs_sigmahat(
     d = df_agn.copy()
     clipped_mask = _resolve_clipped_mask(d, clipped_mask)
     out_of_range_color = _OUT_OF_RANGE_AGN_COLOR
-    out_of_range_marker_color = mpl.colors.to_rgba(out_of_range_color, alpha=0.4)
+    out_of_range_marker_color = _OUT_OF_RANGE_AGN_MARKER_COLOR
     out_of_range_error_color = mpl.colors.to_rgba(out_of_range_color, alpha=0.1)
     out_of_range_residual_error_color = mpl.colors.to_rgba(out_of_range_color, alpha=0.18)
 
@@ -11114,6 +11114,15 @@ def plot_predicted_L2500_vs_sigmahat(
                 contour_handles = [
                     Line2D([0],[0], color='red', lw=2.6, ls='-', label='95% contour'),
                     Line2D([0],[0], color='red', lw=3.2, ls='-',  label='68% contour'),
+                ]
+            elif debias:
+                contour_color = "tab:blue"
+                contour_linewidths = (2.0, 2.4)
+                contour_handles = [
+                    Line2D([0], [0], color=contour_color, lw=width, ls='-', label=label)
+                    for width, label in zip(
+                        contour_linewidths, ('95% contour', '68% contour')
+                    )
                 ]
             else:
                 contour_color = "darkgray"
@@ -12344,6 +12353,7 @@ def plot_residuals_vs_alphaOX(
     yerr_all = np.asarray(residuals_err, dtype=float)
 
     def _plot_one(xcol, xerr_col, xlabel, filename, *, marker_alpha=1.0, show_grid=True):
+        paper_xray_style = xcol in ("alphaOX", "delta_alphaOX")
         x = np.asarray(df_agn.get(xcol, np.full(len(df_agn), np.nan)), dtype=float)
         xerr = np.asarray(df_agn.get(xerr_col, np.full(len(df_agn), np.nan)), dtype=float)
         z = z_all.copy()
@@ -12362,7 +12372,7 @@ def plot_residuals_vs_alphaOX(
 
         fig, ax = plt.subplots(1, 1, figsize=(7.2, 5.2))
         ax.set_xlabel(xlabel)
-        ax.set_ylabel("Residuals (mag)")
+        ax.set_ylabel("Hubble residual (mag)" if paper_xray_style else "Residuals (mag)")
         ax.axhline(0.0, color="magenta", linewidth=2, zorder=0)
         ax.set_ylim(-4.6, 3.9)
         if show_grid:
@@ -12403,7 +12413,7 @@ def plot_residuals_vs_alphaOX(
                 mfc = ci
                 mec = "none"
             else:
-                mfc = "none"
+                mfc = ci if paper_xray_style else "none"
                 mec = ci
 
             label = "AGN" if i == n_pts - 1 else None
@@ -12412,16 +12422,16 @@ def plot_residuals_vs_alphaOX(
                 y[i],
                 xerr=xi_err,
                 yerr=yerr[i],
-                fmt="o",
-                markersize=6,
+                fmt="D" if paper_xray_style and not mask_in[i] else "o",
+                markersize=5 if paper_xray_style else 6,
                 mfc=mfc,
                 mec=mec,
                 mew=0.9,
-                ecolor=(0.5, 0.5, 0.5, 0.7),
-                elinewidth=0.8,
-                capsize=2,
+                ecolor=(0.4, 0.4, 0.4, 0.28) if paper_xray_style else (0.5, 0.5, 0.5, 0.7),
+                elinewidth=0.6 if paper_xray_style else 0.8,
+                capsize=0 if paper_xray_style else 2,
                 capthick=0.8,
-                alpha=marker_alpha,
+                alpha=None if paper_xray_style else marker_alpha,
                 zorder=2,
                 label=label,
             )
@@ -12479,18 +12489,29 @@ def plot_residuals_vs_alphaOX(
                     by,
                     yerr=by_sem,
                     fmt="o",
-                    ms=6,
-                    lw=2,
+                    ms=8 if paper_xray_style else 6,
+                    lw=1.4 if paper_xray_style else 2,
                     color="red",
                     mfc="red",
-                    mew=1.2,
+                    mec="white" if paper_xray_style else "red",
+                    mew=0.7 if paper_xray_style else 1.2,
+                    capsize=3 if paper_xray_style else 0,
                     zorder=3,
                     label="Binned mean",
                 )
 
-        cbar = fig.colorbar(sm, ax=ax)
-        cbar.set_label(r"$z$")
-        ax.legend(loc="lower right", frameon=True, framealpha=0.8)
+        cbar = fig.colorbar(sm, ax=ax, fraction=0.045, pad=0.025) if paper_xray_style else fig.colorbar(sm, ax=ax)
+        cbar.set_label(r"Redshift $z$" if paper_xray_style else r"$z$")
+        if paper_xray_style:
+            handles, labels = ax.get_legend_handles_labels()
+            handles = [
+                Line2D([], [], marker="o", linestyle="none", markersize=5,
+                       color="0.4", label="AGN") if label == "AGN" else handle
+                for handle, label in zip(handles, labels)
+            ]
+            ax.legend(handles, labels, loc="lower right", frameon=False, fontsize=12)
+        else:
+            ax.legend(loc="lower right", frameon=True, framealpha=0.8)
 
         fig.tight_layout()
         os.makedirs(plot_path, exist_ok=True)
