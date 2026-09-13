@@ -137,6 +137,25 @@ def test_skip_debiased_residual_plot_leaves_next_diagnostic_running(skip, capsys
     assert ('Skipping debiased residual' in message) == skip
 
 
+@pytest.mark.parametrize('skip', [False, True])
+def test_skip_debiased_residual_plot_guards_redshift_wiggle_diagnostics(skip, capsys):
+    fn = next(n for n in tree().body if isinstance(n, ast.FunctionDef) and n.name == 'run_single')
+    block = next(n for n in fn.body if isinstance(n, ast.If)
+                 and any(isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                         and c.func.id == 'plot_redshift_wiggle_diagnostics'
+                         for c in ast.walk(n)))
+    diagnostic = Mock()
+    scope = dict(skip_debiased_residual_plot=skip,
+                 plot_redshift_wiggle_diagnostics=diagnostic,
+                 df_agn_pass2_plot_sample=object(), biased_residuals=object(),
+                 biased_residuals_err=object(), debiased_residuals=object(),
+                 debiased_clipping_sigma=object(), plot_path='unused',
+                 z_range=(.44, 3.16))
+    exec(compile(ast.Module(body=[block], type_ignores=[]), '<wiggle guard>', 'exec'), scope)
+    assert diagnostic.call_count == int(not skip)
+    assert ('Skipping redshift-wiggle diagnostics' in capsys.readouterr().out) == skip
+
+
 def test_skip_debiased_residual_plot_forwarded_from_cli_and_full_dispatch():
     for node in ast.walk(tree()):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in {'run_single', 'run_all'}:

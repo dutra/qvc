@@ -5724,16 +5724,19 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         plot_path=plot_path,
         show=False,
     )
-    plot_redshift_wiggle_diagnostics(
-        df_agn_pass2_plot_sample,
-        biased_residuals,
-        biased_residuals_err,
-        debiased_residuals,
-        debiased_clipping_sigma,
-        plot_path=plot_path,
-        z_range=z_range,
-        show=False,
-    )
+    if skip_debiased_residual_plot:
+        print("Skipping redshift-wiggle diagnostics (--skip-debiased-residual-plot).")
+    else:
+        plot_redshift_wiggle_diagnostics(
+            df_agn_pass2_plot_sample,
+            biased_residuals,
+            biased_residuals_err,
+            debiased_residuals,
+            debiased_clipping_sigma,
+            plot_path=plot_path,
+            z_range=z_range,
+            show=False,
+        )
     plot_parameter_residual_diagnostics(
         df_agn_pass2_plot_sample,
         debiased_residuals,
@@ -6458,8 +6461,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--skip-debiased-residual-plot", "--skip_debiased_residual_plot",
         action="store_true", default=False,
-        help=("Skip only the debiased-residual partial-control atlas and its auxiliary "
-              "tables (the 'Plotting debiased residuals...' step); retain other plots "
+        help=("Skip the debiased-residual partial-control atlas and its auxiliary "
+              "tables, plus redshift-wiggle diagnostics (overview, tables, and atlas); retain other plots "
               "and Hubble residual CSVs."),
     )
     parser.add_argument("--skip_plots", action="store_true", default=False, help="Skip plotting steps (default: False)")
