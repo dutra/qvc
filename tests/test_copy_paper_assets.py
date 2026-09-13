@@ -21,7 +21,7 @@ def setup_sources(tmp_path, legacy=False):
     files += [base / 'diagnostics' / name for name in (
         'tier1_cuts_vs_redshift_precut.pdf', 'blr_postcut.pdf',
         'sigma_tau_vs_lambda_broken_pl_fit_postcut.pdf',
-        'bpl_psd_vs_uv_variability_precut.pdf')]
+        'bpl_psd_vs_uv_variability_postcut.pdf')]
     files += [compare / f'cosmo_corner_{model}_{kind}.pdf'
               for model in ('FlatLambdaCDM', 'FlatwCDM', 'Flatw0waCDM')
               for kind in ('alphabeta',)]
@@ -52,9 +52,10 @@ def test_exact_corner_sources_and_added_draft_assets(tmp_path, legacy):
         assert (dest / name).read_bytes() == (compare / name).read_bytes()
     assert not list(dest.glob('*_noalphabeta.pdf'))
     assert (dest / 'agn_table.tex').read_bytes() == (run / 'agn_table.tex').read_bytes()
-    assert (dest / 'bpl_psd_vs_uv_variability_precut.pdf').exists()
+    assert (dest / 'bpl_psd_vs_uv_variability_postcut.pdf').exists()
+    assert not (dest / 'bpl_psd_vs_uv_variability_precut.pdf').exists()
     assert (dest / 'completeness_map_with_relative_percent_contours.pdf').exists()
-    assert (dest / 'tier1_cuts_vs_redshift_precut.pdf').exists()
+    assert not (dest / 'tier1_cuts_vs_redshift_precut.pdf').exists()
     assert not (dest / 'completeness_map.pdf').exists()
     assert not (dest / 'spectral_fraction_vs_redshift_cuts.pdf').exists()
 

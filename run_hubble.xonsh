@@ -193,3 +193,5 @@ python -m qvc.hubble.hubble_fit \
 
 # QVC_HUBBLE_CUT_TIER meanings (tiers are cumulative):
 #   none: no tiered cuts; 0: eligibility only; 1: tiers 0+1; 2: tiers 0+1+2
+
+bash scripts/copy_paper_assets.sh --speed @(speed) --fiducial-dir @(str(Path("plots/hubble") / prefix))

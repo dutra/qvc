@@ -369,9 +369,9 @@ def plot_blr_diagnostics_summary(
                 fmt="D",
                 linestyle="none",
                 markersize=3,
-                mfc=mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.2),
+                mfc=point_color,
                 mec="none",
-                ecolor=mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.05),
+                ecolor=error_color,
                 elinewidth=0.8,
                 capsize=2,
                 capthick=0.8,
@@ -3362,230 +3362,16 @@ def plot_bpl_psd_vs_uv_variability(
     plot_path="plots/hubble",
     show=False,
     filename="bpl_psd_vs_uv_variability.pdf",
-    max_log_tau_bpl_err=0.5,
-    min_log_chi_sq_red_g=None,
-    z_range=(0.44, 3.16),
 ):
-    """Compare the displayed LS bending-power-law PSD fit against the main UV fit."""
-    required = {"log_sigma_uv", "log_sigma_ls", "log_tau_ls"}
-    if not required.issubset(df.columns):
-        missing = ", ".join(sorted(required - set(df.columns)))
-        raise KeyError(f"Missing required columns for BPL PSD-vs-UV diagnostic plot: {missing}")
-    tau_uv_col = "log_tau_uv_rf" if "log_tau_uv_rf" in df.columns else ("log_tau_uv" if "log_tau_uv" in df.columns else None)
-    if tau_uv_col is None:
-        raise KeyError("Missing required column for BPL PSD-vs-UV diagnostic plot: log_tau_uv_rf or log_tau_uv")
+    """Compare free-slope PSD RMS/tau with matching total reference-band values.
 
-    z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float) if "z" in df.columns else np.full(len(df), np.nan)
-    log_sigma_uv = pd.to_numeric(df["log_sigma_uv"], errors="coerce").to_numpy(dtype=float)
-    log_sigma_uv_err = (
-        pd.to_numeric(df["log_sigma_uv_err"], errors="coerce").to_numpy(dtype=float)
-        if "log_sigma_uv_err" in df.columns else np.full(len(df), np.nan)
-    )
-    log_sigma_bpl = pd.to_numeric(df["log_sigma_ls"], errors="coerce").to_numpy(dtype=float)
-    log_sigma_bpl_err = (
-        pd.to_numeric(df["log_sigma_ls_err"], errors="coerce").to_numpy(dtype=float)
-        if "log_sigma_ls_err" in df.columns else np.full(len(df), np.nan)
-    )
-    alpha_high = (
-        pd.to_numeric(df["alpha_high_ls"], errors="coerce").to_numpy(dtype=float)
-        if "alpha_high_ls" in df.columns else np.full(len(df), -2.0, dtype=float)
-    )
-    slope = -alpha_high
-    valid_slope = np.isfinite(slope) & (slope > 1.0)
-    rms_factor = np.full(len(df), 1.0 / np.sqrt(2.0), dtype=float)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        rms_factor[valid_slope] = np.sqrt(
-            1.0 / (slope[valid_slope] * np.sin(np.pi / slope[valid_slope]))
-        )
-    rms_factor = np.where(np.isfinite(rms_factor) & (rms_factor > 0.0), rms_factor, 1.0 / np.sqrt(2.0))
-    log_sigma_bpl_comparable = log_sigma_bpl + np.log10(rms_factor / np.sqrt(2.0 * np.pi))
-    log_tau_uv = pd.to_numeric(df[tau_uv_col], errors="coerce").to_numpy(dtype=float)
-    log_tau_uv_err_col = f"{tau_uv_col}_err"
-    log_tau_uv_err = (
-        pd.to_numeric(df[log_tau_uv_err_col], errors="coerce").to_numpy(dtype=float)
-        if log_tau_uv_err_col in df.columns else np.full(len(df), np.nan)
-    )
-    log_tau_bpl = pd.to_numeric(df["log_tau_ls"], errors="coerce").to_numpy(dtype=float)
-    log_tau_bpl_err = (
-        pd.to_numeric(df["log_tau_ls_err"], errors="coerce").to_numpy(dtype=float)
-        if "log_tau_ls_err" in df.columns else np.full(len(df), np.nan)
-    )
-    if tau_uv_col == "log_tau_uv" and "z" in df.columns:
-        log_tau_uv = log_tau_uv - np.log10(1.0 + z)
-
-    if "log_tau_uv" in df.columns:
-        log_tau_uv_obs = pd.to_numeric(df["log_tau_uv"], errors="coerce").to_numpy(dtype=float)
-        log_tau_uv_obs_err = (
-            pd.to_numeric(df["log_tau_uv_err"], errors="coerce").to_numpy(dtype=float)
-            if "log_tau_uv_err" in df.columns else log_tau_uv_err
-        )
-    else:
-        log_tau_uv_obs = log_tau_uv + np.log10(1.0 + z)
-        log_tau_uv_obs_err = log_tau_uv_err
-    log_tau_bpl_obs = (
-        pd.to_numeric(df["log_tau_ls_obs"], errors="coerce").to_numpy(dtype=float)
-        if "log_tau_ls_obs" in df.columns else log_tau_bpl + np.log10(1.0 + z)
-    )
-    psd_valid = (
-        pd.Series(df["psd_ls_valid"]).fillna(False).astype(bool).to_numpy()
-        if "psd_ls_valid" in df.columns else np.ones(len(df), dtype=bool)
-    )
-    tau_bpl_well_constrained = (
-        psd_valid
-        & np.isfinite(log_tau_bpl_err)
-        & (log_tau_bpl_err >= 0.0)
-        & (log_tau_bpl_err <= float(max_log_tau_bpl_err))
-    )
-
-    fig, axes = plt.subplots(1, 2, figsize=(11.2, 5.2))
-
-    def _linear_error_from_log(value, log_value, log_err):
-        value = np.asarray(value, dtype=float)
-        log_value = np.asarray(log_value, dtype=float)
-        log_err = np.asarray(log_err, dtype=float)
-        finite = (
-            np.isfinite(value)
-            & np.isfinite(log_value)
-            & np.isfinite(log_err)
-            & (value > 0.0)
-            & (log_err >= 0.0)
-        )
-        lower = np.full(value.shape, np.nan, dtype=float)
-        upper = np.full(value.shape, np.nan, dtype=float)
-        lower_exponent = log_value - log_err
-        upper_exponent = log_value + log_err
-        lower[finite] = np.clip(
-            value[finite] - np.power(10.0, lower_exponent[finite]),
-            0.0,
-            None,
-        )
-        finite_upper = finite & (upper_exponent <= np.log10(np.finfo(float).max))
-        upper[finite_upper] = np.clip(
-            np.power(10.0, upper_exponent[finite_upper]) - value[finite_upper],
-            0.0,
-            None,
-        )
-        return np.vstack([lower, upper])
-
-    panels = [
-        (
-            axes[0],
-            np.power(10.0, log_sigma_uv),
-            np.power(10.0, log_sigma_bpl_comparable),
-            _linear_error_from_log(np.power(10.0, log_sigma_uv), log_sigma_uv, log_sigma_uv_err),
-            _linear_error_from_log(np.power(10.0, log_sigma_bpl_comparable), log_sigma_bpl_comparable, log_sigma_bpl_err),
-            r"$\sigma_{\rm UV}$ (mag)",
-            r"$\sigma_{\rm LS}$ (mag)",
-            "No valid BPL sigma values",
-            psd_valid & (np.power(10.0, log_sigma_bpl_comparable) > 5e-2),
-            (2e-2, 2e0),
-        ),
-        (
-            axes[1],
-            np.power(10.0, log_tau_uv),
-            np.power(10.0, log_tau_bpl),
-            _linear_error_from_log(np.power(10.0, log_tau_uv), log_tau_uv, log_tau_uv_err),
-            _linear_error_from_log(np.power(10.0, log_tau_bpl), log_tau_bpl, log_tau_bpl_err),
-            r"$\tau_{\rm UV,RF}$ (days)",
-            r"$\tau_{\rm LS,RF}$ (days)",
-            "No well-constrained BPL tau values",
-            tau_bpl_well_constrained & (np.power(10.0, log_sigma_bpl_comparable) > 5e-2),
-            None,
-        ),
-    ]
-    for ax, x, y, xerr, yerr, xlabel, ylabel, empty_label, panel_filter, fixed_axis_limits in panels:
-        finite_mask = np.isfinite(x) & np.isfinite(y) & (x > 0.0) & (y > 0.0) & panel_filter
-        if np.any(finite_mask):
-            err_mask = finite_mask & np.all(np.isfinite(xerr), axis=0) & np.all(np.isfinite(yerr), axis=0)
-            in_z = finite_mask & np.isfinite(z) & (z >= z_range[0]) & (z <= z_range[1])
-            out_z = finite_mask & ~in_z
-            for mask, marker, label in ((in_z, "o", "AGN"), (out_z, "D", None)):
-                if not np.any(mask):
-                    continue
-                marker_err = mask & err_mask
-                if np.any(marker_err):
-                    ax.errorbar(
-                        x[marker_err],
-                        y[marker_err],
-                        xerr=xerr[:, marker_err],
-                        yerr=yerr[:, marker_err],
-                        fmt=marker,
-                        linestyle="none",
-                        markersize=3,
-                        mfc=(mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.4) if marker == "D" else (0, 0, 0, 0.4)),
-                        mec="none",
-                        ecolor=(mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.1) if marker == "D" else (0.2, 0.2, 0.2, 0.1)),
-                        elinewidth=0.8,
-                        capsize=2,
-                        capthick=0.8,
-                        rasterized=True,
-                        zorder=1,
-                        label=label,
-                    )
-                marker_noerr = mask & ~err_mask
-                if np.any(marker_noerr):
-                    ax.scatter(
-                        x[marker_noerr],
-                        y[marker_noerr],
-                        s=10 if marker == "o" else 12,
-                        marker=marker,
-                        c=(_OUT_OF_RANGE_AGN_COLOR if marker == "D" else 'black'),
-                        alpha=0.4,
-                        linewidths=0,
-                        rasterized=True,
-                        zorder=1,
-                        label=label if not np.any(marker_err) else None,
-                    )
-            lo = min(np.nanmin(x[finite_mask]), np.nanmin(y[finite_mask]))
-            hi = max(np.nanmax(x[finite_mask]), np.nanmax(y[finite_mask]))
-            log_delta = np.log10(y[finite_mask]) - np.log10(x[finite_mask])
-            log_delta = log_delta[np.isfinite(log_delta)]
-            if log_delta.size:
-                bias = float(np.mean(log_delta))
-                sigma = float(np.std(log_delta))
-                ax.text(
-                    0.97,
-                    0.03,
-                    (
-                        f"N = {log_delta.size}\n"
-                        f"bias = {bias:.2f} dex\n"
-                        f"$\\sigma$ = {sigma:.2f} dex"
-                    ),
-                    transform=ax.transAxes,
-                    ha="right",
-                    va="bottom",
-                    fontsize=10.5,
-                    bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="0.6", alpha=0.9),
-                    zorder=20,
-                )
-        else:
-            ax.text(0.5, 0.5, empty_label, ha="center", va="center", transform=ax.transAxes)
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        if np.any(finite_mask) and np.isfinite(lo) and np.isfinite(hi) and hi > lo:
-            if fixed_axis_limits is not None:
-                axis_limits = fixed_axis_limits
-            else:
-                log_lo = np.log10(lo)
-                log_hi = np.log10(hi)
-                pad = 0.12 * max(log_hi - log_lo, 1e-6)
-                axis_limits = (10.0 ** (log_lo - pad), 10.0 ** (log_hi + pad))
-            ax.set_xlim(*axis_limits)
-            ax.set_ylim(*axis_limits)
-            ax.plot(axis_limits, axis_limits, color="m", ls="-", lw=2.2, alpha=0.95, zorder=0)
-        ax.tick_params(axis="x", which="both", pad=8)
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
-        handles, labels = ax.get_legend_handles_labels()
-        if handles:
-            ax.legend(frameon=False, loc="best")
-
-    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
-    return _save_figure(
-        fig,
-        os.path.join(diagnostics_path, filename),
-        dpi=200,
-        show=show,
+    Share the recovery diagnostic's normalization, wavelength scaling, and
+    resolution selection rather than comparing band PSDs with UV continuum
+    parameters. The historical filename is retained for paper assets.
+    """
+    return plot_psd_uv_recovery_comparison(
+        df, plot_path=plot_path, show=show, filename=filename,
+        tau_resolution_mode="filter", free_only=True,
     )
 
 
@@ -3597,6 +3383,7 @@ def plot_psd_uv_recovery_comparison(
     *,
     tau_resolution_mode="mark",
     nominal_psd_fmax=2e-3,
+    free_only=False,
 ):
     """Compare PSD fits with like-for-like model RMS and timescale estimates.
 
@@ -3630,6 +3417,9 @@ def plot_psd_uv_recovery_comparison(
         "psd_bpl_ref_band",
         "psd_bpl_ref_lambda_rf",
     }
+    if free_only:
+        required -= {"log_sigma_ls_fixed", "log_sigma_ls_fixed_err",
+                     "log_tau_ls_fixed", "log_tau_ls_fixed_err", "psd_ls_fixed_valid"}
     if not required.issubset(df.columns):
         missing = ", ".join(sorted(required - set(df.columns)))
         raise KeyError(
@@ -3637,6 +3427,8 @@ def plot_psd_uv_recovery_comparison(
         )
 
     def _numeric(column):
+        if free_only and "_fixed" in column and column not in df.columns:
+            return np.full(len(df), np.nan)
         return pd.to_numeric(df[column], errors="coerce").to_numpy(dtype=float)
 
     ref_band = (
@@ -3843,7 +3635,7 @@ def plot_psd_uv_recovery_comparison(
     )
     free_valid = pd.Series(df["psd_ls_valid"]).fillna(False).astype(bool).to_numpy()
     fixed_valid = (
-        pd.Series(df["psd_ls_fixed_valid"])
+        pd.Series(df.get("psd_ls_fixed_valid", np.zeros(len(df), dtype=bool)))
         .fillna(False)
         .astype(bool)
         .to_numpy()
@@ -3973,8 +3765,10 @@ def plot_psd_uv_recovery_comparison(
         upper = step * np.ceil((np.max(values) + margin) / step)
         return float(lower), float(upper)
 
-    sigma_limits = _shared_limits(panels[:2], step=0.05, margin_floor=0.06)
-    tau_limits = _shared_limits(panels[2:], step=0.05, margin_floor=0.08)
+    if free_only:
+        panels = [panels[0], panels[2]]
+    sigma_limits = _shared_limits([p for p in panels if p["quantity"] == "sigma"], step=0.05, margin_floor=0.06)
+    tau_limits = _shared_limits([p for p in panels if p["quantity"] == "tau"], step=0.05, margin_floor=0.08)
     if sigma_limits is None and tau_limits is None:
         raise ValueError("No finite valid free-slope or fixed-slope PSD fits to plot.")
 
@@ -4012,11 +3806,12 @@ def plot_psd_uv_recovery_comparison(
             print(f"[PSD-vs-UV KDE contours] skipped: {exc}")
 
     fig, axes = plt.subplots(
+        1 if free_only else 2,
         2,
-        2,
-        figsize=(10.0, 9.0),
-        sharex="row",
-        sharey="row",
+        figsize=(11.2, 5.2) if free_only else (10.0, 9.0),
+        sharex=False if free_only else "row",
+        sharey=False if free_only else "row",
+        squeeze=False,
         constrained_layout=True,
     )
     fig.get_layout_engine().set(
@@ -4101,7 +3896,8 @@ def plot_psd_uv_recovery_comparison(
                     r"$\tau_{\rm model}<[2\pi f_{\max}(1+z)]^{-1}$"
                 ),
             )
-        _plot_kde_contours(ax, x[stats_mask], y[stats_mask])
+        if not free_only:
+            _plot_kde_contours(ax, x[stats_mask], y[stats_mask])
         ax.set_xlim(*limits)
         ax.set_ylim(*limits)
         ax.set_aspect("equal", adjustable="box")
@@ -4158,9 +3954,10 @@ def plot_psd_uv_recovery_comparison(
             ax.legend(loc="upper left", fontsize=8.5, frameon=True)
 
     axes[0, 0].set_title("Free-slope BPL", fontsize=14)
-    axes[0, 1].set_title("Fixed-slope DRW", fontsize=14)
-    axes[0, 1].tick_params(labelleft=False)
-    axes[1, 1].tick_params(labelleft=False)
+    axes[0, 1].set_title("Free-slope BPL" if free_only else "Fixed-slope DRW", fontsize=14)
+    if not free_only:
+        axes[0, 1].tick_params(labelleft=False)
+        axes[1, 1].tick_params(labelleft=False)
 
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(

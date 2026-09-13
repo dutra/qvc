@@ -2118,16 +2118,6 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             show=False,
             filename="sf_ref_band_vs_model_g_precut.pdf",
         )
-    if {"log_sigma_uv", "log_sigma_ls", "log_tau_ls"}.issubset(df.columns) and (
-        {"log_tau_uv_rf"}.issubset(df.columns)
-        or {"log_tau_uv", "z"}.issubset(df.columns)
-    ):
-        plot_bpl_psd_vs_uv_variability(
-            df,
-            plot_path=plot_path,
-            show=False,
-            filename="bpl_psd_vs_uv_variability_precut.pdf",
-        )
     psd_recovery_columns = {
         "log_sigma_ls",
         "log_sigma_ls_err",
@@ -2187,6 +2177,22 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         and psd_total_tau_columns.issubset(df.columns)
         and psd_sigma_ready
     )
+    bpl_recovery_ready = (
+        (psd_recovery_columns - {
+            "log_sigma_ls_fixed", "log_sigma_ls_fixed_err",
+            "log_tau_ls_fixed", "log_tau_ls_fixed_err", "psd_ls_fixed_valid",
+        }).issubset(df.columns)
+        and bool(psd_ref_bands)
+        and psd_total_tau_columns.issubset(df.columns)
+        and psd_sigma_ready
+    )
+    if bpl_recovery_ready:
+        plot_bpl_psd_vs_uv_variability(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="bpl_psd_vs_uv_variability_precut.pdf",
+        )
     if psd_recovery_ready:
         plot_psd_uv_recovery_comparison(
             df,
@@ -2991,10 +2997,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             show=False,
             filename="sf_ref_band_vs_model_g_postcut.pdf",
         )
-    if {"log_sigma_uv", "log_sigma_ls", "log_tau_ls"}.issubset(df.columns) and (
-        {"log_tau_uv_rf"}.issubset(df.columns)
-        or {"log_tau_uv", "z"}.issubset(df.columns)
-    ):
+    if bpl_recovery_ready:
         plot_bpl_psd_vs_uv_variability(
             df,
             plot_path=plot_path,
