@@ -979,7 +979,8 @@ def test_plot_init_saves_each_stage_without_showing(tmp_path, monkeypatch):
     )
 
     class FakeFitter:
-        def plot_sed(self, *, output_path=None, show=False, title=None, plot_residual=True):
+        def plot_sed(self, *, output_path=None, show=False, title=None, plot_residual=True, rest_frame=False):
+            assert rest_frame is True
             assert plot_residual is False
             calls.append(
                 {"output_path": output_path, "show": show, "title": title}
@@ -2349,7 +2350,8 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
                 )
             return path
 
-        def plot_sed(self, *, output_path, show, plot_residual=True):
+        def plot_sed(self, *, output_path, show, plot_residual=True, rest_frame=False):
+            assert rest_frame is True
             assert plot_residual is False
             assert show is False
             fig = plt.figure()
@@ -2541,7 +2543,8 @@ def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_
 
 def test_final_sed_disables_residuals_without_initialization_plots(tmp_path):
     class Fitter:
-        def plot_sed(self, *, output_path, show, plot_residual=True):
+        def plot_sed(self, *, output_path, show, plot_residual=True, rest_frame=False):
+            assert rest_frame is True
             assert show is False
             assert plot_residual is False
             return "final figure"

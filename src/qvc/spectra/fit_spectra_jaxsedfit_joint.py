@@ -2560,6 +2560,7 @@ def fit_with_saved_initialization_plots(fitter, rec, args):
         # unfamiliar future stage title remains non-interactive.
         call_kwargs["show"] = False
         call_kwargs["plot_residual"] = False
+        call_kwargs["rest_frame"] = True
         if stage is None:
             return original_plot_sed(*call_args, **call_kwargs)
         output_path = initialization_figure_path(args.fig_dir, rec, stage)
@@ -3030,7 +3031,7 @@ def _complete_resumed_fit(rec, args, source_path, fitter):
     if args.save_fig:
         sed_path = sed_figure_path(args.fig_dir, rec)
         sed_path.parent.mkdir(parents=True, exist_ok=True)
-        sed_fig = fitter.plot_sed(output_path=sed_path, show=False, plot_residual=False)
+        sed_fig = fitter.plot_sed(output_path=sed_path, show=False, plot_residual=False, rest_frame=True)
         if sed_fig is not None:
             plt.close(sed_fig)
         if not sed_path.is_file():
