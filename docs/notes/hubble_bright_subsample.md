@@ -64,3 +64,12 @@ Two-pass fits retain `_pass1.h5` and `_pass2.h5` suffixes; JAX files use
 Existing files are not renamed; use an explicit resume path for legacy names.
 Use separate prefixes to retain different configurations. Detailed settings
 remain in checkpoint metadata, including `run_tag`, rather than filenames.
+
+Use `--skip-debiased-residual-plot` (alias `--skip_debiased_residual_plot`) to
+skip only the `Plotting debiased residuals...` partial-control diagnostic in
+NumPy/Dynesty `single` and `full` runs. This skips
+`full_residuals_debiased_partial_controls.pdf` and its auxiliary
+`partial_control_residuals.csv` and `partial_control_parameter_index.csv`.
+Other residual plots, Hubble residual CSVs, clipping, and inference remain
+unchanged. The default is off; minimal mode already skips this diagnostic.
+Existing output files are not deleted.

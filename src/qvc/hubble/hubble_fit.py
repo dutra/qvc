@@ -4170,7 +4170,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                agn_pivot_context=None,
                df_agn_completeness_parent=None,
                bright_subsample_cut=None,
-               bright_subsample_plot_data=None):
+               bright_subsample_plot_data=None,
+               skip_debiased_residual_plot=False):
     if only_sna:
         completeness = False
         plot_completeness = False
@@ -5689,14 +5690,17 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         np.asarray(M2500_std_debiased)[fit_stat_mask],
         n_params=len(model_labels) - 1,
     )
-    print("Plotting debiased residuals...")
-    plot_full_residuals_debiased_partial_controls(
-        df_agn_pass2_plot_sample,
-        debiased_residuals,
-        plot_path=plot_path,
-        z_range=z_range,
-        show=False,
-    )
+    if skip_debiased_residual_plot:
+        print("Skipping debiased residual partial-control plot (--skip-debiased-residual-plot).")
+    else:
+        print("Plotting debiased residuals...")
+        plot_full_residuals_debiased_partial_controls(
+            df_agn_pass2_plot_sample,
+            debiased_residuals,
+            plot_path=plot_path,
+            z_range=z_range,
+            show=False,
+        )
     plot_debias_impact_diagnostics(
         df_agn_pass2_plot_sample,
         biased_residuals,
@@ -5819,7 +5823,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             selection_attenuation_mode="fixed-offset",
             df_agn_completeness_parent=None,
             bright_subsample_cut=None,
-            bright_subsample_plot_data=None):
+            bright_subsample_plot_data=None,
+            skip_debiased_residual_plot=False):
 
     validate_completeness_mode(completeness_mode)
     completeness_magnitude = normalize_completeness_magnitude(
@@ -5951,7 +5956,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        selection_attenuation_mode=selection_attenuation_mode,
                        df_agn_completeness_parent=df_agn_completeness_parent,
                        bright_subsample_cut=bright_subsample_cut,
-                       bright_subsample_plot_data=bright_subsample_plot_data)
+                       bright_subsample_plot_data=bright_subsample_plot_data,
+                       skip_debiased_residual_plot=skip_debiased_residual_plot)
         
         samples_joint, model_labels_joint, dm_interp_joint, logZ_joint, logZerr_joint, debiased_residuals_joint, age_joint, age_err_joint = r
         #print(f"For model {cosmo_model}, universe age: {age:.3f} Gyr")
@@ -5995,6 +6001,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                            agn_pivot_context=None,
                            bright_subsample_cut=None,
                            bright_subsample_plot_data=None,
+                           skip_debiased_residual_plot=skip_debiased_residual_plot,
                            df_agn_completeness_parent=None)
             samples_sna, model_labels_sna, dm_interp_sna, logZ_sna, logZerr_sna, debiased_residuals_sna, age_sna, age_sna_err = r
         if not compare_sigma_only and not minimal_plots and not only_agn:
@@ -6423,6 +6430,13 @@ if __name__ == "__main__":
     )
     parser.add_argument("--plot-completeness", action="store_true", default=False,
                         help="Generate completeness maps, count/cut audits and correction diagnostics; also works with --minimal-plots.")
+    parser.add_argument(
+        "--skip-debiased-residual-plot", "--skip_debiased_residual_plot",
+        action="store_true", default=False,
+        help=("Skip only the debiased-residual partial-control atlas and its auxiliary "
+              "tables (the 'Plotting debiased residuals...' step); retain other plots "
+              "and Hubble residual CSVs."),
+    )
     parser.add_argument("--skip_plots", action="store_true", default=False, help="Skip plotting steps (default: False)")
     parser.add_argument(
         "--minimal-plots",
@@ -6987,6 +7001,7 @@ if __name__ == "__main__":
                 resume_replot_with_cuts=args.resume_replot_with_cuts,
                 bright_subsample_cut=bright_subsample_cut,
                 bright_subsample_plot_data=bright_subsample_plot_data,
+                skip_debiased_residual_plot=args.skip_debiased_residual_plot,
                 df_agn_completeness_parent=df_agn_completeness_parent,
                 agn_pivot_context=agn_pivot_context)
             samples_joint, model_labels, dm_interp, logZ_joint, logZerr_joint, debiased_residuals, age, age_err = r
@@ -7081,6 +7096,7 @@ if __name__ == "__main__":
                 selection_attenuation_mode=args.selection_attenuation_mode,
                 df_agn_completeness_parent=df_agn_completeness_parent,
                 bright_subsample_cut=bright_subsample_cut,
-                bright_subsample_plot_data=bright_subsample_plot_data)
+                bright_subsample_plot_data=bright_subsample_plot_data,
+                skip_debiased_residual_plot=args.skip_debiased_residual_plot)
     
     print(f"Finished running Hubble fit pipeline for {args.cosmo_models}")

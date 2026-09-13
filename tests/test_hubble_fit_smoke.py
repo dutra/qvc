@@ -6080,10 +6080,12 @@ def test_full_bright_selection_dispatch_and_output_identity(monkeypatch, tmp_pat
         completeness_magnitude="attenuated", selection_attenuation_mode=attenuation,
         df_agn_completeness_parent=parent, bright_subsample_cut=cut,
         completeness_sim_file="shared-mock.h5", plot_completeness=True,
-        minimal_plots=True, disable_sigma_clip_pass=True, prefix="full-bright")
+        minimal_plots=True, disable_sigma_clip_pass=True, prefix="full-bright",
+        skip_debiased_residual_plot=True)
     assert len(pivot_calls) == 1
     assert len(calls) == (2 if only_agn else 4)
     for args, kwargs in calls:
+        assert kwargs["skip_debiased_residual_plot"] is True
         if kwargs["only_sna"]:
             assert kwargs["completeness"] is False
             assert kwargs["plot_completeness"] is False

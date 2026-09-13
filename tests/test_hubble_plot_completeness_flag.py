@@ -72,3 +72,45 @@ def test_map_suite_guard_executes_only_when_requested(enabled, completeness):
     # This suite must run before the minimal branch returns.
     assert fn.body.index(block) < next(i for i, n in enumerate(fn.body)
         if isinstance(n, ast.If) and ast.unparse(n.test) == 'minimal_plots')
+
+
+def test_skip_debiased_residual_plot_cli_aliases_and_default():
+    parser = argparse.ArgumentParser()
+    declaration = next(n for n in ast.walk(tree()) if isinstance(n, ast.Call)
+                       and isinstance(n.func, ast.Attribute) and n.func.attr == 'add_argument'
+                       and n.args and isinstance(n.args[0], ast.Constant)
+                       and n.args[0].value == '--skip-debiased-residual-plot')
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[ast.Expr(declaration)], type_ignores=[])), '<cli>', 'exec'), {'parser': parser})
+    assert parser.parse_args([]).skip_debiased_residual_plot is False
+    for spelling in ('--skip-debiased-residual-plot', '--skip_debiased_residual_plot'):
+        assert parser.parse_args([spelling]).skip_debiased_residual_plot is True
+
+
+@pytest.mark.parametrize('skip', [False, True])
+def test_skip_debiased_residual_plot_leaves_next_diagnostic_running(skip, capsys):
+    fn = next(n for n in tree().body if isinstance(n, ast.FunctionDef) and n.name == 'run_single')
+    block = next(n for n in fn.body if isinstance(n, ast.If)
+                 and ast.unparse(n.test) == 'skip_debiased_residual_plot')
+    following = fn.body[fn.body.index(block) + 1]
+    assert following.value.func.id == 'plot_debias_impact_diagnostics'
+    atlas, impact = Mock(), Mock()
+    scope = dict(skip_debiased_residual_plot=skip,
+                 plot_full_residuals_debiased_partial_controls=atlas,
+                 plot_debias_impact_diagnostics=impact,
+                 df_agn_pass2_plot_sample=object(), debiased_residuals=object(),
+                 biased_residuals=object(), plot_path='unused', z_range=(.44, 3.16))
+    exec(compile(ast.Module(body=[block, following], type_ignores=[]), '<residual plot guard>', 'exec'), scope)
+    assert atlas.call_count == int(not skip)
+    impact.assert_called_once()
+    message = capsys.readouterr().out
+    assert ('Plotting debiased residuals...' in message) == (not skip)
+    assert ('Skipping debiased residual' in message) == skip
+
+
+def test_skip_debiased_residual_plot_forwarded_from_cli_and_full_dispatch():
+    for node in ast.walk(tree()):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in {'run_single', 'run_all'}:
+            kwargs = {k.arg: k.value for k in node.keywords}
+            assert 'skip_debiased_residual_plot' in kwargs
+            assert ast.unparse(kwargs['skip_debiased_residual_plot']) in {
+                'args.skip_debiased_residual_plot', 'skip_debiased_residual_plot'}
