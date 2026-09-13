@@ -5447,64 +5447,14 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 index=False,
             )
     if cosmo_model == "Flatw0waCDM":
-        df_agn_table_sample = df_agn_full_sample_preclip
-        table_sample_matches_plot_sample = (
-            len(df_agn_table_sample) == len(df_agn_pass2_plot_sample)
-            and df_agn_table_sample["object_id"].astype(str).reset_index(drop=True).equals(
-                df_agn_pass2_plot_sample["object_id"].astype(str).reset_index(drop=True)
-            )
-        )
-        if table_sample_matches_plot_sample:
-            dmi_posterior_median_table = dmi_posterior_median_full
-        else:
-            dmi_posterior_median_table, _, _ = _compute_direct_full_sample_completeness_summaries(
-                flat_samples,
-                df_agn_fit_selection=df_agn_pass2_fit_selection,
-                df_agn_plot_sample=df_agn_table_sample,
-                df_pantheon=df_pantheon,
-                _sna_L=_sna_L,
-                _sna_Lower=_sna_Lower,
-                _sna_LogdetCov=_sna_LogdetCov,
-                cosmo_model=cosmo_model,
-                completeness_params=_get_direct_completeness_params(),
-                z_pivot_agn=z_pivot_agn,
-                agn_pivot_context=agn_pivot_context,
-                use_full_cov=use_full_cov,
-                disable_ceph_dist_calibration=disable_ceph_dist_calibration,
-                use_planck_h0_prior=use_planck_h0_prior,
-                use_planck_om_prior=use_planck_om_prior,
-                prior_profile=prior_profile,
-                only_agn=only_agn,
-                use_alpha_lambda_term=use_alpha_lambda_term,
-                use_eta_sigma_term=use_eta_sigma_term,
-                use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
-        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
-                use_redshift_log_f_term=use_redshift_log_f_term,
-                early_de_guard=early_de_guard,
-                selection_attenuation_mode=selection_attenuation_mode,
-                light_curve_uncertainty_mode=light_curve_uncertainty_mode,
-            )
-        mu_table, mu_err_table = _compute_debiased_agn_table_mu(
-            flat_samples,
-            model_labels,
-            df_agn_table_sample,
-            cosmo_model,
-            z_pivot_agn=z_pivot_agn,
-            agn_pivot_context=agn_pivot_context,
-            dmi_values=dmi_posterior_median_table,
-            only_agn=only_agn,
-            use_alpha_lambda_term=use_alpha_lambda_term,
-            use_eta_sigma_term=use_eta_sigma_term,
-            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
-        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
-            use_redshift_log_f_term=use_redshift_log_f_term,
-        )
+        # Keep both published tables aligned with the exact object sample and
+        # posterior summaries returned by the debiased Hubble plot above.
         make_agn_csv_table(
-            df_agn_table_sample,
-            mu_table,
-            mu_err_table,
+            df_agn_pass2_plot_sample,
+            mu_pred_median_debiased,
+            mu_pred_std_debiased_with_scatter,
             dm_interp,
-            dmi_values=dmi_posterior_median_table,
+            dmi_values=dmi_posterior_median_full,
             sort_by="z",
             ascending=True,
             write_path=plot_path,

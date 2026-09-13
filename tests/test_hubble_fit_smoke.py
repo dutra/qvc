@@ -3279,6 +3279,8 @@ def test_run_single_calls_agn_table_only_for_joint_flatw0wa(monkeypatch, tmp_pat
     flat_samples = np.tile(theta[None, :], (8, 1))
     dmi_posterior_median = np.zeros(len(df_agn))
     dmi_posterior_sigma = np.full(len(df_agn), 0.05)
+    expected_mu = 44.0 + 0.01 * np.arange(len(df_agn))
+    expected_mu_err = 0.2 + 0.01 * np.arange(len(df_agn))
     latex_calls = []
     csv_calls = []
 
@@ -3322,9 +3324,9 @@ def test_run_single_calls_agn_table_only_for_joint_flatw0wa(monkeypatch, tmp_pat
         lambda *args, **kwargs: (
             np.zeros(len(df_agn)),
             np.ones(len(df_agn)),
-            np.full(len(df_agn), 44.0),
+            expected_mu,
             np.full(len(df_agn), 0.1),
-            np.full(len(df_agn), 0.2),
+            expected_mu_err,
         ),
     )
     monkeypatch.setattr(hubble_fit, "plot_hubble_residual_normality", lambda *args, **kwargs: None)
@@ -3357,7 +3359,16 @@ def test_run_single_calls_agn_table_only_for_joint_flatw0wa(monkeypatch, tmp_pat
     assert len(latex_calls) == 1
     assert len(csv_calls) == 1
     csv_df_arg = csv_calls[0][0][0]
+    latex_df_arg = latex_calls[0][0][0]
     assert csv_df_arg["object_id"].tolist() == df_agn["object_id"].tolist()
+    assert latex_df_arg["object_id"].tolist() == csv_df_arg["object_id"].tolist()
+    np.testing.assert_array_equal(csv_calls[0][0][1], expected_mu)
+    np.testing.assert_array_equal(latex_calls[0][0][1], expected_mu)
+    np.testing.assert_array_equal(csv_calls[0][0][2], expected_mu_err)
+    np.testing.assert_array_equal(latex_calls[0][0][2], expected_mu_err)
+    np.testing.assert_array_equal(
+        csv_calls[0][1]["dmi_values"], latex_calls[0][1]["dmi_values"]
+    )
 
 
 def test_run_single_does_not_call_agn_table_for_only_sna(monkeypatch, tmp_path):

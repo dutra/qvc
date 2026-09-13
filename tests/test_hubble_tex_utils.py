@@ -107,6 +107,8 @@ def test_make_agn_csv_table_writes_expected_output(tmp_path):
     df.loc[1, "sdss_name"] = "223456.78+123456.7"
     df.loc[1, "z"] = 2.3456
     df.loc[1, "apparent_mag_2500"] = 21.15
+    df["in_fit_z_range"] = [True, False]
+    df["is_fit_selection"] = [True, False]
 
     csv_df = make_agn_csv_table(
         df,
@@ -156,7 +158,9 @@ def test_make_agn_csv_table_writes_expected_output(tmp_path):
         "log_sigma_UV",
         "log_sigma_UV_err",
         "cov_log_sigma_UV_log_tau_UV_RF",
+        "in_fit_z_range",
     ]
+    assert "is_fit_selection" not in plain.columns
     assert "PL_slope" not in plain.columns
     assert list(plain["z"]) == sorted(df["z"].tolist())
     np.testing.assert_allclose(plain["m_2500"], loaded["apparent_mag_2500_corr"])
