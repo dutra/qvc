@@ -1497,7 +1497,7 @@ def plot_cut_diagnostics(df_before, df_after, bins=30, cut_info="", save_path="p
             return "generic"
         return "_".join(tokens)
 
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    os.makedirs(save_path, exist_ok=True)
 
     before_ids = set(df_before["object_id"].astype(str))
     after_ids = set(df_after["object_id"].astype(str))
@@ -1552,7 +1552,7 @@ def plot_cut_diagnostics(df_before, df_after, bins=30, cut_info="", save_path="p
         fig.text(0.5, 0.01, f"Cut info: {cut_info}", ha="center", va="bottom", fontsize=11, color="k")
 
     filename = f"cut_diagnostic_{_cut_slug(cut_info)}.pdf"
-    plot_path = os.path.join(os.path.dirname(save_path), filename)
+    plot_path = os.path.join(save_path, filename)
     fig.tight_layout(rect=(0, 0.03, 1, 1))
     _save_figure(fig, plot_path, dpi=150)
 

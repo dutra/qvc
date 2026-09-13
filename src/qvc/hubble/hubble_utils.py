@@ -1187,6 +1187,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             completeness_magnitude_support_mode
         )
     )
+    cuts_plot_dir = os.path.join(plot_path or "plots/hubble", "cuts")
     cut_tier = normalize_cut_tier(cut_tier)
     maximum_cut_tier = cut_tier_level(cut_tier)
     apply_tier0 = maximum_cut_tier >= 0
@@ -2329,7 +2330,8 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                 )
             col_mask = _scalar_parameter_cut_mask(frame, col, lower, upper)
             plot_cut_diagnostics(
-                frame.copy(), frame[col_mask], bins=30, cut_info=cut_desc
+                frame.copy(), frame[col_mask], bins=30, cut_info=cut_desc,
+                save_path=cuts_plot_dir,
             )
             frame = _record_cut(
                 f"tier{tier}:agn_scalar:{col}",
@@ -2410,7 +2412,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                 exclude_df = pd.read_csv(exclude_csv)
                 exclude_ids = set(exclude_df['object_id'].astype(str))
                 mask_exclude = ~df['object_id'].astype(str).isin(exclude_ids)
-                plot_cut_diagnostics(df.copy(), df[mask_exclude], bins=30, cut_info="exclude csv")
+                plot_cut_diagnostics(df.copy(), df[mask_exclude], bins=30, cut_info="exclude csv", save_path=cuts_plot_dir)
                 df = _record_cut(
                     f"exclude_csv:{Path(exclude_csv).name}",
                     f"object_id not in {Path(exclude_csv).name}",
@@ -2579,7 +2581,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                 <= bc_amp_upper
             ) | df["dlog_amp_bc"].isna().to_numpy(dtype=bool)
             cut_desc = f"dlog_amp_bc in (-inf, {bc_amp_upper}] or NaN"
-            plot_cut_diagnostics(df.copy(), df[bc_amp_mask], bins=30, cut_info=cut_desc)
+            plot_cut_diagnostics(df.copy(), df[bc_amp_mask], bins=30, cut_info=cut_desc, save_path=cuts_plot_dir)
             df = _record_cut(
                 "tier2:agn_scalar:dlog_amp_bc", cut_desc, df, bc_amp_mask, tier="2"
             )
@@ -2598,7 +2600,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             frac_upper = 10.0**log_upper
             frac_mask = (~np.isfinite(frac_vals)) | (frac_vals <= 0.0) | (frac_vals <= frac_upper)
             cut_desc = f"{log_col} <= {log_upper} or NaN/non-positive"
-            plot_cut_diagnostics(df.copy(), df[frac_mask], bins=30, cut_info=cut_desc)
+            plot_cut_diagnostics(df.copy(), df[frac_mask], bins=30, cut_info=cut_desc, save_path=cuts_plot_dir)
             df = _record_cut(
                 f"tier2:agn_scalar:{log_col}", cut_desc, df, frac_mask, tier="2"
             )
@@ -2618,7 +2620,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             cut_desc = (
                 f"rel_apparent_mag_2500_err < {REL_APPARENT_MAG_2500_ERR_MAX} or NaN"
             )
-            plot_cut_diagnostics(df.copy(), df[rel_mag_err_mask], bins=30, cut_info=cut_desc)
+            plot_cut_diagnostics(df.copy(), df[rel_mag_err_mask], bins=30, cut_info=cut_desc, save_path=cuts_plot_dir)
             df = _record_cut(
                 "agn_scalar:rel_apparent_mag_2500_err",
                 cut_desc,
@@ -2655,7 +2657,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             mu_zscore = dict(zip(residual_df['object_id'].astype(str), residual_df['mu_zscore']))
             df['mu_zscore'] = df['object_id'].astype(str).map(mu_zscore)
             mask_residual = df['mu_zscore'].abs() < residuals_sigma_clip
-            plot_cut_diagnostics(df.copy(), df[mask_residual], bins=30, cut_info=f"|mu_zscore|<{residuals_sigma_clip}")
+            plot_cut_diagnostics(df.copy(), df[mask_residual], bins=30, cut_info=f"|mu_zscore|<{residuals_sigma_clip}", save_path=cuts_plot_dir)
             df = _record_cut(
                 "residual_sigma_clip",
                 f"|mu_zscore| < {residuals_sigma_clip}",
@@ -3009,10 +3011,9 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         sigma_limits=(-1.9, 1.2),
         tau_limits=(-0.2, 4.9),
     )
-    plot_cut_diagnostics(df_all.copy(), df.copy(), bins=30, cut_info="all cuts")
+    plot_cut_diagnostics(df_all.copy(), df.copy(), bins=30, cut_info="all cuts", save_path=cuts_plot_dir)
     colorpanel_cols = [col for col in ("f_host_2500", "f_host_center", "f_bc_3000", "wrms") if col in df_all.columns]
     if len(colorpanel_cols) > 0 and "z" in df_all.columns and "apparent_mag_2500" in df_all.columns:
-        cuts_plot_dir = os.path.join("plots", "hubble", "cuts")
         os.makedirs(cuts_plot_dir, exist_ok=True)
         colorpanel_result = plot_m2500_vs_z_colorpanels(
             df_all,
@@ -3032,7 +3033,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                 bbox_inches="tight",
             )
             plt.close(fig_colorpanels)
-    plot_Mi_relation(df_all.copy())
+    plot_Mi_relation(df_all.copy(), plot_path=plot_path)
     _finalize_cut_report()
     if return_completeness_parent:
         return df, df_all, completeness_parent
