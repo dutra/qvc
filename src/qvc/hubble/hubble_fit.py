@@ -6174,7 +6174,7 @@ def configure_completeness_run_args(args):
 
 
 def validate_plot_mode_args(args):
-    """Reject plotting modes whose output contracts are mutually exclusive."""
+    """Validate plot modes and enable completeness diagnostics for the full suite."""
     if getattr(args, "plot_completeness", False):
         if args.skip_plots or args.compare_sigma_only:
             raise ValueError("--plot-completeness cannot be combined with --skip_plots or --compare_sigma_only.")
@@ -6186,6 +6186,16 @@ def validate_plot_mode_args(args):
         raise ValueError("--minimal-plots cannot be used with a direct --only_sna run.")
     if args.minimal_plots and args.use_jax:
         raise ValueError("--minimal-plots is not supported with --use_jax.")
+    args.plot_completeness = bool(
+        (
+            getattr(args, "plot_completeness", False)
+            or not args.minimal_plots
+        )
+        and not args.skip_plots
+        and not args.compare_sigma_only
+        and not args.only_sna
+        and not getattr(args, "disable_completeness", False)
+    )
 
 
 def render_hubble_mode_table(args):
@@ -6430,7 +6440,7 @@ if __name__ == "__main__":
         help="Maximum AGN cut tier: none, 0 (eligibility), 1 (fit quality), or 2 (science parameters).",
     )
     parser.add_argument("--plot-completeness", action="store_true", default=False,
-                        help="Generate completeness maps, count/cut audits and correction diagnostics; also works with --minimal-plots.")
+                        help="Include completeness maps, count/cut audits and correction diagnostics with --minimal-plots; enabled automatically for the full plot suite.")
     parser.add_argument(
         "--skip-debiased-residual-plot", "--skip_debiased_residual_plot",
         action="store_true", default=False,
@@ -6447,7 +6457,9 @@ if __name__ == "__main__":
             "Run the normal fit and evidence comparison while retaining only the "
             "debiased Hubble diagram, its residual CSV, the debiased luminosity "
             "plot with residuals, and the Dynesty corner "
-            "plot (generated during fresh sampling runs)."
+            "plot (generated during fresh sampling runs). Without this flag, "
+            "generate the full plot suite, including completeness diagnostics; "
+            "--skip-debiased-residual-plot still suppresses the residual atlas."
         ),
     )
     parser.add_argument(

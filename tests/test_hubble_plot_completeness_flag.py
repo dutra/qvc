@@ -1,4 +1,4 @@
-"""Completeness plotting is opt-in, independently of the minimal plot suite."""
+"""The full suite includes completeness; minimal mode can explicitly enable it."""
 import argparse
 import ast
 from pathlib import Path
@@ -13,7 +13,7 @@ def tree():
     return ast.parse(Path(hubble_fit.__file__).read_text())
 
 
-def test_cli_accepts_plot_completeness_and_defaults_off():
+def test_cli_accepts_explicit_plot_completeness_request():
     parser = argparse.ArgumentParser()
     declaration = next(n for n in ast.walk(tree()) if isinstance(n, ast.Call)
                        and isinstance(n.func, ast.Attribute) and n.func.attr == 'add_argument'
@@ -22,6 +22,36 @@ def test_cli_accepts_plot_completeness_and_defaults_off():
     exec(compile(ast.fix_missing_locations(ast.Module(body=[ast.Expr(declaration)], type_ignores=[])), '<cli>', 'exec'), {'parser': parser})
     assert parser.parse_args([]).plot_completeness is False
     assert parser.parse_args(['--plot-completeness']).plot_completeness is True
+
+
+@pytest.mark.parametrize('minimal,explicit,expected', [
+    (False, False, True), (False, True, True),
+    (True, False, False), (True, True, True),
+])
+@pytest.mark.parametrize('skip_residual', [False, True])
+def test_effective_completeness_plot_mode(minimal, explicit, expected, skip_residual):
+    args = SimpleNamespace(
+        minimal_plots=minimal, plot_completeness=explicit, skip_plots=False,
+        compare_sigma_only=False, only_sna=False, use_jax=False,
+        disable_completeness=False, skip_debiased_residual_plot=skip_residual,
+    )
+    hubble_fit.validate_plot_mode_args(args)
+    assert args.plot_completeness is expected
+    assert args.skip_debiased_residual_plot is skip_residual
+
+
+@pytest.mark.parametrize('disabled_mode', [
+    'skip_plots', 'compare_sigma_only', 'only_sna', 'disable_completeness',
+])
+def test_automatic_completeness_respects_disabled_modes(disabled_mode):
+    args = SimpleNamespace(
+        minimal_plots=False, plot_completeness=False, skip_plots=False,
+        compare_sigma_only=False, only_sna=False, use_jax=False,
+        disable_completeness=False,
+    )
+    setattr(args, disabled_mode, True)
+    hubble_fit.validate_plot_mode_args(args)
+    assert args.plot_completeness is False
 
 
 @pytest.mark.parametrize('minimal', [False, True])
