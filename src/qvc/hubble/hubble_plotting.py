@@ -2174,7 +2174,7 @@ def plot_sigma_tau_vs_lambda_broken_pl_fit(
         sharex=True,
         constrained_layout=True,
     )
-    fig.set_constrained_layout_pads(w_pad=0.01, h_pad=0.01, wspace=0.01, hspace=0.02)
+    fig.set_constrained_layout_pads(w_pad=0.01, h_pad=0.05, wspace=0.01, hspace=0.02)
 
     plotted_bands = []
     for band in bands:
@@ -2279,9 +2279,9 @@ def plot_sigma_tau_vs_lambda_broken_pl_fit(
     if band_handles:
         ax_sigma.legend(handles=band_handles + model_handle, loc="upper right", frameon=False, ncol=2, fontsize=9)
 
-    ax_sigma.set_ylim(-0.54, 0.64)
+    ax_sigma.set_ylim(-0.45, 0.55)
     ax_tau.set_xlim(2.81, 3.89)
-    ax_tau.set_ylim(-0.69, 0.64)
+    ax_tau.set_ylim(-0.10, 0.75)
 
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(
