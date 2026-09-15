@@ -7069,6 +7069,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # Labels
     ax.set_ylabel(r"$\mu$ (mag)")
+    ax.yaxis.set_label_coords(-0.075, 0.5)
     ax.set_xlabel(r"$z$")
 
     # ---------- Residuals panel ----------
@@ -7147,6 +7148,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
 
         ax_resid.set_ylabel(r"$\Delta\mu$ (mag)")
+        ax_resid.yaxis.set_label_coords(-0.075, 0.5)
         ax_resid.set_xlabel(r"$z$")
         def _paired_reduced_chi2(mask):
             if np.count_nonzero(mask) <= n_agn_params:
