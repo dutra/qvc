@@ -451,16 +451,22 @@ def test_fit_selection_applies_n_after_inclusive_redshift_cut():
     assert first["object_id"].tolist() == second["object_id"].tolist()
 
 
+@pytest.mark.parametrize("automatic", [False, True])
 def test_multi_cosmology_resume_loads_context_without_computing(
     tmp_path,
     monkeypatch,
+    automatic,
 ):
+    monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: tmp_path)
     context = _context()
     checkpoints = {}
     for model in ("FlatLambdaCDM", "FlatwCDM"):
-        checkpoint = tmp_path / f"{model}.h5"
+        checkpoint = (
+            hubble_fit._build_checkpoint_paths("unit", model)["single"]
+            if automatic else tmp_path / f"posteriors_{model}_joint_legacy.h5"
+        )
         hubble_fit.save_chains(checkpoint, **_checkpoint_payload(context))
-        checkpoints[model] = str(checkpoint)
+        checkpoints[model] = True if automatic else str(checkpoint)
     monkeypatch.setattr(
         hubble_fit,
         "build_agn_pivot_context",

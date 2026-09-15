@@ -6,19 +6,24 @@ usage() {
   cat <<'EOF'
 Usage:
   bash scripts/copy_paper_assets.sh \
-    --speed fast \
-    --fiducial-dir plots/hubble/apr2a_apr1a_fast_paper \
-    --restricted-dir plots/hubble/apr2a_apr1a_fast_paper_restricted \
+    --speed quicker \
+    --fiducial-dir plots/hubble/fiducial_run \
+    [--restricted-dir plots/hubble/restricted_run] \
     [--only hubble|spectra|light-curve|appendix] \
-    [--draft path/to/draft.tex]
+    [--draft path/to/draft.tex] [--dry-run] [--dest-dir path/to/assets]
 
 Description:
-  Copy paper-ready plots and TeX parameter files into plots/paper/.
+  Copy paper-ready plots, tables and TeX parameter files into plots/paper/.
 
 Notes:
   - Run this from the repository root.
   - --speed must match the hubble run tag used inside the source directories.
-  - Hubble paper assets are expected under completeness-tagged `_2d` run directories.
+  - Supports current short directory names and unique legacy completeness-tagged names.
+  - Missing or ambiguous sources abort before any destination files are changed.
+  - Restricted parameters are copied only when --restricted-dir is supplied.
+  - --dry-run validates and prints the manifest without copying files.
+  - All files are copied directly into one flat destination directory.
+  - --dest-dir overrides the default <repo-root>/plots/paper destination.
   - The manifest is hardcoded for the current paper draft.
   - --draft is accepted for logging only and is not parsed.
   - --only filters the copy to a single asset group.
@@ -41,19 +46,18 @@ require_repo_root() {
 
 copy_file() {
   local source_path="$1"
-  local dest_subdir="$2"
+  # The second argument identifies the asset group; destinations are flat.
   local dest_name="$3"
-  local dest_dir="$DEST_ROOT/$dest_subdir"
-
-  mkdir -p "$dest_dir"
+  local dest_dir="$DEST_ROOT"
 
   if [[ ! -f "$source_path" ]]; then
-    MISSING+=("$dest_subdir/$dest_name <= $source_path")
+    MISSING+=("$dest_name <= $source_path")
     return
   fi
 
-  cp "$source_path" "$dest_dir/$dest_name"
-  COPIED+=("$dest_subdir/$dest_name <= $source_path")
+  SOURCES+=("$source_path")
+  DESTINATIONS+=("$dest_dir/$dest_name")
+  COPIED+=("$dest_name <= $source_path")
 }
 
 copy_from_root() {
@@ -72,15 +76,25 @@ copy_from_dir() {
 }
 
 REPO_ROOT="$(pwd)"
-DEST_ROOT="$REPO_ROOT/plots/paper"
+DEST_ROOT=""
 SPEED=""
 FIDUCIAL_DIR=""
 RESTRICTED_DIR=""
 DRAFT_PATH=""
 ONLY_GROUP=""
+DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --dry-run)
+      DRY_RUN=true
+      shift
+      ;;
+    --dest-dir)
+      DEST_ROOT="${2:-}"
+      [[ -n "$DEST_ROOT" ]] || { echo "error: --dest-dir needs a path" >&2; exit 1; }
+      shift 2
+      ;;
     --speed)
       SPEED="${2:-}"
       shift 2
@@ -113,17 +127,17 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$SPEED" || -z "$FIDUCIAL_DIR" || -z "$RESTRICTED_DIR" ]]; then
-  echo "error: --speed, --fiducial-dir, and --restricted-dir are required" >&2
+if [[ -z "$SPEED" || -z "$FIDUCIAL_DIR" ]]; then
+  echo "error: --speed and --fiducial-dir are required" >&2
   usage >&2
   exit 1
 fi
 
 case "$SPEED" in
-  production|standard|quick|fastest)
+  production|standard|quick|quicker|fastest)
     ;;
   *)
-    echo "error: --speed must be one of: production, standard, quick, fastest" >&2
+    echo "error: --speed must be one of: production, standard, quick, quicker, fastest" >&2
     exit 1
     ;;
 esac
@@ -144,7 +158,10 @@ require_repo_root
 if [[ "$FIDUCIAL_DIR" != /* ]]; then
   FIDUCIAL_DIR="$REPO_ROOT/$FIDUCIAL_DIR"
 fi
-if [[ "$RESTRICTED_DIR" != /* ]]; then
+if [[ -z "$DEST_ROOT" ]]; then
+  DEST_ROOT="$REPO_ROOT/plots/paper"
+fi
+if [[ -n "$RESTRICTED_DIR" && "$RESTRICTED_DIR" != /* ]]; then
   RESTRICTED_DIR="$REPO_ROOT/$RESTRICTED_DIR"
 fi
 if [[ -n "$DRAFT_PATH" && "$DRAFT_PATH" != /* ]]; then
@@ -155,7 +172,7 @@ if [[ ! -d "$FIDUCIAL_DIR" ]]; then
   echo "error: fiducial directory not found: $FIDUCIAL_DIR" >&2
   exit 1
 fi
-if [[ ! -d "$RESTRICTED_DIR" ]]; then
+if [[ -n "$RESTRICTED_DIR" && ! -d "$RESTRICTED_DIR" ]]; then
   echo "error: restricted directory not found: $RESTRICTED_DIR" >&2
   exit 1
 fi
@@ -164,14 +181,34 @@ if [[ -n "$DRAFT_PATH" && ! -f "$DRAFT_PATH" ]]; then
   exit 1
 fi
 
-mkdir -p "$DEST_ROOT"
+# Resolve all inputs before creating or changing any destination files.
+resolve_run_dir() {
+  local base="$1" short="$2" legacy="$3"
+  local candidates=() path
+  [[ ! -d "$base/$short" ]] || candidates+=("$short")
+  for path in "$base"/"$legacy"*; do
+    [[ ! -d "$path" ]] || candidates+=("${path##*/}")
+  done
+  if [[ ${#candidates[@]} -ne 1 ]]; then
+    echo "error: expected exactly one $short source in $base; found ${#candidates[@]}" >&2
+    printf '  %s\n' "${candidates[@]:-none}" >&2
+    return 1
+  fi
+  printf '%s\n' "${candidates[0]}"
+}
 
 declare -a COPIED=()
 declare -a MISSING=()
+declare -a SOURCES=()
+declare -a DESTINATIONS=()
 
-FIDUCIAL_RUN_DIR="Flatw0waCDM_joint_${SPEED}_all_z0p44_3p16_2d"
-FIDUCIAL_MODEL_COMPARE_DIR="model_compare_joint_${SPEED}_all_z0p44_3p16_2d"
-RESTRICTED_MODEL_COMPARE_DIR="model_compare_joint_${SPEED}_all_z1p00_3p16_2d"
+if [[ -z "$ONLY_GROUP" || "$ONLY_GROUP" == hubble ]]; then
+  FIDUCIAL_RUN_DIR="$(resolve_run_dir "$FIDUCIAL_DIR" Flatw0waCDM_joint "Flatw0waCDM_joint_${SPEED}_all_z0p44_3p16_2d")"
+  FIDUCIAL_MODEL_COMPARE_DIR="$(resolve_run_dir "$FIDUCIAL_DIR" model_compare "model_compare_joint_${SPEED}_all_z0p44_3p16_2d")"
+  if [[ -n "$RESTRICTED_DIR" ]]; then
+    RESTRICTED_MODEL_COMPARE_DIR="$(resolve_run_dir "$RESTRICTED_DIR" model_compare "model_compare_joint_${SPEED}_all_z1p00_3p16_2d")"
+  fi
+fi
 
 copy_hubble_assets() {
   #copy_from_root "src/plots/appendix/N_vs_logZ_grid.pdf" "hubble" "N_vs_logZ_grid.pdf"
@@ -181,23 +218,21 @@ copy_hubble_assets() {
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/hubble_diagram_debiased.pdf" "hubble" "hubble_diagram_debiased.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/hubble_diagram.pdf" "hubble" "hubble_diagram.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/agn_table.csv" "hubble" "agn_table.csv"
+  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/agn_table.tex" "hubble" "agn_table.tex"
+  copy_from_dir "$FIDUCIAL_DIR" "diagnostics/bpl_psd_vs_uv_variability_postcut.pdf" "hubble" "bpl_psd_vs_uv_variability_postcut.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/predicted_vs_actual_M2500_debias.pdf" "hubble" "predicted_vs_actual_M2500_debias.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/alphaOX_residuals.pdf" "hubble" "alphaOx_residuals.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/delta_alphaOX_residuals.pdf" "hubble" "delta_alphaOX_residuals.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/completeness/completeness_map.pdf" "hubble" "completeness_map.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "diagnostics/spectral_fraction_vs_redshift_cuts.pdf" "hubble" "spectral_fraction_vs_redshift_cuts.pdf"
+  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/completeness/completeness_map_with_relative_percent_contours.pdf" "hubble" "completeness_map_with_relative_percent_contours.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "diagnostics/blr_postcut.pdf" "hubble" "blr_postcut.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "diagnostics/sigma_tau_vs_lambda_broken_pl_fit_postcut.pdf" "hubble" "sigma_tau_vs_lambda_broken_pl_fit_postcut.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_MODEL_COMPARE_DIR/cosmo_corner_Flatw0waCDM_alphabeta.pdf" "hubble" "cosmo_corner_Flatw0waCDM_alphabeta.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_MODEL_COMPARE_DIR/cosmo_corner_FlatwCDM_alphabeta.pdf" "hubble" "cosmo_corner_FlatwCDM_alphabeta.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_MODEL_COMPARE_DIR/cosmo_corner_FlatLambdaCDM_alphabeta.pdf" "hubble" "cosmo_corner_FlatLambdaCDM_alphabeta.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_MODEL_COMPARE_DIR/cosmo_corner_Flatw0waCDM_alphabeta.pdf" "hubble" "cosmo_corner_Flatw0waCDM_noalphabeta.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_MODEL_COMPARE_DIR/cosmo_corner_FlatwCDM_alphabeta.pdf" "hubble" "cosmo_corner_FlatwCDM_noalphabeta.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_MODEL_COMPARE_DIR/cosmo_corner_FlatLambdaCDM_alphabeta.pdf" "hubble" "cosmo_corner_FlatLambdaCDM_noalphabeta.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_MODEL_COMPARE_DIR/param_results_fiducial.tex" "hubble" "param_results_fiducial.tex"
-  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/hubble_diagram.pdf" "hubble" "hubble_diagram.pdf"
-  copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/completeness/completeness_map.pdf" "hubble" "completeness_map.pdf"
-  copy_from_dir "$RESTRICTED_DIR" "$RESTRICTED_MODEL_COMPARE_DIR/param_results_restricted.tex" "hubble" "param_results_restricted.tex"
+  if [[ -n "$RESTRICTED_DIR" ]]; then
+    copy_from_dir "$RESTRICTED_DIR" "$RESTRICTED_MODEL_COMPARE_DIR/param_results_restricted.tex" "hubble" "param_results_restricted.tex"
+  fi
 }
 
 copy_spectra_assets() {
@@ -237,13 +272,25 @@ case "${ONLY_GROUP:-all}" in
     ;;
 esac
 
+if [[ -z "$RESTRICTED_DIR" && ( -z "$ONLY_GROUP" || "$ONLY_GROUP" == hubble ) ]]; then
+  echo "Note: param_results_restricted.tex is not updated; supply --restricted-dir for the draft's restricted results." >&2
+fi
+
 if [[ ${#MISSING[@]} -gt 0 ]]; then
   printf 'error: missing required paper assets:\n' >&2
   printf '  - %s\n' "${MISSING[@]}" >&2
   exit 1
 fi
 
-printf 'Copied %d assets into %s\n' "${#COPIED[@]}" "$DEST_ROOT"
+if [[ "$DRY_RUN" == false ]]; then
+  for ((i=0; i<${#SOURCES[@]}; i++)); do
+    mkdir -p "$(dirname "${DESTINATIONS[$i]}")"
+    cp "${SOURCES[$i]}" "${DESTINATIONS[$i]}"
+  done
+else
+  printf 'Dry run: no files copied.\n'
+fi
+printf 'Validated %d assets for %s\n' "${#COPIED[@]}" "$DEST_ROOT"
 printf 'Speed: %s\n' "$SPEED"
 if [[ -n "$DRAFT_PATH" ]]; then
   printf 'Draft reference: %s\n' "$DRAFT_PATH"

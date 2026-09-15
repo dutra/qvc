@@ -31,10 +31,12 @@ def test_default_completeness_support_matches_histogram_edges(tmp_path):
 
     mock_path = tmp_path / "mock.h5"
     with h5py.File(mock_path, "w") as handle:
-        handle.create_dataset("apparent_mag_2500", data=[17.9, 21.0, 24.6])
+        handle.create_dataset("apparent_mag_2500", data=[17.9, 21.0, 24.4])
         handle.create_dataset("z", data=[0.0, 2.25, 4.5])
         handle.attrs["mock_redshift_min"] = 0.0
         handle.attrs["mock_redshift_max"] = 4.5
+        handle.attrs["m2500_support_min"] = COMPLETENESS_MAP_MAG_EDGE_MIN
+        handle.attrs["m2500_support_max"] = COMPLETENESS_MAP_MAG_EDGE_MAX
         handle.attrs["mock_count_scale"] = 1.0
 
     observed = pd.DataFrame(
@@ -63,7 +65,7 @@ def test_default_completeness_support_matches_histogram_edges(tmp_path):
     )
     assert mag_centers[0] < COMPLETENESS_MAG_2500_MIN
     assert mag_centers[-1] > COMPLETENESS_MAG_2500_MAX
-    assert len(mag_centers) == 65
+    assert len(mag_centers) == 80
     assert len(z_centers) == 45
     assert dm == pytest.approx(0.1)
     assert dz == pytest.approx(0.1)

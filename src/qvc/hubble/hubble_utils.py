@@ -40,6 +40,8 @@ from qvc.hubble.cuts import (
     COMPLETENESS_TAIL_MAG_2500_MIN,
     EBV_GAL_PLUS_EBV_AGN_COLUMN,
     EXCLUDED_SDSS_NAMES,
+    F_BC_3000_MAX,
+    F_FE_UV_3000_MAX,
     LIGHT_CURVE_N_POINTS_COLUMN,
     LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
     normalize_completeness_magnitude_support_mode,
@@ -484,6 +486,7 @@ def populate_xray(df, table_fpath="data/cscresults.vot"):
             stacklevel=2,
         )
         df_out = df.copy()
+        df_out["xray_matched"] = False
         for col in xray_cols:
             if col not in df_out.columns:
                 df_out[col] = np.nan
@@ -507,6 +510,9 @@ def populate_xray(df, table_fpath="data/cscresults.vot"):
         max_sep_arcsec=1.0
     )
     print(f"Matched {len(df_matched) - len(unmatched_object_ids)} out of {len(df)} objects to CSC3 catalog.")
+    # Preserve X-ray membership independently of generic matching columns and
+    # flux availability (a counterpart can lack a usable broad-band flux).
+    df_matched["xray_matched"] = df_matched["matched_idx_b"].to_numpy() >= 0
 
     # Ensure the matched flux columns are numeric.
     for c in ["flux_aper_b", "flux_aper_hilim_b", "flux_aper_lolim_b"]:
@@ -1187,6 +1193,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             completeness_magnitude_support_mode
         )
     )
+    cuts_plot_dir = os.path.join(plot_path or "plots/hubble", "cuts")
     cut_tier = normalize_cut_tier(cut_tier)
     maximum_cut_tier = cut_tier_level(cut_tier)
     apply_tier0 = maximum_cut_tier >= 0
@@ -1364,7 +1371,8 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         report_path = Path(cut_report_path)
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(table_text + "\n", encoding="utf-8")
-        diagnostics_path = report_path.parent / "cut_diagnostics_by_z.csv"
+        diagnostics_path = report_path.parent / "diagnostics" / "cut_diagnostics_by_z.csv"
+        diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(cut_rows).to_csv(diagnostics_path, index=False)
 
     def _plot_sigma_tau_ls_identity(frame, *, suffix, sigma_limits=None, tau_limits=None):
@@ -2112,16 +2120,6 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             show=False,
             filename="sf_ref_band_vs_model_g_precut.pdf",
         )
-    if {"log_sigma_uv", "log_sigma_ls", "log_tau_ls"}.issubset(df.columns) and (
-        {"log_tau_uv_rf"}.issubset(df.columns)
-        or {"log_tau_uv", "z"}.issubset(df.columns)
-    ):
-        plot_bpl_psd_vs_uv_variability(
-            df,
-            plot_path=plot_path,
-            show=False,
-            filename="bpl_psd_vs_uv_variability_precut.pdf",
-        )
     psd_recovery_columns = {
         "log_sigma_ls",
         "log_sigma_ls_err",
@@ -2181,6 +2179,22 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         and psd_total_tau_columns.issubset(df.columns)
         and psd_sigma_ready
     )
+    bpl_recovery_ready = (
+        (psd_recovery_columns - {
+            "log_sigma_ls_fixed", "log_sigma_ls_fixed_err",
+            "log_tau_ls_fixed", "log_tau_ls_fixed_err", "psd_ls_fixed_valid",
+        }).issubset(df.columns)
+        and bool(psd_ref_bands)
+        and psd_total_tau_columns.issubset(df.columns)
+        and psd_sigma_ready
+    )
+    if bpl_recovery_ready:
+        plot_bpl_psd_vs_uv_variability(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="bpl_psd_vs_uv_variability_precut.pdf",
+        )
     if psd_recovery_ready:
         plot_psd_uv_recovery_comparison(
             df,
@@ -2328,7 +2342,8 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                 )
             col_mask = _scalar_parameter_cut_mask(frame, col, lower, upper)
             plot_cut_diagnostics(
-                frame.copy(), frame[col_mask], bins=30, cut_info=cut_desc
+                frame.copy(), frame[col_mask], bins=30, cut_info=cut_desc,
+                save_path=cuts_plot_dir,
             )
             frame = _record_cut(
                 f"tier{tier}:agn_scalar:{col}",
@@ -2409,7 +2424,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                 exclude_df = pd.read_csv(exclude_csv)
                 exclude_ids = set(exclude_df['object_id'].astype(str))
                 mask_exclude = ~df['object_id'].astype(str).isin(exclude_ids)
-                plot_cut_diagnostics(df.copy(), df[mask_exclude], bins=30, cut_info="exclude csv")
+                plot_cut_diagnostics(df.copy(), df[mask_exclude], bins=30, cut_info="exclude csv", save_path=cuts_plot_dir)
                 df = _record_cut(
                     f"exclude_csv:{Path(exclude_csv).name}",
                     f"object_id not in {Path(exclude_csv).name}",
@@ -2578,26 +2593,35 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                 <= bc_amp_upper
             ) | df["dlog_amp_bc"].isna().to_numpy(dtype=bool)
             cut_desc = f"dlog_amp_bc in (-inf, {bc_amp_upper}] or NaN"
-            plot_cut_diagnostics(df.copy(), df[bc_amp_mask], bins=30, cut_info=cut_desc)
+            plot_cut_diagnostics(df.copy(), df[bc_amp_mask], bins=30, cut_info=cut_desc, save_path=cuts_plot_dir)
             df = _record_cut(
                 "tier2:agn_scalar:dlog_amp_bc", cut_desc, df, bc_amp_mask, tier="2"
             )
         elif LOG_AMP_DELTA_BC_UPPER is not None:
             raise ValueError("Tier 2 cut requires missing column 'dlog_amp_bc'.")
 
-        for frac_col, log_col, log_upper in (
-            ("f_bc_3000", "log_f_bc_3000", LOG_F_BC_3000_MAX),
-            ("f_fe_uv_3000", "log_f_fe_uv_3000", LOG_F_FE_UV_3000_MAX),
+        for frac_col, log_col, frac_upper, log_upper in (
+            (
+                "f_bc_3000",
+                "log_f_bc_3000",
+                F_BC_3000_MAX,
+                LOG_F_BC_3000_MAX,
+            ),
+            (
+                "f_fe_uv_3000",
+                "log_f_fe_uv_3000",
+                F_FE_UV_3000_MAX,
+                LOG_F_FE_UV_3000_MAX,
+            ),
         ):
-            if log_upper is None:
+            if frac_upper is None:
                 continue
             if frac_col not in df.columns:
                 raise ValueError(f"Tier 2 cut requires missing column {frac_col!r}.")
             frac_vals = pd.to_numeric(df[frac_col], errors="coerce").to_numpy(dtype=float)
-            frac_upper = 10.0**log_upper
             frac_mask = (~np.isfinite(frac_vals)) | (frac_vals <= 0.0) | (frac_vals <= frac_upper)
             cut_desc = f"{log_col} <= {log_upper} or NaN/non-positive"
-            plot_cut_diagnostics(df.copy(), df[frac_mask], bins=30, cut_info=cut_desc)
+            plot_cut_diagnostics(df.copy(), df[frac_mask], bins=30, cut_info=cut_desc, save_path=cuts_plot_dir)
             df = _record_cut(
                 f"tier2:agn_scalar:{log_col}", cut_desc, df, frac_mask, tier="2"
             )
@@ -2617,7 +2641,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             cut_desc = (
                 f"rel_apparent_mag_2500_err < {REL_APPARENT_MAG_2500_ERR_MAX} or NaN"
             )
-            plot_cut_diagnostics(df.copy(), df[rel_mag_err_mask], bins=30, cut_info=cut_desc)
+            plot_cut_diagnostics(df.copy(), df[rel_mag_err_mask], bins=30, cut_info=cut_desc, save_path=cuts_plot_dir)
             df = _record_cut(
                 "agn_scalar:rel_apparent_mag_2500_err",
                 cut_desc,
@@ -2654,7 +2678,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             mu_zscore = dict(zip(residual_df['object_id'].astype(str), residual_df['mu_zscore']))
             df['mu_zscore'] = df['object_id'].astype(str).map(mu_zscore)
             mask_residual = df['mu_zscore'].abs() < residuals_sigma_clip
-            plot_cut_diagnostics(df.copy(), df[mask_residual], bins=30, cut_info=f"|mu_zscore|<{residuals_sigma_clip}")
+            plot_cut_diagnostics(df.copy(), df[mask_residual], bins=30, cut_info=f"|mu_zscore|<{residuals_sigma_clip}", save_path=cuts_plot_dir)
             df = _record_cut(
                 "residual_sigma_clip",
                 f"|mu_zscore| < {residuals_sigma_clip}",
@@ -2730,6 +2754,13 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         "tier2": (
             build_tier2_cuts(completeness_magnitude=completeness_magnitude)
             if apply_tier2 else []
+        ),
+        "tier2_spectral_component_fraction_max": (
+            {
+                "f_bc_3000": F_BC_3000_MAX,
+                "f_fe_uv_3000": F_FE_UV_3000_MAX,
+            }
+            if apply_tier2 else None
         ),
         "tier2_low_l2500_low_fhost_psf": (
             {
@@ -2984,10 +3015,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             show=False,
             filename="sf_ref_band_vs_model_g_postcut.pdf",
         )
-    if {"log_sigma_uv", "log_sigma_ls", "log_tau_ls"}.issubset(df.columns) and (
-        {"log_tau_uv_rf"}.issubset(df.columns)
-        or {"log_tau_uv", "z"}.issubset(df.columns)
-    ):
+    if bpl_recovery_ready:
         plot_bpl_psd_vs_uv_variability(
             df,
             plot_path=plot_path,
@@ -3008,10 +3036,9 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         sigma_limits=(-1.9, 1.2),
         tau_limits=(-0.2, 4.9),
     )
-    plot_cut_diagnostics(df_all.copy(), df.copy(), bins=30, cut_info="all cuts")
+    plot_cut_diagnostics(df_all.copy(), df.copy(), bins=30, cut_info="all cuts", save_path=cuts_plot_dir)
     colorpanel_cols = [col for col in ("f_host_2500", "f_host_center", "f_bc_3000", "wrms") if col in df_all.columns]
     if len(colorpanel_cols) > 0 and "z" in df_all.columns and "apparent_mag_2500" in df_all.columns:
-        cuts_plot_dir = os.path.join("plots", "hubble", "cuts")
         os.makedirs(cuts_plot_dir, exist_ok=True)
         colorpanel_result = plot_m2500_vs_z_colorpanels(
             df_all,
@@ -3031,7 +3058,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                 bbox_inches="tight",
             )
             plt.close(fig_colorpanels)
-    plot_Mi_relation(df_all.copy())
+    plot_Mi_relation(df_all.copy(), plot_path=plot_path)
     _finalize_cut_report()
     if return_completeness_parent:
         return df, df_all, completeness_parent
@@ -4106,6 +4133,7 @@ def write_results_tex_variables(
     compare_r_sna=None,
     *,
     agn_pivot_context: AgnPivotContext,
+    agn_xray_counts=None,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
 ):
@@ -4159,6 +4187,20 @@ def write_results_tex_variables(
 
     lines.append(_cmd("NumAGNPlotted", len(df_agn)))
     lines.append(_cmd("NumAGNFitted", n_fitted))
+    lines.append(_cmd("NumAGNOutOfRange", len(df_agn) - n_fitted))
+    # Prefer the paper's Flatw0waCDM diagnostic sample; also export each model
+    # explicitly because clipping/finite residuals can differ between models.
+    xray_counts = agn_xray_counts or {}
+    reference_model = "Flatw0waCDM" if "Flatw0waCDM" in xray_counts else next(iter(xray_counts), None)
+    reference_counts = xray_counts.get(reference_model, {
+        "NumAGNXrayMatched": int(df_agn.get("xray_matched", pd.Series(False, index=df_agn.index)).fillna(False).sum()),
+        "NumAGNAlphaOXPlotted": 0,
+    })
+    lines.append(f"% X-ray count reference model: {reference_model or 'no plots requested'}")
+    for name in ("NumAGNXrayMatched", "NumAGNAlphaOXPlotted"):
+        lines.append(_cmd(name, reference_counts[name]))
+        for model_name, counts in xray_counts.items():
+            lines.append(_cmd(name, counts[name], model_suffix=model_name))
 
     is_calib_bool = np.asarray(df_pantheon['IS_CALIBRATOR'], dtype=bool)
     mask = (df_pantheon['zHD'] > 0.01) | is_calib_bool

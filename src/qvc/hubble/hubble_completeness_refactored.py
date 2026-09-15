@@ -11,6 +11,8 @@ from scipy.interpolate import interp1d
 from scipy.optimize import curve_fit
 from scipy.special import expit, logit
 from functools import partial
+from contextlib import contextmanager, nullcontext
+from time import perf_counter
 
 from qvc.hubble.hubble_utils import convert_M2500_to_logL2500, resolve_qvc_data_path
 from qvc.hubble.cuts import (
@@ -31,6 +33,30 @@ from qvc.hubble.cuts import (
 
 
 COSMO = FlatLambdaCDM(H0=70.0, Om0=0.3)
+
+
+@contextmanager
+def trace_completeness_step(label):
+    """Flush progress before work so batch logs identify an unfinished stage."""
+    started = perf_counter()
+    print(f"[Completeness timing] START {label}", flush=True)
+    try:
+        yield
+    except BaseException:
+        print(f"[Completeness timing] FAILED {label} ({perf_counter() - started:.3f}s)", flush=True)
+        raise
+    else:
+        print(f"[Completeness timing] DONE {label} ({perf_counter() - started:.3f}s)", flush=True)
+
+
+def _save_completeness_figure(fig, path, *, dpi):
+    """Separate layout (including text rendering) from PDF export timings."""
+    with trace_completeness_step(f"{path}: tight_layout"):
+        fig.tight_layout()
+    with trace_completeness_step(f"{path}: savefig (dpi={dpi})"):
+        fig.savefig(path, dpi=dpi)
+
+
 COMPLETENESS_MAG_COL = "completeness_m_2500"
 COMPLETENESS_MAG_ERR_COL = "completeness_m_2500_err"
 COMPLETENESS_FHOST_COL = "f_host_2500_psf"
@@ -42,7 +68,7 @@ COMPLETENESS_SMOOTH_SIGMA_MAG_ENV = "QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG"
 COMPLETENESS_SMOOTH_SIGMA_Z_ENV = "QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z"
 RELATIVE_COMPLETENESS_REFERENCE_PERCENTILE = 99.0
 RELATIVE_COMPLETENESS_MIN_PARENT_COUNT = 20.0
-RELATIVE_COMPLETENESS_CONTOUR_LEVELS = (10.0, 25.0, 50.0, 75.0, 90.0, 95.0, 99.0)
+RELATIVE_COMPLETENESS_CONTOUR_LEVELS = (10.0, 50.0, 90.0)
 FAINT_TAIL_FIT_WIDTH_MAG = 0.75
 FAINT_TAIL_MAX_FIT_WIDTH_MAG = 2.0
 FAINT_TAIL_DECAY_MIN = 0.02
@@ -783,12 +809,37 @@ def _resolve_redshift_edges(z_true, z_range, declared_min=np.nan, declared_max=n
     return z_min, z_max
 
 
-def _validate_mock_magnitude_coverage(m_true):
+def _mock_magnitude_support_from_attrs(attrs):
+    """Read generator support, rather than the desired map's metadata."""
+    keys = ("m2500_support_min", "m2500_support_max")
+    if not any(key in attrs for key in keys):
+        return None
+    return tuple(attrs.get(key, np.nan) for key in keys)
+
+
+def _validate_mock_magnitude_coverage(m_true, *, declared_support=None):
     finite = np.asarray(m_true, dtype=float)
     finite = finite[np.isfinite(finite)]
     if finite.size == 0:
         raise ValueError("Completeness mock contains no finite magnitudes.")
     mock_min, mock_max = float(np.min(finite)), float(np.max(finite))
+    if declared_support is not None:
+        support = np.asarray(declared_support, dtype=float)
+        if (support.shape != (2,) or not np.all(np.isfinite(support))
+                or support[0] >= support[1]):
+            raise ValueError("Invalid mock m2500_support metadata; regenerate the artifact.")
+        lower, upper = support
+        if lower > COMPLETENESS_MAP_MAG_EDGE_MIN or upper < COMPLETENESS_MAP_MAG_EDGE_MAX:
+            raise ValueError(
+                f"Declared mock magnitude support [{lower}, {upper}] does not cover "
+                f"the fixed map [{COMPLETENESS_MAP_MAG_EDGE_MIN}, {COMPLETENESS_MAP_MAG_EDGE_MAX}]. "
+                "Regenerate the completeness artifact."
+            )
+        if mock_min < lower - 1e-10 or mock_max > upper + 1e-10:
+            raise ValueError("Mock magnitudes lie outside declared m2500_support metadata.")
+        # Poisson realizations need not populate either endpoint of their
+        # sampling support, especially at the sparsely populated bright end.
+        return
     tolerance = 0.01 * (COMPLETENESS_MAP_MAG_EDGE_MAX - COMPLETENESS_MAP_MAG_EDGE_MIN)
     if (
         mock_min > COMPLETENESS_MAP_MAG_EDGE_MIN + tolerance
@@ -797,7 +848,9 @@ def _validate_mock_magnitude_coverage(m_true):
         raise ValueError(
             "Completeness mock magnitude support does not cover the fixed map: "
             f"mock=[{mock_min:.6g}, {mock_max:.6g}], required="
-            f"[{COMPLETENESS_MAP_MAG_EDGE_MIN}, {COMPLETENESS_MAP_MAG_EDGE_MAX}]."
+            f"[{COMPLETENESS_MAP_MAG_EDGE_MIN}, {COMPLETENESS_MAP_MAG_EDGE_MAX}]. "
+            "Regenerate the completeness artifact or omit --completeness_sim_file "
+            "to generate a fresh mock."
         )
 
 
@@ -1127,8 +1180,7 @@ def _plot_magnitude_tail_diagnostics(model, plot_dir):
     ax.axvline(model.mag_max, color="k", ls="--", lw=1)
     ax.set(xlabel=r"$m_{2500}$ (mag)", ylabel=r"$p(\mathrm{detect})$", xlim=(lower, upper))
     ax.legend(frameon=False)
-    fig.tight_layout()
-    fig.savefig(os.path.join(plot_dir, "completeness_magnitude_tails.pdf"), dpi=300)
+    _save_completeness_figure(fig, os.path.join(plot_dir, "completeness_magnitude_tails.pdf"), dpi=300)
     plt.close(fig)
     diagnostics = dict(model.faint_tail_diagnostics or {})
     diagnostics.update(
@@ -1444,6 +1496,163 @@ def _relative_completeness_percent(
     return relative_percent, reference, int(reference_values.size)
 
 
+COUNTS_COMPARISON_Z_EDGES = (0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.2, 4.5)
+
+
+def counts_comparison_table(
+    H_obs,
+    H_true,
+    H_obs_s,
+    H_true_s,
+    mag_centers,
+    z_centers,
+    *,
+    count_scale,
+    completeness_raw=None,
+    completeness_final=None,
+    z_slice_edges=COUNTS_COMPARISON_Z_EDGES,
+):
+    """Observed versus scaled-mock magnitude counts in coarse redshift slices.
+
+    The completeness map is the ratio of these two histograms, so the table
+    exposes directly where the mock (LF plus K-corrections) disagrees with
+    the catalog.  For a flux-limited survey the ratio should be flat on the
+    bright side and fall on the faint side; a rise toward fainter magnitudes
+    on the bright side indicates a mock/data mismatch rather than selection.
+    """
+    import pandas as pd
+
+    mag_centers = np.asarray(mag_centers, dtype=float)
+    z_centers = np.asarray(z_centers, dtype=float)
+    edges = np.asarray(z_slice_edges, dtype=float)
+    rows = []
+    for lower, upper in zip(edges[:-1], edges[1:]):
+        columns = np.flatnonzero((z_centers >= lower) & (z_centers < upper))
+        if columns.size == 0:
+            continue
+        n_obs = H_obs[:, columns].sum(axis=1)
+        n_obs_s = H_obs_s[:, columns].sum(axis=1)
+        n_mock = count_scale * H_true[:, columns].sum(axis=1)
+        n_mock_s = count_scale * H_true_s[:, columns].sum(axis=1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.where(n_mock_s > 0, n_obs_s / n_mock_s, np.nan)
+            ratio_err = np.where(
+                (n_mock_s > 0) & (n_obs > 0), np.sqrt(n_obs) / n_mock_s, np.nan
+            )
+        frame = pd.DataFrame(
+            {
+                "z_lo": lower,
+                "z_hi": upper,
+                "mag": mag_centers,
+                "n_obs": n_obs,
+                "n_obs_smoothed": n_obs_s,
+                "n_mock_scaled": n_mock,
+                "n_mock_scaled_smoothed": n_mock_s,
+                "ratio_obs_over_mock": ratio,
+                "ratio_poisson_err": ratio_err,
+            }
+        )
+        if completeness_raw is not None:
+            weights = np.clip(H_true_s[:, columns], 0.0, None)
+            weight_sum = weights.sum(axis=1)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                frame["completeness_map_raw"] = np.where(
+                    weight_sum > 0,
+                    (completeness_raw[:, columns] * weights).sum(axis=1) / weight_sum,
+                    np.nan,
+                )
+                if completeness_final is not None:
+                    frame["completeness_map_final"] = np.where(
+                        weight_sum > 0,
+                        (completeness_final[:, columns] * weights).sum(axis=1) / weight_sum,
+                        np.nan,
+                    )
+        rows.append(frame)
+    if not rows:
+        return pd.DataFrame()
+    return pd.concat(rows, ignore_index=True)
+
+
+@trace_completeness_step("completeness_counts_comparison.csv + .pdf")
+def _plot_counts_comparison(
+    H_obs,
+    H_true,
+    H_obs_s,
+    H_true_s,
+    mag_centers,
+    z_centers,
+    *,
+    count_scale,
+    completeness_raw=None,
+    completeness_final=None,
+    plot_dir,
+    z_slice_edges=COUNTS_COMPARISON_Z_EDGES,
+):
+    """Write ``completeness_counts_comparison.{csv,pdf}`` into ``plot_dir``."""
+    import matplotlib.pyplot as plt
+
+    table = counts_comparison_table(
+        H_obs,
+        H_true,
+        H_obs_s,
+        H_true_s,
+        mag_centers,
+        z_centers,
+        count_scale=count_scale,
+        completeness_raw=completeness_raw,
+        completeness_final=completeness_final,
+        z_slice_edges=z_slice_edges,
+    )
+    os.makedirs(plot_dir, exist_ok=True)
+    csv_path = os.path.join(plot_dir, "completeness_counts_comparison.csv")
+    table.to_csv(csv_path, index=False)
+    if table.empty:
+        return table
+    slices = list(table.groupby(["z_lo", "z_hi"], sort=True))
+    n = len(slices)
+    fig, axes = plt.subplots(
+        2, n, figsize=(3.4 * n, 6.4), sharex=True, squeeze=False,
+        gridspec_kw={"height_ratios": (2.0, 1.2)},
+    )
+    monotone_applied = (
+        completeness_final is not None
+        and completeness_raw is not None
+        and np.any(np.asarray(completeness_final) > np.asarray(completeness_raw) + 1e-12)
+    )
+    for index, ((lower, upper), frame) in enumerate(slices):
+        top, bottom = axes[0, index], axes[1, index]
+        top.step(frame["mag"], np.clip(frame["n_obs"], 0.5, None), where="mid", color="k", lw=1.2, label="observed")
+        top.plot(frame["mag"], np.clip(frame["n_mock_scaled_smoothed"], 0.5, None), color="C3", lw=1.4, label="mock x scale (smoothed)")
+        top.plot(frame["mag"], np.clip(frame["n_obs_smoothed"], 0.5, None), color="C0", lw=1.0, ls="--", label="observed (smoothed)")
+        top.set_yscale("log")
+        top.set_title(f"{lower:.1f} <= z < {upper:.1f}  (N={int(frame['n_obs'].sum())})", fontsize=9)
+        finite = np.isfinite(frame["ratio_obs_over_mock"])
+        bottom.errorbar(
+            frame["mag"][finite], frame["ratio_obs_over_mock"][finite],
+            yerr=frame["ratio_poisson_err"][finite], fmt=".", color="k", ms=3, lw=0.7,
+            label="observed / (scale x mock)",
+        )
+        if "completeness_map_raw" in frame:
+            bottom.plot(frame["mag"], frame["completeness_map_raw"], color="C3", lw=1.2, label="map (raw ratio)")
+        if monotone_applied and "completeness_map_final" in frame:
+            bottom.plot(frame["mag"], frame["completeness_map_final"], color="C2", lw=1.2, ls="--", label="map (monotone)")
+        peak = np.nanmax(frame["ratio_obs_over_mock"]) if finite.any() else 1.0
+        bottom.set_ylim(0.0, max(1.05 * peak, 1e-3))
+        bottom.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
+        if index == 0:
+            top.set_ylabel("counts per magnitude bin")
+            bottom.set_ylabel("ratio")
+            top.legend(fontsize=7, loc="upper left")
+            bottom.legend(fontsize=7, loc="upper right")
+    fig.suptitle(
+        f"Catalog versus LF-mock counts (mock count scale {count_scale:.3g})", fontsize=10
+    )
+    _save_completeness_figure(fig, os.path.join(plot_dir, "completeness_counts_comparison.pdf"), dpi=200)
+    plt.close(fig)
+    return table
+
+
+@trace_completeness_step("completeness_map_with_relative_percent_contours.pdf")
 def _plot_relative_completeness_percent(
     C_plot,
     H_true_s,
@@ -1452,26 +1661,37 @@ def _plot_relative_completeness_percent(
     mag_edges,
     z_edges,
     plot_dir,
+    *,
+    completeness_grid,
+    bright_subsample_cut=None,
 ):
-    """Plot robustly normalized relative completeness with percentage contours."""
+    """Smoothed colors and contours with one shared reference."""
     import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
 
     relative_percent, reference, n_reference_bins = _relative_completeness_percent(
         C_plot,
         H_true_s,
     )
+    completeness_grid = np.asarray(completeness_grid, dtype=float)
+    if completeness_grid.shape != relative_percent.shape:
+        raise ValueError("Contour and displayed completeness grids must align.")
+    # Preserve the displayed normalization; only the contour geometry changes.
+    contour_percent = 100.0 * np.clip(completeness_grid / reference, 0.0, 1.0)
+    contour_percent[~np.isfinite(contour_percent)] = 0.0
+    cmap = plt.get_cmap("viridis").copy()
+    cmap.set_bad(cmap(0.0))
     fig, ax = plt.subplots(figsize=(7, 5))
     im = ax.imshow(
-        relative_percent.T,
+        np.ma.masked_less_equal(relative_percent.T, 0.0),
         origin="lower",
         aspect="auto",
         extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
-        cmap="viridis",
-        vmin=0.0,
-        vmax=100.0,
+        cmap=cmap,
+        norm=LogNorm(vmin=0.01, vmax=100.0, clip=True),
     )
-    data_min = float(np.nanmin(relative_percent))
-    data_max = float(np.nanmax(relative_percent))
+    data_min = float(np.nanmin(contour_percent))
+    data_max = float(np.nanmax(contour_percent))
     contour_levels = [
         level
         for level in RELATIVE_COMPLETENESS_CONTOUR_LEVELS
@@ -1481,10 +1701,10 @@ def _plot_relative_completeness_percent(
         contours = ax.contour(
             mag_centers,
             z_centers,
-            relative_percent.T,
+            contour_percent.T,
             levels=contour_levels,
             colors="white",
-            linewidths=1.3,
+            linewidths=0.8,
         )
         ax.clabel(
             contours,
@@ -1495,13 +1715,43 @@ def _plot_relative_completeness_percent(
     ax.set_ylabel(r"$z$")
     ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
     cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label("Relative completeness (%)")
-    fig.tight_layout()
+    cbar.set_ticks([0.01, 0.1, 1.0, 10.0, 100.0])
+    cbar.set_ticklabels(["0.01", "0.1", "1", "10", "100"])
+    cbar.set_label("relative completeness (%)")
+    filename = "completeness_map_with_relative_percent_contours.pdf"
+    if bright_subsample_cut is not None:
+        from matplotlib.path import Path
+        from matplotlib.patches import Patch, PathPatch
+
+        removed = ~bright_subsample_cut.mask(
+            np.asarray(mag_centers)[:, None], np.asarray(z_centers)[None, :]
+        )
+        regions = []
+        for j in range(len(z_centers)):
+            transitions = np.diff(np.r_[False, removed[:, j], False].astype(int))
+            for start, stop in zip(np.flatnonzero(transitions == 1), np.flatnonzero(transitions == -1)):
+                left, right = mag_edges[start], mag_edges[stop]
+                bottom, top = z_edges[j], z_edges[j + 1]
+                regions.append(Path(
+                    [(left, bottom), (right, bottom), (right, top), (left, top), (left, bottom)],
+                    [Path.MOVETO, Path.LINETO, Path.LINETO, Path.LINETO, Path.CLOSEPOLY],
+                ))
+        if regions:
+            ax.add_patch(PathPatch(
+                Path.make_compound_path(*regions), facecolor="none",
+                edgecolor="black", hatch="///", linewidth=0, zorder=10,
+            ))
+        ax.legend(
+            handles=[Patch(facecolor="none", edgecolor="black", hatch="///",
+                           label="Removed by faint-end cut")],
+            loc="upper right", fontsize=8, framealpha=1.0,
+        ).set_zorder(11)
+        filename = "completeness_map_with_relative_percent_contours_faint_cut_masked.pdf"
     output_path = os.path.join(
         plot_dir,
-        "completeness_map_with_relative_percent_contours.pdf",
+        filename,
     )
-    fig.savefig(output_path, dpi=600)
+    _save_completeness_figure(fig, output_path, dpi=600)
     plt.close(fig)
     print(
         "Relative completeness display: "
@@ -1527,6 +1777,7 @@ def get_completeness_function_2d(
     fill_along_z=False,
     z_range=None,
     magnitude_support_mode="hard-cut",
+    bright_subsample_cut=None,
 ):
     """
     Build p(detect | m, z)
@@ -1539,6 +1790,7 @@ def get_completeness_function_2d(
     # Simulation inputs: apparent-magnitude proxy at rest-frame 2500 A and z
     sim_file = resolve_qvc_data_path(sim_file)
     with h5py.File(sim_file, "r") as f:
+        declared_magnitude_support = _mock_magnitude_support_from_attrs(f.attrs)
         if "apparent_mag_2500" in f:
             m_true = np.asarray(f["apparent_mag_2500"][:], dtype=float)
         else:
@@ -1556,7 +1808,7 @@ def get_completeness_function_2d(
     ok_true = np.isfinite(m_true) & np.isfinite(z_true)
     m_obs,  z_obs  = m_obs[ok_obs],  z_obs[ok_obs]
     m_true, z_true = m_true[ok_true], z_true[ok_true]
-    _validate_mock_magnitude_coverage(m_true)
+    _validate_mock_magnitude_coverage(m_true, declared_support=declared_magnitude_support)
     # Grid
     mag_min, mag_max = COMPLETENESS_MAP_MAG_EDGE_MIN, COMPLETENESS_MAP_MAG_EDGE_MAX
     z_min, z_max = _resolve_redshift_edges(
@@ -1596,6 +1848,11 @@ def get_completeness_function_2d(
         sigma_mag = 0.0
         H_true_s, H_obs_s = H_true, H_obs
     eps = 1e-12
+    count_scale_used = (
+        _estimate_mock_count_scale(H_obs_s, H_true_s, mag_centers, eps=eps)
+        if mock_count_scale is None
+        else max(float(mock_count_scale), eps)
+    )
     C = _scaled_completeness_ratio(
         H_obs_s,
         H_true_s,
@@ -1604,7 +1861,6 @@ def get_completeness_function_2d(
         count_scale=mock_count_scale,
         eps=eps,
     )
-
     if fill_along_mag:
     # fill non-decreasing completeness along mag (for each z)
         tol = 1e-12
@@ -1637,56 +1893,57 @@ def get_completeness_function_2d(
         base_plot_path = plot_path or "plots/hubble"
         plot_dir = os.path.join(base_plot_path, "completeness")
         os.makedirs(plot_dir, exist_ok=True)
-        # Plot completeness map
-        C_plot = gaussian_filter(C, sigma=(1, 1), mode="nearest")
-        log_C_plot = np.log10(np.clip(C_plot, 1e-12, None))
-        plt.figure(figsize=(7, 5))
-        im = plt.imshow(
-            log_C_plot.T, origin="lower", aspect="auto",
-            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]], cmap="viridis",
-            vmin=-4, vmax=0
-        )
-        plt.ylabel(r'$z$')
-        # plt.xlabel(r'$L_{2500\,\mathrm{\AA}}$ (erg s$^{-1}$)')
-        #plt.xlabel(r"$m_{2500\,\mathrm{\AA}} \; (\mathrm{mag})$")
-        plt.xlabel(r'$m_{2500\,\mathrm{\AA}}$ (mag)')
+        with trace_completeness_step("completeness_map.pdf"):
+            # Plot completeness map
+            C_plot = gaussian_filter(C, sigma=(1, 1), mode="nearest")
+            log_C_plot = np.log10(np.clip(C_plot, 1e-12, None))
+            plt.figure(figsize=(7, 5))
+            im = plt.imshow(
+                log_C_plot.T, origin="lower", aspect="auto",
+                extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]], cmap="viridis",
+                vmin=-4, vmax=0
+            )
+            plt.ylabel(r'$z$')
+            # plt.xlabel(r'$L_{2500\,\mathrm{\AA}}$ (erg s$^{-1}$)')
+            #plt.xlabel(r"$m_{2500\,\mathrm{\AA}} \; (\mathrm{mag})$")
+            plt.xlabel(r'$m_{2500\,\mathrm{\AA}}$ (mag)')
 
-        cbar = plt.colorbar(im); 
-        cbar.set_label(r"Completeness $\log\,p(I{=}1\,|\,m,z)$")
-        plt.tight_layout()
-        plt.savefig(os.path.join(plot_dir, "completeness_map.pdf"), dpi=600)
-        plt.close()
+            cbar = plt.colorbar(im)
+            cbar.set_label(r"Completeness $\log\,p(I{=}1\,|\,m,z)$")
+            _save_completeness_figure(plt.gcf(), os.path.join(plot_dir, "completeness_map.pdf"), dpi=600)
+            plt.close()
 
-        # Plot the same map with automatically located log-completeness contours.
-        fig, ax = plt.subplots(figsize=(7, 5))
-        displayed_log_C = np.clip(log_C_plot, -4.0, 0.0)
-        im = ax.imshow(
-            displayed_log_C.T,
-            origin="lower",
-            aspect="auto",
-            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
-            cmap="viridis",
-            vmin=-4,
-            vmax=0,
-        )
-        contours = ax.contour(
-            mag_centers,
-            z_centers,
-            displayed_log_C.T,
-            colors="white",
-            linewidths=1.3,
-        )
-        ax.clabel(contours, inline=True, fmt="%.1f", fontsize=7)
-        ax.set_ylabel(r"$z$")
-        ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
-        cbar = fig.colorbar(im, ax=ax)
-        cbar.set_label(r"Completeness $\log\,p(I{=}1\,|\,m,z)$")
-        fig.tight_layout()
-        fig.savefig(
-            os.path.join(plot_dir, "completeness_map_with_log_contours.pdf"),
-            dpi=600,
-        )
-        plt.close(fig)
+        with trace_completeness_step("completeness_map_with_log_contours.pdf"):
+            # Derive contour geometry from the same smoothed grid as the image.
+            fig, ax = plt.subplots(figsize=(7, 5))
+            displayed_log_C = np.clip(log_C_plot, -4.0, 0.0)
+            contour_log_C = displayed_log_C
+            im = ax.imshow(
+                displayed_log_C.T,
+                origin="lower",
+                aspect="auto",
+                extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
+                cmap="viridis",
+                vmin=-4,
+                vmax=0,
+            )
+            contours = ax.contour(
+                mag_centers,
+                z_centers,
+                contour_log_C.T,
+                colors="white",
+                linewidths=1.3,
+            )
+            ax.clabel(contours, inline=True, fmt="%.1f", fontsize=7)
+            ax.set_ylabel(r"$z$")
+            ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
+            cbar = fig.colorbar(im, ax=ax)
+            cbar.set_label(r"Completeness $\log\,p(I{=}1\,|\,m,z)$")
+            _save_completeness_figure(fig,
+                os.path.join(plot_dir, "completeness_map_with_log_contours.pdf"),
+                dpi=600,
+            )
+            plt.close(fig)
         _plot_relative_completeness_percent(
             C_plot,
             H_true_s,
@@ -1695,52 +1952,74 @@ def get_completeness_function_2d(
             mag_edges,
             z_edges,
             plot_dir,
+            completeness_grid=C_plot,
         )
-        # Plot H_obs
-        plt.figure(figsize=(7, 5))
-        im = plt.imshow(
-            np.log10(np.clip(H_obs.T, 1e-12, None)), origin="lower", aspect="auto",
-            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]], cmap="plasma"
+        if bright_subsample_cut is not None:
+            from qvc.hubble.hubble_bright_subsample import plot_completeness_per_redshift_peak_faint_cut
+
+            plot_completeness_per_redshift_peak_faint_cut(
+                C, mag_centers, z_centers, mag_edges, z_edges,
+                bright_subsample_cut, plot_dir=plot_dir,
+            )
+        _plot_counts_comparison(
+            H_obs,
+            H_true,
+            H_obs_s,
+            H_true_s,
+            mag_centers,
+            z_centers,
+            count_scale=count_scale_used,
+            completeness_raw=C,
+            completeness_final=C,
+            plot_dir=plot_dir,
         )
-        plt.ylabel(r"$z$")
-        plt.xlabel(r"$m_{2500\,\text{\AA}} \; (\mathrm{mag})$")
-        cbar = plt.colorbar(im); cbar.set_label(r"$\log\,H_{\rm obs}$")
-        plt.tight_layout()
-        plt.savefig(os.path.join(plot_dir, "H_obs_map.pdf"), dpi=600)
-        plt.close()
-        # Plot H_true
-        plt.figure(figsize=(7, 5))
-        im = plt.imshow(
-            np.log10(np.clip(H_true.T, 1e-12, None)), origin="lower", aspect="auto",
-            extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]], cmap="cividis"
-        )
-        plt.ylabel(r"$z$")
-        plt.xlabel(r"Apparent Magnitude $m_{i,\mathrm{rest}} \; (\mathrm{mag})$")
-        cbar = plt.colorbar(im); cbar.set_label(r"$\log\,H_{\rm true}$")
-        plt.tight_layout()
-        plt.savefig(os.path.join(plot_dir, "H_true_map.pdf"), dpi=600)
-        plt.close()
+        with trace_completeness_step("H_obs_map.pdf"):
+            # Plot H_obs
+            plt.figure(figsize=(7, 5))
+            im = plt.imshow(
+                np.log10(np.clip(H_obs.T, 1e-12, None)), origin="lower", aspect="auto",
+                extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]], cmap="plasma"
+            )
+            plt.ylabel(r"$z$")
+            plt.xlabel(r"$m_{2500\,\text{\AA}} \; (\mathrm{mag})$")
+            cbar = plt.colorbar(im); cbar.set_label(r"$\log\,H_{\rm obs}$")
+            _save_completeness_figure(plt.gcf(), os.path.join(plot_dir, "H_obs_map.pdf"), dpi=600)
+            plt.close()
+        with trace_completeness_step("H_true_map.pdf"):
+            # Plot H_true
+            plt.figure(figsize=(7, 5))
+            im = plt.imshow(
+                np.log10(np.clip(H_true.T, 1e-12, None)), origin="lower", aspect="auto",
+                extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]], cmap="cividis"
+            )
+            plt.ylabel(r"$z$")
+            plt.xlabel(r"Apparent Magnitude $m_{i,\mathrm{rest}} \; (\mathrm{mag})$")
+            cbar = plt.colorbar(im); cbar.set_label(r"$\log\,H_{\rm true}$")
+            _save_completeness_figure(plt.gcf(), os.path.join(plot_dir, "H_true_map.pdf"), dpi=600)
+            plt.close()
     support_mode = normalize_completeness_magnitude_support_mode(magnitude_support_mode)
     selection_support = (
         (COMPLETENESS_TAIL_MAG_2500_MIN, COMPLETENESS_TAIL_MAG_2500_MAX)
         if support_mode == "tails"
         else (COMPLETENESS_MAG_2500_MIN, COMPLETENESS_MAG_2500_MAX)
     )
-    completeness2d = Completeness2D(
-        mag_centers,
-        z_centers,
-        C,
-        magnitude_support=(mag_min, mag_max),
-        redshift_support=(z_min, z_max),
-        selection_magnitude_support=selection_support,
-        magnitude_support_mode=support_mode,
-        tail_parent_counts_2d=H_true,
-        tail_observed_counts_2d=H_obs,
-    )
-    if plot:
-        _plot_magnitude_tail_diagnostics(
-            completeness2d, os.path.join(plot_path or "plots/hubble", "completeness")
+    with trace_completeness_step("2D interpolator and magnitude tails") if plot else nullcontext():
+        completeness2d = Completeness2D(
+            mag_centers,
+            z_centers,
+            C,
+            magnitude_support=(mag_min, mag_max),
+            redshift_support=(z_min, z_max),
+            selection_magnitude_support=selection_support,
+            magnitude_support_mode=support_mode,
+            tail_parent_counts_2d=H_true,
+            tail_observed_counts_2d=H_obs,
         )
+    if plot and completeness2d.magnitude_support_mode == "tails":
+        with trace_completeness_step("completeness_magnitude_tails.pdf + .json"):
+            _plot_magnitude_tail_diagnostics(
+                completeness2d, os.path.join(plot_path or "plots/hubble", "completeness")
+            )
     return completeness2d, mag_centers, z_centers, dm, dz, sigma_mag
 
 
@@ -1973,6 +2252,7 @@ def get_completeness_function_3d_fhost(
 
     sim_file = resolve_qvc_data_path(sim_file)
     with h5py.File(sim_file, "r") as f:
+        declared_magnitude_support = _mock_magnitude_support_from_attrs(f.attrs)
         if "apparent_mag_2500" in f:
             m_true = np.asarray(f["apparent_mag_2500"][:], dtype=float)
         else:
@@ -2013,7 +2293,7 @@ def get_completeness_function_3d_fhost(
         )
     m_obs, z_obs, fhost_obs = m_obs[ok_obs], z_obs[ok_obs], fhost_obs[ok_obs]
     m_true, z_true = m_true[ok_true], z_true[ok_true]
-    _validate_mock_magnitude_coverage(m_true)
+    _validate_mock_magnitude_coverage(m_true, declared_support=declared_magnitude_support)
 
     host_model = _fit_fhost_population_model(
         df_agn.loc[ok_obs],
@@ -2203,6 +2483,7 @@ def get_completeness_function_4d_fhost_alpha(
 
     sim_file = resolve_qvc_data_path(sim_file)
     with h5py.File(sim_file, "r") as f:
+        declared_magnitude_support = _mock_magnitude_support_from_attrs(f.attrs)
         if "apparent_mag_2500" in f:
             m_true = np.asarray(f["apparent_mag_2500"][:], dtype=float)
         else:
@@ -2258,7 +2539,7 @@ def get_completeness_function_4d_fhost_alpha(
         )
     m_obs, z_obs, fhost_obs, alpha_obs = m_obs[ok_obs], z_obs[ok_obs], fhost_obs[ok_obs], alpha_obs[ok_obs]
     m_true, z_true = m_true[ok_true], z_true[ok_true]
-    _validate_mock_magnitude_coverage(m_true)
+    _validate_mock_magnitude_coverage(m_true, declared_support=declared_magnitude_support)
     if alpha_true_raw is not None:
         alpha_true = np.clip(alpha_true_raw[ok_true], _ALPHA_MIN, _ALPHA_MAX)
         alpha_model = _alpha_lambda_model_from_values(

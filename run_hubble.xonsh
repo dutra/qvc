@@ -15,19 +15,30 @@ $SHEN_PUBTOOLS_PATH = __xonsh__.env.get(
     str(Path.home() / "sdev" / "quasarlf" / "pubtools"),
 )
 
-# Sweep values fastest, quick, standard.  The environment overrides make this
-# runner suitable for isolated, reproducible cut-search members.
-speed = __xonsh__.env.get("QVC_HUBBLE_SPEED", "quick")
-minimal_plots_value = str(
-    __xonsh__.env.get("QVC_HUBBLE_MINIMAL_PLOTS", "false")
-).strip().lower()
-if minimal_plots_value not in {"0", "1", "false", "true", "no", "yes"}:
-    raise ValueError(
-        "QVC_HUBBLE_MINIMAL_PLOTS must be a boolean value; "
-        f"got {minimal_plots_value!r}."
-    )
-minimal_plots = minimal_plots_value in {"1", "true", "yes"}
-minimal_plot_args = ["--minimal-plots"] if minimal_plots else []
+# Completeness settings are passed explicitly to the scientific CLI.
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+from qvc.hubble.completeness_grid import launcher_completeness_options
+completeness_grid_options = launcher_completeness_options(
+    __xonsh__.env.get("ARGS", [])[1:],
+    {
+        "QVC_HUBBLE_COMPLETENESS_MAG_BIN_WIDTH": "0.2",
+        "QVC_HUBBLE_COMPLETENESS_Z_BIN_WIDTH": "0.2",
+        "QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG": "0.10",
+        "QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z": "0.30",
+    },
+)
+completeness_mag_bin_width = completeness_grid_options["QVC_HUBBLE_COMPLETENESS_MAG_BIN_WIDTH"]
+completeness_z_bin_width = completeness_grid_options["QVC_HUBBLE_COMPLETENESS_Z_BIN_WIDTH"]
+completeness_smooth_sigma_mag = completeness_grid_options["QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG"]
+completeness_smooth_sigma_z = completeness_grid_options["QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z"]
+
+# Speed options: fastest, quick, medium, standard, production.
+# Set QVC_HUBBLE_SPEED=medium for 100 initial live points, batches of 50,
+# and a 2,000 effective-sample target (Dynesty). Runtime is model-dependent.
+# Environment overrides support isolated, reproducible cut-search members.
+speed = __xonsh__.env.get("QVC_HUBBLE_SPEED", "standard")
+
 magnitude_convention = __xonsh__.env.get("QVC_HUBBLE_MAGNITUDE_CONVENTION", "dereddened")
 completeness_magnitude = __xonsh__.env.get(
     "QVC_HUBBLE_COMPLETENESS_MAGNITUDE", "attenuated"
@@ -42,12 +53,6 @@ if completeness_magnitude_support_mode not in {"tails", "hard-cut"}:
     )
 completeness_lf_model = __xonsh__.env.get(
     "QVC_HUBBLE_COMPLETENESS_LF_MODEL", "wang2026_type1_lade_a"
-)
-$QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG = __xonsh__.env.get(
-    "QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG", "0.10"
-)
-$QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z = __xonsh__.env.get(
-    "QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z", "0.30"
 )
 cut_tier = str(__xonsh__.env.get("QVC_HUBBLE_CUT_TIER", "2")).strip().lower()
 if cut_tier not in {"none", "0", "1", "2"}:
@@ -66,23 +71,34 @@ if light_curve_uncertainty_mode not in {"covariance", "posterior-draws"}:
 
 # Hubble quality-cut thresholds. Edit the defaults here, or override any one
 # with the corresponding environment variable. Use "none" for thresholds that
-# are optional; the four tier-1 chi-square and R-hat limits must stay numeric.
+# are optional; the Tier 1 chi-square and R-hat limits must stay numeric.
 cut_threshold_defaults = {
+    # Tier 0: inclusive limits in the selected completeness magnitude
+    # (attenuated by default). Defaults select the 17–24 magnitude range.
+    "QVC_CUT_COMPLETENESS_MAG_2500_MIN": "17",
+    "QVC_CUT_COMPLETENESS_MAG_2500_MAX": "24",
     # Tier 1: spectral/light-curve fit quality and convergence.
-    "QVC_CUT_JAXSEDFIT_JOINT_REDUCED_CHI2_MAX": "1.2",
-    "QVC_CUT_SED_REDUCED_CHI2_MAX": "1.3",
-    "QVC_CUT_SPECTROSCOPY_REDUCED_CHI2_MAX": "1.2",
-    "QVC_CUT_LOO_CHI2_EFF_MAX": "1.1",
-    "QVC_CUT_SPECTRAL_RHAT_MAX": "1.3",
-    "QVC_CUT_LIGHT_CURVE_RHAT_MAX": "1.1",
-    "QVC_CUT_NUM_DIVERGENCES_MAX": "none",
+    "QVC_CUT_JAXSEDFIT_JOINT_REDUCED_CHI2_MAX": "1.2", # they all pass
+    "QVC_CUT_SED_REDUCED_CHI2_MAX": "1.5",
+    "QVC_CUT_SPECTROSCOPY_REDUCED_CHI2_MAX": "1.1",
+    "QVC_CUT_LOO_CHI2_EFF_MAX": "1.0",
+    "QVC_CUT_SPECTRAL_RHAT_MAX": "1.1",
+    "QVC_CUT_LIGHT_CURVE_RHAT_MAX": "1.05",
+    "QVC_CUT_NUM_DIVERGENCES_MAX": "0",
     # Tier 2: fitted-parameter and science-quality cuts.
-    "QVC_CUT_LOG_TAU_UV_RF_MIN": "1.0",
+    "QVC_CUT_LOG_TAU_UV_RF_MIN": "1.3",
+    "QVC_CUT_T_RF_LENGTH_MIN": "none",
+    "QVC_CUT_LIGHT_CURVE_N_POINTS_MIN": "none",
+    "QVC_CUT_SN_MEDIAN_ALL_MIN": "3",
+    "QVC_CUT_ETA_SIGMA_KL_MIN": "none",
     "QVC_CUT_LOG_TAU_UV_RF_MAX": "none",
     "QVC_CUT_T_RF_OVER_TAU_UV_RF_MIN": "none",
-    "QVC_CUT_APPARENT_MAG_2500_ERR_MAX": "1.0",
+    "QVC_CUT_APPARENT_MAG_2500_ERR_MAX": "none",
+    "QVC_CUT_F_BC_3000_MAX": "none",
+    "QVC_CUT_F_FE_UV_3000_MAX": "none",
+    "QVC_CUT_F_HOST_2500_PSF_MAX": "none",
     "QVC_CUT_A_2500_TOTAL_MAX": "none",
-    "QVC_CUT_EBV_GAL_PLUS_EBV_AGN_MAX": "1.0",
+    "QVC_CUT_EBV_GAL_PLUS_EBV_AGN_MAX": "none",
     "QVC_CUT_LOW_L2500_FHOST_LOG_L_MAX": "none",
     "QVC_CUT_LOW_L2500_FHOST_PSF_MAX": "none",
 }
@@ -121,11 +137,19 @@ spectra_fit_csv = "results/data/jaxqsofit/aug31_w500s500_d01c034.h5"
 #h5_file = "results/data/aug31_1219pm_slb_seeing_etapriormodifiewided_noetatau_svithennuts_iters2disk3_svi10000lr0003w250s250_5567ce3_chisq.h5"
 #h5_file = "results/data/sep02_1059am_slb_seeing_etapriormodifiewided_noetatau_svithennuts_iters2disk3_svi10000lr0003w250s250_specaug311159pm_d01c034_chisq.h5"
 
-h5_file = 'results/data/sep06_0744pm_slb_seeing_etapriormodifiewided_noetatau_svithennuts_iters3disk3_svi10000lr0003w1000s500_specaug31w500s500_d01c034_chisq.h5'
+#h5_file = 'results/data/sep06_0744pm_slb_seeing_etapriormodifiewided_noetatau_svithennuts_iters3disk3_svi10000lr0003w1000s500_specaug31w500s500_d01c034_chisq.h5'
+
+#h5_file = 'results/data/sep08_1206am_chisq_slb_faster_etamodified_n2000_iters3disk3_svi10000lr0003w500s250_specaug31w500s250_6c83c0c_chisq.h5'
+#h5_file = 'results/data/sep08_1207am_chisq_slb_faster_etamodifiedtight_n2000_iters3disk3_svi10000lr0003w500s250_specaug31w500s250_5203856_chisq_with_timescales.h5'
+#h5_file = 'results/data/sep08_0914am_chisq_slb_faster_etadmodified_n2000_iters3disk3_svi10000lr0003w500s250_specaug31w500s250_83cb31d_chisq_with_timescales.h5'
+
+#h5_file = "results/data/sep08_1244pm_chisq_slb_faster_etamodifiedtight_n8000excn2000_iters3disk3_svi10000lr0003w500s250_specaug31w500s250_83cb31d_chisq.h5"
+
+h5_file = "results/data/sep09_1033am_chisq_slb_faster_etamodifiedtight_nallexcn8000and2000_iters3disk3_svi10000lr0003w500s250_specaug31w500s250_83cb31d_chisq.h5"
 
 $PREFIX = __xonsh__.env.get(
     "QVC_HUBBLE_PREFIX",
-    f"sep7a_specw500s500_h5sep06_n8k_tier{cut_tier}_{speed}",
+    f"sep14a_tau13cut_slb_bsc01m02_merrnone_magcut1724_cs02020103_chisq20_wang_specw500s500_h5sep091033_tier{cut_tier}_{speed}",
 )
 
 prefix = $PREFIX
@@ -133,15 +157,14 @@ echo "Running hubble_fit.py and PREFIX=" $PREFIX
 echo "Using cumulative Hubble cut tier:" @(cut_tier)
 echo "Using light-curve uncertainty mode:" @(light_curve_uncertainty_mode)
 echo "Using completeness magnitude support mode:" @(completeness_magnitude_support_mode)
-echo "Using minimal plot set:" @(minimal_plots)
 echo "Using Hubble cut thresholds:"
 for name, value in cut_thresholds.items():
     echo "  " @(name) "=" @(value)
 
 python -m qvc.hubble.hubble_fit \
     @(resume_args) \
-    @(minimal_plot_args) \
-    --cosmo_models Flatw0waCDM FlatLambdaCDM \
+    --bright-subsample-completeness-min 0.1 --bright-subsample-margin 0.2 \
+    --cosmo_models FlatLambdaCDM Flatw0waCDM \
     --run single \
     --speed @(speed) \
     --spectra_fit_csv @(spectra_fit_csv) \
@@ -149,6 +172,10 @@ python -m qvc.hubble.hubble_fit \
     --completeness_magnitude @(completeness_magnitude) \
     --completeness-magnitude-support-mode @(completeness_magnitude_support_mode) \
     --completeness_lf_model @(completeness_lf_model) \
+    --completeness-mag-bin-width @(completeness_mag_bin_width) \
+    --completeness-z-bin-width @(completeness_z_bin_width) \
+    --completeness-smooth-sigma-mag @(completeness_smooth_sigma_mag) \
+    --completeness-smooth-sigma-z @(completeness_smooth_sigma_z) \
     --light-curve-uncertainty-mode @(light_curve_uncertainty_mode) \
     --cut-tier @(cut_tier) \
     --result_prefix "fiducial" \
@@ -157,17 +184,15 @@ python -m qvc.hubble.hubble_fit \
     --disable_sigma_clip_pass \
     --sigma_clip_threshold 3.0 \
     --prior-profile centered_lcdm \
-    --disable-pivot-rounding \
+    --skip-debiased-residual-plot \
     @(h5_file)
 
+#    --bright-subsample-completeness-min 0.1 --bright-subsample-margin 0.25 \
 
-#    --minimal-plots \
-
-# --fit_f_agn_psf_2500_sigmoid_term
-# --light-curve-uncertainty-mode posterior-draws \
-
-#--selection-attenuation-mode joint-posterior \
-#--completeness_magnitude attenuated
+# --minimal-plots
+#    --plot-completeness \
 
 # QVC_HUBBLE_CUT_TIER meanings (tiers are cumulative):
 #   none: no tiered cuts; 0: eligibility only; 1: tiers 0+1; 2: tiers 0+1+2
+
+bash scripts/copy_paper_assets.sh --speed @(speed) --fiducial-dir @(str(Path("plots/hubble") / prefix))

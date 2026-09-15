@@ -1497,7 +1497,7 @@ def plot_cut_diagnostics(df_before, df_after, bins=30, cut_info="", save_path="p
             return "generic"
         return "_".join(tokens)
 
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    os.makedirs(save_path, exist_ok=True)
 
     before_ids = set(df_before["object_id"].astype(str))
     after_ids = set(df_after["object_id"].astype(str))
@@ -1552,7 +1552,7 @@ def plot_cut_diagnostics(df_before, df_after, bins=30, cut_info="", save_path="p
         fig.text(0.5, 0.01, f"Cut info: {cut_info}", ha="center", va="bottom", fontsize=11, color="k")
 
     filename = f"cut_diagnostic_{_cut_slug(cut_info)}.pdf"
-    plot_path = os.path.join(os.path.dirname(save_path), filename)
+    plot_path = os.path.join(save_path, filename)
     fig.tight_layout(rect=(0, 0.03, 1, 1))
     _save_figure(fig, plot_path, dpi=150)
 
@@ -1934,9 +1934,9 @@ def plot_mean_function_slope_vs_tau(
                     fmt=marker,
                     linestyle="none",
                     markersize=3,
-                    mfc=(0, 0, 0, 0.4),
+                    mfc=(mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.4) if marker == "D" else (0, 0, 0, 0.4)),
                     mec="none",
-                    ecolor=(0.2, 0.2, 0.2, 0.1),
+                    ecolor=(mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.1) if marker == "D" else (0.2, 0.2, 0.2, 0.1)),
                     elinewidth=0.8,
                     capsize=2,
                     capthick=0.8,
@@ -1951,7 +1951,7 @@ def plot_mean_function_slope_vs_tau(
                     slope[marker_noerr],
                     s=10 if marker == "o" else 12,
                     marker=marker,
-                    c="black",
+                    c=(_OUT_OF_RANGE_AGN_COLOR if marker == "D" else 'black'),
                     alpha=0.4,
                     linewidths=0,
                     rasterized=True,
@@ -2174,7 +2174,7 @@ def plot_sigma_tau_vs_lambda_broken_pl_fit(
         sharex=True,
         constrained_layout=True,
     )
-    fig.set_constrained_layout_pads(w_pad=0.01, h_pad=0.01, wspace=0.01, hspace=0.02)
+    fig.set_constrained_layout_pads(w_pad=0.01, h_pad=0.05, wspace=0.01, hspace=0.02)
 
     plotted_bands = []
     for band in bands:
@@ -2279,9 +2279,9 @@ def plot_sigma_tau_vs_lambda_broken_pl_fit(
     if band_handles:
         ax_sigma.legend(handles=band_handles + model_handle, loc="upper right", frameon=False, ncol=2, fontsize=9)
 
-    ax_sigma.set_ylim(-0.54, 0.64)
+    ax_sigma.set_ylim(-0.45, 0.55)
     ax_tau.set_xlim(2.81, 3.89)
-    ax_tau.set_ylim(-0.69, 0.64)
+    ax_tau.set_ylim(-0.10, 0.75)
 
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(
@@ -3362,230 +3362,16 @@ def plot_bpl_psd_vs_uv_variability(
     plot_path="plots/hubble",
     show=False,
     filename="bpl_psd_vs_uv_variability.pdf",
-    max_log_tau_bpl_err=0.5,
-    min_log_chi_sq_red_g=None,
-    z_range=(0.44, 3.16),
 ):
-    """Compare the displayed LS bending-power-law PSD fit against the main UV fit."""
-    required = {"log_sigma_uv", "log_sigma_ls", "log_tau_ls"}
-    if not required.issubset(df.columns):
-        missing = ", ".join(sorted(required - set(df.columns)))
-        raise KeyError(f"Missing required columns for BPL PSD-vs-UV diagnostic plot: {missing}")
-    tau_uv_col = "log_tau_uv_rf" if "log_tau_uv_rf" in df.columns else ("log_tau_uv" if "log_tau_uv" in df.columns else None)
-    if tau_uv_col is None:
-        raise KeyError("Missing required column for BPL PSD-vs-UV diagnostic plot: log_tau_uv_rf or log_tau_uv")
+    """Compare free-slope PSD RMS/tau with matching total reference-band values.
 
-    z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float) if "z" in df.columns else np.full(len(df), np.nan)
-    log_sigma_uv = pd.to_numeric(df["log_sigma_uv"], errors="coerce").to_numpy(dtype=float)
-    log_sigma_uv_err = (
-        pd.to_numeric(df["log_sigma_uv_err"], errors="coerce").to_numpy(dtype=float)
-        if "log_sigma_uv_err" in df.columns else np.full(len(df), np.nan)
-    )
-    log_sigma_bpl = pd.to_numeric(df["log_sigma_ls"], errors="coerce").to_numpy(dtype=float)
-    log_sigma_bpl_err = (
-        pd.to_numeric(df["log_sigma_ls_err"], errors="coerce").to_numpy(dtype=float)
-        if "log_sigma_ls_err" in df.columns else np.full(len(df), np.nan)
-    )
-    alpha_high = (
-        pd.to_numeric(df["alpha_high_ls"], errors="coerce").to_numpy(dtype=float)
-        if "alpha_high_ls" in df.columns else np.full(len(df), -2.0, dtype=float)
-    )
-    slope = -alpha_high
-    valid_slope = np.isfinite(slope) & (slope > 1.0)
-    rms_factor = np.full(len(df), 1.0 / np.sqrt(2.0), dtype=float)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        rms_factor[valid_slope] = np.sqrt(
-            1.0 / (slope[valid_slope] * np.sin(np.pi / slope[valid_slope]))
-        )
-    rms_factor = np.where(np.isfinite(rms_factor) & (rms_factor > 0.0), rms_factor, 1.0 / np.sqrt(2.0))
-    log_sigma_bpl_comparable = log_sigma_bpl + np.log10(rms_factor / np.sqrt(2.0 * np.pi))
-    log_tau_uv = pd.to_numeric(df[tau_uv_col], errors="coerce").to_numpy(dtype=float)
-    log_tau_uv_err_col = f"{tau_uv_col}_err"
-    log_tau_uv_err = (
-        pd.to_numeric(df[log_tau_uv_err_col], errors="coerce").to_numpy(dtype=float)
-        if log_tau_uv_err_col in df.columns else np.full(len(df), np.nan)
-    )
-    log_tau_bpl = pd.to_numeric(df["log_tau_ls"], errors="coerce").to_numpy(dtype=float)
-    log_tau_bpl_err = (
-        pd.to_numeric(df["log_tau_ls_err"], errors="coerce").to_numpy(dtype=float)
-        if "log_tau_ls_err" in df.columns else np.full(len(df), np.nan)
-    )
-    if tau_uv_col == "log_tau_uv" and "z" in df.columns:
-        log_tau_uv = log_tau_uv - np.log10(1.0 + z)
-
-    if "log_tau_uv" in df.columns:
-        log_tau_uv_obs = pd.to_numeric(df["log_tau_uv"], errors="coerce").to_numpy(dtype=float)
-        log_tau_uv_obs_err = (
-            pd.to_numeric(df["log_tau_uv_err"], errors="coerce").to_numpy(dtype=float)
-            if "log_tau_uv_err" in df.columns else log_tau_uv_err
-        )
-    else:
-        log_tau_uv_obs = log_tau_uv + np.log10(1.0 + z)
-        log_tau_uv_obs_err = log_tau_uv_err
-    log_tau_bpl_obs = (
-        pd.to_numeric(df["log_tau_ls_obs"], errors="coerce").to_numpy(dtype=float)
-        if "log_tau_ls_obs" in df.columns else log_tau_bpl + np.log10(1.0 + z)
-    )
-    psd_valid = (
-        pd.Series(df["psd_ls_valid"]).fillna(False).astype(bool).to_numpy()
-        if "psd_ls_valid" in df.columns else np.ones(len(df), dtype=bool)
-    )
-    tau_bpl_well_constrained = (
-        psd_valid
-        & np.isfinite(log_tau_bpl_err)
-        & (log_tau_bpl_err >= 0.0)
-        & (log_tau_bpl_err <= float(max_log_tau_bpl_err))
-    )
-
-    fig, axes = plt.subplots(1, 2, figsize=(11.2, 5.2))
-
-    def _linear_error_from_log(value, log_value, log_err):
-        value = np.asarray(value, dtype=float)
-        log_value = np.asarray(log_value, dtype=float)
-        log_err = np.asarray(log_err, dtype=float)
-        finite = (
-            np.isfinite(value)
-            & np.isfinite(log_value)
-            & np.isfinite(log_err)
-            & (value > 0.0)
-            & (log_err >= 0.0)
-        )
-        lower = np.full(value.shape, np.nan, dtype=float)
-        upper = np.full(value.shape, np.nan, dtype=float)
-        lower_exponent = log_value - log_err
-        upper_exponent = log_value + log_err
-        lower[finite] = np.clip(
-            value[finite] - np.power(10.0, lower_exponent[finite]),
-            0.0,
-            None,
-        )
-        finite_upper = finite & (upper_exponent <= np.log10(np.finfo(float).max))
-        upper[finite_upper] = np.clip(
-            np.power(10.0, upper_exponent[finite_upper]) - value[finite_upper],
-            0.0,
-            None,
-        )
-        return np.vstack([lower, upper])
-
-    panels = [
-        (
-            axes[0],
-            np.power(10.0, log_sigma_uv),
-            np.power(10.0, log_sigma_bpl_comparable),
-            _linear_error_from_log(np.power(10.0, log_sigma_uv), log_sigma_uv, log_sigma_uv_err),
-            _linear_error_from_log(np.power(10.0, log_sigma_bpl_comparable), log_sigma_bpl_comparable, log_sigma_bpl_err),
-            r"$\sigma_{\rm UV}$ (mag)",
-            r"$\sigma_{\rm LS}$ (mag)",
-            "No valid BPL sigma values",
-            psd_valid & (np.power(10.0, log_sigma_bpl_comparable) > 5e-2),
-            (2e-2, 2e0),
-        ),
-        (
-            axes[1],
-            np.power(10.0, log_tau_uv),
-            np.power(10.0, log_tau_bpl),
-            _linear_error_from_log(np.power(10.0, log_tau_uv), log_tau_uv, log_tau_uv_err),
-            _linear_error_from_log(np.power(10.0, log_tau_bpl), log_tau_bpl, log_tau_bpl_err),
-            r"$\tau_{\rm UV,RF}$ (days)",
-            r"$\tau_{\rm LS,RF}$ (days)",
-            "No well-constrained BPL tau values",
-            tau_bpl_well_constrained & (np.power(10.0, log_sigma_bpl_comparable) > 5e-2),
-            None,
-        ),
-    ]
-    for ax, x, y, xerr, yerr, xlabel, ylabel, empty_label, panel_filter, fixed_axis_limits in panels:
-        finite_mask = np.isfinite(x) & np.isfinite(y) & (x > 0.0) & (y > 0.0) & panel_filter
-        if np.any(finite_mask):
-            err_mask = finite_mask & np.all(np.isfinite(xerr), axis=0) & np.all(np.isfinite(yerr), axis=0)
-            in_z = finite_mask & np.isfinite(z) & (z >= z_range[0]) & (z <= z_range[1])
-            out_z = finite_mask & ~in_z
-            for mask, marker, label in ((in_z, "o", "AGN"), (out_z, "D", None)):
-                if not np.any(mask):
-                    continue
-                marker_err = mask & err_mask
-                if np.any(marker_err):
-                    ax.errorbar(
-                        x[marker_err],
-                        y[marker_err],
-                        xerr=xerr[:, marker_err],
-                        yerr=yerr[:, marker_err],
-                        fmt=marker,
-                        linestyle="none",
-                        markersize=3,
-                        mfc=(0, 0, 0, 0.4),
-                        mec="none",
-                        ecolor=(0.2, 0.2, 0.2, 0.1),
-                        elinewidth=0.8,
-                        capsize=2,
-                        capthick=0.8,
-                        rasterized=True,
-                        zorder=1,
-                        label=label,
-                    )
-                marker_noerr = mask & ~err_mask
-                if np.any(marker_noerr):
-                    ax.scatter(
-                        x[marker_noerr],
-                        y[marker_noerr],
-                        s=10 if marker == "o" else 12,
-                        marker=marker,
-                        c="black",
-                        alpha=0.4,
-                        linewidths=0,
-                        rasterized=True,
-                        zorder=1,
-                        label=label if not np.any(marker_err) else None,
-                    )
-            lo = min(np.nanmin(x[finite_mask]), np.nanmin(y[finite_mask]))
-            hi = max(np.nanmax(x[finite_mask]), np.nanmax(y[finite_mask]))
-            log_delta = np.log10(y[finite_mask]) - np.log10(x[finite_mask])
-            log_delta = log_delta[np.isfinite(log_delta)]
-            if log_delta.size:
-                bias = float(np.mean(log_delta))
-                sigma = float(np.std(log_delta))
-                ax.text(
-                    0.97,
-                    0.03,
-                    (
-                        f"N = {log_delta.size}\n"
-                        f"bias = {bias:.2f} dex\n"
-                        f"$\\sigma$ = {sigma:.2f} dex"
-                    ),
-                    transform=ax.transAxes,
-                    ha="right",
-                    va="bottom",
-                    fontsize=10.5,
-                    bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="0.6", alpha=0.9),
-                    zorder=20,
-                )
-        else:
-            ax.text(0.5, 0.5, empty_label, ha="center", va="center", transform=ax.transAxes)
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-        if np.any(finite_mask) and np.isfinite(lo) and np.isfinite(hi) and hi > lo:
-            if fixed_axis_limits is not None:
-                axis_limits = fixed_axis_limits
-            else:
-                log_lo = np.log10(lo)
-                log_hi = np.log10(hi)
-                pad = 0.12 * max(log_hi - log_lo, 1e-6)
-                axis_limits = (10.0 ** (log_lo - pad), 10.0 ** (log_hi + pad))
-            ax.set_xlim(*axis_limits)
-            ax.set_ylim(*axis_limits)
-            ax.plot(axis_limits, axis_limits, color="m", ls="-", lw=2.2, alpha=0.95, zorder=0)
-        ax.tick_params(axis="x", which="both", pad=8)
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
-        handles, labels = ax.get_legend_handles_labels()
-        if handles:
-            ax.legend(frameon=False, loc="best")
-
-    diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
-    return _save_figure(
-        fig,
-        os.path.join(diagnostics_path, filename),
-        dpi=200,
-        show=show,
+    Share the recovery diagnostic's normalization, wavelength scaling, and
+    resolution selection rather than comparing band PSDs with UV continuum
+    parameters. The historical filename is retained for paper assets.
+    """
+    return plot_psd_uv_recovery_comparison(
+        df, plot_path=plot_path, show=show, filename=filename,
+        tau_resolution_mode="filter", free_only=True,
     )
 
 
@@ -3597,6 +3383,7 @@ def plot_psd_uv_recovery_comparison(
     *,
     tau_resolution_mode="mark",
     nominal_psd_fmax=2e-3,
+    free_only=False,
 ):
     """Compare PSD fits with like-for-like model RMS and timescale estimates.
 
@@ -3630,6 +3417,9 @@ def plot_psd_uv_recovery_comparison(
         "psd_bpl_ref_band",
         "psd_bpl_ref_lambda_rf",
     }
+    if free_only:
+        required -= {"log_sigma_ls_fixed", "log_sigma_ls_fixed_err",
+                     "log_tau_ls_fixed", "log_tau_ls_fixed_err", "psd_ls_fixed_valid"}
     if not required.issubset(df.columns):
         missing = ", ".join(sorted(required - set(df.columns)))
         raise KeyError(
@@ -3637,6 +3427,8 @@ def plot_psd_uv_recovery_comparison(
         )
 
     def _numeric(column):
+        if free_only and "_fixed" in column and column not in df.columns:
+            return np.full(len(df), np.nan)
         return pd.to_numeric(df[column], errors="coerce").to_numpy(dtype=float)
 
     ref_band = (
@@ -3843,7 +3635,7 @@ def plot_psd_uv_recovery_comparison(
     )
     free_valid = pd.Series(df["psd_ls_valid"]).fillna(False).astype(bool).to_numpy()
     fixed_valid = (
-        pd.Series(df["psd_ls_fixed_valid"])
+        pd.Series(df.get("psd_ls_fixed_valid", np.zeros(len(df), dtype=bool)))
         .fillna(False)
         .astype(bool)
         .to_numpy()
@@ -3973,8 +3765,10 @@ def plot_psd_uv_recovery_comparison(
         upper = step * np.ceil((np.max(values) + margin) / step)
         return float(lower), float(upper)
 
-    sigma_limits = _shared_limits(panels[:2], step=0.05, margin_floor=0.06)
-    tau_limits = _shared_limits(panels[2:], step=0.05, margin_floor=0.08)
+    if free_only:
+        panels = [panels[0], panels[2]]
+    sigma_limits = _shared_limits([p for p in panels if p["quantity"] == "sigma"], step=0.05, margin_floor=0.06)
+    tau_limits = _shared_limits([p for p in panels if p["quantity"] == "tau"], step=0.05, margin_floor=0.08)
     if sigma_limits is None and tau_limits is None:
         raise ValueError("No finite valid free-slope or fixed-slope PSD fits to plot.")
 
@@ -4012,11 +3806,12 @@ def plot_psd_uv_recovery_comparison(
             print(f"[PSD-vs-UV KDE contours] skipped: {exc}")
 
     fig, axes = plt.subplots(
+        1 if free_only else 2,
         2,
-        2,
-        figsize=(10.0, 9.0),
-        sharex="row",
-        sharey="row",
+        figsize=(11.2, 5.2) if free_only else (10.0, 9.0),
+        sharex=False if free_only else "row",
+        sharey=False if free_only else "row",
+        squeeze=False,
         constrained_layout=True,
     )
     fig.get_layout_engine().set(
@@ -4101,7 +3896,8 @@ def plot_psd_uv_recovery_comparison(
                     r"$\tau_{\rm model}<[2\pi f_{\max}(1+z)]^{-1}$"
                 ),
             )
-        _plot_kde_contours(ax, x[stats_mask], y[stats_mask])
+        if not free_only:
+            _plot_kde_contours(ax, x[stats_mask], y[stats_mask])
         ax.set_xlim(*limits)
         ax.set_ylim(*limits)
         ax.set_aspect("equal", adjustable="box")
@@ -4158,9 +3954,10 @@ def plot_psd_uv_recovery_comparison(
             ax.legend(loc="upper left", fontsize=8.5, frameon=True)
 
     axes[0, 0].set_title("Free-slope BPL", fontsize=14)
-    axes[0, 1].set_title("Fixed-slope DRW", fontsize=14)
-    axes[0, 1].tick_params(labelleft=False)
-    axes[1, 1].tick_params(labelleft=False)
+    axes[0, 1].set_title("Free-slope BPL" if free_only else "Fixed-slope DRW", fontsize=14)
+    if not free_only:
+        axes[0, 1].tick_params(labelleft=False)
+        axes[1, 1].tick_params(labelleft=False)
 
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(
@@ -5313,10 +5110,7 @@ def _plot_dm_by_band(
         cut_in_z = (~keep_mask) & in_z
         cut_out_z = (~keep_mask) & (~in_z)
 
-        cmap_obj = mpl.cm.get_cmap("viridis")
         norm = colors.Normalize(vmin=vmin, vmax=vmax)
-        color_keep_out_z = cmap_obj(norm(petro_plot[keep_out_z])) if np.any(keep_out_z) else None
-        color_cut_out_z = cmap_obj(norm(petro_plot[cut_out_z])) if np.any(cut_out_z) else None
 
         sc = ax.scatter(
             x_masked[keep_in_z],
@@ -5345,7 +5139,7 @@ def _plot_dm_by_band(
         ax.scatter(
             x_masked[keep_out_z],
             y_masked[keep_out_z],
-            c=color_keep_out_z,
+            c=_OUT_OF_RANGE_AGN_COLOR,
             s=s,
             alpha=1.0,
             marker="D",
@@ -5355,7 +5149,7 @@ def _plot_dm_by_band(
         ax.scatter(
             x_masked[cut_out_z],
             y_masked[cut_out_z],
-            c=color_cut_out_z,
+            c=_OUT_OF_RANGE_AGN_COLOR,
             s=s,
             alpha=1.0,
             marker="D",
@@ -5363,7 +5157,7 @@ def _plot_dm_by_band(
             rasterized=True,
         )
         cbar = fig.colorbar(sc, ax=ax)
-        cbar.set_label(rf"$\log_{{10}}(\mathrm{{petroRad}}_{{{band}}})$")
+        cbar.set_label(rf"$\log_{{10}}(\mathrm{{petroRad}}_{{{band}}})$ (in z range)")
 
         # Overlay a rolling median in redshift to highlight broad trends by band.
         if np.count_nonzero(mask) >= 5:
@@ -5561,7 +5355,7 @@ def plot_log_fhost_vs_petrorad_by_band(
             y[keep_out_z],
             s=s,
             alpha=1.0,
-            color="tab:blue",
+            color=_OUT_OF_RANGE_AGN_COLOR,
             marker="D",
             linewidths=1.5,
             rasterized=True,
@@ -5571,7 +5365,7 @@ def plot_log_fhost_vs_petrorad_by_band(
             y[cut_out_z],
             s=s,
             alpha=1.0,
-            color="tab:orange",
+            color=_OUT_OF_RANGE_AGN_COLOR,
             marker="D",
             linewidths=1.5,
             rasterized=True,
@@ -6294,6 +6088,30 @@ def compute_hubble_redshift_trend(
     }
 
 
+def _hubble_linear_bin_edges(z, z_range):
+    """Sixteen equal bins within the fit range, extended on the same grid.
+
+    Construct the fit endpoints exactly so range partitioning cannot create
+    tiny boundary bins through floating-point rounding.
+    """
+    lower, upper = map(float, z_range)
+    if not np.isfinite(lower) or not np.isfinite(upper) or upper <= lower:
+        raise ValueError("z_range must contain finite, increasing bounds")
+    fit_edges = np.linspace(lower, upper, 17)
+    width = (upper - lower) / 16
+    values = np.asarray(z, dtype=float)
+    finite = values[np.isfinite(values)]
+    minimum = min(lower, float(finite.min())) if finite.size else lower
+    maximum = max(upper, float(finite.max())) if finite.size else upper
+    n_below = int(np.ceil((lower - minimum) / width))
+    n_above = int(np.ceil((maximum - upper) / width))
+    return np.concatenate((
+        lower - width * np.arange(n_below, 0, -1),
+        fit_edges,
+        upper + width * np.arange(1, n_above + 1),
+    ))
+
+
 def _interval_bin_edges(bins, lower, upper):
     """Return ``bins`` clipped to one non-empty interval."""
     bins = np.asarray(bins, dtype=float)
@@ -6393,8 +6211,14 @@ def _range_partitioned_weighted_bin_stats(
     return inside, _concatenate_weighted_bin_stats((below, above))
 
 
-def get_hubble_posterior_sample_indices(n_samples, target_samples=100):
-    """Return the deterministic posterior rows used by ``plot_hubble``."""
+HUBBLE_PLOT_MAX_DRAWS = 500
+
+
+def get_hubble_posterior_sample_indices(
+    n_samples,
+    target_samples=HUBBLE_PLOT_MAX_DRAWS,
+):
+    """Return at most ``target_samples`` evenly spaced posterior rows."""
     if (
         isinstance(n_samples, (bool, np.bool_))
         or not isinstance(n_samples, (int, np.integer))
@@ -6412,8 +6236,12 @@ def get_hubble_posterior_sample_indices(n_samples, target_samples=100):
             "target_samples must be a positive integer; "
             f"got {target_samples!r}."
         )
-    thin_factor = max(1, int(n_samples) // int(target_samples))
-    return np.arange(int(n_samples), dtype=int)[::thin_factor]
+    return np.linspace(
+        0,
+        int(n_samples) - 1,
+        min(int(n_samples), int(target_samples)),
+        dtype=int,
+    )
 
 
 def _validate_hubble_posterior_sample_indices(indices, n_samples):
@@ -6455,6 +6283,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 residuals_csv_filename="residuals.csv",
                 compute_only=False,
                 *,
+                fit_quality_summary=None,
                 dmi_posterior_draws=None,
                 posterior_sample_indices=None,
                 agn_pivot_context: AgnPivotContext):
@@ -6841,9 +6670,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     mu_zscore = np.abs(residuals) / clipping_sigma
 
     # ----------------- BINNING -----------------
-    # Linear-z bins for MAIN & RESIDUALS panel
-    #bins_linear = np.arange(0.4, 3.36, 0.1)
-    bins_linear = np.arange(0.4, 3.41, 0.2)
+    # Sixteen fitted bins; outside objects use the same spacing.
+    bins_linear = _hubble_linear_bin_edges(df_agn["z"].values, z_range)
 
     print("Using linear-z bins:", bins_linear)
     linear_main_in, linear_main_out = _range_partitioned_weighted_bin_stats(
@@ -6852,7 +6680,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         binning_sigma,
         bins_linear,
         z_range,
-        min_count=5,
+        min_count=3,
         center="mid",
         fit_membership_mask=fit_membership_mask,
     )
@@ -6865,7 +6693,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         clipping_sigma,
         bins_linear,
         z_range,
-        min_count=5,
+        min_count=3,
         center="mid",
         fit_membership_mask=fit_membership_mask,
     )
@@ -6877,7 +6705,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     bins_per_decade = 6
     decades = np.log10(zmax_inset) - np.log10(zmin_inset)
     n_bins_log = max(1, int(np.ceil(decades * bins_per_decade)))
-    bins_log = np.logspace(np.log10(bins_linear[0]), np.log10(bins_linear[-1]), n_bins_log + 1)
+    bins_log = np.logspace(np.log10(0.4), np.log10(3.4), n_bins_log + 1)
     #bins_log = bins_linear
     log_main_in, log_main_out = _range_partitioned_weighted_bin_stats(
         df_agn["z"].values,
@@ -6967,7 +6795,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             mu_pred_plot[clipped_out],
             s=18,
             marker="D",
-            c="tab:green",
+            c=_OUT_OF_RANGE_AGN_COLOR,
             alpha=0.95,
             linewidths=0,
             zorder=3,
@@ -7083,7 +6911,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             mu_pred_plot[clipped_out],
             s=24,
             marker="D",
-            c="tab:green",
+            c=_OUT_OF_RANGE_AGN_COLOR,
             alpha=0.95,
             linewidths=0,
             zorder=2,
@@ -7241,6 +7069,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
     # Labels
     ax.set_ylabel(r"$\mu$ (mag)")
+    ax.yaxis.set_label_coords(-0.075, 0.5)
     ax.set_xlabel(r"$z$")
 
     # ---------- Residuals panel ----------
@@ -7267,6 +7096,16 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
 
         for cosmo_model_other, cosmo_model_samples_other in cosmo_model_samples.items():
+            cosmo_model_samples_other = np.asarray(
+                cosmo_model_samples_other,
+                dtype=float,
+            )
+            comparison_sample_indices = get_hubble_posterior_sample_indices(
+                len(cosmo_model_samples_other)
+            )
+            cosmo_model_samples_other = cosmo_model_samples_other[
+                comparison_sample_indices
+            ]
             option_flags_other = resolve_model_option_flags(
                 cosmo_model_other,
                 np.asarray(cosmo_model_samples_other).shape[1],
@@ -7309,6 +7148,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
 
         ax_resid.set_ylabel(r"$\Delta\mu$ (mag)")
+        ax_resid.yaxis.set_label_coords(-0.075, 0.5)
         ax_resid.set_xlabel(r"$z$")
         def _paired_reduced_chi2(mask):
             if np.count_nonzero(mask) <= n_agn_params:
@@ -7328,6 +7168,33 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         chi2_full, chi2_data_only = _paired_reduced_chi2(
             chi2_redshift_mask
         )
+        if fit_quality_summary is not None and debias:
+            selected_mask = (
+                chi2_redshift_mask & np.isfinite(sigma_sel) & (sigma_sel > 0)
+                if sigma_sel is not None else np.zeros_like(chi2_redshift_mask)
+            )
+            chi2_selected = np.nan
+            if np.count_nonzero(selected_mask) > n_agn_params:
+                chi2_selected, _ = reduced_chi_squared(
+                    residuals[selected_mask], sigma_sel[selected_mask], n_params=n_agn_params,
+                )
+            median_sigmas = []
+            for width in (mu_pred_std_with_scatter, mu_pred_std, sigma_sel):
+                if width is None:
+                    median_sigmas.append(np.nan)
+                    continue
+                valid = chi2_redshift_mask & np.isfinite(width) & (width > 0)
+                median_sigmas.append(float(np.median(width[valid])) if np.any(valid) else np.nan)
+            fit_quality_summary.update(
+                n_fit=int(np.count_nonzero(chi2_redshift_mask)),
+                n_selected=int(np.count_nonzero(selected_mask)),
+                z_range=tuple(z_range),
+                chi2_full=float(chi2_full), chi2_data_only=float(chi2_data_only),
+                chi2_selected=float(chi2_selected), median_sigmas=median_sigmas,
+                residual_rms=float(np.sqrt(np.mean(residuals[chi2_redshift_mask] ** 2)))
+                if np.any(chi2_redshift_mask) else np.nan,
+                redshift_trend=redshift_trend,
+            )
         high_z_chi2_mask = chi2_redshift_mask & (z_values > 1.0)
         chi2_full_zgt1, chi2_data_only_zgt1 = _paired_reduced_chi2(
             high_z_chi2_mask
@@ -7336,7 +7203,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         if np.isfinite(chi2_full) and np.isfinite(chi2_data_only):
             chi2_kind = "Debiased" if debias else "Biased"
             chi2_annotation_lines = [
-                rf"{chi2_kind} $\chi^2_\nu$ (full / data only)",
+                rf"{chi2_kind} $\chi^2_\nu$ (full / data only / selected)",
                 (
                     rf"${z_range[0]:.2f}\leq z\leq{z_range[1]:.2f}$: "
                     f"{chi2_full:.2f} / {chi2_data_only:.2f}"
@@ -7353,6 +7220,32 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                         f"{chi2_data_only_zgt1:.2f}"
                     )
                 )
+            if sigma_sel is not None:
+                for line_index, mask in ((1, chi2_redshift_mask), (2, high_z_chi2_mask)):
+                    if line_index >= len(chi2_annotation_lines):
+                        continue
+                    valid = mask & np.isfinite(sigma_sel) & (sigma_sel > 0.0)
+                    selected_chi2, _ = reduced_chi_squared(
+                        residuals[valid], sigma_sel[valid], n_params=n_agn_params,
+                    )
+                    chi2_annotation_lines[line_index] += f" / {selected_chi2:.2f}"
+            else:
+                chi2_annotation_lines[0] = chi2_annotation_lines[0].replace(
+                    " / selected", ""
+                )
+            widths = [mu_pred_std_with_scatter, mu_pred_std]
+            if sigma_sel is not None:
+                widths.append(sigma_sel)
+            median_widths = []
+            for width in widths:
+                valid = chi2_redshift_mask & np.isfinite(width) & (width > 0.0)
+                median_widths.append(f"{np.median(width[valid]):.3f}")
+            chi2_annotation_lines.append(
+                r"Median $\sigma$ (mag): " + " / ".join(median_widths)
+            )
+            chi2_annotation_lines.append(
+                f"Residual RMS: {np.sqrt(np.mean(residuals[chi2_redshift_mask] ** 2)):.3f} mag"
+            )
             if (
                 redshift_trend is not None
                 and np.isfinite(redshift_trend["slope_mag_per_dex"])
@@ -7367,22 +7260,41 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                         rf"\Delta\chi^2={redshift_trend['delta_chi2']:.1f})$"
                     )
                 )
-            ax_resid.text(
-                0.02,
-                0.08,
-                "\n".join(chi2_annotation_lines),
-                transform=ax_resid.transAxes,
-                ha="left",
-                va="bottom",
-                fontsize=11,
-                bbox=dict(boxstyle="round,pad=0.02", facecolor="white", alpha=0.0, edgecolor="none"),
-                zorder=20,                
+            # Keep the fit-range summary compact enough to sit below the
+            # residual points; the CSV retains the per-object diagnostics.
+            range_summary = chi2_annotation_lines[1].split(": ", 1)[1]
+            compact_lines = [chi2_annotation_lines[0] + ": " + range_summary]
+            compact_lines.extend(
+                line for line in chi2_annotation_lines[2:]
+                if not line.startswith(r"$1.00<z")
             )
+            compact_lines = [
+                line + rf" (${z_range[0]:.2f}\leq z\leq{z_range[1]:.2f}$)"
+                if line.startswith("Residual RMS:") else line
+                for line in compact_lines
+            ]
+            for line_index, line in enumerate(compact_lines):
+                line_transform = mtransforms.offset_copy(
+                    ax_resid.transAxes, fig=fig, x=0,
+                    y=9 * (len(compact_lines) - 1 - line_index), units="points",
+                )
+                ax_resid.text(
+                    0.02, 0.05, line,
+                    transform=line_transform,
+                    ha="left", va="bottom", fontsize=7,
+                    bbox=dict(
+                        boxstyle="round,pad=0.12", facecolor="white",
+                        alpha=0.6, edgecolor="none",
+                    ),
+                    gid="hubble-fit-statistic-line",
+                    zorder=20,
+                )
         if df_calibrators is not None:
-            ax_resid.set_ylim(-0.5, 0.5)
+            ax_resid.set_ylim(-0.7, 0.7)
             ax_resid.set_xlim(df_calibrators['z'].min()*0.2, df_calibrators['z'].max()*1.1)
         else:
-            ax_resid.set_ylim(-0.5, 0.5)
+            ax_resid.set_ylim(-0.7, 0.7)
+        ax_resid.set_yticks([-0.5, 0.0, 0.5])
         #ax_resid.legend(frameon=True, loc="upper left", fontsize=10)
 
     for axi in (ax, inset_ax, ax_resid):
@@ -7506,6 +7418,18 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 )
 
     ax.legend(frameon=False, loc="lower center", bbox_to_anchor=(0.24, 0.06), fontsize=10)
+
+    # Fit membership is independent of display-only and highlighted clipped rows.
+    n_fitted_agn = int(np.count_nonzero(fit_membership_mask))
+    n_plotted_agn = int(np.count_nonzero(
+        np.isfinite(z_values) & np.isfinite(mu_pred_plot)
+    ))
+    ax.text(
+        0.03, 0.97,
+        f"AGNs: {n_fitted_agn:,} fitted; {n_plotted_agn:,} plotted",
+        transform=ax.transAxes, ha="left", va="top", fontsize=10,
+        zorder=20, gid="agn-sample-counts",
+    )
 
     # Save/show
     fig.tight_layout()
@@ -8499,7 +8423,7 @@ def plot_predicted_vs_actual_M2500(
         colors_bin = np.where(cats_bin >= 0, palette[np.clip(cats_bin, 0, 4)], "#999999")  # gray for NaN
 
         # Filled circles are in range; out-of-range objects follow the Hubble
-        # diagram's dark blue-gray diamond styling.
+        # diagram's green diamond styling.
         z_bin = z[bin_mask]
         mask_closed = (z_bin >= z_range[0]) & (z_bin <= z_range[1])
         mask_open = ~mask_closed
@@ -8553,8 +8477,8 @@ def plot_predicted_vs_actual_M2500(
                 ax.scatter(
                     x[clipped_open],
                     y_plot[clipped_open],
-                    facecolors="tab:green",
-                    edgecolors="tab:green",
+                    facecolors=_OUT_OF_RANGE_AGN_COLOR,
+                    edgecolors=_OUT_OF_RANGE_AGN_COLOR,
                     marker="D",
                     s=28,
                     alpha=0.95,
@@ -10670,8 +10594,8 @@ def plot_predicted_L2500_vs_sigmahat(
 ):
     d = df_agn.copy()
     clipped_mask = _resolve_clipped_mask(d, clipped_mask)
-    out_of_range_color = "#354B5B"
-    out_of_range_marker_color = mpl.colors.to_rgba(out_of_range_color, alpha=0.4)
+    out_of_range_color = _OUT_OF_RANGE_AGN_COLOR
+    out_of_range_marker_color = _OUT_OF_RANGE_AGN_MARKER_COLOR
     out_of_range_error_color = mpl.colors.to_rgba(out_of_range_color, alpha=0.1)
     out_of_range_residual_error_color = mpl.colors.to_rgba(out_of_range_color, alpha=0.18)
 
@@ -10977,7 +10901,7 @@ def plot_predicted_L2500_vs_sigmahat(
             10**actual_logL2500_plot[clipped_out],
             s=28,
             marker="D",
-            c="tab:green",
+            c=_OUT_OF_RANGE_AGN_COLOR,
             alpha=0.95,
             linewidths=0,
             zorder=2,
@@ -11009,6 +10933,15 @@ def plot_predicted_L2500_vs_sigmahat(
                 contour_handles = [
                     Line2D([0],[0], color='red', lw=2.6, ls='-', label='95% contour'),
                     Line2D([0],[0], color='red', lw=3.2, ls='-',  label='68% contour'),
+                ]
+            elif debias:
+                contour_color = "tab:blue"
+                contour_linewidths = (2.0, 2.4)
+                contour_handles = [
+                    Line2D([0], [0], color=contour_color, lw=width, ls='-', label=label)
+                    for width, label in zip(
+                        contour_linewidths, ('95% contour', '68% contour')
+                    )
                 ]
             else:
                 contour_color = "darkgray"
@@ -11345,7 +11278,7 @@ def plot_predicted_L2500_vs_sigmahat(
                     residuals_plot[clipped_good_out],
                     s=26,
                     marker="D",
-                    c="tab:green",
+                    c=_OUT_OF_RANGE_AGN_COLOR,
                     alpha=0.95,
                     linewidths=0,
                     zorder=7,
@@ -11650,9 +11583,9 @@ def plot_L2500_vs_sigma_tau_separate(
                     fmt=marker,
                     linestyle="none",
                     markersize=size,
-                    mfc=(0, 0, 0, 0.4),
+                    mfc=(mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.4) if marker == "D" else (0, 0, 0, 0.4)),
                     mec="none",
-                    ecolor=(0.2, 0.2, 0.2, 0.12),
+                    ecolor=(mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.12) if marker == "D" else (0.2, 0.2, 0.2, 0.12)),
                     elinewidth=0.8,
                     capsize=2,
                     capthick=0.8,
@@ -11667,7 +11600,7 @@ def plot_L2500_vs_sigma_tau_separate(
                     10.0**actual_logL2500_plot[clipped],
                     s=28,
                     marker="D",
-                    c="tab:green",
+                    c=_OUT_OF_RANGE_AGN_COLOR,
                     alpha=0.95,
                     linewidths=0,
                     zorder=4,
@@ -11729,9 +11662,9 @@ def plot_L2500_vs_sigma_tau_separate(
                 fmt="D",
                 linestyle="none",
                 markersize=2.8,
-                mfc=(0, 0, 0, 0.4),
+                mfc=mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.4),
                 mec="none",
-                ecolor=(0.2, 0.2, 0.2, 0.18),
+                ecolor=mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.18),
                 elinewidth=0.6,
                 capsize=0,
                 zorder=6,
@@ -11889,9 +11822,9 @@ def plot_catalog_quantity_vs_sigma_tau_separate(
                     fmt=marker,
                     linestyle="none",
                     markersize=size,
-                    mfc=(0, 0, 0, 0.4),
+                    mfc=(mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.4) if marker == "D" else (0, 0, 0, 0.4)),
                     mec="none",
-                    ecolor=(0.2, 0.2, 0.2, 0.12),
+                    ecolor=(mpl.colors.to_rgba(_OUT_OF_RANGE_AGN_COLOR, alpha=0.12) if marker == "D" else (0.2, 0.2, 0.2, 0.12)),
                     elinewidth=0.8,
                     capsize=2,
                     capthick=0.8,
@@ -11906,7 +11839,7 @@ def plot_catalog_quantity_vs_sigma_tau_separate(
                     y[clipped],
                     s=28,
                     marker="D",
-                    c="tab:green",
+                    c=_OUT_OF_RANGE_AGN_COLOR,
                     alpha=0.95,
                     linewidths=0,
                     zorder=4,
@@ -12218,6 +12151,7 @@ def plot_residuals_vs_alphaOX(
     min_per_bin=4,           # hide bins with too few points
     z_range=(0.44, 3.16),
     clipped_mask=None,
+    sample_counts=None,
 ):
     """
     Plot residuals vs delta_alphaOX and alphaOX, colored by redshift, with binned means.
@@ -12238,6 +12172,7 @@ def plot_residuals_vs_alphaOX(
     yerr_all = np.asarray(residuals_err, dtype=float)
 
     def _plot_one(xcol, xerr_col, xlabel, filename, *, marker_alpha=1.0, show_grid=True):
+        paper_xray_style = xcol in ("alphaOX", "delta_alphaOX")
         x = np.asarray(df_agn.get(xcol, np.full(len(df_agn), np.nan)), dtype=float)
         xerr = np.asarray(df_agn.get(xerr_col, np.full(len(df_agn), np.nan)), dtype=float)
         z = z_all.copy()
@@ -12249,12 +12184,14 @@ def plot_residuals_vs_alphaOX(
         if np.isfinite(xerr).any():
             m &= np.isfinite(xerr) | np.isnan(xerr)
         x, xerr, y, yerr, z = x[m], xerr[m], y[m], yerr[m], z[m]
+        if sample_counts is not None and xcol == "alphaOX":
+            sample_counts["NumAGNAlphaOXPlotted"] = len(x)
         if clipped_local is not None:
             clipped_local = clipped_local[m]
 
         fig, ax = plt.subplots(1, 1, figsize=(7.2, 5.2))
         ax.set_xlabel(xlabel)
-        ax.set_ylabel("Residuals (mag)")
+        ax.set_ylabel("Hubble residual (mag)" if paper_xray_style else "Residuals (mag)")
         ax.axhline(0.0, color="magenta", linewidth=2, zorder=0)
         ax.set_ylim(-4.6, 3.9)
         if show_grid:
@@ -12295,7 +12232,7 @@ def plot_residuals_vs_alphaOX(
                 mfc = ci
                 mec = "none"
             else:
-                mfc = "none"
+                mfc = ci if paper_xray_style else "none"
                 mec = ci
 
             label = "AGN" if i == n_pts - 1 else None
@@ -12304,16 +12241,16 @@ def plot_residuals_vs_alphaOX(
                 y[i],
                 xerr=xi_err,
                 yerr=yerr[i],
-                fmt="o",
-                markersize=6,
+                fmt="D" if paper_xray_style and not mask_in[i] else "o",
+                markersize=5 if paper_xray_style else 6,
                 mfc=mfc,
                 mec=mec,
                 mew=0.9,
-                ecolor=(0.5, 0.5, 0.5, 0.7),
-                elinewidth=0.8,
-                capsize=2,
+                ecolor=(0.4, 0.4, 0.4, 0.28) if paper_xray_style else (0.5, 0.5, 0.5, 0.7),
+                elinewidth=0.6 if paper_xray_style else 0.8,
+                capsize=0 if paper_xray_style else 2,
                 capthick=0.8,
-                alpha=marker_alpha,
+                alpha=None if paper_xray_style else marker_alpha,
                 zorder=2,
                 label=label,
             )
@@ -12335,9 +12272,9 @@ def plot_residuals_vs_alphaOX(
                     x[out_clipped],
                     y[out_clipped],
                     s=28,
-                    c="tab:green",
+                    c=_OUT_OF_RANGE_AGN_COLOR,
                     marker="D",
-                    edgecolors="tab:green",
+                    edgecolors=_OUT_OF_RANGE_AGN_COLOR,
                     linewidths=0.8,
                     zorder=3,
                 )
@@ -12371,18 +12308,29 @@ def plot_residuals_vs_alphaOX(
                     by,
                     yerr=by_sem,
                     fmt="o",
-                    ms=6,
-                    lw=2,
+                    ms=8 if paper_xray_style else 6,
+                    lw=1.4 if paper_xray_style else 2,
                     color="red",
                     mfc="red",
-                    mew=1.2,
+                    mec="white" if paper_xray_style else "red",
+                    mew=0.7 if paper_xray_style else 1.2,
+                    capsize=3 if paper_xray_style else 0,
                     zorder=3,
                     label="Binned mean",
                 )
 
-        cbar = fig.colorbar(sm, ax=ax)
-        cbar.set_label(r"$z$")
-        ax.legend(loc="lower right", frameon=True, framealpha=0.8)
+        cbar = fig.colorbar(sm, ax=ax, fraction=0.045, pad=0.025) if paper_xray_style else fig.colorbar(sm, ax=ax)
+        cbar.set_label(r"Redshift $z$" if paper_xray_style else r"$z$")
+        if paper_xray_style:
+            handles, labels = ax.get_legend_handles_labels()
+            handles = [
+                Line2D([], [], marker="o", linestyle="none", markersize=5,
+                       color="0.4", label="AGN") if label == "AGN" else handle
+                for handle, label in zip(handles, labels)
+            ]
+            ax.legend(handles, labels, loc="lower right", frameon=False, fontsize=12)
+        else:
+            ax.legend(loc="lower right", frameon=True, framealpha=0.8)
 
         fig.tight_layout()
         os.makedirs(plot_path, exist_ok=True)
@@ -12969,7 +12917,7 @@ def plot_spectral_fraction_vs_redshift(
                 fmt="D",
                 markersize=3.2,
                 alpha=0.1,
-                color=kept_color,
+                color=_OUT_OF_RANGE_AGN_COLOR,
                 elinewidth=0.4,
                 zorder=6,
                 label=component_label if not np.any(in_z) else None,
@@ -13693,9 +13641,7 @@ def plot_completeness_diagnostics(
         ax.scatter(
             z[out_mask],
             -dmi_plot[out_mask],
-            c=m2500[out_mask],
-            cmap=cmap,
-            norm=magnitude_norm,
+            c=_OUT_OF_RANGE_AGN_COLOR,
             s=28,
             marker="D",
             label="outside $z$ range",
@@ -13714,7 +13660,7 @@ def plot_completeness_diagnostics(
     magnitude_mappable = mpl.cm.ScalarMappable(norm=magnitude_norm, cmap=cmap)
     magnitude_mappable.set_array([])
     cbar = fig.colorbar(magnitude_mappable, ax=ax)
-    cbar.set_label(r"Apparent magnitude $m_{2500}$ (mag)")
+    cbar.set_label(r"$m_{2500}$ (mag; in-range)")
 
     fig.tight_layout()
 
@@ -13744,9 +13690,7 @@ def plot_completeness_diagnostics(
         ax.scatter(
             m2500[out_mask],
             -dmi_plot[out_mask],
-            c=z[out_mask],
-            cmap=cmap,
-            norm=redshift_norm,
+            c=_OUT_OF_RANGE_AGN_COLOR,
             alpha=0.5,
             s=28,
             marker="D",
@@ -13765,7 +13709,7 @@ def plot_completeness_diagnostics(
     redshift_mappable = mpl.cm.ScalarMappable(norm=redshift_norm, cmap=cmap)
     redshift_mappable.set_array([])
     cbar = fig.colorbar(redshift_mappable, ax=ax)
-    cbar.set_label(r"Redshift $z$")
+    cbar.set_label(r"Redshift $z$ (in z range)")
 
     fig.tight_layout()
 
@@ -14002,6 +13946,14 @@ def plot_m2500_vs_z_colorpanels(
                markersize=6, linestyle="None", label="Cut in z-range"),
     ]
 
+    if z_range is not None and (~base["_in_z_range"]).any():
+        legend_handles.append(
+            Line2D([0], [0], marker="D", color="none",
+                   markerfacecolor=_OUT_OF_RANGE_AGN_COLOR,
+                   markeredgecolor=_OUT_OF_RANGE_AGN_COLOR,
+                   markersize=6, linestyle="None", label="Outside z-range")
+        )
+
     for ax, ccol in zip(axes, color_cols):
         d = base.dropna(subset=[ccol]).copy()
         if thin and thin > 1:
@@ -14040,26 +13992,18 @@ def plot_m2500_vs_z_colorpanels(
         d_cut_in_z = d.iloc[cut_in_z]
         d_cut_out_z = d.iloc[cut_out_z]
         c_keep_in_z = c_all[keep_in_z]
-        c_keep_out_z = c_all[keep_out_z]
         c_cut_in_z = c_all[cut_in_z]
-        c_cut_out_z = c_all[cut_out_z]
 
         # Per-panel clipping
         clip_lo, clip_hi = color_clip.get(ccol, (None, None))
         c_keep_in_z_plot = c_keep_in_z.copy()
-        c_keep_out_z_plot = c_keep_out_z.copy()
         c_cut_in_z_plot = c_cut_in_z.copy()
-        c_cut_out_z_plot = c_cut_out_z.copy()
         if clip_lo is not None:
             c_keep_in_z_plot = np.clip(c_keep_in_z_plot, clip_lo, None)
-            c_keep_out_z_plot = np.clip(c_keep_out_z_plot, clip_lo, None)
             c_cut_in_z_plot = np.clip(c_cut_in_z_plot, clip_lo, None)
-            c_cut_out_z_plot = np.clip(c_cut_out_z_plot, clip_lo, None)
         if clip_hi is not None:
             c_keep_in_z_plot = np.clip(c_keep_in_z_plot, None, clip_hi)
-            c_keep_out_z_plot = np.clip(c_keep_out_z_plot, None, clip_hi)
             c_cut_in_z_plot = np.clip(c_cut_in_z_plot, None, clip_hi)
-            c_cut_out_z_plot = np.clip(c_cut_out_z_plot, None, clip_hi)
 
         # Colorbar limits from clipped all-points (keep+cut)
         c_all_plot = c_all.copy()
@@ -14071,8 +14015,6 @@ def plot_m2500_vs_z_colorpanels(
         vmin = clip_lo if clip_lo is not None else np.nanmin(c_all_plot)
         vmax = clip_hi if clip_hi is not None else np.nanmax(c_all_plot)
         norm = colors.Normalize(vmin=vmin, vmax=vmax)
-        color_keep_out_z = mpl.cm.get_cmap(cmap)(norm(c_keep_out_z_plot)) if len(c_keep_out_z_plot) else None
-        color_cut_out_z = mpl.cm.get_cmap(cmap)(norm(c_cut_out_z_plot)) if len(c_cut_out_z_plot) else None
 
         print(
             f"[m2500_vs_z:{ccol}] kept_in_z={len(d_keep_in_z)} "
@@ -14090,7 +14032,7 @@ def plot_m2500_vs_z_colorpanels(
         ax.scatter(
             d_keep_out_z[xcol],
             d_keep_out_z[ycol],
-            c=color_keep_out_z,
+            c=_OUT_OF_RANGE_AGN_COLOR,
             s=s,
             alpha=1.0,
             marker="D",
@@ -14101,7 +14043,7 @@ def plot_m2500_vs_z_colorpanels(
         ax.scatter(
             d_cut_out_z[xcol],
             d_cut_out_z[ycol],
-            c=color_cut_out_z,
+            c=_OUT_OF_RANGE_AGN_COLOR,
             s=s,
             alpha=1.0,
             marker="D",
@@ -14115,7 +14057,8 @@ def plot_m2500_vs_z_colorpanels(
         cbar = fig.colorbar(sm, ax=ax)
 
         base_label = label_map.get(ccol, ccol)
-        cbar.set_label(rf"$\log_{{10}}({base_label})$" if log_color else base_label)
+        cbar_label = rf"$\log_{{10}}({base_label})$" if log_color else base_label
+        cbar.set_label(cbar_label + (" (in z range)" if z_range is not None else ""))
 
         ax.set_ylabel(r"$m_{2500\,\mathrm{\AA}}$")
 

@@ -21,6 +21,12 @@ PARAMETER_FIGURE_STEM = "lf_parameter_comparison"
 SUMMARY_FILENAME = "lf_residual_sensitivity_summary.csv"
 BINNED_FILENAME = "lf_residual_sensitivity_binned.csv"
 README_FILENAME = "lf_residual_sensitivity_README.txt"
+LF_REFERENCE_MODEL = "wang2026_type1_lade_a"
+LF_REFERENCE_LABEL = "Wang et al. (2026)"
+DEFAULT_LF_COMPARISON_MODELS = (
+    LF_REFERENCE_MODEL,
+    *(model for model in COMPLETENESS_LF_MODELS if model != LF_REFERENCE_MODEL),
+)
 Z_EDGES = np.array([0.44, 0.80, 1.20, 1.60, 2.00, 2.50, 3.16])
 Z_CENTERS = 0.5 * (Z_EDGES[:-1] + Z_EDGES[1:])
 DIAGNOSTIC_LABELS = {
@@ -166,8 +172,11 @@ def _load_sweep_data(
     expected_models = tuple(model for model, _ in diagrams)
     if len(diagram_paths) != len(expected_models):
         raise ValueError("Diagnostic run identifiers must be unique.")
-    if not expected_models or expected_models[0] != "shen":
-        raise ValueError("Diagnostic diagrams must start with the Shen reference run.")
+    if not expected_models or expected_models[0] != LF_REFERENCE_MODEL:
+        raise ValueError(
+            "Diagnostic diagrams must start with the Wang reference run "
+            f"({LF_REFERENCE_MODEL!r})."
+        )
     missing_labels = [
         model for model in expected_models if model not in DIAGNOSTIC_LABELS
     ]
@@ -237,7 +246,7 @@ def _load_sweep_data(
                 )
             m0_agn[model] = float(np.median(samples[:, m0_index]))
 
-    reference_ids = set(residuals["shen"].index)
+    reference_ids = set(residuals[LF_REFERENCE_MODEL].index)
     for model in expected_models:
         residual_ids = set(residuals[model].index)
         correction_ids = set(corrections[model].index)
@@ -246,7 +255,7 @@ def _load_sweep_data(
                 "LF diagnostics require identical fit-selection object IDs; "
                 f"model {model!r} has {len(residual_ids)} residual IDs and "
                 f"{len(correction_ids)} correction IDs versus "
-                f"{len(reference_ids)} for Shen."
+                f"{len(reference_ids)} for {LF_REFERENCE_LABEL}."
             )
     ids = pd.Index(sorted(reference_ids))
     if len(ids) == 0:
@@ -267,7 +276,7 @@ def load_lf_parameter_summaries(
     base_prefix: str,
     *,
     repo_root: Path = REPO_ROOT,
-    models: Sequence[str] = COMPLETENESS_LF_MODELS,
+    models: Sequence[str] = DEFAULT_LF_COMPARISON_MODELS,
 ) -> pd.DataFrame:
     """Load median and central-68% summaries for each LF posterior."""
     _, model_labels, _ = get_model_params("Flatw0waCDM")
@@ -284,9 +293,14 @@ def load_lf_parameter_summaries(
     }
 
     models = tuple(models)
-    if not models or models[0] != "shen" or len(set(models)) != len(models):
+    if (
+        not models
+        or models[0] != LF_REFERENCE_MODEL
+        or len(set(models)) != len(models)
+    ):
         raise ValueError(
-            "Parameter-comparison runs must be unique and start with 'shen'."
+            "Parameter-comparison runs must be unique and start with "
+            f"{LF_REFERENCE_MODEL!r}."
         )
     missing_labels = [
         model for model in models if model not in PARAMETER_COMPARISON_LF_LABELS
@@ -347,9 +361,9 @@ def generate_lf_parameter_comparison(
     output_directory: Path,
     *,
     repo_root: Path = REPO_ROOT,
-    models: Sequence[str] = COMPLETENESS_LF_MODELS,
+    models: Sequence[str] = DEFAULT_LF_COMPARISON_MODELS,
 ) -> Mapping[str, Path]:
-    """Plot fitted parameters across LF choices with Shen as the reference."""
+    """Plot fitted parameters across LF choices with Wang as the reference."""
     output_directory = Path(output_directory).resolve()
     output_directory.mkdir(parents=True, exist_ok=True)
     summaries = load_lf_parameter_summaries(
@@ -375,9 +389,11 @@ def generate_lf_parameter_comparison(
             medians = parameter_rows["median"].to_numpy(dtype=float)
             lower = parameter_rows["interval_16"].to_numpy(dtype=float)
             upper = parameter_rows["interval_84"].to_numpy(dtype=float)
-            shen_median = float(parameter_rows.loc["shen", "median"])
+            reference_median = float(
+                parameter_rows.loc[LF_REFERENCE_MODEL, "median"]
+            )
             axis.axhline(
-                shen_median,
+                reference_median,
                 color="black",
                 linestyle="--",
                 linewidth=1.5,
@@ -444,9 +460,9 @@ def _selection_correction_and_residual_figure(
     bootstrap_draws,
     models,
 ):
-    reference_frame = residuals["shen"].loc[ids]
+    reference_frame = residuals[LF_REFERENCE_MODEL].loc[ids]
     z = reference_frame["z"].to_numpy(float)
-    reference_dmi = corrections["shen"].loc[ids].to_numpy(float)
+    reference_dmi = corrections[LF_REFERENCE_MODEL].loc[ids].to_numpy(float)
     reference_residual = reference_frame["residuals"].to_numpy(float)
     fig, axes = plt.subplots(4, 1, figsize=(10, 16), constrained_layout=True)
     absolute_offsets = np.linspace(-0.035, 0.035, len(models))
@@ -503,12 +519,14 @@ def _selection_correction_and_residual_figure(
         _append_binned_rows(
             binned_rows,
             model=model,
-            quantity="delta_dmi_vs_shen",
+            quantity="delta_dmi_vs_wang",
             stats=stats,
             interval_kind="paired_distribution",
         )
 
-        compensated = delta_dmi + (m0_agn[model] - m0_agn["shen"])
+        compensated = delta_dmi + (
+            m0_agn[model] - m0_agn[LF_REFERENCE_MODEL]
+        )
         compensated_stats = _binned_medians(
             z,
             compensated,
@@ -558,14 +576,14 @@ def _selection_correction_and_residual_figure(
         _append_binned_rows(
             binned_rows,
             model=model,
-            quantity="delta_dmi_plus_delta_M0_vs_shen",
+            quantity="delta_dmi_plus_delta_M0_vs_wang",
             stats=compensated_stats,
             interval_kind="paired_distribution",
         )
         _append_binned_rows(
             binned_rows,
             model=model,
-            quantity="delta_residual_vs_shen",
+            quantity="delta_residual_vs_wang",
             stats=residual_stats,
             interval_kind="paired_distribution",
         )
@@ -574,16 +592,16 @@ def _selection_correction_and_residual_figure(
     axes[0].legend(ncol=2, frameon=False, loc="upper center")
     axes[1].set_ylabel(
         r"Selection-correction difference, $\Delta d m_i$" "\n"
-        r"(w.r.t. Shen et al.) (mag)"
+        r"(w.r.t. Wang et al. (2026)) (mag)"
     )
     axes[1].set_ylim(top=0.1)
     axes[2].set_ylabel(
         r"$\Delta d m_i + \Delta M^0_{\rm AGN}$" "\n"
-        r"(w.r.t. Shen et al.) (mag)"
+        r"(w.r.t. Wang et al. (2026)) (mag)"
     )
     axes[3].set_ylabel(
         r"Final $\Delta$ Hubble residual" "\n"
-        r"(w.r.t. Shen et al.) (mag)"
+        r"(w.r.t. Wang et al. (2026)) (mag)"
     )
     for axis in axes:
         axis.set_xlim(Z_EDGES[0], Z_EDGES[-1])
@@ -602,35 +620,37 @@ def _selection_correction_and_residual_figure(
 def _write_summary(
     residuals, corrections, m0_agn, ids, output_directory, *, models
 ):
-    reference_residual = residuals["shen"].loc[ids, "residuals"].to_numpy(float)
-    reference_dmi = corrections["shen"].loc[ids].to_numpy(float)
+    reference_residual = residuals[LF_REFERENCE_MODEL].loc[
+        ids, "residuals"
+    ].to_numpy(float)
+    reference_dmi = corrections[LF_REFERENCE_MODEL].loc[ids].to_numpy(float)
     rows = []
     for model in models:
         values = residuals[model].loc[ids, "residuals"].to_numpy(float)
         delta_residual = values - reference_residual
         delta_dmi = corrections[model].loc[ids].to_numpy(float) - reference_dmi
-        delta_m0 = m0_agn[model] - m0_agn["shen"]
+        delta_m0 = m0_agn[model] - m0_agn[LF_REFERENCE_MODEL]
         rows.append(
             {
                 "model": model,
                 "label": DIAGNOSTIC_LABELS[model],
                 "n_paired": len(ids),
                 "residual_rms_mag": np.sqrt(np.mean(values**2)),
-                "delta_residual_rms_vs_shen_mag": np.sqrt(
+                "delta_residual_rms_vs_wang_mag": np.sqrt(
                     np.mean(delta_residual**2)
                 ),
-                "median_abs_delta_residual_vs_shen_mag": np.median(
+                "median_abs_delta_residual_vs_wang_mag": np.median(
                     np.abs(delta_residual)
                 ),
-                "p90_abs_delta_residual_vs_shen_mag": np.quantile(
+                "p90_abs_delta_residual_vs_wang_mag": np.quantile(
                     np.abs(delta_residual), 0.90
                 ),
-                "median_delta_dmi_vs_shen_mag": np.median(delta_dmi),
-                "delta_M0_agn_vs_shen_mag": delta_m0,
-                "median_delta_dmi_plus_delta_M0_mag": (
+                "median_delta_dmi_vs_wang_mag": np.median(delta_dmi),
+                "delta_M0_agn_vs_wang_mag": delta_m0,
+                "median_delta_dmi_plus_delta_M0_vs_wang_mag": (
                     np.median(delta_dmi) + delta_m0
                 ),
-                "centered_delta_dmi_rms_mag": np.sqrt(
+                "centered_delta_dmi_rms_vs_wang_mag": np.sqrt(
                     np.mean((delta_dmi - np.median(delta_dmi)) ** 2)
                 ),
             }
@@ -686,7 +706,9 @@ def generate_lf_comparison_diagnostics(
     readme_path.write_text(
         "Automatically generated paired diagnostics for the luminosity-function "
         f"Hubble sweep. All statistics use the same {len(ids)} fit-selection "
-        "object IDs in every run. In the absolute-value panel, points are the "
+        f"object IDs in every run. Differences use {LF_REFERENCE_LABEL} "
+        f"({LF_REFERENCE_MODEL}) as the reference. In the absolute-value panel, "
+        "points are the "
         "median and error bars are the 16th-84th percentiles of the actual "
         "object-level dmi values within each redshift bin. In delta panels, "
         "error bars are the "

@@ -22,8 +22,9 @@ from qvc.hubble.hubble_utils import (
 
 
 def test_speed_names_are_ordered_and_do_not_accept_legacy_aliases():
-    assert hubble_fit.SPEED_CHOICES == ("fastest", "quick", "standard", "production")
+    assert hubble_fit.SPEED_CHOICES == ("fastest", "quicker", "quick", "standard", "production")
     assert hubble_fit.normalize_speed("fastest") == "fastest"
+    assert hubble_fit.normalize_speed("quicker") == "quicker"
     assert hubble_fit.normalize_speed("quick") == "quick"
     assert hubble_fit.normalize_speed("standard") == "standard"
     assert hubble_fit.normalize_speed("production") == "production"
@@ -163,6 +164,18 @@ def _agn_pivot_checkpoint_payload_for_ids(object_ids, z_range=(0.44, 3.16)):
     }
 
 
+def _prior_checkpoint_payload(priors=None):
+    if priors is None:
+        priors = hubble_fit.get_model_params(
+            "FlatLambdaCDM", prior_profile="centered_lcdm"
+        )[0]
+    return {
+        "prior_profile": "centered_lcdm",
+        "prior_bounds_json": hubble_fit.canonical_prior_bounds_json(priors),
+        "early_de_guard": False,
+    }
+
+
 def _minimal_pantheon_df():
     return pd.DataFrame(
         {
@@ -182,7 +195,7 @@ def test_run_mcmc_pipeline_default_resume_uses_result_dir(monkeypatch, tmp_path)
     pivot_payload = hubble_fit._agn_pivot_checkpoint_payload(agn_pivot_context)
     df_pantheon = _minimal_pantheon_df()
     result_root = tmp_path / "result_root"
-    expected = result_root / "hubble_posteriors" / "unit" / "posteriors_FlatLambdaCDM_joint_fastest_all_z0p44_3p16_disable_completeness.h5"
+    expected = result_root / "hubble_posteriors" / "unit" / "FlatLambdaCDM_joint.h5"
     captured = {}
 
     monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: result_root)
@@ -201,6 +214,7 @@ def test_run_mcmc_pipeline_default_resume_uses_result_dir(monkeypatch, tmp_path)
             "integrals_max_w": np.ones(len(df_agn)),
             "logZ": -1.0,
             "logZerr": 0.2,
+            **_prior_checkpoint_payload({"H0": (60.0, 80.0)}),
             **pivot_payload,
             "sigma_clip_pass_stage": "single",
             "object_id_fit_selection": np.asarray(
@@ -278,6 +292,7 @@ def test_run_mcmc_pipeline_explicit_resume_path_bypasses_default(monkeypatch, tm
             "integrals_max_w": np.ones(len(df_agn)),
             "logZ": -2.0,
             "logZerr": 0.3,
+            **_prior_checkpoint_payload({"H0": (60.0, 80.0)}),
             **pivot_payload,
             "sigma_clip_pass_stage": "single",
             "object_id_fit_selection": np.asarray(
@@ -308,7 +323,12 @@ def test_run_mcmc_pipeline_explicit_resume_path_bypasses_default(monkeypatch, tm
     assert captured["path"] == str(explicit)
 
 
-def test_run_mcmc_pipeline_new_checkpoint_writes_fit_object_ids(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "minimal_plots, compare_sigma_only", [(False, False), (True, False), (False, True)]
+)
+def test_run_mcmc_pipeline_new_checkpoint_writes_fit_object_ids(
+    monkeypatch, tmp_path, minimal_plots, compare_sigma_only
+):
     df_agn = _minimal_agn_df()
     agn_pivot_context = _agn_pivot_context(df_agn)
     df_pantheon = _minimal_pantheon_df()
@@ -352,7 +372,8 @@ def test_run_mcmc_pipeline_new_checkpoint_writes_fit_object_ids(monkeypatch, tmp
     monkeypatch.setattr(hubble_fit, "get_model_params", lambda *args, **kwargs: ({"H0": (60.0, 80.0)}, ["H0"], ["H0"]))
     monkeypatch.setattr(hubble_fit, "get_agn_model_spec", lambda *args, **kwargs: ((), (), ()))
     monkeypatch.setattr(hubble_fit, "make_dm_function", lambda *args, **kwargs: "interp")
-    monkeypatch.setattr(hubble_fit, "plot_dynesty", lambda *args, **kwargs: None)
+    corner_calls = []
+    monkeypatch.setattr(hubble_fit, "plot_dynesty", lambda *args, **kwargs: corner_calls.append(args))
     monkeypatch.setattr(hubble_fit, "plot_completeness_diagnostics", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "evaluate_log_f", lambda *args, **kwargs: np.zeros(1, dtype=float))
     monkeypatch.setattr(hubble_fit.dyfunc, "resample_equal", lambda idx, weights: idx)
@@ -371,8 +392,14 @@ def test_run_mcmc_pipeline_new_checkpoint_writes_fit_object_ids(monkeypatch, tmp
         use_full_cov=False,
         speed="fastest",
         prefix="unit",
+        minimal_plots=minimal_plots,
+        compare_sigma_only=compare_sigma_only,
     )
 
+    assert len(corner_calls) == (0 if compare_sigma_only else 1)
+    assert captured["run_tag"] == hubble_fit.make_run_tag(
+        "FlatLambdaCDM", False, "fastest", None, (.44, 3.16), completeness=False
+    )
     np.testing.assert_array_equal(captured["object_id_fit_selection"], df_agn["object_id"].astype(str).to_numpy())
     assert set(hubble_fit.AGN_PIVOT_CHECKPOINT_KEYS).issubset(captured)
     restored_context = hubble_fit._load_agn_pivot_context_from_checkpoint(
@@ -395,6 +422,7 @@ def test_resume_replot_with_cuts_remaps_per_object_arrays_by_object_id(tmp_path)
         integrals_max_w=np.array([100.0, 200.0, 300.0]),
         logZ=-1.0,
         logZerr=0.1,
+        **_prior_checkpoint_payload(),
         **_agn_pivot_checkpoint_payload_for_ids(["agn_a", "agn_b", "agn_c"]),
     )
     current = pd.DataFrame({"object_id": ["agn_c", "agn_a"]})
@@ -424,6 +452,7 @@ def test_resume_replot_with_cuts_rejects_missing_current_object_id(tmp_path):
         integrals_max_w=np.array([100.0, 200.0]),
         logZ=-1.0,
         logZerr=0.1,
+        **_prior_checkpoint_payload(),
         **_agn_pivot_checkpoint_payload_for_ids(["agn_a", "agn_b"]),
     )
     current = pd.DataFrame({"object_id": ["agn_a", "agn_missing"]})
@@ -447,6 +476,7 @@ def test_resume_replot_with_cuts_rejects_legacy_checkpoint_without_object_ids(tm
         integrals_max_w=np.array([100.0, 200.0]),
         logZ=-1.0,
         logZerr=0.1,
+        **_prior_checkpoint_payload(),
         **_agn_pivot_checkpoint_payload_for_ids(["agn_a", "agn_b"]),
     )
     current = pd.DataFrame({"object_id": ["agn_a"]})
@@ -523,7 +553,11 @@ def test_run_all_saves_cosmo_results_under_result_dir(monkeypatch, tmp_path):
         prefix="unit",
     )
 
-    expected = result_root / "cosmo" / "unit" / "cosmo_results_all_z0p44_3p16.hdf5"
+    expected = result_root / "cosmo" / "unit" / (
+        "cosmo_results_model_compare_joint_fastest_all_z0p44_3p16_"
+        "2d_compmag-dereddened_prior-centered_lcdm_lf-shen_"
+        "attsel-fixed-offset_compgrid80x45.hdf5"
+    )
     assert captured["filename"] == str(expected)
     assert expected.parent.is_dir()
 
@@ -652,3 +686,69 @@ def test_run_all_minimal_plots_keeps_joint_and_sna_fits_and_skips_corners(monkey
     ]
     assert len(compare_calls) == 2
     assert corner_calls == []
+
+
+@pytest.mark.parametrize("only_sna,only_agn,mode", [(False, False, "joint"), (True, False, "sna"), (False, True, "agn")])
+def test_model_plot_path_has_only_model_and_fit_mode(only_sna, only_agn, mode):
+    assert hubble_fit.model_plot_path("campaign", "Flatw0waCDM", only_sna=only_sna, only_agn=only_agn) == f"plots/hubble/campaign/Flatw0waCDM_{mode}"
+
+
+def test_model_plot_routing_does_not_use_scientific_run_tag():
+    for filename in ("hubble_fit.py", "hubble_fit_jax.py"):
+        text = (SRC / "qvc" / "hubble" / filename).read_text()
+        assert 'plot_path = f"plots/hubble/{prefix}/{run_tag}"' not in text
+        assert 'plot_path = model_plot_path(prefix, cosmo_model, only_sna=only_sna, only_agn=only_agn)' in text
+
+
+def test_quicker_dynesty_preset_and_warm_start():
+    assert hubble_fit.get_dynesty_speed_settings("quicker", 8) == {
+        "dlogz_init": 0.01, "nlive_init": 50, "nlive_batch": 25, "n_effective": 500,
+    }
+    assert hubble_fit.get_dynesty_speed_settings("quicker", 8, warm_start=True) == {
+        "dlogz_init": 0.01, "nlive_init": 17, "nlive_batch": 5, "n_effective": 50,
+    }
+
+
+def test_quicker_numpyro_preset_uses_existing_quick_settings():
+    from qvc.hubble.hubble_fit_jax import _nested_speed_preset
+    assert _nested_speed_preset("quicker", 8) == _nested_speed_preset("quick", 8)
+
+
+@pytest.mark.parametrize("only_sna,only_agn,mode", [(False, False, "joint"), (True, False, "sna"), (False, True, "agn")])
+def test_short_checkpoint_names_and_stage_metadata(monkeypatch, tmp_path, only_sna, only_agn, mode):
+    monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: tmp_path)
+    paths = hubble_fit._build_checkpoint_paths("campaign", "Flatw0waCDM", only_sna=only_sna, only_agn=only_agn)
+    name = f"Flatw0waCDM_{mode}"
+    folder = tmp_path / "hubble_posteriors" / "campaign"
+    assert paths == {stage: str(folder / f"{name}{suffix}.h5") for stage, suffix in
+                     (("single", ""), ("pass1", "_pass1"), ("pass2", "_pass2"))}
+    tag = hubble_fit.make_run_tag("Flatw0waCDM", only_sna, "quicker", None, (.44, 3.16), only_agn=only_agn)
+    hubble_fit.save_chains(paths["single"], run_tag=tag, flat_samples=np.ones((2, 3)))
+    assert hubble_fit.resolve_resume_checkpoint_path(True, paths["single"]) == paths["single"]
+    for stage in ("pass1", "pass2"):
+        hubble_fit._write_stage_checkpoint(paths[stage], source_checkpoint_file=paths["single"], sigma_clip_pass_stage=stage)
+        saved = hubble_fit.load_chains(paths[stage])
+        assert saved["run_tag"] == tag
+        assert saved["sigma_clip_pass_stage"] == stage
+    assert hubble_fit._resolve_two_pass_resume_checkpoint(True, "both", paths) == paths["pass2"]
+    assert hubble_fit._resolve_two_pass_resume_checkpoint(True, "pass1", paths) == paths["pass1"]
+    legacy = folder / f"posteriors_{tag}.h5"
+    hubble_fit.save_chains(legacy, run_tag=tag)
+    assert hubble_fit.resolve_resume_checkpoint_path(str(legacy), paths["single"]) == str(legacy)
+
+
+@pytest.mark.parametrize("only_sna,only_agn,mode", [(False, False, "joint"), (True, False, "sna"), (False, True, "agn")])
+def test_jax_checkpoint_filename_and_run_tag_metadata(tmp_path, only_sna, only_agn, mode):
+    """Exercise the JAX output expressions without launching its sampler."""
+    import ast
+    tree = ast.parse((SRC / "qvc/hubble/hubble_fit_jax.py").read_text())
+    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "run_single_jax")
+    names = {"output_name", "checkpoint_file", "checkpoint_payload"}
+    assignments = [node for node in function.body if isinstance(node, ast.Assign)
+                   and any(isinstance(target, ast.Name) and target.id in names for target in node.targets)]
+    payload = next(node.value for node in assignments if node.targets[0].id == "checkpoint_payload")
+    assert next(kw.value.id for kw in payload.keywords if kw.arg == "run_tag") == "run_tag"
+    namespace = dict(checkpoint_folder=tmp_path, cosmo_model="Flatw0waCDM", only_sna=only_sna,
+                     only_agn=only_agn, model_output_name=hubble_fit.model_output_name)
+    exec(compile(ast.Module(body=assignments[:2], type_ignores=[]), "<JAX output paths>", "exec"), namespace)
+    assert namespace["checkpoint_file"] == str(tmp_path / f"Flatw0waCDM_{mode}_jax.h5")

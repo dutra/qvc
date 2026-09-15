@@ -41,11 +41,12 @@ def test_models_and_labels_follow_the_canonical_supported_order():
         "kulkarni2019_type1_model2",
         "kulkarni2019_type1_model3",
     )
+    assert lf_comparison_diagnostics.LF_REFERENCE_MODEL == (
+        "wang2026_type1_lade_a"
+    )
     assert comparison.LF_RUN_IDS == (
-        "shen",
-        "shen_type1_intrinsic",
-        "shen_type1_attenuated",
         "wang2026_type1_lade_a",
+        "shen",
         "palanque2016_ple_lede",
         "kulkarni2019_type1_model1",
         "kulkarni2019_type1_model2",
@@ -116,7 +117,7 @@ def test_sweep_stops_on_the_first_failed_run(monkeypatch):
         raise subprocess.CalledProcessError(7, command)
 
     monkeypatch.setattr(comparison.subprocess, "run", fail_run)
-    with pytest.raises(RuntimeError, match="failed.*shen.*exit code 7"):
+    with pytest.raises(RuntimeError, match="failed.*wang.*exit code 7"):
         comparison.run_luminosity_function_sweep(
             "comparison", xonsh_path="xonsh", base_environment={}
         )
@@ -142,7 +143,7 @@ def test_diagram_discovery_requires_exactly_one_match(monkeypatch, tmp_path, cou
         comparison.find_debiased_hubble_diagram("model-prefix")
 
 
-def test_assembly_creates_one_page_with_all_eight_labels(tmp_path):
+def test_assembly_creates_one_page_with_all_six_labels(tmp_path):
     diagrams = []
     for index, model in enumerate(comparison.LF_RUN_IDS):
         source = tmp_path / f"source-{index}.pdf"
@@ -164,8 +165,8 @@ def test_assembly_creates_one_page_with_all_eight_labels(tmp_path):
         / float(source_page.cropbox.width)
     )
     expected_page_height = (
-        4 * (expected_source_height + comparison.COMPARISON_LABEL_HEIGHT_PT)
-        + 3 * comparison.COMPARISON_ROW_GAP_PT
+        3 * (expected_source_height + comparison.COMPARISON_LABEL_HEIGHT_PT)
+        + 2 * comparison.COMPARISON_ROW_GAP_PT
     )
     assert float(page.mediabox.width) == pytest.approx(
         2 * comparison.COMPARISON_PANEL_WIDTH_PT
@@ -285,7 +286,7 @@ def test_parameter_summaries_use_named_columns_and_canonical_model_order(tmp_pat
 
     expected_pairs = [
         (model, parameter)
-        for model in COMPLETENESS_LF_MODELS
+        for model in lf_comparison_diagnostics.DEFAULT_LF_COMPARISON_MODELS
         for parameter in lf_comparison_diagnostics.PARAMETER_COMPARISON_NAMES
     ]
     assert list(zip(summaries["model"], summaries["parameter"])) == expected_pairs
@@ -307,11 +308,19 @@ def test_parameter_summaries_use_named_columns_and_canonical_model_order(tmp_pat
             ) == pytest.approx(expected)
 
 
-def test_parameter_comparison_writes_single_page_pdf_and_png(tmp_path):
-    _write_parameter_posteriors(
+def test_parameter_comparison_writes_single_page_pdf_and_png(tmp_path, monkeypatch):
+    parameter_names = _write_parameter_posteriors(
         tmp_path, "comparison", models=comparison.LF_RUN_IDS
     )
     output_directory = tmp_path / "plots" / "hubble" / "comparison"
+    reference_lines = []
+    original_axhline = plt.Axes.axhline
+
+    def capture_axhline(axis, y, *args, **kwargs):
+        reference_lines.append(y)
+        return original_axhline(axis, y, *args, **kwargs)
+
+    monkeypatch.setattr(plt.Axes, "axhline", capture_axhline)
 
     outputs = comparison.generate_lf_parameter_comparison(
         "comparison",
@@ -326,6 +335,12 @@ def test_parameter_comparison_writes_single_page_pdf_and_png(tmp_path):
     )
     assert len(PdfReader(outputs["parameter_pdf"]).pages) == 1
     assert outputs["parameter_png"].read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+    assert reference_lines == pytest.approx(
+        [
+            10.0 * parameter_names.index(parameter) + 2.0
+            for parameter in lf_comparison_diagnostics.PARAMETER_COMPARISON_NAMES
+        ]
+    )
 
 
 def test_parameter_summaries_require_exactly_one_posterior(tmp_path):
@@ -391,16 +406,29 @@ def test_diagnostics_generate_paired_figures_and_tables(tmp_path):
     summary = pd.read_csv(outputs["summary_csv"])
     assert summary["model"].tolist() == list(comparison.LF_RUN_IDS)
     assert set(summary["n_paired"]) == {18}
-    assert np.allclose(summary["median_delta_dmi_plus_delta_M0_mag"], 0.0)
+    assert np.allclose(
+        summary["median_delta_dmi_plus_delta_M0_vs_wang_mag"], 0.0
+    )
+    reference_row = summary.loc[
+        summary["model"].eq(lf_comparison_diagnostics.LF_REFERENCE_MODEL)
+    ].iloc[0]
+    assert reference_row["delta_residual_rms_vs_wang_mag"] == pytest.approx(0.0)
+    assert reference_row["median_delta_dmi_vs_wang_mag"] == pytest.approx(0.0)
+    assert reference_row["delta_M0_agn_vs_wang_mag"] == pytest.approx(0.0)
+    shen_row = summary.loc[summary["model"].eq("shen")].iloc[0]
+    assert shen_row["median_delta_dmi_vs_wang_mag"] < 0.0
+    assert shen_row["delta_M0_agn_vs_wang_mag"] > 0.0
+    assert not any("vs_shen" in column for column in summary.columns)
     binned = pd.read_csv(outputs["binned_csv"])
     delta_rows = binned["quantity"].isin(
         [
-            "delta_residual_vs_shen",
-            "delta_dmi_vs_shen",
-            "delta_dmi_plus_delta_M0_vs_shen",
+            "delta_residual_vs_wang",
+            "delta_dmi_vs_wang",
+            "delta_dmi_plus_delta_M0_vs_wang",
         ]
     )
     assert set(binned.loc[delta_rows, "interval_kind"]) == {"paired_distribution"}
+    assert not binned["quantity"].str.contains("vs_shen").any()
     absolute_rows = binned["quantity"].eq("dmi")
     assert set(binned.loc[absolute_rows, "interval_kind"]) == {
         "object_distribution"
@@ -415,9 +443,50 @@ def test_diagnostics_generate_paired_figures_and_tables(tmp_path):
     )
     readme = outputs["readme"].read_text()
     assert "same 18 fit-selection object IDs" in readme
+    assert "Wang et al. (2026)" in readme
     assert "actual object-level dmi values" in readme
     assert "actual paired object differences" in readme
     assert "style.mplstyle" in readme
+
+
+def test_diagnostics_use_wang_ids_as_the_matched_reference(tmp_path):
+    diagrams = _write_diagnostic_inputs(
+        tmp_path, "comparison", models=comparison.LF_RUN_IDS
+    )
+    wang_diagram = dict(diagrams)[lf_comparison_diagnostics.LF_REFERENCE_MODEL]
+    wang_residual_path = wang_diagram.with_name("hubble_plot_residuals.csv")
+    pd.read_csv(wang_residual_path).iloc[:-1].to_csv(
+        wang_residual_path, index=False
+    )
+    wang_posterior_path = (
+        tmp_path
+        / "results"
+        / "hubble_posteriors"
+        / "comparison_wang2026_type1_lade_a"
+        / "posterior.h5"
+    )
+    with h5py.File(wang_posterior_path, "a") as handle:
+        ids = handle["object_id_fit_selection"][:-1]
+        dmi = handle["dmi_posterior_median"][:-1]
+        del handle["object_id_fit_selection"]
+        del handle["dmi_posterior_median"]
+        handle.create_dataset(
+            "object_id_fit_selection",
+            data=ids.astype(h5py.string_dtype("utf-8")),
+        )
+        handle.create_dataset("dmi_posterior_median", data=dmi)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"versus 17 for Wang et al\. \(2026\)",
+    ):
+        lf_comparison_diagnostics.generate_lf_comparison_diagnostics(
+            "comparison",
+            diagrams,
+            tmp_path / "outputs",
+            repo_root=tmp_path,
+            bootstrap_draws=20,
+        )
 
 
 def test_main_generates_diagnostics_after_comparison_pdf(monkeypatch, tmp_path):

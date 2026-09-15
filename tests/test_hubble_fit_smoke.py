@@ -28,6 +28,18 @@ from qvc.hubble import (
 )
 
 
+def _current_prior_checkpoint_metadata(cosmo_model="FlatLambdaCDM", priors=None):
+    if priors is None:
+        priors, _, _ = hubble_model.get_model_params(
+            cosmo_model, prior_profile="centered_lcdm"
+        )
+    return {
+        "prior_profile": "centered_lcdm",
+        "prior_bounds_json": hubble_fit.canonical_prior_bounds_json(priors),
+        "early_de_guard": False,
+    }
+
+
 @pytest.fixture(autouse=True)
 def _disable_expensive_redshift_wiggle_atlas(monkeypatch):
     monkeypatch.setattr(
@@ -245,7 +257,7 @@ def test_unrounded_pivot_rule_changes_run_tag_only_when_requested():
     assert "_pivots-median" in unrounded_tag
 
 
-def test_centered_lcdm_prior_profile_changes_run_tag_only_when_requested():
+def test_centered_lcdm_default_preserves_distinct_legacy_run_tag():
     common = ("Flatw0waCDM", False, "fastest", None, (0.44, 3.16))
 
     default_tag = hubble_fit.make_run_tag(*common)
@@ -256,8 +268,8 @@ def test_centered_lcdm_prior_profile_changes_run_tag_only_when_requested():
         *common, prior_profile="centered_lcdm"
     )
 
-    assert default_tag == explicit_default_tag
-    assert "_prior-" not in default_tag
+    assert default_tag == centered_tag
+    assert "_prior-" not in explicit_default_tag
     assert "_prior-centered_lcdm" in centered_tag
 
 
@@ -268,7 +280,7 @@ def test_centered_lcdm_prior_profile_changes_run_tag_only_when_requested():
         ("FlatwCDM", {"w0": (-3.0, 1.0)}),
         (
             "Flatw0waCDM",
-            {"w0": (-3.0, 1.0), "wa": (-10.0, 10.0)},
+            {"w0": (-3.0, 1.0), "wa": (-30.0, 30.0)},
         ),
         ("FlatwpwaCDM", {"wp": (-10.0, 1.0), "wa": (-50, 500)}),
     ],
@@ -279,6 +291,7 @@ def test_centered_lcdm_prior_profile_bounds(cosmo_model, expected_dark_energy):
         cosmo_model, prior_profile="centered_lcdm"
     )
 
+    assert default_priors == centered_priors
     assert default_priors["M0_agn"] == (-26.0, -18.0)
     assert centered_priors["M0_agn"] == (-26.0, -18.0)
     for parameter, bounds in expected_dark_energy.items():
@@ -308,6 +321,14 @@ def test_checkpoint_prior_metadata_allows_legacy_default_and_checks_centered(tmp
         "prior_bounds_json": bounds_json,
         "early_de_guard": True,
     }
+    old_priors = dict(priors, wa=(-10.0, 10.0))
+    with pytest.raises(RuntimeError, match="incompatible resolved prior bounds"):
+        hubble_fit._validate_checkpoint_prior_metadata(
+            dict(metadata, prior_bounds_json=hubble_fit.canonical_prior_bounds_json(old_priors)),
+            "old_centered.h5",
+            expected_prior_bounds_json=bounds_json,
+            expected_early_de_guard=True,
+        )
     checkpoint_path = tmp_path / "centered.h5"
     hubble_fit.save_chains(checkpoint_path, **metadata)
     metadata = hubble_fit.load_chains(checkpoint_path)
@@ -570,7 +591,7 @@ def test_alpha_ox_cosmology_uses_equal_weight_posterior_medians(monkeypatch):
     assert out.loc[0, "alphaOX"] == pytest.approx(1.23)
 
 
-def test_log_f_prior_uses_wider_symmetric_range():
+def test_log_f_prior_uses_tight_symmetric_range():
     priors, _, _ = hubble_model.get_model_params("FlatLambdaCDM")
     expected_center = np.log(hubble_model.AGN_INTRINSIC_SCATTER_MAG_CENTER)
 
@@ -580,7 +601,7 @@ def test_log_f_prior_uses_wider_symmetric_range():
             expected_center + hubble_model.AGN_LOG_F_PRIOR_HALF_WIDTH,
         )
     )
-    assert hubble_model.AGN_LOG_F_PRIOR_HALF_WIDTH == pytest.approx(1.6)
+    assert hubble_model.AGN_LOG_F_PRIOR_HALF_WIDTH == pytest.approx(0.8)
 
 
 @pytest.mark.parametrize(
@@ -1491,16 +1512,16 @@ def test_strict_padded_support_is_recorded_in_checkpoint_selection_metadata():
 
     hubble_fit.record_completeness_support_metadata(
         (frame,),
-        magnitude_support=(18.5, 24.0),
+        magnitude_support=(17.0, 24.0),
         redshift_support=(0.2, 3.5),
     )
 
     configuration = json.loads(frame.attrs["cut_configuration_json"])
-    assert configuration["completeness_magnitude_support"] == [18.5, 24.0]
+    assert configuration["completeness_magnitude_support"] == [17.0, 24.0]
     assert configuration["completeness_redshift_support"] == [0.2, 3.5]
-    assert configuration["completeness_map_magnitude_support"] == [18.0, 24.5]
+    assert configuration["completeness_map_magnitude_support"] == [16.5, 24.5]
     assert configuration["completeness_map_redshift_support"] == [0.0, 4.5]
-    assert configuration["completeness_map_n_magnitude_bins"] == 65
+    assert configuration["completeness_map_n_magnitude_bins"] == 80
     assert configuration["completeness_map_n_redshift_bins"] == 45
     assert configuration["completeness_interpolation_policy"] == "strict-padded-v1"
 
@@ -1519,15 +1540,20 @@ def test_strict_padded_resume_rejects_checkpoint_without_map_metadata():
         )
 
 
+@pytest.mark.parametrize("n_samples", [4, 1000])
 def test_compute_direct_full_sample_completeness_summaries_optionally_returns_selected_draws(
     fake_data,
     monkeypatch,
+    n_samples,
 ):
     df_agn, df_pantheon = fake_data
     df_fit = df_agn.iloc[:2].copy()
     df_plot = df_agn.iloc[:3].copy()
-    flat_samples = np.array([[10.0], [20.0], [30.0], [40.0]])
-    draw_indices = np.array([0, 2], dtype=int)
+    flat_samples = (10.0 * np.arange(1, n_samples + 1))[:, None]
+    draw_indices = (
+        np.array([0, 2], dtype=int) if n_samples == 4
+        else np.linspace(0, n_samples - 1, 256, dtype=int)[::-1]
+    )
     observed_prior_profiles = []
 
     def fake_log_likelihood(theta, *, agn_data, **kwargs):
@@ -1586,10 +1612,13 @@ def test_compute_direct_full_sample_completeness_summaries_optionally_returns_se
         0.1 * flat_samples[:, 0, None]
         + np.arange(len(df_plot), dtype=float)[None, :]
     )
-    np.testing.assert_allclose(dmi_median, np.median(all_draws, axis=0))
+    summary_indices = np.linspace(0, n_samples - 1, min(n_samples, 500), dtype=int)
+    np.testing.assert_allclose(legacy_result[0], np.median(all_draws[summary_indices], axis=0))
+    assert len(observed_prior_profiles) == len(summary_indices) + len(draw_indices)
+    np.testing.assert_allclose(dmi_median, np.median(all_draws[draw_indices], axis=0))
     np.testing.assert_allclose(
         sigma_sel_median,
-        np.median(all_sigma_sel_draws, axis=0),
+        np.median(all_sigma_sel_draws[draw_indices], axis=0),
     )
     assert isinstance(
         selected_draws,
@@ -1610,15 +1639,63 @@ def test_compute_direct_full_sample_completeness_summaries_optionally_returns_se
     assert set(observed_prior_profiles) == {"centered_lcdm"}
 
 
-def test_get_hubble_posterior_sample_indices_preserves_plot_stride():
+def test_get_hubble_posterior_sample_indices_caps_at_500_evenly_spaced_draws():
     np.testing.assert_array_equal(
         hubble_plotting.get_hubble_posterior_sample_indices(99),
         np.arange(99, dtype=int),
     )
     np.testing.assert_array_equal(
         hubble_plotting.get_hubble_posterior_sample_indices(205),
-        np.arange(0, 205, 2, dtype=int),
+        np.arange(205, dtype=int),
     )
+    selected = hubble_plotting.get_hubble_posterior_sample_indices(1001)
+    assert hubble_plotting.HUBBLE_PLOT_MAX_DRAWS == 500
+    assert hubble_fit.COMPLETENESS_REPLAY_MAX_DRAWS == 500
+    assert len(selected) == 500
+    assert selected[0] == 0
+    assert selected[-1] == 1000
+
+
+def test_plot_hubble_thins_comparison_model_samples(monkeypatch, tmp_path):
+    df_agn = _make_fake_agn_sample(n_agn=2)
+    df_pantheon = _make_fake_pantheon_sample(n_sne=3)
+    priors, model_labels, _ = hubble_model.get_model_params(
+        "FlatLambdaCDM",
+        only_sna=False,
+    )
+    theta = np.array(
+        [(priors[name][0] + priors[name][1]) / 2.0 for name in model_labels],
+        dtype=float,
+    )
+    active_samples = np.tile(theta[None, :], (2, 1))
+    comparison_samples = np.tile(theta[None, :], (1001, 1))
+    observed = []
+    original = hubble_plotting.get_hubble_posterior_sample_indices
+
+    def record_indices(n_samples, target_samples=500):
+        observed.append((n_samples, target_samples))
+        return original(n_samples, target_samples)
+
+    monkeypatch.setattr(
+        hubble_plotting,
+        "get_hubble_posterior_sample_indices",
+        record_indices,
+    )
+    monkeypatch.setattr(hubble_plotting, "_save_figure", lambda *args, **kwargs: None)
+
+    hubble_plotting.plot_hubble(
+        active_samples,
+        df_agn,
+        df_pantheon,
+        cosmo_model="FlatLambdaCDM",
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        plot_path=str(tmp_path),
+        cosmo_model_samples={"FlatLambdaCDM": comparison_samples},
+        posterior_sample_indices=np.arange(2, dtype=int),
+        agn_pivot_context=_agn_pivot_context(df_agn),
+    )
+
+    assert observed == [(1001, 500)]
 
 
 def test_run_single_skip_plots_smoke(fake_data, monkeypatch, tmp_path):
@@ -1976,7 +2053,8 @@ def test_run_single_threads_direct_full_sample_debias_arrays_to_plots(monkeypatc
     np.testing.assert_allclose(blr_calls[0]["dmi_values"], direct_dmi)
 
 
-def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
+@pytest.mark.parametrize("requested_completeness", [False, True])
+def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path, requested_completeness):
     df_agn, df_pantheon = fake_data
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=True)
     theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
@@ -1991,8 +2069,17 @@ def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
     monkeypatch.setattr(hubble_fit, "report_pivots", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "display_results_summary", lambda *args, **kwargs: None)
     monkeypatch.setattr(hubble_fit, "compute_age_universe_with_error", lambda *args, **kwargs: (13.7, 0.2))
+    def forbidden(*args, **kwargs):
+        pytest.fail("SNe-only fit entered AGN completeness")
+    for name in ("prepare_completeness_magnitude_columns", "_build_completeness_params",
+                 "generate_fresh_completeness_sim_file", "validate_completeness_mode",
+                 "validate_selection_attenuation_configuration"):
+        monkeypatch.setattr(hubble_fit, name, forbidden)
     def fake_sna_pipeline(*args, **kwargs):
         assert kwargs["agn_pivot_context"] is None
+        assert kwargs["completeness"] is False
+        assert kwargs["bright_subsample_cut"] is None
+        assert kwargs["plot_completeness"] is False
         return (
             flat_samples,
             model_labels,
@@ -2015,7 +2102,13 @@ def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
         _sna_Lower=True,
         _sna_LogdetCov=None,
         cosmo_model="FlatLambdaCDM",
-        completeness=False,
+        completeness=requested_completeness,
+        completeness_lf_model="wang2026_type1_lade_a",
+        completeness_magnitude="attenuated",
+        selection_attenuation_mode="joint-posterior",
+        plot_completeness=True,
+        bright_subsample_cut=object(),
+        bright_subsample_plot_data=SimpleNamespace(write=forbidden),
         use_full_cov=False,
         only_sna=True,
         speed="fastest",
@@ -2033,6 +2126,7 @@ def test_run_single_only_sna_smoke(fake_data, monkeypatch, tmp_path):
     assert residuals is None
     assert age == 13.7
     assert age_err == 0.2
+    assert not list(tmp_path.rglob("completeness"))
 
 
 def test_run_single_only_agn_keeps_agn_hubble_plots(fake_data, monkeypatch, tmp_path):
@@ -2491,7 +2585,7 @@ def test_plot_hubble_keeps_selected_dmi_draws_aligned_through_thinning(
         ],
         dtype=float,
     )
-    n_samples = 205
+    n_samples = 1001
     flat_samples = np.tile(theta[None, :], (n_samples, 1))
     flat_samples[:, model_labels.index("M0_agn")] = np.linspace(
         -23.0,
@@ -2517,9 +2611,7 @@ def test_plot_hubble_keeps_selected_dmi_draws_aligned_through_thinning(
         )
     )
     draw_positions = np.arange(len(sample_indices), dtype=int)
-    target_residual_draws = (
-        ((draw_positions * 37) % 101 - 50) / 10.0
-    )[:, None]
+    target_residual_draws = draw_positions.astype(float)[:, None]
     apparent_magnitude = df_agn[
         "apparent_mag_2500"
     ].to_numpy(dtype=float)
@@ -2919,16 +3011,18 @@ def test_plot_hubble_residual_chi2_annotation_uses_debiased_full_and_data_errors
     theta = np.array([(priors[key][0] + priors[key][1]) / 2.0 for key in model_labels], dtype=float)
     flat_samples = np.tile(theta[None, :], (6, 1))
 
+    fit_quality_summary = {}
     text_calls = []
     original_text = Axes.text
 
     def capture_text(self, x, y, s, *args, **kwargs):
-        if r"\chi^2" in str(s):
+        if kwargs.get("gid") == "hubble-fit-statistic-line":
             text_calls.append(
                 {
                     "x": x,
                     "y": y,
                     "text": str(s),
+                    "bbox": kwargs.get("bbox"),
                     "ha": kwargs.get("ha"),
                     "va": kwargs.get("va"),
                 }
@@ -2963,6 +3057,7 @@ def test_plot_hubble_residual_chi2_annotation_uses_debiased_full_and_data_errors
         z_range=z_range,
         only_agn=only_agn,
         residuals_csv_filename=None,
+        fit_quality_summary=fit_quality_summary,
         agn_pivot_context=pivot_context,
     )
 
@@ -3007,10 +3102,13 @@ def test_plot_hubble_residual_chi2_annotation_uses_debiased_full_and_data_errors
     assert full_meta["n_params"] == data_meta["n_params"] == n_agn_params
 
     annotation = next(call for call in text_calls if "Debiased" in call["text"])
-    annotation_text = annotation["text"]
-    assert "full / data only" in annotation_text
+    annotation_text = "\n".join(call["text"] for call in text_calls)
+    assert len(text_calls) == 4
+    assert all(call["bbox"]["facecolor"] == "white" and call["bbox"]["alpha"] == 0.6 for call in text_calls)
+    assert "full / data only / selected" in annotation_text
+    assert "Median" in annotation_text
+    assert "Residual RMS:" in annotation_text
     assert r"0.44\leq z\leq3.16" in annotation_text
-    assert r"1.00<z\leq3.16" in annotation_text
     assert "Selection-weighted" in annotation_text
     assert r"\gamma_z=" in annotation_text
     assert r"\Delta\chi^2=" in annotation_text
@@ -3018,15 +3116,22 @@ def test_plot_hubble_residual_chi2_annotation_uses_debiased_full_and_data_errors
         f"{expected_full:.2f} / {expected_data:.2f}"
         in annotation_text
     )
-    assert (
-        f"{expected_high_full:.2f} / {expected_high_data:.2f}"
-        in annotation_text
-    )
-    assert "\n" in annotation["text"]
+    assert all("\n" not in call["text"] for call in text_calls)
     assert annotation["x"] == 0.02
-    assert annotation["y"] == 0.08
+    assert annotation["y"] == 0.05
     assert annotation["ha"] == "left"
     assert annotation["va"] == "bottom"
+
+    assert fit_quality_summary["n_fit"] == 15
+    assert fit_quality_summary["chi2_full"] == pytest.approx(expected_full)
+    assert fit_quality_summary["chi2_data_only"] == pytest.approx(expected_data)
+    expected_selected, _ = hubble_utils.reduced_chi_squared(
+        residuals[common_mask], sigma_sel[common_mask], n_params=n_agn_params)
+    assert fit_quality_summary["chi2_selected"] == pytest.approx(expected_selected)
+    assert fit_quality_summary["residual_rms"] == pytest.approx(np.sqrt(np.mean(residuals[common_mask] ** 2)))
+    trend = fit_quality_summary["redshift_trend"]
+    assert f"{trend['slope_mag_per_dex']:+.2f}" in annotation_text
+    assert f"{trend['slope_err_mag_per_dex']:.2f}" in annotation_text
 
 
 def test_plot_hubble_has_no_likelihood_space_chi2_override_arguments():
@@ -3224,6 +3329,7 @@ def test_run_single_only_agn_two_pass_passes_only_agn_to_pass1_clipped_plot(monk
 
 
 def test_run_single_calls_agn_table_only_for_joint_flatw0wa(monkeypatch, tmp_path):
+    monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: tmp_path / "results")
     df_agn = _make_fake_agn_sample()
     df_pantheon = _make_fake_pantheon_sample()
     priors, model_labels, _ = hubble_model.get_model_params("Flatw0waCDM", only_sna=False)
@@ -3231,6 +3337,8 @@ def test_run_single_calls_agn_table_only_for_joint_flatw0wa(monkeypatch, tmp_pat
     flat_samples = np.tile(theta[None, :], (8, 1))
     dmi_posterior_median = np.zeros(len(df_agn))
     dmi_posterior_sigma = np.full(len(df_agn), 0.05)
+    expected_mu = 44.0 + 0.01 * np.arange(len(df_agn))
+    expected_mu_err = 0.2 + 0.01 * np.arange(len(df_agn))
     latex_calls = []
     csv_calls = []
 
@@ -3274,9 +3382,9 @@ def test_run_single_calls_agn_table_only_for_joint_flatw0wa(monkeypatch, tmp_pat
         lambda *args, **kwargs: (
             np.zeros(len(df_agn)),
             np.ones(len(df_agn)),
-            np.full(len(df_agn), 44.0),
+            expected_mu,
             np.full(len(df_agn), 0.1),
-            np.full(len(df_agn), 0.2),
+            expected_mu_err,
         ),
     )
     monkeypatch.setattr(hubble_fit, "plot_hubble_residual_normality", lambda *args, **kwargs: None)
@@ -3309,7 +3417,16 @@ def test_run_single_calls_agn_table_only_for_joint_flatw0wa(monkeypatch, tmp_pat
     assert len(latex_calls) == 1
     assert len(csv_calls) == 1
     csv_df_arg = csv_calls[0][0][0]
+    latex_df_arg = latex_calls[0][0][0]
     assert csv_df_arg["object_id"].tolist() == df_agn["object_id"].tolist()
+    assert latex_df_arg["object_id"].tolist() == csv_df_arg["object_id"].tolist()
+    np.testing.assert_array_equal(csv_calls[0][0][1], expected_mu)
+    np.testing.assert_array_equal(latex_calls[0][0][1], expected_mu)
+    np.testing.assert_array_equal(csv_calls[0][0][2], expected_mu_err)
+    np.testing.assert_array_equal(latex_calls[0][0][2], expected_mu_err)
+    np.testing.assert_array_equal(
+        csv_calls[0][1]["dmi_values"], latex_calls[0][1]["dmi_values"]
+    )
 
 
 def test_run_single_does_not_call_agn_table_for_only_sna(monkeypatch, tmp_path):
@@ -3497,7 +3614,7 @@ def test_run_single_compare_sigma_only_skips_plotting_but_keeps_fit_outputs(monk
     assert delta_m_calls == []
 
 
-def test_run_single_minimal_plots_keeps_only_debiased_hubble_plot(monkeypatch, tmp_path):
+def test_run_single_minimal_plots_keeps_debiased_hubble_and_luminosity_plots(monkeypatch, tmp_path):
     df_agn = _make_fake_agn_sample(n_agn=6)
     df_pantheon = _make_fake_pantheon_sample()
     priors, model_labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
@@ -3505,6 +3622,7 @@ def test_run_single_minimal_plots_keeps_only_debiased_hubble_plot(monkeypatch, t
     flat_samples = np.tile(theta[None, :], (8, 1))
     pipeline_kwargs = []
     hubble_calls = []
+    luminosity_calls = []
     partial_control_calls = []
     expensive_calls = []
 
@@ -3512,7 +3630,6 @@ def test_run_single_minimal_plots_keeps_only_debiased_hubble_plot(monkeypatch, t
     _patch_run_single_plot_stack(monkeypatch)
     for name in (
         "plot_sigma_uv_mpred_correction",
-        "plot_predicted_L2500_vs_sigmahat",
         "plot_blr_diagnostics_summary",
         "plot_completeness_diagnostics",
         "plot_cosmo_corner",
@@ -3523,6 +3640,11 @@ def test_run_single_minimal_plots_keeps_only_debiased_hubble_plot(monkeypatch, t
             name,
             lambda *args, _name=name, **kwargs: expensive_calls.append(_name),
         )
+
+    monkeypatch.setattr(
+        hubble_fit, "plot_predicted_L2500_vs_sigmahat",
+        lambda *args, **kwargs: luminosity_calls.append((args, kwargs)),
+    )
 
     def fake_run_mcmc_pipeline(df_agn_arg, *args, **kwargs):
         pipeline_kwargs.append(kwargs)
@@ -3617,11 +3739,18 @@ def test_run_single_minimal_plots_keeps_only_debiased_hubble_plot(monkeypatch, t
     assert hubble_calls[0]["dmi_posterior_draws"].object_ids == tuple(
         df_agn["object_id"].astype(str)
     )
-    assert len(partial_control_calls) == 1
-    partial_args, partial_kwargs = partial_control_calls[0]
-    assert partial_args[0]["object_id"].tolist() == df_agn["object_id"].tolist()
-    np.testing.assert_array_equal(partial_args[1], np.arange(len(df_agn)))
-    assert partial_kwargs["z_range"] == (0.44, 3.16)
+    assert len(luminosity_calls) == 1
+    lum_args, lum_kwargs = luminosity_calls[0]
+    np.testing.assert_array_equal(lum_args[0], flat_samples)
+    assert lum_args[1]["object_id"].tolist() == df_agn["object_id"].tolist()
+    assert lum_kwargs["debias"] is True
+    assert lum_kwargs["show_residuals"] is True
+    assert lum_kwargs["show"] is False
+    for key in ("dmi_values", "dmi_selection_sigma"):
+        np.testing.assert_array_equal(lum_kwargs[key], hubble_calls[0][key])
+    assert lum_kwargs["plot_path"] == hubble_calls[0]["plot_path"]
+    assert lum_kwargs["agn_pivot_context"] is hubble_calls[0]["agn_pivot_context"]
+    assert partial_control_calls == []
     assert expensive_calls == []
     assert result[5].tolist() == list(range(len(df_agn)))
 
@@ -3713,7 +3842,11 @@ def test_normalize_resume_by_model_rejects_mismatched_path_count(resume_values):
         hubble_fit.normalize_resume_by_model(resume_values, models)
 
 
-def test_run_all_dispatches_resume_path_per_cosmo_model(monkeypatch, tmp_path):
+@pytest.mark.parametrize("bright_state", ["none", "matching", "mismatched"])
+def test_run_all_dispatches_resume_path_per_cosmo_model(monkeypatch, tmp_path, bright_state):
+    from qvc.hubble.hubble_bright_subsample import BrightSubsampleCut
+    from qvc.hubble.hubble_bright_subsample import BRIGHT_SUBSAMPLE_JSON_ATTR
+    cut = None if bright_state == "none" else BrightSubsampleCut(.1, .25, (.44, 3.16), (21., 21.))
     calls = []
     shared_context = None
     observed_joint_contexts = []
@@ -3722,6 +3855,7 @@ def test_run_all_dispatches_resume_path_per_cosmo_model(monkeypatch, tmp_path):
         if kwargs["only_sna"]:
             assert kwargs["agn_pivot_context"] is None
         else:
+            assert kwargs["bright_subsample_cut"] is cut
             assert kwargs["agn_pivot_context"] == shared_context
             observed_joint_contexts.append(kwargs["agn_pivot_context"])
             assert kwargs["agn_pivot_context"] is observed_joint_contexts[0]
@@ -3765,6 +3899,7 @@ def test_run_all_dispatches_resume_path_per_cosmo_model(monkeypatch, tmp_path):
         hubble_fit.save_chains(
             resume_path,
             **hubble_fit._agn_pivot_checkpoint_payload(shared_context),
+            **{BRIGHT_SUBSAMPLE_JSON_ATTR: cut.to_json() if bright_state == "matching" else ""},
             sigma_clip_pass_stage="single",
             object_id_fit_selection=np.asarray(
                 shared_context.reference_object_ids,
@@ -3772,20 +3907,28 @@ def test_run_all_dispatches_resume_path_per_cosmo_model(monkeypatch, tmp_path):
             ),
         )
 
-    hubble_fit.run_all(
-        df_agn,
-        df_agn,
-        df_pantheon,
-        np.eye(len(df_pantheon)),
-        np.eye(len(df_pantheon)),
-        0.0,
-        cosmo_models=["FlatLambdaCDM", "FlatwCDM"],
-        resume=resume_paths,
-        speed="fastest",
-        compare_sigma_only=True,
-        disable_sigma_clip_pass=True,
-        prefix=str(tmp_path / "plots"),
-    )
+    from contextlib import nullcontext
+    expected = (pytest.raises(RuntimeError, match="bright-subsample definition")
+                if bright_state == "mismatched" else nullcontext())
+    with expected:
+        hubble_fit.run_all(
+            df_agn,
+            df_agn,
+            df_pantheon,
+            np.eye(len(df_pantheon)),
+            np.eye(len(df_pantheon)),
+            0.0,
+            cosmo_models=["FlatLambdaCDM", "FlatwCDM"],
+            resume=resume_paths,
+            speed="fastest",
+            compare_sigma_only=True,
+            disable_sigma_clip_pass=True,
+            prefix=str(tmp_path / "plots"),
+            bright_subsample_cut=cut,
+        )
+    if bright_state == "mismatched":
+        assert not calls
+        return
 
     assert calls == [
         {"cosmo_model": "FlatLambdaCDM", "only_sna": False, "resume": resume_paths[0]},
@@ -4008,8 +4151,7 @@ def test_run_mcmc_pipeline_compare_sigma_only_skips_completeness_plots_on_resume
         / "hubble_posteriors"
         / "unit"
         / (
-                "posteriors_FlatLambdaCDM_joint_fastest_all_z0p44_3p16_"
-                "2d_compmag-dereddened_compsupport-hardcut.h5"
+                "FlatLambdaCDM_joint.h5"
             )
         )
     completeness_calls = []
@@ -4036,6 +4178,7 @@ def test_run_mcmc_pipeline_compare_sigma_only_skips_completeness_plots_on_resume
             "integrals_max_w": np.ones(len(df_agn)),
             "logZ": -1.0,
             "logZerr": 0.2,
+            **_current_prior_checkpoint_metadata(priors={"H0": (60.0, 80.0)}),
             **hubble_fit._agn_pivot_checkpoint_payload(pivot_context),
             "sigma_clip_pass_stage": "single",
             "object_id_fit_selection": np.asarray(
@@ -4074,7 +4217,8 @@ def test_run_mcmc_pipeline_compare_sigma_only_skips_completeness_plots_on_resume
     assert completeness_calls == [False]
 
 
-def test_run_mcmc_pipeline_uses_explicit_parent_sample_for_completeness_map(monkeypatch, tmp_path):
+@pytest.mark.parametrize("plot_completeness", [False, True])
+def test_run_mcmc_pipeline_uses_explicit_parent_sample_for_completeness_map(monkeypatch, tmp_path, plot_completeness):
     df_fit = _make_fake_agn_sample(n_agn=2)
     df_parent = _make_fake_agn_sample(n_agn=4)
     df_pantheon = _make_fake_pantheon_sample()
@@ -4144,6 +4288,7 @@ def test_run_mcmc_pipeline_uses_explicit_parent_sample_for_completeness_map(monk
         agn_pivot_context=pivot_context,
         cosmo_model="FlatLambdaCDM",
         completeness=True,
+        plot_completeness=plot_completeness,
         use_full_cov=False,
         speed="fastest",
         prefix="unit",
@@ -4160,8 +4305,9 @@ def test_run_mcmc_pipeline_uses_explicit_parent_sample_for_completeness_map(monk
             "*/completeness_audit_pre_post_cuts.pdf"
         )
     )
-    assert len(audit_paths) == 1
-    assert audit_paths[0].stat().st_size > 0
+    assert len(audit_paths) == int(plot_completeness)
+    if plot_completeness:
+        assert audit_paths[0].stat().st_size > 0
 
 
 def _patch_run_single_plot_stack(monkeypatch):
@@ -4224,6 +4370,7 @@ def _write_fake_checkpoint(
         logZ=float(logz),
         logZerr=float(logzerr),
         integrals_max_w=np.ones(len(dmi_posterior_median), dtype=float),
+        **_current_prior_checkpoint_metadata(),
         **pivot_payload,
     )
 
@@ -4425,12 +4572,16 @@ def test_run_single_resume_replot_with_cuts_bypasses_sampling_passes_and_plots_c
     assert plot_hubble_calls[0]["dmi_posterior_draws"].object_ids == tuple(
         df_agn["object_id"].astype(str)
     )
-    assert completeness_plot_calls == [str(generated_completeness), str(generated_completeness)]
+    assert completeness_plot_calls == [str(generated_completeness)]
 
 
 def test_remap_resume_replot_checkpoint_rejects_current_cut_ids_missing_from_checkpoint():
     df_agn = pd.DataFrame({"object_id": ["agn_000", "agn_new"]})
     results = {
+        "prior_profile": "centered_lcdm",
+        "prior_bounds_json": hubble_fit.canonical_prior_bounds_json(
+            hubble_model.get_model_params("Flatw0waCDM")[0]
+        ),
         "flat_samples": np.ones((4, 2), dtype=float),
         "object_id_fit_selection": np.array(["agn_000"], dtype=str),
         "dmi_max_w": np.zeros(1, dtype=float),
@@ -4569,9 +4720,8 @@ def test_run_single_two_pass_sigma_clip_filters_outliers_and_writes_diagnostics(
     assert plot_hubble_calls[1]["filename"] == "hubble_diagram_pass1_full_sample_clipped_debiased.pdf"
     assert plot_hubble_calls[1]["sigma_clip_threshold"] == 3.0
 
-    run_dir = tmp_path / "plots" / "hubble" / "unit" / "FlatLambdaCDM_joint_fastest_all_z0p44_3p16_disable_completeness"
-    run_tag = hubble_fit.make_run_tag("FlatLambdaCDM", False, "fastest", None, (0.44, 3.16), completeness=False)
-    checkpoint_paths = hubble_fit._build_checkpoint_paths("unit", run_tag)
+    run_dir = tmp_path / hubble_fit.model_plot_path("unit", "FlatLambdaCDM")
+    checkpoint_paths = hubble_fit._build_checkpoint_paths("unit", "FlatLambdaCDM")
     pass1_df = pd.read_csv(run_dir / "residuals_pass1.csv")
     clipped_df = pd.read_csv(run_dir / "clipped_objects_pass1.csv")
     final_df = pd.read_csv(run_dir / "residuals.csv")
@@ -4949,7 +5099,7 @@ def test_run_single_two_pass_sigma_clip_keeps_new_pass2_outlier(monkeypatch, tmp
         prefix="unit",
     )
 
-    run_dir = tmp_path / "plots" / "hubble" / "unit" / "FlatLambdaCDM_joint_fastest_all_z0p44_3p16_disable_completeness"
+    run_dir = tmp_path / hubble_fit.model_plot_path("unit", "FlatLambdaCDM")
     final_df = pd.read_csv(run_dir / "residuals.csv")
     assert set(final_df["object_id"]) == set(df_agn["object_id"])
     assert final_df.loc[final_df["object_id"] == "agn_001", "mu_zscore_pass1"].item() < 3.0
@@ -5084,7 +5234,7 @@ def test_run_single_two_pass_sigma_clip_keeps_out_of_range_survivor_in_stage2_pl
     assert debias_impact_calls[0] == expected_stage2_plot_ids
     assert alphaox_calls[0] == expected_stage2_plot_ids
 
-    run_dir = tmp_path / "plots" / "hubble" / "unit" / "FlatLambdaCDM_joint_fastest_all_z0p44_3p16_disable_completeness"
+    run_dir = tmp_path / hubble_fit.model_plot_path("unit", "FlatLambdaCDM")
     final_df = pd.read_csv(run_dir / "residuals.csv")
     pass2_membership_df = pd.read_csv(run_dir / "sigma_clip_membership_pass2.csv")
     assert set(final_df["object_id"]) == set(expected_stage2_plot_ids)
@@ -5121,8 +5271,7 @@ def test_run_single_resume_stage_pass2_skips_first_pass(monkeypatch, tmp_path):
         ),
     )
 
-    run_tag = hubble_fit.make_run_tag("FlatLambdaCDM", False, "fastest", None, (0.44, 3.16), completeness=False)
-    checkpoint_paths = hubble_fit._build_checkpoint_paths("unit", run_tag)
+    checkpoint_paths = hubble_fit._build_checkpoint_paths("unit", "FlatLambdaCDM")
     flat_samples_pass1 = np.tile(theta[None, :], (8, 1))
     pivot_context = _agn_pivot_context(df_agn, (0.44, 3.16))
     _write_fake_checkpoint(
@@ -5224,8 +5373,7 @@ def test_run_single_resume_stage_pass2_rejects_legacy_checkpoint(monkeypatch, tm
     monkeypatch.chdir(tmp_path)
     _patch_run_single_plot_stack(monkeypatch)
 
-    run_tag = hubble_fit.make_run_tag("FlatLambdaCDM", False, "fastest", None, (0.44, 3.16), completeness=False)
-    checkpoint_paths = hubble_fit._build_checkpoint_paths("unit", run_tag)
+    checkpoint_paths = hubble_fit._build_checkpoint_paths("unit", "FlatLambdaCDM")
     _write_fake_checkpoint(checkpoint_paths["single"], np.tile(theta[None, :], (8, 1)), np.zeros(len(df_agn)), np.full(len(df_agn), 0.05), logz=-9.0)
 
     with pytest.raises(RuntimeError, match="missing required immutable pivot metadata"):
@@ -5516,7 +5664,7 @@ def test_load_agn_data_residuals_csv_cut_remains_available(monkeypatch, tmp_path
     assert "removed z < 1.5" in cut_report_text
     assert "removed z >= 1.5" in cut_report_text
 
-    diagnostics_path = cut_report_path.parent / "cut_diagnostics_by_z.csv"
+    diagnostics_path = cut_report_path.parent / "diagnostics" / "cut_diagnostics_by_z.csv"
     diagnostics_df = pd.read_csv(diagnostics_path)
     assert {
         "removed_z_lt_0p44",
@@ -5872,6 +6020,10 @@ def test_hubble_fit_cli_declares_and_forwards_minimal_plots():
 def test_resume_checkpoint_validates_cut_and_redshift_metadata():
     n_agn = 2
     payload = {
+        "prior_profile": "centered_lcdm",
+        "prior_bounds_json": hubble_fit.canonical_prior_bounds_json(
+            hubble_model.get_model_params("Flatw0waCDM")[0]
+        ),
         "flat_samples": np.zeros((4, 3)),
         "dmi_max_w": np.zeros(n_agn),
         "dmi_posterior_sigma": np.ones(n_agn),
@@ -5936,9 +6088,183 @@ def test_run_hubble_forwards_configurable_cumulative_cut_tier():
     assert 'cut_tier not in {"none", "0", "1", "2"}' in runner
     assert "--cut-tier @(cut_tier)" in runner
     assert "tiers are cumulative" in runner
-    assert '"QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG", "0.10"' in runner
-    assert '"QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z", "0.30"' in runner
+    assert '"QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG": "0.10"' in runner
+    assert '"QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z": "0.30"' in runner
     assert '"QVC_HUBBLE_COMPLETENESS_MAGNITUDE_SUPPORT_MODE", "hard-cut"' in runner
     assert "--completeness-magnitude-support-mode @(completeness_magnitude_support_mode)" in runner
     assert '"QVC_CUT_A_2500_TOTAL_MAX": "none"' in runner
-    assert '"QVC_CUT_EBV_GAL_PLUS_EBV_AGN_MAX": "1.0"' in runner
+    assert '"QVC_CUT_EBV_GAL_PLUS_EBV_AGN_MAX": "none"' in runner
+    assert '"QVC_CUT_F_BC_3000_MAX": "none"' in runner
+    assert '"QVC_CUT_F_FE_UV_3000_MAX": "none"' in runner
+
+
+@pytest.mark.parametrize('changed', [
+    {'completeness_magnitude_support': [18.5, 24.]},
+    {'tier2': []},
+    {'tier2': [['f_host_2500_psf', 0., .8]]},
+])
+def test_resume_rejects_changed_magnitude_or_psf_host_selection(changed):
+    config = {'completeness_magnitude_support': [17., 27.], 'tier2': [['f_host_2500_psf', 0., .9]]}
+    payload = {
+        **_current_prior_checkpoint_metadata(),
+        'flat_samples': np.zeros((4, 3)), 'dmi_max_w': np.zeros(2),
+        'dmi_posterior_sigma': np.ones(2), 'integrals_max_w': np.zeros(2),
+        'logZ': 0., 'logZerr': 0., 'cut_tier': '2',
+        'cut_configuration_json': json.dumps(dict(config, **changed), sort_keys=True),
+    }
+    with pytest.raises(RuntimeError, match='different Hubble cut'):
+        hubble_fit.validate_resume_checkpoint(payload, 'old.h5', 3, 2,
+            expected_cut_tier='2', expected_cut_configuration_json=json.dumps(config, sort_keys=True))
+
+
+@pytest.mark.parametrize('column,threshold', [
+    ('light_curve_n_points', 400.), ('SN_MEDIAN_ALL', 3.), ('eta_sigma_kl', .05),
+])
+@pytest.mark.parametrize('old_threshold', [None, 0.])
+def test_resume_rejects_changed_coverage_sn_information_cut(column, threshold, old_threshold):
+    current = {'cut_tier': '2', 'tier2': [[column, threshold, None]]}
+    previous = {'cut_tier': '2', 'tier2': [] if old_threshold is None else [[column, old_threshold, None]]}
+    payload = {
+        **_current_prior_checkpoint_metadata(),
+        'flat_samples': np.zeros((4, 3)), 'dmi_max_w': np.zeros(2),
+        'dmi_posterior_sigma': np.ones(2), 'integrals_max_w': np.zeros(2),
+        'logZ': 0., 'logZerr': 0., 'cut_tier': '2',
+        'cut_configuration_json': json.dumps(previous, sort_keys=True),
+    }
+    with pytest.raises(RuntimeError, match='different Hubble cut'):
+        hubble_fit.validate_resume_checkpoint(
+            payload, 'old.h5', 3, 2, expected_cut_tier='2',
+            expected_cut_configuration_json=json.dumps(current, sort_keys=True),
+        )
+
+
+@pytest.mark.parametrize("only_agn", [False, True])
+@pytest.mark.parametrize("attenuation", ["fixed-offset", "joint-posterior"])
+def test_full_bright_selection_dispatch_and_output_identity(monkeypatch, tmp_path, only_agn, attenuation):
+    from qvc.hubble.hubble_bright_subsample import BrightSubsampleCut, apply_bright_subsample_cut
+    parent = _make_fake_agn_sample(n_agn=8)
+    cut = BrightSubsampleCut(0.1, 0.25, (0.44, 3.16), (20.5, 20.5))
+    selected, _ = apply_bright_subsample_cut(parent, cut, completeness_magnitude="attenuated")
+    assert 0 < len(selected) < len(parent)
+    pantheon = _make_fake_pantheon_sample(n_sne=4)
+    calls, pivot_calls, output_paths = [], [], []
+    context = object()
+    def pivots(frame, **kwargs):
+        assert frame.object_id.tolist() == selected.object_id.tolist()
+        assert kwargs["bright_subsample_cut"] is cut
+        assert kwargs["selection_attenuation_mode"] == attenuation
+        pivot_calls.append(kwargs)
+        return context
+    def fit(*args, **kwargs):
+        calls.append((args, kwargs))
+        return np.ones((4, 2)), ["H0", "Om0"], None, -10., .1, None, 13.8, .1
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(hubble_fit, "_prepare_shared_agn_pivot_context", pivots)
+    monkeypatch.setattr(hubble_fit, "run_single", fit)
+    monkeypatch.setattr(hubble_fit, "compare_models_by_log_evidence_all", lambda *a, **k: {})
+    monkeypatch.setattr(hubble_fit, "extract_cosmo_results_from_samples", lambda *a, **k: {})
+    monkeypatch.setattr(hubble_fit, "write_results_tex_variables", lambda *a, **k: None)
+    monkeypatch.setattr(hubble_fit, "save_cosmo_results_hdf5", lambda path, *a: output_paths.append(path))
+    monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: tmp_path)
+    hubble_fit.run_all(selected, parent, pantheon, None, True, None,
+        cosmo_models=["Flatw0waCDM", "FlatLambdaCDM"], only_agn=only_agn,
+        completeness=True, completeness_lf_model="wang2026_type1_lade_a",
+        completeness_magnitude="attenuated", selection_attenuation_mode=attenuation,
+        df_agn_completeness_parent=parent, bright_subsample_cut=cut,
+        completeness_sim_file="shared-mock.h5", plot_completeness=True,
+        minimal_plots=True, disable_sigma_clip_pass=True, prefix="full-bright",
+        skip_debiased_residual_plot=True)
+    assert len(pivot_calls) == 1
+    assert len(calls) == (2 if only_agn else 4)
+    for args, kwargs in calls:
+        assert kwargs["skip_debiased_residual_plot"] is True
+        if kwargs["only_sna"]:
+            assert kwargs["completeness"] is False
+            assert kwargs["plot_completeness"] is False
+            assert kwargs["bright_subsample_cut"] is None
+            assert kwargs["df_agn_completeness_parent"] is None
+            assert kwargs["agn_pivot_context"] is None
+            assert kwargs["completeness_sim_file"] is None
+        else:
+            assert args[0].object_id.tolist() == selected.object_id.tolist()
+            assert kwargs["df_agn_completeness_parent"] is parent
+            assert kwargs["bright_subsample_cut"] is cut
+            assert kwargs["completeness_lf_model"] == "wang2026_type1_lade_a"
+            assert kwargs["selection_attenuation_mode"] == attenuation
+            assert kwargs["agn_pivot_context"] is context
+            assert kwargs["completeness_sim_file"] == "shared-mock.h5"
+    assert len(output_paths) == 1
+    assert "lf-wang2026_type1_lade_a" in output_paths[0]
+    assert f"attsel-{attenuation}" in output_paths[0]
+    assert cut.run_tag() in output_paths[0]
+    assert (tmp_path / "plots" / "hubble" / "full-bright" / "model_compare").is_dir()
+
+
+def test_sna_pipeline_ignores_completeness_and_preserves_likelihood(fake_data, monkeypatch, tmp_path):
+    from contextlib import nullcontext
+    df_agn, pantheon = fake_data
+    values = []
+    class Evaluated(Exception):
+        pass
+    def sampler(loglike, transform, ndim, **kwargs):
+        options = kwargs["logl_kwargs"]
+        assert options["completeness_params"] is None
+        assert options["only_sna"] is True
+        theta = transform(np.full(ndim, .5), **kwargs["ptform_kwargs"])
+        values.append(loglike(theta, **options)[0])
+        raise Evaluated
+    def forbidden(*a, **k):
+        pytest.fail("SNe-only sampler entered AGN completeness")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: tmp_path)
+    monkeypatch.setattr(hubble_fit, "DynamicNestedSampler", sampler)
+    monkeypatch.setattr(hubble_fit.multiprocessing, "get_context",
+        lambda *a: SimpleNamespace(Pool=lambda **k: nullcontext(None)))
+    for name in ("prepare_completeness_magnitude_columns", "_build_completeness_params",
+                 "generate_fresh_completeness_sim_file", "validate_completeness_mode",
+                 "validate_selection_attenuation_configuration"):
+        monkeypatch.setattr(hubble_fit, name, forbidden)
+    for requested in (False, True):
+        with pytest.raises(Evaluated):
+            hubble_fit.run_mcmc_pipeline(df_agn, df_agn.copy(), pantheon, None, True, None,
+                agn_pivot_context=None, cosmo_model="FlatLambdaCDM", only_sna=True,
+                completeness=requested, completeness_mode="ignored", completeness_magnitude="ignored",
+                completeness_params_override=object(), bright_subsample_cut=object(),
+                selection_attenuation_mode="joint-posterior", plot_completeness=True,
+                use_full_cov=False, speed="fastest", prefix="sna")
+    assert np.isfinite(values).all()
+    assert values[0] == values[1]
+
+
+def test_single_and_full_deliver_same_selected_and_parent_ids(monkeypatch, tmp_path):
+    from qvc.hubble.hubble_bright_subsample import BrightSubsampleCut, apply_bright_subsample_cut
+    parent = _make_fake_agn_sample(n_agn=8)
+    cut = BrightSubsampleCut(.1, .25, (.44, 3.16), (20.5, 20.5))
+    selected, _ = apply_bright_subsample_cut(parent, cut, completeness_magnitude="attenuated")
+    pantheon = _make_fake_pantheon_sample(n_sne=4)
+    calls = []
+    class ReachedSampler(Exception):
+        pass
+    def sample(frame, *args, **kwargs):
+        calls.append((frame.object_id.tolist(), kwargs["df_agn_completeness"].object_id.tolist(),
+                      kwargs["bright_subsample_cut"], kwargs["completeness_sim_file"]))
+        raise ReachedSampler
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: tmp_path / "results")
+    monkeypatch.setattr(hubble_fit, "run_mcmc_pipeline", sample)
+    monkeypatch.setattr(hubble_fit, "plot_redshift_histograms", lambda *a, **k: None)
+    monkeypatch.setattr(hubble_fit, "plot_delta_m_flux_recal_vs_redshift", lambda *a, **k: None)
+    kwargs = dict(completeness=True, completeness_lf_model="wang2026_type1_lade_a",
+        completeness_magnitude="attenuated", df_agn_completeness_parent=parent,
+        bright_subsample_cut=cut, completeness_sim_file="shared-mock.h5",
+        disable_sigma_clip_pass=True, skip_plots=True, speed="quicker", prefix="matched")
+    with pytest.raises(ReachedSampler):
+        hubble_fit.run_single(selected, parent, pantheon, None, True, None,
+            cosmo_model="FlatLambdaCDM", **kwargs)
+    with pytest.raises(ReachedSampler):
+        hubble_fit.run_all(selected, parent, pantheon, None, True, None,
+            cosmo_models=["FlatLambdaCDM"], **kwargs)
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+    assert calls[0][0] == selected.object_id.tolist()
+    assert calls[0][1] == parent.object_id.tolist()
