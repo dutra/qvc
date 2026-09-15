@@ -219,7 +219,7 @@ copy_hubble_assets() {
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/hubble_diagram.pdf" "hubble" "hubble_diagram.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/agn_table.csv" "hubble" "agn_table.csv"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/agn_table.tex" "hubble" "agn_table.tex"
-  copy_from_dir "$FIDUCIAL_DIR" "diagnostics/bpl_psd_vs_uv_variability_postcut.pdf" "hubble" "bpl_psd_vs_uv_variability_postcut.pdf"
+  copy_from_dir "$FIDUCIAL_DIR" "diagnostics/sigma_tau_psd_fixed_postcut.pdf" "hubble" "sigma_tau_psd_fixed_postcut.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/predicted_vs_actual_M2500_debias.pdf" "hubble" "predicted_vs_actual_M2500_debias.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/alphaOX_residuals.pdf" "hubble" "alphaOx_residuals.pdf"
   copy_from_dir "$FIDUCIAL_DIR" "$FIDUCIAL_RUN_DIR/delta_alphaOX_residuals.pdf" "hubble" "delta_alphaOX_residuals.pdf"

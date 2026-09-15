@@ -128,7 +128,6 @@ def _patch_load_agn_plotters(monkeypatch):
         "plot_blr_line_lags_vs_l2500_fiducial",
         "plot_blr_lag_vs_amp_by_band",
         "plot_blr_lag_vs_redshift_by_band",
-        "plot_bpl_psd_vs_uv_variability",
         "plot_eta_tau_sigma_vs_redshift",
         "plot_fast_vs_uv_variability",
         "plot_f_host_2500_vs_redshift",
@@ -159,7 +158,6 @@ def _patch_load_agn_plotters(monkeypatch):
     )
     for name in plot_noops:
         monkeypatch.setattr(hubble_plotting, name, lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(hubble_utils, "plot_sigma_tau_identity_grid", lambda *_args, **_kwargs: None)
 
 
 def test_load_agn_data_makes_default_combined_tier1_diagnostic(tmp_path, monkeypatch):
@@ -231,7 +229,6 @@ def test_load_agn_data_makes_pre_and_postcut_joint_sed_and_blr_plots(tmp_path, m
         "plot_blr_line_lags_vs_l2500_fiducial",
         "plot_blr_lag_vs_amp_by_band",
         "plot_blr_lag_vs_redshift_by_band",
-        "plot_bpl_psd_vs_uv_variability",
         "plot_eta_tau_sigma_vs_redshift",
         "plot_fast_vs_uv_variability",
         "plot_f_host_2500_vs_redshift",
@@ -300,53 +297,6 @@ def test_load_agn_data_makes_pre_and_postcut_joint_sed_and_blr_plots(tmp_path, m
     assert postcut_eta["kl_color_limits"] == pytest.approx((0.01, 0.99))
 
 
-def test_load_agn_data_writes_sigma_tau_ls_identity_grids_to_diagnostics(tmp_path, monkeypatch):
-    source_path = tmp_path / "agn.h5"
-    source_path.touch()
-    monkeypatch.setattr(
-        hubble_utils,
-        "read_quasars_from_hdf5_flat",
-        lambda *_args, **_kwargs: _minimal_agn_frame(),
-    )
-    monkeypatch.setattr(hubble_utils, "populate_xray", lambda df: df)
-
-    plot_calls = []
-
-    def capture_identity_grid(*_args, **kwargs):
-        plot_calls.append(kwargs)
-        return None
-
-    monkeypatch.setattr(hubble_utils, "plot_sigma_tau_identity_grid", capture_identity_grid)
-
-    hubble_utils.load_agn_data(
-        source_path,
-        magnitude_convention="dereddened",
-        spectra_fit_csv=None,
-        lc_info_csv=None,
-        cut_tier="2",
-        plot_path=str(tmp_path / "plots" / "hubble" / "prefix"),
-        cut_report_path=tmp_path / "cut_summary.txt",
-    )
-
-    assert len(plot_calls) == 2
-    by_suffix = {
-        Path(call["output_path"]).name: call
-        for call in plot_calls
-    }
-    assert "sigma_tau_ls_identity_precut.pdf" in by_suffix
-    assert "sigma_tau_ls_identity_postcut.pdf" in by_suffix
-
-    precut_output = Path(by_suffix["sigma_tau_ls_identity_precut.pdf"]["output_path"])
-    postcut_output = Path(by_suffix["sigma_tau_ls_identity_postcut.pdf"]["output_path"])
-    expected_diagnostics_dir = tmp_path / "plots" / "hubble" / "prefix" / "diagnostics"
-    assert precut_output.parent == expected_diagnostics_dir
-    assert postcut_output.parent == expected_diagnostics_dir
-
-    postcut_kwargs = by_suffix["sigma_tau_ls_identity_postcut.pdf"]
-    assert postcut_kwargs["sigma_limits"] == (-1.9, 1.2)
-    assert postcut_kwargs["tau_limits"] == (-0.2, 4.9)
-
-
 def test_load_agn_data_writes_psd_uv_recovery_comparisons(tmp_path, monkeypatch):
     source_path = tmp_path / "agn.h5"
     source_path.touch()
@@ -394,10 +344,18 @@ def test_load_agn_data_writes_psd_uv_recovery_comparisons(tmp_path, monkeypatch)
 
     assert [call[1]["filename"] for call in calls] == [
         "sigma_tau_psd_free_vs_fixed_precut.pdf",
+        "sigma_tau_psd_fixed_precut.pdf",
         "sigma_tau_psd_free_vs_fixed_postcut.pdf",
+        "sigma_tau_psd_fixed_postcut.pdf",
     ]
     assert all(call[1]["plot_path"] == str(tmp_path / "plots") for call in calls)
     assert all(call[1]["tau_resolution_mode"] == "filter" for call in calls)
+    assert [call[1].get("fixed_only", False) for call in calls] == [
+        False,
+        True,
+        False,
+        True,
+    ]
 
     calls.clear()
     missing_total_tau_error = frame.drop(columns="log_tau_band_g_RF_err")
@@ -445,7 +403,9 @@ def test_load_agn_data_writes_psd_uv_recovery_comparisons(tmp_path, monkeypatch)
     )
     assert [call[1]["filename"] for call in calls] == [
         "sigma_tau_psd_free_vs_fixed_precut.pdf",
+        "sigma_tau_psd_fixed_precut.pdf",
         "sigma_tau_psd_free_vs_fixed_postcut.pdf",
+        "sigma_tau_psd_fixed_postcut.pdf",
     ]
 
 

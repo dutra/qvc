@@ -75,7 +75,6 @@ from qvc.hubble.hubble_model import (
     infer_use_alpha_lambda_term,
 )
 from qvc.hubble.sigma_tau_lambda_fit import fit_sigma_tau_lambda_broken_pl
-from qvc.light_curve.plotting_appendix import plot_sigma_tau_identity_grid
 from qvc.light_curve.posterior_draws import (
     LIGHT_CURVE_LOG_SIGMA_DRAW_COL,
     LIGHT_CURVE_LOG_TAU_RF_DRAW_COL,
@@ -1377,7 +1376,6 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         plot_blr_line_lags_vs_l2500_fiducial,
         plot_blr_lag_vs_amp_by_band,
         plot_blr_lag_vs_redshift_by_band,
-        plot_bpl_psd_vs_uv_variability,
         plot_psd_uv_recovery_comparison,
         plot_eta_sigma_vs_redshift_colored_by_kl,
         plot_eta_tau_sigma_vs_redshift,
@@ -1424,7 +1422,6 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         plot_blr_line_lags_vs_l2500_fiducial = _skip_diagnostic_plot
         plot_blr_lag_vs_amp_by_band = _skip_diagnostic_plot
         plot_blr_lag_vs_redshift_by_band = _skip_diagnostic_plot
-        plot_bpl_psd_vs_uv_variability = _skip_diagnostic_plot
         plot_psd_uv_recovery_comparison = _skip_diagnostic_plot
         plot_eta_sigma_vs_redshift_colored_by_kl = _skip_diagnostic_plot
         plot_eta_tau_sigma_vs_redshift = _skip_diagnostic_plot
@@ -1499,78 +1496,6 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         diagnostics_path = report_path.parent / "diagnostics" / "cut_diagnostics_by_z.csv"
         diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(cut_rows).to_csv(diagnostics_path, index=False)
-
-    def _plot_sigma_tau_ls_identity(frame, *, suffix, sigma_limits=None, tau_limits=None):
-        if not plot_diagnostics:
-            return
-        sigma_keys = {
-            "x": "log_sigma_uv",
-            "y": "log_sigma_ls",
-            "xerr": "log_sigma_uv_err",
-            "yerr": "log_sigma_ls_err",
-            "xlabel": r"$\log\!\,\sigma_{\mathrm{UV}}\,(\mathrm{mag})$" "\n(UV)",
-            "ylabel": r"$\log\!\,\sigma_{\mathrm{LS,BPL}}\,(\mathrm{mag})$" "\n(PSD fit)",
-        }
-        tau_keys = {
-            "x": "log_tau_uv_rf",
-            "y": "log_tau_ls",
-            "xerr": "log_tau_uv_rf_err",
-            "yerr": "log_tau_ls_err",
-            "xlabel": r"$\log\!\,\tau_{\mathrm{UV},\,\mathrm{RF}}\,(\mathrm{days})$" "\n(UV)",
-            "ylabel": r"$\log\!\,\tau_{\mathrm{LS,BPL,RF}}\,(\mathrm{days})$" "\n(PSD fit)",
-        }
-        required_xy = {
-            sigma_keys["x"],
-            sigma_keys["y"],
-            tau_keys["x"],
-            tau_keys["y"],
-        }
-        missing_xy = sorted(required_xy - set(frame.columns))
-        if missing_xy:
-            print(
-                "[WARNING] Skipping sigma/tau LS identity grid "
-                f"({suffix}): missing columns {missing_xy}"
-            )
-            return
-
-        def _metric_finite_count(keydict):
-            finite = np.isfinite(pd.to_numeric(frame[keydict["x"]], errors="coerce").to_numpy(dtype=float))
-            finite &= np.isfinite(pd.to_numeric(frame[keydict["y"]], errors="coerce").to_numpy(dtype=float))
-            xerr_key = keydict.get("xerr")
-            yerr_key = keydict.get("yerr")
-            if xerr_key in frame.columns:
-                finite &= np.isfinite(pd.to_numeric(frame[xerr_key], errors="coerce").to_numpy(dtype=float))
-            if yerr_key in frame.columns:
-                finite &= np.isfinite(pd.to_numeric(frame[yerr_key], errors="coerce").to_numpy(dtype=float))
-            return int(np.count_nonzero(finite))
-
-        sigma_n = _metric_finite_count(sigma_keys)
-        tau_n = _metric_finite_count(tau_keys)
-        output_path = Path(plot_path or "plots/hubble") / "diagnostics" / f"sigma_tau_ls_identity_{suffix}.pdf"
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            fig = plot_sigma_tau_identity_grid(
-                frame,
-                sigma_keys,
-                tau_keys,
-                bands=("uv",),
-                figsize=(4.8, 7.8),
-                show=False,
-                output_path=str(output_path),
-                sigma_limits=sigma_limits,
-                tau_limits=tau_limits,
-            )
-            plt.close(fig)
-        except ValueError as exc:
-            print(
-                "[WARNING] Skipping sigma/tau LS identity grid "
-                f"({suffix}): {exc}"
-            )
-            return
-
-        print(f"Sigma/tau LS identity grid written to: {output_path.resolve()}")
-        print(f"  sigma finite rows used: {sigma_n:,}")
-        print(f"  tau finite rows used: {tau_n:,}")
 
     def _normalize_dropped_bands(value):
         if value is None:
@@ -2304,22 +2229,6 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         and psd_total_tau_columns.issubset(df.columns)
         and psd_sigma_ready
     )
-    bpl_recovery_ready = (
-        (psd_recovery_columns - {
-            "log_sigma_ls_fixed", "log_sigma_ls_fixed_err",
-            "log_tau_ls_fixed", "log_tau_ls_fixed_err", "psd_ls_fixed_valid",
-        }).issubset(df.columns)
-        and bool(psd_ref_bands)
-        and psd_total_tau_columns.issubset(df.columns)
-        and psd_sigma_ready
-    )
-    if bpl_recovery_ready:
-        plot_bpl_psd_vs_uv_variability(
-            df,
-            plot_path=plot_path,
-            show=False,
-            filename="bpl_psd_vs_uv_variability_precut.pdf",
-        )
     if psd_recovery_ready:
         plot_psd_uv_recovery_comparison(
             df,
@@ -2327,6 +2236,14 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             show=False,
             filename="sigma_tau_psd_free_vs_fixed_precut.pdf",
             tau_resolution_mode="filter",
+        )
+        plot_psd_uv_recovery_comparison(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="sigma_tau_psd_fixed_precut.pdf",
+            tau_resolution_mode="filter",
+            fixed_only=True,
         )
     if {"z", "apparent_mag_2500"}.issubset(df.columns) and any(
         (f"log_lag_blr_{band}_RF" in df.columns) or (f"log_lag_blr2_{band}_RF" in df.columns)
@@ -2393,8 +2310,6 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                 lag_suffix="2",
                 filename="blr_lag2_vs_redshift_by_band_precut.pdf",
             )
-    _plot_sigma_tau_ls_identity(df, suffix="precut")
-
     df = populate_xray(df)
     
     # if lc_info_csv is not None:
@@ -3140,13 +3055,6 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             show=False,
             filename="sf_ref_band_vs_model_g_postcut.pdf",
         )
-    if bpl_recovery_ready:
-        plot_bpl_psd_vs_uv_variability(
-            df,
-            plot_path=plot_path,
-            show=False,
-            filename="bpl_psd_vs_uv_variability_postcut.pdf",
-        )
     if psd_recovery_ready:
         plot_psd_uv_recovery_comparison(
             df,
@@ -3155,12 +3063,14 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             filename="sigma_tau_psd_free_vs_fixed_postcut.pdf",
             tau_resolution_mode="filter",
         )
-    _plot_sigma_tau_ls_identity(
-        df,
-        suffix="postcut",
-        sigma_limits=(-1.9, 1.2),
-        tau_limits=(-0.2, 4.9),
-    )
+        plot_psd_uv_recovery_comparison(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="sigma_tau_psd_fixed_postcut.pdf",
+            tau_resolution_mode="filter",
+            fixed_only=True,
+        )
     plot_cut_diagnostics(df_all.copy(), df.copy(), bins=30, cut_info="all cuts", save_path=cuts_plot_dir)
     colorpanel_cols = [col for col in ("f_host_2500", "f_host_center", "f_bc_3000", "wrms") if col in df_all.columns]
     if len(colorpanel_cols) > 0 and "z" in df_all.columns and "apparent_mag_2500" in df_all.columns:

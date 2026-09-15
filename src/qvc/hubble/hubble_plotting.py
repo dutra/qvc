@@ -3357,24 +3357,6 @@ def plot_sf_vs_uv_variability(
     )
 
 
-def plot_bpl_psd_vs_uv_variability(
-    df,
-    plot_path="plots/hubble",
-    show=False,
-    filename="bpl_psd_vs_uv_variability.pdf",
-):
-    """Compare free-slope PSD RMS/tau with matching total reference-band values.
-
-    Share the recovery diagnostic's normalization, wavelength scaling, and
-    resolution selection rather than comparing band PSDs with UV continuum
-    parameters. The historical filename is retained for paper assets.
-    """
-    return plot_psd_uv_recovery_comparison(
-        df, plot_path=plot_path, show=show, filename=filename,
-        tau_resolution_mode="filter", free_only=True,
-    )
-
-
 def plot_psd_uv_recovery_comparison(
     df,
     plot_path="plots/hubble",
@@ -3383,7 +3365,7 @@ def plot_psd_uv_recovery_comparison(
     *,
     tau_resolution_mode="mark",
     nominal_psd_fmax=2e-3,
-    free_only=False,
+    fixed_only=False,
 ):
     """Compare PSD fits with like-for-like model RMS and timescale estimates.
 
@@ -3399,7 +3381,6 @@ def plot_psd_uv_recovery_comparison(
         )
     if not np.isfinite(nominal_psd_fmax) or nominal_psd_fmax <= 0.0:
         raise ValueError("nominal_psd_fmax must be finite and positive.")
-
     required = {
         "log_sigma_ls",
         "log_sigma_ls_err",
@@ -3417,9 +3398,6 @@ def plot_psd_uv_recovery_comparison(
         "psd_bpl_ref_band",
         "psd_bpl_ref_lambda_rf",
     }
-    if free_only:
-        required -= {"log_sigma_ls_fixed", "log_sigma_ls_fixed_err",
-                     "log_tau_ls_fixed", "log_tau_ls_fixed_err", "psd_ls_fixed_valid"}
     if not required.issubset(df.columns):
         missing = ", ".join(sorted(required - set(df.columns)))
         raise KeyError(
@@ -3427,8 +3405,6 @@ def plot_psd_uv_recovery_comparison(
         )
 
     def _numeric(column):
-        if free_only and "_fixed" in column and column not in df.columns:
-            return np.full(len(df), np.nan)
         return pd.to_numeric(df[column], errors="coerce").to_numpy(dtype=float)
 
     ref_band = (
@@ -3765,8 +3741,8 @@ def plot_psd_uv_recovery_comparison(
         upper = step * np.ceil((np.max(values) + margin) / step)
         return float(lower), float(upper)
 
-    if free_only:
-        panels = [panels[0], panels[2]]
+    if fixed_only:
+        panels = [panels[1], panels[3]]
     sigma_limits = _shared_limits([p for p in panels if p["quantity"] == "sigma"], step=0.05, margin_floor=0.06)
     tau_limits = _shared_limits([p for p in panels if p["quantity"] == "tau"], step=0.05, margin_floor=0.08)
     if sigma_limits is None and tau_limits is None:
@@ -3806,11 +3782,11 @@ def plot_psd_uv_recovery_comparison(
             print(f"[PSD-vs-UV KDE contours] skipped: {exc}")
 
     fig, axes = plt.subplots(
-        1 if free_only else 2,
+        1 if fixed_only else 2,
         2,
-        figsize=(11.2, 5.2) if free_only else (10.0, 9.0),
-        sharex=False if free_only else "row",
-        sharey=False if free_only else "row",
+        figsize=(11.2, 5.2) if fixed_only else (10.0, 9.0),
+        sharex=False if fixed_only else "row",
+        sharey=False if fixed_only else "row",
         squeeze=False,
         constrained_layout=True,
     )
@@ -3896,8 +3872,7 @@ def plot_psd_uv_recovery_comparison(
                     r"$\tau_{\rm model}<[2\pi f_{\max}(1+z)]^{-1}$"
                 ),
             )
-        if not free_only:
-            _plot_kde_contours(ax, x[stats_mask], y[stats_mask])
+        _plot_kde_contours(ax, x[stats_mask], y[stats_mask])
         ax.set_xlim(*limits)
         ax.set_ylim(*limits)
         ax.set_aspect("equal", adjustable="box")
@@ -3953,9 +3928,10 @@ def plot_psd_uv_recovery_comparison(
         if np.any(unresolved):
             ax.legend(loc="upper left", fontsize=8.5, frameon=True)
 
-    axes[0, 0].set_title("Free-slope BPL", fontsize=14)
-    axes[0, 1].set_title("Free-slope BPL" if free_only else "Fixed-slope DRW", fontsize=14)
-    if not free_only:
+    left_title = "Fixed-slope DRW" if fixed_only else "Free-slope BPL"
+    axes[0, 0].set_title(left_title, fontsize=14)
+    axes[0, 1].set_title(left_title if fixed_only else "Fixed-slope DRW", fontsize=14)
+    if not fixed_only:
         axes[0, 1].tick_params(labelleft=False)
         axes[1, 1].tick_params(labelleft=False)
 

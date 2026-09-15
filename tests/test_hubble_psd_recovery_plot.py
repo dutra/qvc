@@ -341,25 +341,3 @@ def test_plot_psd_uv_recovery_requires_current_total_band_pairs(
     with pytest.raises(KeyError, match=missing_column):
         hubble_plotting.plot_psd_uv_recovery_comparison(frame)
     assert not save_called
-
-
-def test_bpl_diagnostic_matches_free_recovery_panels_without_fixed_fields(monkeypatch):
-    figures = []
-    monkeypatch.setattr(hubble_plotting, '_save_figure',
-                        lambda fig, path, **kwargs: figures.append(fig) or path)
-    frame = _psd_recovery_frame()
-    try:
-        hubble_plotting.plot_psd_uv_recovery_comparison(frame, tau_resolution_mode='filter')
-        free_frame = frame.drop(columns=[c for c in frame if '_fixed' in c])
-        hubble_plotting.plot_bpl_psd_vs_uv_variability(free_frame)
-        assert len(figures[1].axes) == 2
-        for original, corrected in zip([figures[0].axes[0], figures[0].axes[2]], figures[1].axes):
-            def points(ax):
-                return next(c.get_offsets() for c in ax.collections
-                            if c.get_offsets().shape == (2, 2))
-            np.testing.assert_allclose(points(corrected), points(original))
-            assert corrected.get_xlabel() == original.get_xlabel()
-            assert corrected.get_ylabel() == original.get_ylabel()
-    finally:
-        for fig in figures:
-            plt.close(fig)
