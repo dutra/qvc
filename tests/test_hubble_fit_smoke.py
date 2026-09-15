@@ -6074,12 +6074,14 @@ def test_run_hubble_forwards_configurable_cumulative_cut_tier():
     assert 'cut_tier not in {"none", "0", "1", "2"}' in runner
     assert "--cut-tier @(cut_tier)" in runner
     assert "tiers are cumulative" in runner
-    assert '"QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG", "0.10"' in runner
-    assert '"QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z", "0.30"' in runner
+    assert '"QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG": "0.10"' in runner
+    assert '"QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z": "0.30"' in runner
     assert '"QVC_HUBBLE_COMPLETENESS_MAGNITUDE_SUPPORT_MODE", "hard-cut"' in runner
     assert "--completeness-magnitude-support-mode @(completeness_magnitude_support_mode)" in runner
     assert '"QVC_CUT_A_2500_TOTAL_MAX": "none"' in runner
     assert '"QVC_CUT_EBV_GAL_PLUS_EBV_AGN_MAX": "none"' in runner
+    assert '"QVC_CUT_F_BC_3000_MAX": "none"' in runner
+    assert '"QVC_CUT_F_FE_UV_3000_MAX": "none"' in runner
 
 
 @pytest.mark.parametrize('changed', [
