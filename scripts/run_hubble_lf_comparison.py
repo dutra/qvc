@@ -31,6 +31,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from qvc.hubble.lf_comparison_diagnostics import (
+    LF_REFERENCE_MODEL,
     generate_lf_parameter_comparison,
     generate_lf_comparison_diagnostics,
 )
@@ -46,8 +47,8 @@ COMPARISON_LABEL_HEIGHT_PT = 17.0
 COMPARISON_COLUMN_GAP_PT = 6.0
 COMPARISON_ROW_GAP_PT = 4.0
 LF_LABELS = {
-    "shen": "Shen et al. (2020)",
     "wang2026_type1_lade_a": "Wang et al. (2026), LADE-A",
+    "shen": "Shen et al. (2020)",
     "palanque2016_ple_lede": "Palanque-Delabrouille et al. (2016), PLE+LEDE",
     "kulkarni2019_type1_model1": "Kulkarni et al. (2019), Model 1",
     "kulkarni2019_type1_model2": "Kulkarni et al. (2019), Model 2",
@@ -63,8 +64,8 @@ class LFRun(NamedTuple):
 
 
 LF_RUNS = (
-    LFRun("shen", "shen", "all_nh_attenuated", "attenuated"),
     LFRun("wang2026_type1_lade_a", "wang2026_type1_lade_a", None, "attenuated"),
+    LFRun("shen", "shen", "all_nh_attenuated", "attenuated"),
     LFRun("palanque2016_ple_lede", "palanque2016_ple_lede", None, "attenuated"),
     LFRun(
         "kulkarni2019_type1_model1",
@@ -86,6 +87,8 @@ LF_RUNS = (
     ),
 )
 LF_RUN_IDS = tuple(run.key for run in LF_RUNS)
+if LF_RUN_IDS[0] != LF_REFERENCE_MODEL:
+    raise RuntimeError("The LF sweep must start with the canonical reference model.")
 
 
 def _validate_model_labels(models: Sequence[str]) -> None:
