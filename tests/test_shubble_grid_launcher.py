@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import shutil
 import subprocess
 from types import ModuleType
 
@@ -8,6 +9,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "hpc_scripts" / "shubble_grid.xsh"
+XONSH = shutil.which("xonsh")
 
 
 def load_launcher():
@@ -47,9 +49,10 @@ def test_defaults_define_dense_48_cell_quick_grid():
     assert (first, last) == (0, 47)
 
 
+@pytest.mark.skipif(XONSH is None, reason="xonsh is required")
 def test_launcher_help_runs_before_compute_environment_is_activated():
     result = subprocess.run(
-        ["xonsh", "--no-rc", str(SCRIPT), "--help"],
+        [XONSH, "--no-rc", str(SCRIPT), "--help"],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -143,6 +146,7 @@ def test_generated_sbatch_has_resources_grid_mapping_and_paper_profile(tmp_path,
     assert "QVC_CUT_NUM_DIVERGENCES_MAX=0" in script
 
 
+@pytest.mark.skipif(XONSH is None, reason="xonsh is required")
 def test_hubble_arguments_match_current_paper_fiducial_profile(monkeypatch, tmp_path):
     launcher = load_launcher()
     args = launcher.parse_args(["--description", "compare"])
@@ -166,7 +170,7 @@ def test_hubble_arguments_match_current_paper_fiducial_profile(monkeypatch, tmp_
     env = {key: value for key, value in os.environ.items() if not key.startswith("QVC_")}
     env.update(PATH=f"{fake_bin}{os.pathsep}{env['PATH']}", CALLS=str(calls), QVC_HUBBLE_SPEED="quick", QVC_HUBBLE_PREFIX="paper_test")
     result = subprocess.run(
-        ["xonsh", "--no-rc", str(ROOT / "run_hubble_paper.xonsh")],
+        [XONSH, "--no-rc", str(ROOT / "run_hubble_paper.xonsh")],
         cwd=ROOT,
         env=env,
         capture_output=True,

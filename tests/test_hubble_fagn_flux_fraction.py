@@ -296,6 +296,11 @@ def test_cli_declares_option_and_rejects_jax_and_sigmoid_combination():
 
 def test_resume_metadata_rejects_flux_fraction_mismatch():
     payload = {
+        "prior_profile": "centered_lcdm",
+        "prior_bounds_json": hubble_fit.canonical_prior_bounds_json(
+            hubble_model.get_model_params("FlatLambdaCDM")[0]
+        ),
+        "early_de_guard": False,
         "flat_samples": np.zeros((3, 4)),
         "dmi_max_w": np.zeros(2),
         "dmi_posterior_sigma": np.ones(2),

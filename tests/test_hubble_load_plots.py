@@ -524,10 +524,10 @@ def test_plot_blr_diagnostics_summary_marks_out_of_range_redshifts(tmp_path, mon
     for call in errorbar_calls:
         if call.get("fmt") == "D":
             np.testing.assert_allclose(
-                call["mfc"], hubble_plotting.mpl.colors.to_rgba("tab:green", alpha=0.2)
+                call["mfc"], hubble_plotting.mpl.colors.to_rgba("black", alpha=0.2)
             )
             np.testing.assert_allclose(
-                call["ecolor"], hubble_plotting.mpl.colors.to_rgba("tab:green", alpha=0.05)
+                call["ecolor"], hubble_plotting.mpl.colors.to_rgba("0.2", alpha=0.05)
             )
 
 

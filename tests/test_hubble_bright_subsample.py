@@ -210,7 +210,9 @@ def test_run_tag_checkpoint_validation_and_mode_table():
     tagged = hubble_fit.make_run_tag(
         "Flatw0waCDM", False, "fastest", None, (0.44, 3.16), bright_subsample_cut=cut
     )
-    assert tagged == base + "_brightsub-rel0p9-dm1"
+    assert tagged == base.replace(
+        "_compgrid80x45", "_brightsub-rel0p9-dm1_compgrid80x45"
+    )
     assert hubble_fit.make_run_tag(
         "Flatw0waCDM", True, "fastest", None, (0.44, 3.16), bright_subsample_cut=cut
     ) == hubble_fit.make_run_tag("Flatw0waCDM", True, "fastest", None, (0.44, 3.16))

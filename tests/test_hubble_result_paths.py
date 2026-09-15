@@ -164,6 +164,18 @@ def _agn_pivot_checkpoint_payload_for_ids(object_ids, z_range=(0.44, 3.16)):
     }
 
 
+def _prior_checkpoint_payload(priors=None):
+    if priors is None:
+        priors = hubble_fit.get_model_params(
+            "FlatLambdaCDM", prior_profile="centered_lcdm"
+        )[0]
+    return {
+        "prior_profile": "centered_lcdm",
+        "prior_bounds_json": hubble_fit.canonical_prior_bounds_json(priors),
+        "early_de_guard": False,
+    }
+
+
 def _minimal_pantheon_df():
     return pd.DataFrame(
         {
@@ -202,6 +214,7 @@ def test_run_mcmc_pipeline_default_resume_uses_result_dir(monkeypatch, tmp_path)
             "integrals_max_w": np.ones(len(df_agn)),
             "logZ": -1.0,
             "logZerr": 0.2,
+            **_prior_checkpoint_payload({"H0": (60.0, 80.0)}),
             **pivot_payload,
             "sigma_clip_pass_stage": "single",
             "object_id_fit_selection": np.asarray(
@@ -279,6 +292,7 @@ def test_run_mcmc_pipeline_explicit_resume_path_bypasses_default(monkeypatch, tm
             "integrals_max_w": np.ones(len(df_agn)),
             "logZ": -2.0,
             "logZerr": 0.3,
+            **_prior_checkpoint_payload({"H0": (60.0, 80.0)}),
             **pivot_payload,
             "sigma_clip_pass_stage": "single",
             "object_id_fit_selection": np.asarray(
@@ -408,6 +422,7 @@ def test_resume_replot_with_cuts_remaps_per_object_arrays_by_object_id(tmp_path)
         integrals_max_w=np.array([100.0, 200.0, 300.0]),
         logZ=-1.0,
         logZerr=0.1,
+        **_prior_checkpoint_payload(),
         **_agn_pivot_checkpoint_payload_for_ids(["agn_a", "agn_b", "agn_c"]),
     )
     current = pd.DataFrame({"object_id": ["agn_c", "agn_a"]})
@@ -437,6 +452,7 @@ def test_resume_replot_with_cuts_rejects_missing_current_object_id(tmp_path):
         integrals_max_w=np.array([100.0, 200.0]),
         logZ=-1.0,
         logZerr=0.1,
+        **_prior_checkpoint_payload(),
         **_agn_pivot_checkpoint_payload_for_ids(["agn_a", "agn_b"]),
     )
     current = pd.DataFrame({"object_id": ["agn_a", "agn_missing"]})
@@ -460,6 +476,7 @@ def test_resume_replot_with_cuts_rejects_legacy_checkpoint_without_object_ids(tm
         integrals_max_w=np.array([100.0, 200.0]),
         logZ=-1.0,
         logZerr=0.1,
+        **_prior_checkpoint_payload(),
         **_agn_pivot_checkpoint_payload_for_ids(["agn_a", "agn_b"]),
     )
     current = pd.DataFrame({"object_id": ["agn_a"]})
@@ -538,7 +555,8 @@ def test_run_all_saves_cosmo_results_under_result_dir(monkeypatch, tmp_path):
 
     expected = result_root / "cosmo" / "unit" / (
         "cosmo_results_model_compare_joint_fastest_all_z0p44_3p16_"
-        "2d_compmag-dereddened_lf-shen_attsel-fixed-offset.hdf5"
+        "2d_compmag-dereddened_prior-centered_lcdm_lf-shen_"
+        "attsel-fixed-offset_compgrid80x45.hdf5"
     )
     assert captured["filename"] == str(expected)
     assert expected.parent.is_dir()

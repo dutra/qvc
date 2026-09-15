@@ -28,6 +28,18 @@ from qvc.hubble import (
 )
 
 
+def _current_prior_checkpoint_metadata(cosmo_model="FlatLambdaCDM", priors=None):
+    if priors is None:
+        priors, _, _ = hubble_model.get_model_params(
+            cosmo_model, prior_profile="centered_lcdm"
+        )
+    return {
+        "prior_profile": "centered_lcdm",
+        "prior_bounds_json": hubble_fit.canonical_prior_bounds_json(priors),
+        "early_de_guard": False,
+    }
+
+
 @pytest.fixture(autouse=True)
 def _disable_expensive_redshift_wiggle_atlas(monkeypatch):
     monkeypatch.setattr(
@@ -4166,6 +4178,7 @@ def test_run_mcmc_pipeline_compare_sigma_only_skips_completeness_plots_on_resume
             "integrals_max_w": np.ones(len(df_agn)),
             "logZ": -1.0,
             "logZerr": 0.2,
+            **_current_prior_checkpoint_metadata(priors={"H0": (60.0, 80.0)}),
             **hubble_fit._agn_pivot_checkpoint_payload(pivot_context),
             "sigma_clip_pass_stage": "single",
             "object_id_fit_selection": np.asarray(
@@ -4357,6 +4370,7 @@ def _write_fake_checkpoint(
         logZ=float(logz),
         logZerr=float(logzerr),
         integrals_max_w=np.ones(len(dmi_posterior_median), dtype=float),
+        **_current_prior_checkpoint_metadata(),
         **pivot_payload,
     )
 
@@ -6092,6 +6106,7 @@ def test_run_hubble_forwards_configurable_cumulative_cut_tier():
 def test_resume_rejects_changed_magnitude_or_psf_host_selection(changed):
     config = {'completeness_magnitude_support': [17., 27.], 'tier2': [['f_host_2500_psf', 0., .9]]}
     payload = {
+        **_current_prior_checkpoint_metadata(),
         'flat_samples': np.zeros((4, 3)), 'dmi_max_w': np.zeros(2),
         'dmi_posterior_sigma': np.ones(2), 'integrals_max_w': np.zeros(2),
         'logZ': 0., 'logZerr': 0., 'cut_tier': '2',
@@ -6110,6 +6125,7 @@ def test_resume_rejects_changed_coverage_sn_information_cut(column, threshold, o
     current = {'cut_tier': '2', 'tier2': [[column, threshold, None]]}
     previous = {'cut_tier': '2', 'tier2': [] if old_threshold is None else [[column, old_threshold, None]]}
     payload = {
+        **_current_prior_checkpoint_metadata(),
         'flat_samples': np.zeros((4, 3)), 'dmi_max_w': np.zeros(2),
         'dmi_posterior_sigma': np.ones(2), 'integrals_max_w': np.zeros(2),
         'logZ': 0., 'logZerr': 0., 'cut_tier': '2',
