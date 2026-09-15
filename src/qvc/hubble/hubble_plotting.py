@@ -10589,6 +10589,7 @@ def plot_predicted_L2500_vs_sigmahat(
     dmi_selection_sigma_interp=None,
     clipped_mask=None,
     sigma_sel_floor_mag=0.05,
+    contours_only=False,
     *,
     agn_pivot_context: AgnPivotContext,
 ):
@@ -10868,44 +10869,45 @@ def plot_predicted_L2500_vs_sigmahat(
     clipped_in = clipped_mask & mask_in.to_numpy(dtype=bool) if clipped_mask is not None else None
     clipped_out = clipped_mask & mask_out.to_numpy(dtype=bool) if clipped_mask is not None else None
 
-    # inside redshift range: filled markers
-    ax.errorbar(
-        x_ref[mask_in], 10**actual_logL2500_plot[mask_in], xerr=xerr_asym[:, mask_in], yerr=yerr_linear_display[mask_in],
-        fmt='o', linestyle='none', markersize=4, mfc=(0,0,0,0.4), mec="none",
-        #markeredgewidth=0,
-        ecolor=(0.2, 0.2, 0.2, 0.1), elinewidth=0.8, capsize=2, capthick=0.8,
-        zorder=1, label="AGN"
-    )
-    # outside redshift range: filled diamonds
-    ax.errorbar(
-        x_ref[mask_out], 10**actual_logL2500_plot[mask_out], xerr=xerr_asym[:, mask_out], yerr=yerr_linear_display[mask_out],
-        fmt='D', linestyle='none', markersize=3, mfc=out_of_range_marker_color, mec="none",
-        ecolor=out_of_range_error_color, elinewidth=0.8, capsize=2, capthick=0.8,
-        zorder=1
-    )
-    if clipped_in is not None and np.any(clipped_in):
-        ax.scatter(
-            x_ref[clipped_in],
-            10**actual_logL2500_plot[clipped_in],
-            s=26,
-            marker="o",
-            c="tab:green",
-            alpha=0.95,
-            linewidths=0,
-            zorder=2,
-            label="Clipped AGN",
+    if not contours_only:
+        # inside redshift range: filled markers
+        ax.errorbar(
+            x_ref[mask_in], 10**actual_logL2500_plot[mask_in], xerr=xerr_asym[:, mask_in], yerr=yerr_linear_display[mask_in],
+            fmt='o', linestyle='none', markersize=4, mfc=(0,0,0,0.4), mec="none",
+            #markeredgewidth=0,
+            ecolor=(0.2, 0.2, 0.2, 0.1), elinewidth=0.8, capsize=2, capthick=0.8,
+            zorder=1, label="AGN"
         )
-    if clipped_out is not None and np.any(clipped_out):
-        ax.scatter(
-            x_ref[clipped_out],
-            10**actual_logL2500_plot[clipped_out],
-            s=28,
-            marker="D",
-            c=_OUT_OF_RANGE_AGN_COLOR,
-            alpha=0.95,
-            linewidths=0,
-            zorder=2,
+        # outside redshift range: filled diamonds
+        ax.errorbar(
+            x_ref[mask_out], 10**actual_logL2500_plot[mask_out], xerr=xerr_asym[:, mask_out], yerr=yerr_linear_display[mask_out],
+            fmt='D', linestyle='none', markersize=3, mfc=out_of_range_marker_color, mec="none",
+            ecolor=out_of_range_error_color, elinewidth=0.8, capsize=2, capthick=0.8,
+            zorder=1
         )
+        if clipped_in is not None and np.any(clipped_in):
+            ax.scatter(
+                x_ref[clipped_in],
+                10**actual_logL2500_plot[clipped_in],
+                s=26,
+                marker="o",
+                c="tab:green",
+                alpha=0.95,
+                linewidths=0,
+                zorder=2,
+                label="Clipped AGN",
+            )
+        if clipped_out is not None and np.any(clipped_out):
+            ax.scatter(
+                x_ref[clipped_out],
+                10**actual_logL2500_plot[clipped_out],
+                s=28,
+                marker="D",
+                c=_OUT_OF_RANGE_AGN_COLOR,
+                alpha=0.95,
+                linewidths=0,
+                zorder=2,
+            )
 
     # --- 68% / 95% KDE contours (outlines only) ---
     try:
@@ -10927,7 +10929,16 @@ def plot_predicted_L2500_vs_sigmahat(
 
             # Ascending levels: [95%, 68%]
             levels = _kde_conf_levels(Z, conf=(0.954, 0.683))
-            if show_residuals:
+            if contours_only:
+                contour_color = "black"
+                contour_linewidths = (2.0, 2.4)
+                contour_handles = [
+                    Line2D([0], [0], color=contour_color, lw=width, ls='-', label=label)
+                    for width, label in zip(
+                        contour_linewidths, ('95% contour', '68% contour')
+                    )
+                ]
+            elif show_residuals:
                 contour_color = "red"
                 contour_linewidths = (2.6, 3.2)
                 contour_handles = [
@@ -11051,7 +11062,7 @@ def plot_predicted_L2500_vs_sigmahat(
     # )
 
     # ========= HIGHLIGHT: compute EVERYTHING from df_calibrators =========
-    if df_calibrators is not None and len(df_calibrators) > 0:
+    if not contours_only and df_calibrators is not None and len(df_calibrators) > 0:
         ds = df_calibrators.copy()
 
         M2500_show = ds['apparent_mag_2500'].values - cosmo.distmod(ds['z'].values).value
@@ -11311,6 +11322,8 @@ def plot_predicted_L2500_vs_sigmahat(
         out_pdf += "_debiased"
     if show_residuals:
         out_pdf += "_with_residuals"
+    if contours_only:
+        out_pdf += "_contours_only"
     out_pdf += ".pdf"
     _save_figure(fig, os.path.join(plot_path, out_pdf), dpi=600, show=show)
 

@@ -2045,6 +2045,10 @@ def test_run_single_threads_direct_full_sample_debias_arrays_to_plots(monkeypatc
     debiased_l2500_call = next(call for call in l2500_calls if call.get("debias"))
     np.testing.assert_allclose(debiased_l2500_call["dmi_values"], direct_dmi)
     np.testing.assert_allclose(debiased_l2500_call["dmi_selection_sigma"], direct_sigma_sel)
+    contours_only_calls = [call for call in l2500_calls if call.get("contours_only")]
+    assert len(contours_only_calls) == 1
+    assert contours_only_calls[0]["debias"] is True
+    assert contours_only_calls[0]["show_residuals"] is False
 
     debiased_m2500_call = next(call for call in m2500_calls if call.get("debias"))
     np.testing.assert_allclose(debiased_m2500_call["dmi_values"], direct_dmi)

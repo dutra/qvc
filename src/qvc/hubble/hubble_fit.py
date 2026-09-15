@@ -5222,6 +5222,28 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         use_redshift_log_f_term=use_redshift_log_f_term,
         agn_pivot_context=agn_pivot_context,
     )
+    plot_predicted_L2500_vs_sigmahat(
+        flat_samples,
+        df_agn_pass2_plot_sample,
+        cosmo_model=cosmo_model,
+        z_pivot_agn=z_pivot_agn,
+        debias=True,
+        dm_interp=dm_interp,
+        dmi_values=dmi_posterior_median_full,
+        dmi_selection_sigma=dmi_selection_sigma_full,
+        show_residuals=False,
+        contours_only=True,
+        show=False,
+        plot_path=plot_path,
+        df_calibrators=df_calibrators,
+        z_range=z_range,
+        use_alpha_lambda_term=use_alpha_lambda_term,
+        use_eta_sigma_term=use_eta_sigma_term,
+        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+        use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
+        use_redshift_log_f_term=use_redshift_log_f_term,
+        agn_pivot_context=agn_pivot_context,
+    )
     L_residuals_debiased, L_pred_std_debiased = plot_predicted_L2500_vs_sigmahat(
         flat_samples,
         df_agn_pass2_plot_sample,
