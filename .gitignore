@@ -9,6 +9,7 @@ data/
 *.log
 *.xsh
 !hpc_scripts/shubble_validation.xsh
+!hpc_scripts/shubble_grid.xsh
 *.err
 *.txt
 *.tex
