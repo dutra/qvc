@@ -246,18 +246,23 @@ def _load_sweep_data(
                 )
             m0_agn[model] = float(np.median(samples[:, m0_index]))
 
-    reference_ids = set(residuals[LF_REFERENCE_MODEL].index)
+    common_ids = None
     for model in expected_models:
         residual_ids = set(residuals[model].index)
         correction_ids = set(corrections[model].index)
-        if residual_ids != reference_ids or correction_ids != reference_ids:
+        if residual_ids != correction_ids:
             raise RuntimeError(
-                "LF diagnostics require identical fit-selection object IDs; "
+                "LF diagnostics require matching residual and posterior object IDs "
+                "within each run; "
                 f"model {model!r} has {len(residual_ids)} residual IDs and "
-                f"{len(correction_ids)} correction IDs versus "
-                f"{len(reference_ids)} for {LF_REFERENCE_LABEL}."
+                f"{len(correction_ids)} correction IDs."
             )
-    ids = pd.Index(sorted(reference_ids))
+        common_ids = (
+            residual_ids
+            if common_ids is None
+            else common_ids.intersection(residual_ids)
+        )
+    ids = pd.Index(sorted(common_ids or set()))
     if len(ids) == 0:
         raise RuntimeError("LF diagnostics found no common fit-selection objects.")
     return residuals, corrections, m0_agn, ids
@@ -485,7 +490,8 @@ def _selection_correction_and_residual_figure(
             ),
             color=COLORS[model],
             marker=MARKERS[model],
-            ms=4.7,
+            ms=7.0,
+            capsize=3.0,
             lw=2.4,
             label=DIAGNOSTIC_LABELS[model],
         )
@@ -512,7 +518,8 @@ def _selection_correction_and_residual_figure(
             yerr=np.vstack((stats[:, 2] - stats[:, 3], stats[:, 4] - stats[:, 2])),
             color=COLORS[model],
             marker=MARKERS[model],
-            ms=4.7,
+            ms=7.0,
+            capsize=3.0,
             lw=2.4,
             label=DIAGNOSTIC_LABELS[model],
         )
@@ -556,7 +563,8 @@ def _selection_correction_and_residual_figure(
             ),
             color=COLORS[model],
             marker=MARKERS[model],
-            ms=4.7,
+            ms=7.0,
+            capsize=3.0,
             lw=2.4,
         )
         axes[3].errorbar(
@@ -570,7 +578,8 @@ def _selection_correction_and_residual_figure(
             ),
             color=COLORS[model],
             marker=MARKERS[model],
-            ms=4.7,
+            ms=7.0,
+            capsize=3.0,
             lw=2.4,
         )
         _append_binned_rows(
@@ -588,13 +597,13 @@ def _selection_correction_and_residual_figure(
             interval_kind="paired_distribution",
         )
     axes[0].set_ylabel(r"Selection correction, $d m_i$ (mag)")
-    axes[0].set_ylim(top=0.65)
+    axes[0].set_ylim(top=0.8)
     axes[0].legend(ncol=2, frameon=False, loc="upper center")
     axes[1].set_ylabel(
         r"Selection-correction difference, $\Delta d m_i$" "\n"
         r"(w.r.t. Wang et al. (2026)) (mag)"
     )
-    axes[1].set_ylim(top=0.1)
+    axes[1].margins(y=0.1)
     axes[2].set_ylabel(
         r"$\Delta d m_i + \Delta M^0_{\rm AGN}$" "\n"
         r"(w.r.t. Wang et al. (2026)) (mag)"

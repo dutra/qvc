@@ -449,7 +449,7 @@ def test_diagnostics_generate_paired_figures_and_tables(tmp_path):
     assert "style.mplstyle" in readme
 
 
-def test_diagnostics_use_wang_ids_as_the_matched_reference(tmp_path):
+def test_diagnostics_use_intersection_of_fit_selection_ids(tmp_path):
     diagrams = _write_diagnostic_inputs(
         tmp_path, "comparison", models=comparison.LF_RUN_IDS
     )
@@ -476,17 +476,17 @@ def test_diagnostics_use_wang_ids_as_the_matched_reference(tmp_path):
         )
         handle.create_dataset("dmi_posterior_median", data=dmi)
 
-    with pytest.raises(
-        RuntimeError,
-        match=r"versus 17 for Wang et al\. \(2026\)",
-    ):
-        lf_comparison_diagnostics.generate_lf_comparison_diagnostics(
-            "comparison",
-            diagrams,
-            tmp_path / "outputs",
-            repo_root=tmp_path,
-            bootstrap_draws=20,
-        )
+    outputs = lf_comparison_diagnostics.generate_lf_comparison_diagnostics(
+        "comparison",
+        diagrams,
+        tmp_path / "outputs",
+        repo_root=tmp_path,
+        bootstrap_draws=20,
+    )
+
+    summary = pd.read_csv(outputs["summary_csv"])
+    assert set(summary["n_paired"]) == {17}
+    assert "same 17 fit-selection object IDs" in outputs["readme"].read_text()
 
 
 def test_main_generates_diagnostics_after_comparison_pdf(monkeypatch, tmp_path):
