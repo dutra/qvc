@@ -65,7 +65,7 @@ class LFRun(NamedTuple):
 
 LF_RUNS = (
     LFRun("wang2026_type1_lade_a", "wang2026_type1_lade_a", None, "attenuated"),
-    LFRun("shen", "shen", "all_nh_attenuated", "attenuated"),
+    LFRun("shen", "shen", "type1_attenuated", "attenuated"),
     LFRun("palanque2016_ple_lede", "palanque2016_ple_lede", None, "attenuated"),
     LFRun(
         "kulkarni2019_type1_model1",
