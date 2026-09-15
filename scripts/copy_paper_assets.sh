@@ -13,7 +13,7 @@ Usage:
     [--draft path/to/draft.tex] [--dry-run] [--dest-dir path/to/assets]
 
 Description:
-  Copy paper-ready plots and TeX parameter files into <fiducial-dir>/paper/.
+  Copy paper-ready plots, tables and TeX parameter files into plots/paper/.
 
 Notes:
   - Run this from the repository root.
@@ -22,7 +22,8 @@ Notes:
   - Missing or ambiguous sources abort before any destination files are changed.
   - Restricted parameters are copied only when --restricted-dir is supplied.
   - --dry-run validates and prints the manifest without copying files.
-  - --dest-dir overrides the default <fiducial-dir>/paper destination.
+  - All files are copied directly into one flat destination directory.
+  - --dest-dir overrides the default <repo-root>/plots/paper destination.
   - The manifest is hardcoded for the current paper draft.
   - --draft is accepted for logging only and is not parsed.
   - --only filters the copy to a single asset group.
@@ -45,18 +46,18 @@ require_repo_root() {
 
 copy_file() {
   local source_path="$1"
-  local dest_subdir="$2"
+  # The second argument identifies the asset group; destinations are flat.
   local dest_name="$3"
-  local dest_dir="$DEST_ROOT/$dest_subdir"
+  local dest_dir="$DEST_ROOT"
 
   if [[ ! -f "$source_path" ]]; then
-    MISSING+=("$dest_subdir/$dest_name <= $source_path")
+    MISSING+=("$dest_name <= $source_path")
     return
   fi
 
   SOURCES+=("$source_path")
   DESTINATIONS+=("$dest_dir/$dest_name")
-  COPIED+=("$dest_subdir/$dest_name <= $source_path")
+  COPIED+=("$dest_name <= $source_path")
 }
 
 copy_from_root() {
@@ -158,7 +159,7 @@ if [[ "$FIDUCIAL_DIR" != /* ]]; then
   FIDUCIAL_DIR="$REPO_ROOT/$FIDUCIAL_DIR"
 fi
 if [[ -z "$DEST_ROOT" ]]; then
-  DEST_ROOT="$FIDUCIAL_DIR/paper"
+  DEST_ROOT="$REPO_ROOT/plots/paper"
 fi
 if [[ -n "$RESTRICTED_DIR" && "$RESTRICTED_DIR" != /* ]]; then
   RESTRICTED_DIR="$REPO_ROOT/$RESTRICTED_DIR"
