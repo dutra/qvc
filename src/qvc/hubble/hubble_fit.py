@@ -113,6 +113,7 @@ from qvc.light_curve.posterior_draws import (
     LIGHT_CURVE_POSTERIOR_VALID_COUNT_COL,
 )
 from qvc.hubble.hubble_plotting import (
+    HUBBLE_PLOT_MAX_DRAWS,
     HubblePosteriorDrawSelection,
     get_hubble_posterior_sample_indices,
     plot_blr_diagnostics_summary,
@@ -2642,11 +2643,11 @@ def _extract_fit_values_from_plot_sample(
     return plot_values[df_plot_index_positions.loc[fit_indices].to_numpy()]
 
 
-COMPLETENESS_REPLAY_MAX_DRAWS = 256
+COMPLETENESS_REPLAY_MAX_DRAWS = HUBBLE_PLOT_MAX_DRAWS
 
 
 def _completeness_replay_sample_indices(n_samples):
-    """Deterministically cover the posterior with at most 256 rows."""
+    """Deterministically cover the posterior with the Hubble plotting cap."""
     if n_samples <= 0:
         raise ValueError("Completeness replay requires at least one posterior draw.")
     return np.linspace(
@@ -2692,7 +2693,7 @@ def _compute_direct_full_sample_completeness_summaries(
     ``dmi_draw_indices`` is omitted.  When indices are supplied, the fourth
     value is a :class:`HubblePosteriorDrawSelection` carrying the selected
     draws together with their posterior-row and object-column identities.
-    Summaries use at most 256 evenly spaced posterior rows by default. Explicit
+    Summaries use at most 500 evenly spaced posterior rows by default. Explicit
     ``dmi_draw_indices`` select the rows for both summaries and retained draws.
     """
     samples = np.asarray(flat_samples, dtype=float)
@@ -2726,7 +2727,10 @@ def _compute_direct_full_sample_completeness_summaries(
         if np.unique(selected_draw_indices).size != selected_draw_indices.size:
             raise ValueError("dmi_draw_indices must not contain duplicates.")
         if selected_draw_indices.size > COMPLETENESS_REPLAY_MAX_DRAWS:
-            raise ValueError("Completeness replay supports at most 256 selected draws.")
+            raise ValueError(
+                "Completeness replay supports at most "
+                f"{COMPLETENESS_REPLAY_MAX_DRAWS} selected draws."
+            )
 
     replay_indices = (
         _completeness_replay_sample_indices(len(samples))

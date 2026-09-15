@@ -6211,8 +6211,14 @@ def _range_partitioned_weighted_bin_stats(
     return inside, _concatenate_weighted_bin_stats((below, above))
 
 
-def get_hubble_posterior_sample_indices(n_samples, target_samples=100):
-    """Return the deterministic posterior rows used by ``plot_hubble``."""
+HUBBLE_PLOT_MAX_DRAWS = 500
+
+
+def get_hubble_posterior_sample_indices(
+    n_samples,
+    target_samples=HUBBLE_PLOT_MAX_DRAWS,
+):
+    """Return at most ``target_samples`` evenly spaced posterior rows."""
     if (
         isinstance(n_samples, (bool, np.bool_))
         or not isinstance(n_samples, (int, np.integer))
@@ -6230,8 +6236,12 @@ def get_hubble_posterior_sample_indices(n_samples, target_samples=100):
             "target_samples must be a positive integer; "
             f"got {target_samples!r}."
         )
-    thin_factor = max(1, int(n_samples) // int(target_samples))
-    return np.arange(int(n_samples), dtype=int)[::thin_factor]
+    return np.linspace(
+        0,
+        int(n_samples) - 1,
+        min(int(n_samples), int(target_samples)),
+        dtype=int,
+    )
 
 
 def _validate_hubble_posterior_sample_indices(indices, n_samples):
@@ -7085,6 +7095,16 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
 
 
         for cosmo_model_other, cosmo_model_samples_other in cosmo_model_samples.items():
+            cosmo_model_samples_other = np.asarray(
+                cosmo_model_samples_other,
+                dtype=float,
+            )
+            comparison_sample_indices = get_hubble_posterior_sample_indices(
+                len(cosmo_model_samples_other)
+            )
+            cosmo_model_samples_other = cosmo_model_samples_other[
+                comparison_sample_indices
+            ]
             option_flags_other = resolve_model_option_flags(
                 cosmo_model_other,
                 np.asarray(cosmo_model_samples_other).shape[1],

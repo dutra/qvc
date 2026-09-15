@@ -1600,7 +1600,7 @@ def test_compute_direct_full_sample_completeness_summaries_optionally_returns_se
         0.1 * flat_samples[:, 0, None]
         + np.arange(len(df_plot), dtype=float)[None, :]
     )
-    summary_indices = np.linspace(0, n_samples - 1, min(n_samples, 256), dtype=int)
+    summary_indices = np.linspace(0, n_samples - 1, min(n_samples, 500), dtype=int)
     np.testing.assert_allclose(legacy_result[0], np.median(all_draws[summary_indices], axis=0))
     assert len(observed_prior_profiles) == len(summary_indices) + len(draw_indices)
     np.testing.assert_allclose(dmi_median, np.median(all_draws[draw_indices], axis=0))
@@ -1627,15 +1627,63 @@ def test_compute_direct_full_sample_completeness_summaries_optionally_returns_se
     assert set(observed_prior_profiles) == {"centered_lcdm"}
 
 
-def test_get_hubble_posterior_sample_indices_preserves_plot_stride():
+def test_get_hubble_posterior_sample_indices_caps_at_500_evenly_spaced_draws():
     np.testing.assert_array_equal(
         hubble_plotting.get_hubble_posterior_sample_indices(99),
         np.arange(99, dtype=int),
     )
     np.testing.assert_array_equal(
         hubble_plotting.get_hubble_posterior_sample_indices(205),
-        np.arange(0, 205, 2, dtype=int),
+        np.arange(205, dtype=int),
     )
+    selected = hubble_plotting.get_hubble_posterior_sample_indices(1001)
+    assert hubble_plotting.HUBBLE_PLOT_MAX_DRAWS == 500
+    assert hubble_fit.COMPLETENESS_REPLAY_MAX_DRAWS == 500
+    assert len(selected) == 500
+    assert selected[0] == 0
+    assert selected[-1] == 1000
+
+
+def test_plot_hubble_thins_comparison_model_samples(monkeypatch, tmp_path):
+    df_agn = _make_fake_agn_sample(n_agn=2)
+    df_pantheon = _make_fake_pantheon_sample(n_sne=3)
+    priors, model_labels, _ = hubble_model.get_model_params(
+        "FlatLambdaCDM",
+        only_sna=False,
+    )
+    theta = np.array(
+        [(priors[name][0] + priors[name][1]) / 2.0 for name in model_labels],
+        dtype=float,
+    )
+    active_samples = np.tile(theta[None, :], (2, 1))
+    comparison_samples = np.tile(theta[None, :], (1001, 1))
+    observed = []
+    original = hubble_plotting.get_hubble_posterior_sample_indices
+
+    def record_indices(n_samples, target_samples=500):
+        observed.append((n_samples, target_samples))
+        return original(n_samples, target_samples)
+
+    monkeypatch.setattr(
+        hubble_plotting,
+        "get_hubble_posterior_sample_indices",
+        record_indices,
+    )
+    monkeypatch.setattr(hubble_plotting, "_save_figure", lambda *args, **kwargs: None)
+
+    hubble_plotting.plot_hubble(
+        active_samples,
+        df_agn,
+        df_pantheon,
+        cosmo_model="FlatLambdaCDM",
+        z_pivot_agn=hubble_fit.z_pivot_agn,
+        plot_path=str(tmp_path),
+        cosmo_model_samples={"FlatLambdaCDM": comparison_samples},
+        posterior_sample_indices=np.arange(2, dtype=int),
+        agn_pivot_context=_agn_pivot_context(df_agn),
+    )
+
+    assert observed == [(1001, 500)]
 
 
 def test_run_single_skip_plots_smoke(fake_data, monkeypatch, tmp_path):
@@ -2525,7 +2573,7 @@ def test_plot_hubble_keeps_selected_dmi_draws_aligned_through_thinning(
         ],
         dtype=float,
     )
-    n_samples = 205
+    n_samples = 1001
     flat_samples = np.tile(theta[None, :], (n_samples, 1))
     flat_samples[:, model_labels.index("M0_agn")] = np.linspace(
         -23.0,
@@ -2551,9 +2599,7 @@ def test_plot_hubble_keeps_selected_dmi_draws_aligned_through_thinning(
         )
     )
     draw_positions = np.arange(len(sample_indices), dtype=int)
-    target_residual_draws = (
-        ((draw_positions * 37) % 101 - 50) / 10.0
-    )[:, None]
+    target_residual_draws = draw_positions.astype(float)[:, None]
     apparent_magnitude = df_agn[
         "apparent_mag_2500"
     ].to_numpy(dtype=float)
