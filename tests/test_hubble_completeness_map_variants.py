@@ -79,11 +79,11 @@ def test_run_tag_and_mode_table_reflect_map_variants(monkeypatch):
     monkeypatch.delenv(hcr.COMPLETENESS_SMOOTH_SIGMA_MAG_ENV, raising=False)
     monkeypatch.delenv(hcr.COMPLETENESS_SMOOTH_SIGMA_Z_ENV, raising=False)
     base = hubble_fit.make_run_tag("Flatw0waCDM", False, "fastest", None, (0.44, 3.16))
-    assert hubble_fit.completeness_map_variant_tag() == ""
+    assert hubble_fit.completeness_map_variant_tag() == "_compgrid80x45"
     monkeypatch.setenv(hcr.COMPLETENESS_SMOOTH_SIGMA_MAG_ENV, "0.25")
-    assert hubble_fit.completeness_map_variant_tag() == "_compsm0p25x0p3"
-    assert hubble_fit.make_run_tag("Flatw0waCDM", False, "fastest", None, (0.44, 3.16)) == base + "_compsm0p25x0p3"
-    assert hubble_fit.make_run_tag("Flatw0waCDM", False, "fastest", None, (0.44, 3.16), completeness=False).endswith("_disable_completeness")
+    assert hubble_fit.completeness_map_variant_tag() == "_compsm0p25x0p3_compgrid80x45"
+    assert hubble_fit.make_run_tag("Flatw0waCDM", False, "fastest", None, (0.44, 3.16)) == base.replace("_compgrid80x45", "_compsm0p25x0p3_compgrid80x45")
+    assert hubble_fit.make_run_tag("Flatw0waCDM", False, "fastest", None, (0.44, 3.16), completeness=False, prior_profile="default").endswith("_disable_completeness")
     args = SimpleNamespace(
         only_sna=False, only_agn=True, light_curve_uncertainty_mode="covariance",
         correct_sigma_uv_host=False,

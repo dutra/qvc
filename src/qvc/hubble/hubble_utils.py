@@ -40,6 +40,8 @@ from qvc.hubble.cuts import (
     COMPLETENESS_TAIL_MAG_2500_MIN,
     EBV_GAL_PLUS_EBV_AGN_COLUMN,
     EXCLUDED_SDSS_NAMES,
+    F_BC_3000_MAX,
+    F_FE_UV_3000_MAX,
     LIGHT_CURVE_N_POINTS_COLUMN,
     LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
     normalize_completeness_magnitude_support_mode,
@@ -2598,16 +2600,25 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         elif LOG_AMP_DELTA_BC_UPPER is not None:
             raise ValueError("Tier 2 cut requires missing column 'dlog_amp_bc'.")
 
-        for frac_col, log_col, log_upper in (
-            ("f_bc_3000", "log_f_bc_3000", LOG_F_BC_3000_MAX),
-            ("f_fe_uv_3000", "log_f_fe_uv_3000", LOG_F_FE_UV_3000_MAX),
+        for frac_col, log_col, frac_upper, log_upper in (
+            (
+                "f_bc_3000",
+                "log_f_bc_3000",
+                F_BC_3000_MAX,
+                LOG_F_BC_3000_MAX,
+            ),
+            (
+                "f_fe_uv_3000",
+                "log_f_fe_uv_3000",
+                F_FE_UV_3000_MAX,
+                LOG_F_FE_UV_3000_MAX,
+            ),
         ):
-            if log_upper is None:
+            if frac_upper is None:
                 continue
             if frac_col not in df.columns:
                 raise ValueError(f"Tier 2 cut requires missing column {frac_col!r}.")
             frac_vals = pd.to_numeric(df[frac_col], errors="coerce").to_numpy(dtype=float)
-            frac_upper = 10.0**log_upper
             frac_mask = (~np.isfinite(frac_vals)) | (frac_vals <= 0.0) | (frac_vals <= frac_upper)
             cut_desc = f"{log_col} <= {log_upper} or NaN/non-positive"
             plot_cut_diagnostics(df.copy(), df[frac_mask], bins=30, cut_info=cut_desc, save_path=cuts_plot_dir)
@@ -2743,6 +2754,13 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         "tier2": (
             build_tier2_cuts(completeness_magnitude=completeness_magnitude)
             if apply_tier2 else []
+        ),
+        "tier2_spectral_component_fraction_max": (
+            {
+                "f_bc_3000": F_BC_3000_MAX,
+                "f_fe_uv_3000": F_FE_UV_3000_MAX,
+            }
+            if apply_tier2 else None
         ),
         "tier2_low_l2500_low_fhost_psf": (
             {

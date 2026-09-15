@@ -1500,16 +1500,16 @@ def test_strict_padded_support_is_recorded_in_checkpoint_selection_metadata():
 
     hubble_fit.record_completeness_support_metadata(
         (frame,),
-        magnitude_support=(17.0, 27.0),
+        magnitude_support=(17.0, 24.0),
         redshift_support=(0.2, 3.5),
     )
 
     configuration = json.loads(frame.attrs["cut_configuration_json"])
-    assert configuration["completeness_magnitude_support"] == [17.0, 27.0]
+    assert configuration["completeness_magnitude_support"] == [17.0, 24.0]
     assert configuration["completeness_redshift_support"] == [0.2, 3.5]
-    assert configuration["completeness_map_magnitude_support"] == [16.5, 27.5]
+    assert configuration["completeness_map_magnitude_support"] == [16.5, 24.5]
     assert configuration["completeness_map_redshift_support"] == [0.0, 4.5]
-    assert configuration["completeness_map_n_magnitude_bins"] == 110
+    assert configuration["completeness_map_n_magnitude_bins"] == 80
     assert configuration["completeness_map_n_redshift_bins"] == 45
     assert configuration["completeness_interpolation_policy"] == "strict-padded-v1"
 

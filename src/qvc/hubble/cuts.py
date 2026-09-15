@@ -248,44 +248,44 @@ def _cut_env_float(name, default):
     except ValueError as exc:
         raise ValueError(f"{name} must be a floating-point value or 'none', got {value!r}") from exc
 
-LOG_TAU_UV_RF_MIN = _cut_env_float("QVC_CUT_LOG_TAU_UV_RF_MIN", 1.5)
-LOG_TAU_UV_RF_MAX = _cut_env_float("QVC_CUT_LOG_TAU_UV_RF_MAX", 4.0)
+LOG_TAU_UV_RF_MIN = _cut_env_float("QVC_CUT_LOG_TAU_UV_RF_MIN", 1.3)
+LOG_TAU_UV_RF_MAX = _cut_env_float("QVC_CUT_LOG_TAU_UV_RF_MAX", None)
 T_RF_OVER_TAU_UV_RF_COLUMN = "t_rf_over_tau_uv_rf"
 T_RF_OVER_TAU_UV_RF_MIN = _cut_env_float(
-    "QVC_CUT_T_RF_OVER_TAU_UV_RF_MIN", 5.0
+    "QVC_CUT_T_RF_OVER_TAU_UV_RF_MIN", None
 )
 FRAC_AGN_5100_MIN = None
 APPARENT_MAG_2500_ERR_MAX = _cut_env_float(
-    "QVC_CUT_APPARENT_MAG_2500_ERR_MAX", 1.0
+    "QVC_CUT_APPARENT_MAG_2500_ERR_MAX", None
 )
 
 # JAXSEDFit goodness-of-fit and posterior-convergence diagnostics.
 JAXSEDFIT_JOINT_REDUCED_CHI2_MAX = _cut_env_float(
-    "QVC_CUT_JAXSEDFIT_JOINT_REDUCED_CHI2_MAX", 1.5
+    "QVC_CUT_JAXSEDFIT_JOINT_REDUCED_CHI2_MAX", 1.2
 )
-SED_REDUCED_CHI2_MAX = _cut_env_float("QVC_CUT_SED_REDUCED_CHI2_MAX", 2.0)
+SED_REDUCED_CHI2_MAX = _cut_env_float("QVC_CUT_SED_REDUCED_CHI2_MAX", 1.5)
 SPECTROSCOPY_REDUCED_CHI2_MAX = _cut_env_float(
-    "QVC_CUT_SPECTROSCOPY_REDUCED_CHI2_MAX", 1.3
+    "QVC_CUT_SPECTROSCOPY_REDUCED_CHI2_MAX", 1.1
 )
-LOO_CHI2_EFF_MAX = _cut_env_float("QVC_CUT_LOO_CHI2_EFF_MAX", 1.01)
+LOO_CHI2_EFF_MAX = _cut_env_float("QVC_CUT_LOO_CHI2_EFF_MAX", 1.0)
 # Reject spectral solutions whose inferred rest-frame 2500 A attenuation is so
 # large that the attenuated completeness coordinate admits extreme Hubble
 # outliers.  This is exactly
 # m_2500_attenuated_model - m_2500_dereddened.
-A_2500_TOTAL_MAX = _cut_env_float("QVC_CUT_A_2500_TOTAL_MAX", 3.5)
+A_2500_TOTAL_MAX = _cut_env_float("QVC_CUT_A_2500_TOTAL_MAX", None)
 EBV_GAL_PLUS_EBV_AGN_COLUMN = "ebv_gal_plus_ebv_agn"
 EBV_GAL_PLUS_EBV_AGN_MAX = _cut_env_float(
-    "QVC_CUT_EBV_GAL_PLUS_EBV_AGN_MAX", 0.05
+    "QVC_CUT_EBV_GAL_PLUS_EBV_AGN_MAX", None
 )
-SPECTRAL_RHAT_MAX = _cut_env_float("QVC_CUT_SPECTRAL_RHAT_MAX", 1.20)
-LIGHT_CURVE_RHAT_MAX = _cut_env_float("QVC_CUT_LIGHT_CURVE_RHAT_MAX", 1.10)
-NUM_DIVERGENCES_MAX = _cut_env_float("QVC_CUT_NUM_DIVERGENCES_MAX", None)
+SPECTRAL_RHAT_MAX = _cut_env_float("QVC_CUT_SPECTRAL_RHAT_MAX", 1.1)
+LIGHT_CURVE_RHAT_MAX = _cut_env_float("QVC_CUT_LIGHT_CURVE_RHAT_MAX", 1.05)
+NUM_DIVERGENCES_MAX = _cut_env_float("QVC_CUT_NUM_DIVERGENCES_MAX", 0.0)
 
 # The completeness map is tabulated at histogram-bin centers on a deliberately
 # padded physical grid. Science-selection coordinates lie inside that center
 # hull, so no magnitude/redshift extrapolation or clipping is needed.
 COMPLETENESS_MAP_MAG_EDGE_MIN = 16.5
-COMPLETENESS_MAP_MAG_EDGE_MAX = 27.5
+COMPLETENESS_MAP_MAG_EDGE_MAX = 24.5
 COMPLETENESS_N_MAG_BINS = grid_bin_count(
     COMPLETENESS_MAP_MAG_EDGE_MAX - COMPLETENESS_MAP_MAG_EDGE_MIN,
     os.environ.get(MAG_WIDTH_ENV, "0.1"),
@@ -308,7 +308,7 @@ COMPLETENESS_Z_MAX = (
 
 # The Hubble sample selection is deliberately narrower than the padded map.
 COMPLETENESS_MAG_EDGE_MIN = 17.0
-COMPLETENESS_MAG_EDGE_MAX = 27.0
+COMPLETENESS_MAG_EDGE_MAX = 24.0
 COMPLETENESS_MAG_BIN_WIDTH = (
     COMPLETENESS_MAP_MAG_EDGE_MAX - COMPLETENESS_MAP_MAG_EDGE_MIN
 ) / COMPLETENESS_N_MAG_BINS
@@ -360,11 +360,12 @@ LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS = ("u",)
 # LOG_F_FE_UV_3000_MAX=log10(0.1); REL_APPARENT_MAG_2500_ERR_MAX=0.0025
 # COMPLETENESS_MAG_2500_MAX=None; ALPHA_LAMBDA=(None, None)
 WRMS_MAX = None
-T_RF_LENGTH_MIN = None
-LIGHT_CURVE_N_POINTS_MIN = _cut_env_float("QVC_CUT_LIGHT_CURVE_N_POINTS_MIN", 400.0)
+T_RF_LENGTH_MIN = _cut_env_float("QVC_CUT_T_RF_LENGTH_MIN", None)
+LIGHT_CURVE_N_POINTS_MIN = _cut_env_float("QVC_CUT_LIGHT_CURVE_N_POINTS_MIN", None)
 SN_MEDIAN_ALL_MIN = _cut_env_float("QVC_CUT_SN_MEDIAN_ALL_MIN", 3.0)
-ETA_SIGMA_KL_MIN = _cut_env_float("QVC_CUT_ETA_SIGMA_KL_MIN", 0.05)
+ETA_SIGMA_KL_MIN = _cut_env_float("QVC_CUT_ETA_SIGMA_KL_MIN", None)
 for _name, _threshold in (
+    ("QVC_CUT_T_RF_LENGTH_MIN", T_RF_LENGTH_MIN),
     ("QVC_CUT_LIGHT_CURVE_N_POINTS_MIN", LIGHT_CURVE_N_POINTS_MIN),
     ("QVC_CUT_SN_MEDIAN_ALL_MIN", SN_MEDIAN_ALL_MIN),
     ("QVC_CUT_ETA_SIGMA_KL_MIN", ETA_SIGMA_KL_MIN),
@@ -380,25 +381,42 @@ REDDENING_EBV_MAX = None
 
 VARIABILITY_CHI_SQ_RED_G_MIN = None
 F_HOST_2500_MAX = None
-F_HOST_2500_PSF_MAX = _cut_env_float("QVC_CUT_F_HOST_2500_PSF_MAX", 0.90)
+F_HOST_2500_PSF_MAX = _cut_env_float("QVC_CUT_F_HOST_2500_PSF_MAX", None)
 if F_HOST_2500_PSF_MAX is not None and not 0.0 <= F_HOST_2500_PSF_MAX <= 1.0:
     raise ValueError("QVC_CUT_F_HOST_2500_PSF_MAX must be within [0, 1] or none.")
 LOW_L2500_FHOST_LOG_L_MAX = _cut_env_float(
-    "QVC_CUT_LOW_L2500_FHOST_LOG_L_MAX", 45.0
+    "QVC_CUT_LOW_L2500_FHOST_LOG_L_MAX", None
 )
 LOW_L2500_FHOST_PSF_MAX = _cut_env_float(
-    "QVC_CUT_LOW_L2500_FHOST_PSF_MAX", 0.1
+    "QVC_CUT_LOW_L2500_FHOST_PSF_MAX", None
 )
 LOG_AMP_DELTA_BLR_UPPER = None
 LOG_AMP_DELTA_BLR_UPPER_BY_BAND = {}
 LOG_AMP_DELTA_BC_UPPER = None
-LOG_F_BC_3000_MAX = None
-LOG_F_FE_UV_3000_MAX = None
+
+
+def _fraction_cut(name, default):
+    threshold = _cut_env_float(name, default)
+    if threshold is None:
+        return None
+    if not np.isfinite(threshold) or not 0.0 < threshold <= 1.0:
+        raise ValueError(f"{name} must be within (0, 1] or none.")
+    return float(threshold)
+
+
+F_BC_3000_MAX = _fraction_cut("QVC_CUT_F_BC_3000_MAX", None)
+F_FE_UV_3000_MAX = _fraction_cut("QVC_CUT_F_FE_UV_3000_MAX", None)
+LOG_F_BC_3000_MAX = (
+    None if F_BC_3000_MAX is None else float(np.log10(F_BC_3000_MAX))
+)
+LOG_F_FE_UV_3000_MAX = (
+    None if F_FE_UV_3000_MAX is None else float(np.log10(F_FE_UV_3000_MAX))
+)
 REL_APPARENT_MAG_2500_ERR_MAX = None
 
 
 EXCLUDED_SDSS_NAMES = (
-    # bad spectra
+    # spectra
     "221120.38+010905.6",
     "024555.35+005332.6",
     "015802.36+002917.3",
@@ -408,7 +426,8 @@ EXCLUDED_SDSS_NAMES = (
     "215013.64-001627.2",
     "221018.27+005832.1",
     "220311.37+005056.3",
-    # failed LC fits
+    #"020950.71-000506.4",
+    # LC
     "020618.17-003844.1",
     "213638.58+004154.2",
     "010922.91+005305.2",
@@ -450,6 +469,7 @@ AGN_TIER1_FIT_QUALITY_CUTS = (
 )
 
 AGN_TIER2_PARAMETER_CUTS = (
+    ("t_rf_length", T_RF_LENGTH_MIN, None),
     (LIGHT_CURVE_N_POINTS_COLUMN, LIGHT_CURVE_N_POINTS_MIN, None),
     ("SN_MEDIAN_ALL", SN_MEDIAN_ALL_MIN, None),
     ("eta_sigma_kl", ETA_SIGMA_KL_MIN, None),

@@ -44,6 +44,8 @@ def _minimal_agn_frame(n=10):
             "t_rf_length": np.full(n, 2000.0),
             "f_host_2500": np.full(n, 5e-4),
             "f_host_2500_psf": np.full(n, 0.2),
+            "f_bc_3000": np.full(n, 0.04),
+            "f_fe_uv_3000": np.full(n, 0.08),
             "frac_host_psf_2500": np.full(n, 5e-4),
             "frac_host_psf_2500_err": np.full(n, 2e-4),
             "alpha_lambda": np.full(n, -1.5),
@@ -68,6 +70,7 @@ def _minimal_agn_frame(n=10):
             "spectroscopy_reduced_chi2": np.full(n, 1.0),
             "joint_reduced_chi2": np.full(n, 1.0),
             "loo_chi2_eff": np.full(n, 1.0),
+            "num_divergences": np.zeros(n),
             "ebv_gal": np.full(n, 0.02),
             "ebv_agn": np.full(n, 0.02),
             "a_2500_total": np.full(n, 1.0),
@@ -774,7 +777,7 @@ def test_load_agn_data_cut_tiers_apply_cumulatively(tmp_path, monkeypatch):
     frame["object_id"] = ["keep", "tier0", "tier1", "tier2"]
     frame.loc[1, ["m_2500_dereddened", "m_2500_attenuated_model"]] = 32.5
     frame.loc[2, "joint_reduced_chi2"] = 10.0
-    frame.loc[3, "log_tau_uv_rf"] = 4.5
+    frame.loc[3, "log_tau_uv_rf"] = 1.2
 
     monkeypatch.setattr(
         hubble_utils,
@@ -930,6 +933,8 @@ def test_tier2_excludes_only_joint_low_l2500_low_psf_host_region(
         lambda *_args, **_kwargs: frame.copy(),
     )
     monkeypatch.setattr(hubble_utils, "populate_xray", lambda value: value)
+    monkeypatch.setattr(hubble_utils, "LOW_L2500_FHOST_LOG_L_MAX", 45.0)
+    monkeypatch.setattr(hubble_utils, "LOW_L2500_FHOST_PSF_MAX", 0.1)
     _patch_load_agn_plotters(monkeypatch)
 
     selected, _parent = hubble_utils.load_agn_data(
@@ -958,6 +963,13 @@ def test_tier2_requires_total_fitted_reddening_below_point_zero_five(
         lambda *_args, **_kwargs: frame.copy(),
     )
     monkeypatch.setattr(hubble_utils, "populate_xray", lambda value: value)
+    default_tier2_cuts = hubble_utils.build_tier2_cuts
+    monkeypatch.setattr(
+        hubble_utils,
+        "build_tier2_cuts",
+        lambda **kwargs: default_tier2_cuts(**kwargs)
+        + [("ebv_gal_plus_ebv_agn", None, 0.05)],
+    )
     _patch_load_agn_plotters(monkeypatch)
 
     tier1, _ = hubble_utils.load_agn_data(
@@ -978,6 +990,69 @@ def test_tier2_requires_total_fitted_reddening_below_point_zero_five(
     assert tier1["object_id"].tolist() == ["below", "at-boundary", "above"]
     assert tier2["object_id"].tolist() == ["below"]
     assert tier2["ebv_gal_plus_ebv_agn"].tolist() == pytest.approx([0.049])
+
+
+def test_tier2_applies_configured_bc_and_iron_fraction_upper_limits(
+    tmp_path, monkeypatch
+):
+    source_path = tmp_path / "agn.h5"
+    source_path.touch()
+    frame = _minimal_agn_frame(n=6)
+    frame["object_id"] = [
+        "below",
+        "bc-boundary",
+        "bc-above",
+        "iron-boundary",
+        "iron-above",
+        "missing",
+    ]
+    frame["f_bc_3000"] = [
+        0.04,
+        0.05,
+        np.nextafter(0.05, np.inf),
+        0.04,
+        0.04,
+        np.nan,
+    ]
+    frame["f_fe_uv_3000"] = [
+        0.08,
+        0.08,
+        0.08,
+        0.10,
+        np.nextafter(0.10, np.inf),
+        np.nan,
+    ]
+    monkeypatch.setattr(
+        hubble_utils,
+        "read_quasars_from_hdf5_flat",
+        lambda *_args, **_kwargs: frame.copy(),
+    )
+    monkeypatch.setattr(hubble_utils, "populate_xray", lambda value: value)
+    monkeypatch.setattr(hubble_utils, "F_BC_3000_MAX", 0.05)
+    monkeypatch.setattr(hubble_utils, "F_FE_UV_3000_MAX", 0.10)
+    monkeypatch.setattr(hubble_utils, "LOG_F_BC_3000_MAX", np.log10(0.05))
+    monkeypatch.setattr(hubble_utils, "LOG_F_FE_UV_3000_MAX", np.log10(0.10))
+    _patch_load_agn_plotters(monkeypatch)
+
+    selected, _ = hubble_utils.load_agn_data(
+        source_path,
+        magnitude_convention="dereddened",
+        spectra_fit_h5=None,
+        cut_tier="2",
+        plot_diagnostics=False,
+    )
+
+    assert selected["object_id"].tolist() == [
+        "below",
+        "bc-boundary",
+        "iron-boundary",
+        "missing",
+    ]
+    config = json.loads(selected.attrs["cut_configuration_json"])
+    assert config["tier2_spectral_component_fraction_max"] == {
+        "f_bc_3000": 0.05,
+        "f_fe_uv_3000": 0.10,
+    }
 
 
 def test_fast_vs_uv_diagnostic_skips_catalog_without_fast_timescale(tmp_path):
@@ -1077,12 +1152,19 @@ def test_psf_host_cut_tiers_and_provenance(tmp_path, monkeypatch, tier):
     monkeypatch.setattr(hubble_utils, 'read_quasars_from_hdf5_flat', lambda *a, **k: frame.copy())
     monkeypatch.setattr(hubble_utils, 'populate_xray', lambda x: x)
     monkeypatch.setattr(hubble_utils, 'LOW_L2500_FHOST_LOG_L_MAX', None)
+    default_tier2_cuts = hubble_utils.build_tier2_cuts
+    monkeypatch.setattr(
+        hubble_utils,
+        'build_tier2_cuts',
+        lambda **kwargs: default_tier2_cuts(**kwargs)
+        + [('f_host_2500_psf', 0., .9)],
+    )
     _patch_load_agn_plotters(monkeypatch)
     selected, _ = hubble_utils.load_agn_data(source, magnitude_convention='dereddened', cut_tier=tier, plot_diagnostics=False, plot_path=str(tmp_path))
     assert selected.object_id.tolist() == (['obj0', 'obj1'] if tier == '2' else frame.object_id.tolist())
     config = json.loads(selected.attrs['cut_configuration_json'])
     assert (['f_host_2500_psf', 0., .9] in config['tier2']) == (tier == '2')
-    assert config['completeness_magnitude_support'] == [17., 27.]
+    assert config['completeness_magnitude_support'] == [17., 24.]
     if tier == '2':
         frame.drop(columns='f_host_2500_psf', inplace=True)
         with pytest.raises(ValueError, match="Tier 2 cut requires missing column 'f_host_2500_psf'"):
@@ -1103,6 +1185,13 @@ def test_coverage_sn_information_selection_and_provenance(tmp_path, monkeypatch,
         frame[column] = [lower, np.nextafter(lower, -np.inf), lower + 1.]
     monkeypatch.setattr(hubble_utils, 'read_quasars_from_hdf5_flat', lambda *a, **k: frame.copy())
     monkeypatch.setattr(hubble_utils, 'populate_xray', lambda x: x)
+    default_tier2_cuts = hubble_utils.build_tier2_cuts
+
+    def configured_tier2_cuts(**kwargs):
+        cuts = [cut for cut in default_tier2_cuts(**kwargs) if cut[0] != column]
+        return cuts + [(column, lower, None)]
+
+    monkeypatch.setattr(hubble_utils, 'build_tier2_cuts', configured_tier2_cuts)
     _patch_load_agn_plotters(monkeypatch)
     selected, _ = hubble_utils.load_agn_data(source, magnitude_convention='dereddened', cut_tier=tier, plot_diagnostics=False, plot_path=str(tmp_path))
     assert selected.object_id.tolist() == (['obj0', 'obj2'] if tier == '2' else frame.object_id.tolist())

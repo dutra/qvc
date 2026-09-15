@@ -34,13 +34,13 @@ def launcher_completeness_options(argv, environ):
             parser.error(f"--completeness-{option} must be finite and {'positive' if 'bin-width' in option else 'nonnegative'}")
         resolved[env] = str(value)
     try:
-        nm = grid_bin_count(11.0, resolved[MAG_WIDTH_ENV])
+        nm = grid_bin_count(8.0, resolved[MAG_WIDTH_ENV])
         nz = grid_bin_count(4.5, resolved[Z_WIDTH_ENV])
         if float(resolved[MAG_WIDTH_ENV]) > 1:
             raise ValueError("Magnitude bins must be at most 1 mag wide to preserve the padded science support.")
     except ValueError as exc:
         parser.error(str(exc))
-    print(f"Completeness grid: {nm} magnitude bins (width {11/nm:g} mag), "
+    print(f"Completeness grid: {nm} magnitude bins (width {8/nm:g} mag), "
           f"{nz} redshift bins (width {4.5/nz:g}); "
           f"smoothing sigma_mag={resolved[settings[2][1]]}, sigma_z={resolved[settings[3][1]]}.")
     return resolved
@@ -60,7 +60,7 @@ def configure_grid_from_argv(argv, environ):
     add_grid_arguments(parser)
     args, _ = parser.parse_known_args(argv)
     for value, env, span in (
-        (args.completeness_mag_bin_width, MAG_WIDTH_ENV, 11.0),
+        (args.completeness_mag_bin_width, MAG_WIDTH_ENV, 8.0),
         (args.completeness_z_bin_width, Z_WIDTH_ENV, 4.5),
     ):
         if value is None:

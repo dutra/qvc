@@ -14,7 +14,7 @@ def test_defaults_and_cli_precedence():
     assert values[Z_WIDTH_ENV] == '0.3'
     assert values['QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG'] == '0.0'
     assert values['QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z'] == '0.5'
-    assert grid_bin_count(11, .2) == 55
+    assert grid_bin_count(8, .2) == 40
     assert grid_bin_count(4.5, .3) == 15
     assert grid_bin_count(4.5, .2) == 23
 
@@ -30,12 +30,12 @@ def test_subprocess_grid_defaults_and_overrides():
 from qvc.hubble.hubble_completeness_refactored import get_completeness_function_2d, get_completeness_function_3d_fhost, get_completeness_function_4d_fhost_alpha
 from qvc.hubble.hubble_fit import completeness_map_variant_tag
 import inspect
-assert cuts.COMPLETENESS_N_MAG_BINS == 55
+assert cuts.COMPLETENESS_N_MAG_BINS == 40
 assert cuts.COMPLETENESS_N_Z_BINS == 15
 for f in [get_completeness_function_2d, get_completeness_function_3d_fhost, get_completeness_function_4d_fhost_alpha]:
     assert inspect.signature(f).parameters['n_z_bins'].default == 15
-    assert inspect.signature(f).parameters['n_mag_bins'].default == 55
-assert '_compgrid55x15' in completeness_map_variant_tag()
+    assert inspect.signature(f).parameters['n_mag_bins'].default == 40
+assert '_compgrid40x15' in completeness_map_variant_tag()
 '''
     env = dict(os.environ, **{MAG_WIDTH_ENV:'0.2', Z_WIDTH_ENV:'0.3'})
     subprocess.run([sys.executable, '-c', code], env=env, check=True, capture_output=True, text=True)
@@ -48,7 +48,7 @@ configure_grid_from_argv(['--completeness-mag-bin-width', '0.2', '--completeness
 from qvc.hubble import cuts
 from qvc.hubble.hubble_completeness_refactored import get_completeness_function_2d
 import inspect
-assert cuts.COMPLETENESS_N_MAG_BINS == 55
+assert cuts.COMPLETENESS_N_MAG_BINS == 40
 assert cuts.COMPLETENESS_N_Z_BINS == 23
 assert inspect.signature(get_completeness_function_2d).parameters['n_z_bins'].default == 23
 '''
