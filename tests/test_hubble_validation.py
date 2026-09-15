@@ -771,7 +771,7 @@ def test_validation_manifest_records_default_prior_profile():
         default_args, runner._truth_from_args(default_args)
     )
     assert default_configuration["fit"]["prior_profile"] == "centered_lcdm"
-    assert default_configuration["fit"]["prior_bounds"]["wa"] == [-20.0, 20.0]
+    assert default_configuration["fit"]["prior_bounds"]["wa"] == [-30.0, 30.0]
 
     centered_args = runner._parser().parse_args(
         ["--prior-profile", "centered_lcdm"]
@@ -783,7 +783,7 @@ def test_validation_manifest_records_default_prior_profile():
     assert fit["prior_profile"] == "centered_lcdm"
     assert fit["prior_bounds"]["M0_agn"] == [-26.0, -18.0]
     assert fit["prior_bounds"]["w0"] == [-3.0, 1.0]
-    assert fit["prior_bounds"]["wa"] == [-20.0, 20.0]
+    assert fit["prior_bounds"]["wa"] == [-30.0, 30.0]
 
 
 def test_initialize_only_writes_manifest_and_complete_seed_ledger(tmp_path, monkeypatch):

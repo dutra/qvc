@@ -268,7 +268,7 @@ def test_centered_lcdm_default_preserves_distinct_legacy_run_tag():
         ("FlatwCDM", {"w0": (-3.0, 1.0)}),
         (
             "Flatw0waCDM",
-            {"w0": (-3.0, 1.0), "wa": (-20.0, 20.0)},
+            {"w0": (-3.0, 1.0), "wa": (-30.0, 30.0)},
         ),
         ("FlatwpwaCDM", {"wp": (-10.0, 1.0), "wa": (-50, 500)}),
     ],
