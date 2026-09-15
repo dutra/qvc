@@ -47,6 +47,9 @@ def test_defaults_define_dense_48_cell_quick_grid():
         (1000, 2.5), (1000, 3.0), (1000, 3.5), (2000, 1.0),
     ]
     assert (first, last) == (0, 47)
+    assert launcher.build_campaign_name(
+        args, "sep15_1312", "abc1234"
+    ) == "sep15_1312_hubble_grid_quick_paper_grid_abc1234"
 
 
 @pytest.mark.skipif(XONSH is None, reason="xonsh is required")
@@ -125,6 +128,13 @@ def test_generated_sbatch_has_resources_grid_mapping_and_paper_profile(tmp_path,
     args = launcher.parse_args(["--description", "paper_grid"])
     launcher.validate_args(args)
     settings, cuts = launcher.resolve_paper_settings(args, {})
+    grid_argv = launcher.hubble_arguments(
+        n_value=1000,
+        zmax=3.16,
+        prefix="campaign/N1000_zmax3.16",
+        speed=args.speed,
+        settings=settings,
+    )
     script = launcher.build_sbatch_script(args, "campaign", settings, cuts, "encoded")
 
     syntax = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
@@ -136,6 +146,7 @@ def test_generated_sbatch_has_resources_grid_mapping_and_paper_profile(tmp_path,
     assert "N_VALUES=(1000 2000 3000 4000 5000 6000 7000 8000)" in script
     assert "ZMAX_VALUES=(1.0 1.5 2.0 2.5 3.0 3.5)" in script
     assert 'CURRENT_PREFIX="${CAMPAIGN}/N${N}_zmax${ZMAX}"' in script
+    assert grid_argv[grid_argv.index("--run") + 1] == "single"
     assert "--speed \\\n    quick" in script
     for flag in ("--minimal-plots", "--uniform_redshift_distribution", "--skip-debiased-residual-plot"):
         assert flag in script
@@ -182,8 +193,11 @@ def test_hubble_arguments_match_current_paper_fiducial_profile(monkeypatch, tmp_
     paper = option_map(paper_argv)
     grid = option_map(grid_argv)
     intended_differences = {
-        "--plot-completeness", "--N", "--uniform_redshift_distribution", "--minimal-plots"
+        "--run", "--plot-completeness", "--N",
+        "--uniform_redshift_distribution", "--minimal-plots",
     }
+    assert paper["--run"] == ["full"]
+    assert grid["--run"] == ["single"]
     assert {k: v for k, v in paper.items() if k not in intended_differences} == {
         k: v for k, v in grid.items() if k not in intended_differences
     }
@@ -192,7 +206,7 @@ def test_hubble_arguments_match_current_paper_fiducial_profile(monkeypatch, tmp_
 def test_main_dry_run_writes_without_submitting(tmp_path, monkeypatch):
     launcher = load_launcher()
     monkeypatch.setattr(launcher, "REPO_ROOT", tmp_path)
-    monkeypatch.setattr(launcher, "make_run_stamp", lambda: "sep15_1200pm")
+    monkeypatch.setattr(launcher, "make_run_stamp", lambda: "sep15_1312")
     monkeypatch.setattr(launcher, "get_git_short_hash", lambda: "abc1234")
     submitted = []
     monkeypatch.setattr(launcher, "submit_sbatch", lambda *values: submitted.append(values))
@@ -200,14 +214,20 @@ def test_main_dry_run_writes_without_submitting(tmp_path, monkeypatch):
     path = launcher.main(["--description", "paper_grid", "--dry-run"])
 
     assert path.is_file()
-    assert path.name == "submit_sep15_1200pm_hubble_grid_paper_grid_abc1234.sbatch"
+    campaign = "sep15_1312_hubble_grid_quick_paper_grid_abc1234"
+    assert path.name == f"submit_{campaign}.sbatch"
+    script = path.read_text()
+    assert f"#SBATCH --job-name={campaign}" in script
+    assert f"/logs/hubble/{campaign}/grid_%A_%a.out" in script
+    assert f"export CAMPAIGN={campaign}" in script
+    assert 'CURRENT_PREFIX="${CAMPAIGN}/N${N}_zmax${ZMAX}"' in script
     assert submitted == []
 
 
 def test_main_submits_selected_absolute_array_range(tmp_path, monkeypatch):
     launcher = load_launcher()
     monkeypatch.setattr(launcher, "REPO_ROOT", tmp_path)
-    monkeypatch.setattr(launcher, "make_run_stamp", lambda: "sep15_1201pm")
+    monkeypatch.setattr(launcher, "make_run_stamp", lambda: "sep15_1313")
     monkeypatch.setattr(launcher, "get_git_short_hash", lambda: "abc1234")
     submitted = []
     monkeypatch.setattr(launcher, "submit_sbatch", lambda *values: submitted.append(values))

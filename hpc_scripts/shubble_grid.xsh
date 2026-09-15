@@ -156,7 +156,13 @@ def get_git_short_hash(repo_root=REPO_ROOT):
 
 
 def make_run_stamp():
-    return datetime.now().strftime("%b%d_%I%M%p").lower()
+    return datetime.now().strftime("%b%d_%H%M").lower()
+
+
+def build_campaign_name(args, run_stamp, git_hash):
+    return "_".join(
+        (run_stamp, "hubble_grid", args.speed, args.description, git_hash)
+    )
 
 
 def grid_cells(n_values, zmax_values):
@@ -231,7 +237,7 @@ def hubble_arguments(*, n_value, zmax, prefix, speed, settings):
         "--bright-subsample-completeness-min", "0.1",
         "--bright-subsample-margin", "0.2",
         "--cosmo_models", "FlatLambdaCDM", "FlatwCDM", "Flatw0waCDM",
-        "--run", "full",
+        "--run", "single",
         "--speed", str(speed),
         "--spectra_fit_csv", SPECTRA_FIT_CSV,
         "--magnitude-convention", settings["QVC_HUBBLE_MAGNITUDE_CONVENTION"],
@@ -294,7 +300,7 @@ def build_sbatch_script(args, campaign, settings, cuts, provenance):
         f"export {name}={shlex.quote(str(value))}" for name, value in exports.items()
     )
     return f"""#!/usr/bin/env bash
-#SBATCH --job-name=hubble_grid_{campaign[:60]}
+#SBATCH --job-name={campaign[:120]}
 #SBATCH --output={log_dir}/grid_%A_%a.out
 #SBATCH --error={log_dir}/grid_%A_%a.err
 #SBATCH --nodes=1
@@ -362,8 +368,8 @@ def submit_sbatch(script_path, first_task, last_task):
 def main(argv=None):
     args = parse_args(argv)
     first_task, last_task = validate_args(args)
-    campaign = "_".join(
-        (make_run_stamp(), "hubble_grid", args.description, get_git_short_hash())
+    campaign = build_campaign_name(
+        args, make_run_stamp(), get_git_short_hash()
     )
     settings, cuts = resolve_paper_settings(args)
     cells = grid_cells(args.n_values, args.zmax_values)
