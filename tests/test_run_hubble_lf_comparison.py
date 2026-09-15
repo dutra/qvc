@@ -43,8 +43,6 @@ def test_models_and_labels_follow_the_canonical_supported_order():
     )
     assert comparison.LF_RUN_IDS == (
         "shen",
-        "shen_type1_intrinsic",
-        "shen_type1_attenuated",
         "wang2026_type1_lade_a",
         "palanque2016_ple_lede",
         "kulkarni2019_type1_model1",
@@ -142,7 +140,7 @@ def test_diagram_discovery_requires_exactly_one_match(monkeypatch, tmp_path, cou
         comparison.find_debiased_hubble_diagram("model-prefix")
 
 
-def test_assembly_creates_one_page_with_all_eight_labels(tmp_path):
+def test_assembly_creates_one_page_with_all_six_labels(tmp_path):
     diagrams = []
     for index, model in enumerate(comparison.LF_RUN_IDS):
         source = tmp_path / f"source-{index}.pdf"
@@ -164,8 +162,8 @@ def test_assembly_creates_one_page_with_all_eight_labels(tmp_path):
         / float(source_page.cropbox.width)
     )
     expected_page_height = (
-        4 * (expected_source_height + comparison.COMPARISON_LABEL_HEIGHT_PT)
-        + 3 * comparison.COMPARISON_ROW_GAP_PT
+        3 * (expected_source_height + comparison.COMPARISON_LABEL_HEIGHT_PT)
+        + 2 * comparison.COMPARISON_ROW_GAP_PT
     )
     assert float(page.mediabox.width) == pytest.approx(
         2 * comparison.COMPARISON_PANEL_WIDTH_PT

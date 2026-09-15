@@ -5,7 +5,7 @@ Each child run delegates to ``run_hubble.xonsh`` with the minimal plot set.
 The resulting debiased Hubble diagrams are assembled into a labeled, single-
 tightly cropped, single-page PDF without rasterizing the source figures, with
 a matching PNG rendering written alongside it. Paired residual and selection-
-correction diagnostics are then generated from the eight residual tables and
+correction diagnostics are then generated from the six residual tables and
 posterior checkpoints.
 """
 
@@ -47,8 +47,6 @@ COMPARISON_COLUMN_GAP_PT = 6.0
 COMPARISON_ROW_GAP_PT = 4.0
 LF_LABELS = {
     "shen": "Shen et al. (2020)",
-    "shen_type1_intrinsic": "Shen et al. (2020), Type 1 intrinsic",
-    "shen_type1_attenuated": "Shen et al. (2020), Type 1 attenuated",
     "wang2026_type1_lade_a": "Wang et al. (2026), LADE-A",
     "palanque2016_ple_lede": "Palanque-Delabrouille et al. (2016), PLE+LEDE",
     "kulkarni2019_type1_model1": "Kulkarni et al. (2019), Model 1",
@@ -66,8 +64,6 @@ class LFRun(NamedTuple):
 
 LF_RUNS = (
     LFRun("shen", "shen", "all_nh_attenuated", "attenuated"),
-    LFRun("shen_type1_intrinsic", "shen", "type1_intrinsic", "dereddened"),
-    LFRun("shen_type1_attenuated", "shen", "type1_attenuated", "attenuated"),
     LFRun("wang2026_type1_lade_a", "wang2026_type1_lade_a", None, "attenuated"),
     LFRun("palanque2016_ple_lede", "palanque2016_ple_lede", None, "attenuated"),
     LFRun(
