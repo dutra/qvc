@@ -14,6 +14,16 @@ $QT_QPA_PLATFORM = "offscreen"
 $NUM_CORES = __xonsh__.env.get("NUM_CORES", "30")
 $PYTHONPATH = str(Path(__file__).resolve().parent / "src")
 $MPLCONFIGDIR = "/tmp/qvc-matplotlib"
+$QVC_XRAY_CATALOG = __xonsh__.env.get(
+    "QVC_XRAY_CATALOG",
+    str(
+        Path(__file__).resolve().parent
+        / "results"
+        / "diagnostics"
+        / "chandra_precut_sep13"
+        / "csc21_region_download.vot"
+    ),
+)
 $SHEN_PUBTOOLS_PATH = __xonsh__.env.get(
     "SHEN_PUBTOOLS_PATH",
     str(Path.home() / "sdev" / "quasarlf" / "pubtools"),

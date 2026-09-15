@@ -18,7 +18,7 @@ import pandas as pd
 from astropy import units as u
 from astropy.constants import h
 from astropy.cosmology import FlatwCDM, Flatw0waCDM, FlatLambdaCDM, FlatwpwaCDM
-from astropy.coordinates import SkyCoord
+from astropy.coordinates import SkyCoord, search_around_sky
 from astropy.io import fits
 from astropy.io.votable import parse
 from scipy.linalg import cho_factor
@@ -469,7 +469,110 @@ def match_radec(df_a, df_b, populate_cols=[], ra_col_a='ra', dec_col_a='dec', ra
             unmatched_object_ids.append(df_a.iloc[i]['object_id'])
     return result, unmatched_object_ids
 
-def populate_xray(df, table_fpath="data/cscresults.vot"):
+def match_radec_error_ellipse(
+    df_a,
+    df_b,
+    populate_cols=(),
+    *,
+    ra_col_a="ra",
+    dec_col_a="dec",
+    ra_col_b="ra",
+    dec_col_b="dec",
+    major_col="err_ellipse_r0",
+    minor_col="err_ellipse_r1",
+    angle_col="err_ellipse_ang",
+):
+    """Match positions inside catalogued error ellipses.
+
+    CSC position angles are measured from local North through East.  If more
+    than one ellipse contains an input position, the candidate with the
+    smallest normalized elliptical distance is selected.
+    """
+    result = df_a.copy()
+    n_input = len(df_a)
+    best_idx = np.full(n_input, -1, dtype=int)
+    best_sep = np.full(n_input, np.nan, dtype=float)
+    best_distance = np.full(n_input, np.nan, dtype=float)
+
+    major = pd.to_numeric(df_b[major_col], errors="coerce").to_numpy(dtype=float)
+    minor = pd.to_numeric(df_b[minor_col], errors="coerce").to_numpy(dtype=float)
+    angle = pd.to_numeric(df_b[angle_col], errors="coerce").to_numpy(dtype=float)
+    valid_ellipse = (
+        np.isfinite(major)
+        & (major > 0.0)
+        & np.isfinite(minor)
+        & (minor > 0.0)
+        & np.isfinite(angle)
+    )
+
+    if n_input and len(df_b) and np.any(valid_ellipse):
+        coords_a = SkyCoord(
+            ra=pd.to_numeric(df_a[ra_col_a], errors="coerce").to_numpy(dtype=float) * u.deg,
+            dec=pd.to_numeric(df_a[dec_col_a], errors="coerce").to_numpy(dtype=float) * u.deg,
+        )
+        coords_b = SkyCoord(
+            ra=pd.to_numeric(df_b[ra_col_b], errors="coerce").to_numpy(dtype=float) * u.deg,
+            dec=pd.to_numeric(df_b[dec_col_b], errors="coerce").to_numpy(dtype=float) * u.deg,
+        )
+        search_radius = float(np.nanmax(major[valid_ellipse])) * u.arcsec
+        idx_a, idx_b, separation, _ = search_around_sky(
+            coords_a,
+            coords_b,
+            search_radius,
+        )
+        candidate_valid = valid_ellipse[idx_b]
+        idx_a = idx_a[candidate_valid]
+        idx_b = idx_b[candidate_valid]
+        separation = separation[candidate_valid]
+
+        if len(idx_a):
+            east, north = coords_b[idx_b].spherical_offsets_to(coords_a[idx_a])
+            east = east.to_value(u.arcsec)
+            north = north.to_value(u.arcsec)
+            theta = np.deg2rad(angle[idx_b])
+            along_major = east * np.sin(theta) + north * np.cos(theta)
+            along_minor = east * np.cos(theta) - north * np.sin(theta)
+            ellipse_distance = np.sqrt(
+                (along_major / major[idx_b]) ** 2
+                + (along_minor / minor[idx_b]) ** 2
+            )
+            inside = np.isfinite(ellipse_distance) & (ellipse_distance < 1.0)
+            idx_a = idx_a[inside]
+            idx_b = idx_b[inside]
+            separation_arcsec = separation[inside].to_value(u.arcsec)
+            ellipse_distance = ellipse_distance[inside]
+
+            # Sorting makes the first candidate for each input object the one
+            # closest to the ellipse center in normalized coordinates.
+            order = np.lexsort((ellipse_distance, idx_a))
+            idx_a = idx_a[order]
+            idx_b = idx_b[order]
+            separation_arcsec = separation_arcsec[order]
+            ellipse_distance = ellipse_distance[order]
+            first = np.r_[True, idx_a[1:] != idx_a[:-1]]
+            selected_a = idx_a[first]
+            selected_b = idx_b[first]
+            best_idx[selected_a] = selected_b
+            best_sep[selected_a] = separation_arcsec[first]
+            best_distance[selected_a] = ellipse_distance[first]
+
+    matched = best_idx >= 0
+    result["matched_idx_b"] = best_idx
+    result["matched_sep_arcsec"] = best_sep
+    result["matched_ellipse_distance"] = best_distance
+    for col in populate_cols:
+        values = np.full(n_input, np.nan, dtype=object)
+        if np.any(matched):
+            values[matched] = df_b.iloc[best_idx[matched]][col].to_numpy()
+        result[col] = values
+
+    unmatched_object_ids = df_a.loc[~matched, "object_id"].tolist()
+    return result, unmatched_object_ids
+
+
+def populate_xray(df, table_fpath=None):
+    if table_fpath is None:
+        table_fpath = os.environ.get("QVC_XRAY_CATALOG", "data/cscresults.vot")
     xray_cols = [
         "flux_aper_b",
         "flux_aper_hilim_b",
@@ -503,13 +606,35 @@ def populate_xray(df, table_fpath="data/cscresults.vot"):
 
     df_csc = table.to_pandas()
 
-    # Match to the CSC catalog and copy the flux bounds.
-    df_matched, unmatched_object_ids = match_radec(
-        df, df_csc,
-        populate_cols=['flux_aper_b', 'flux_aper_hilim_b', 'flux_aper_lolim_b'],
-        max_sep_arcsec=1.0
+    # Match against the CSC 95% position-error ellipse when its geometry is
+    # available.  Retain the historical 1-arcsec fallback for compatible
+    # user-supplied catalogs without ellipse columns.
+    ellipse_cols = {"err_ellipse_r0", "err_ellipse_r1", "err_ellipse_ang"}
+    if ellipse_cols.issubset(df_csc.columns):
+        df_matched, unmatched_object_ids = match_radec_error_ellipse(
+            df,
+            df_csc,
+            populate_cols=[
+                "flux_aper_b",
+                "flux_aper_hilim_b",
+                "flux_aper_lolim_b",
+                "err_ellipse_r0",
+                "err_ellipse_r1",
+                "err_ellipse_ang",
+            ],
+        )
+        match_description = "CSC 95% position-error ellipses"
+    else:
+        df_matched, unmatched_object_ids = match_radec(
+            df, df_csc,
+            populate_cols=['flux_aper_b', 'flux_aper_hilim_b', 'flux_aper_lolim_b'],
+            max_sep_arcsec=1.0
+        )
+        match_description = "CSC catalog (1-arcsec fallback)"
+    print(
+        f"Matched {len(df_matched) - len(unmatched_object_ids)} out of {len(df)} "
+        f"objects using {match_description}."
     )
-    print(f"Matched {len(df_matched) - len(unmatched_object_ids)} out of {len(df)} objects to CSC3 catalog.")
     # Preserve X-ray membership independently of generic matching columns and
     # flux availability (a counterpart can lack a usable broad-band flux).
     df_matched["xray_matched"] = df_matched["matched_idx_b"].to_numpy() >= 0

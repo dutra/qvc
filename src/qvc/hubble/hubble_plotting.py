@@ -12194,6 +12194,10 @@ def plot_residuals_vs_alphaOX(
         ax.set_ylabel("Hubble residual (mag)" if paper_xray_style else "Residuals (mag)")
         ax.axhline(0.0, color="magenta", linewidth=2, zorder=0)
         ax.set_ylim(-4.6, 3.9)
+        if xcol == "alphaOX":
+            ax.set_xlim(0.8, 2.2)
+        elif xcol == "delta_alphaOX":
+            ax.set_xlim(-0.45, 0.65)
         if show_grid:
             ax.grid(True, alpha=0.25)
         else:
@@ -12312,8 +12316,8 @@ def plot_residuals_vs_alphaOX(
                     lw=1.4 if paper_xray_style else 2,
                     color="red",
                     mfc="red",
-                    mec="white" if paper_xray_style else "red",
-                    mew=0.7 if paper_xray_style else 1.2,
+                    mec="red",
+                    mew=0 if paper_xray_style else 1.2,
                     capsize=3 if paper_xray_style else 0,
                     zorder=3,
                     label="Binned mean",
