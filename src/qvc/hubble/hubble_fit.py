@@ -2471,6 +2471,7 @@ def _build_completeness_params(
     plot=False,
     completeness_z_range=None,
     magnitude_support_mode=None,
+    bright_subsample_cut=None,
 ):
     if not completeness:
         return None
@@ -2551,6 +2552,7 @@ def _build_completeness_params(
         plot_path=plot_path,
         z_range=completeness_z_range,
         magnitude_support_mode=magnitude_support_mode,
+        bright_subsample_cut=bright_subsample_cut,
     )
 
 
@@ -3585,6 +3587,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 plot_path=plot_path,
                 plot=plot_completeness and not compare_sigma_only,
                 completeness_z_range=completeness_z_range,
+                bright_subsample_cut=bright_subsample_cut,
             )
         # Bright-subsample diagnostic: the likelihood must see the hard bright
         # cut as part of the selection so the Malmquist term normalizes over
@@ -4970,6 +4973,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             plot=True,
             plot_path=plot_path,
             completeness_z_range=completeness_z_range,
+            bright_subsample_cut=bright_subsample_cut,
         )
         if completeness_mode == "2d":
             with trace_completeness_step("completeness_vs_mag_at_redshifts.pdf"):

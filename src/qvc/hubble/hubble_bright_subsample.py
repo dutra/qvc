@@ -413,3 +413,59 @@ def summarize_bright_subsample_cut(df, keep, cut, *, z_range, n_bins=6):
         else np.nan
     )
     return summary.reset_index().rename(columns={"z_bin": "z_bin"})
+
+
+def plot_completeness_per_redshift_peak_faint_cut(
+    completeness_grid, mag_centers, z_centers, mag_edges, z_edges,
+    selection, *, plot_dir,
+):
+    """Show the per-redshift normalization and the actual bright selection boundary."""
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
+    from matplotlib.patches import Patch
+    import matplotlib.patheffects as pe
+    from qvc.hubble.hubble_completeness_refactored import trace_completeness_step
+
+    c = np.asarray(completeness_grid, dtype=float)
+    m, z = np.asarray(mag_edges), np.asarray(z_edges)
+    mc, zc = np.asarray(mag_centers), np.asarray(z_centers)
+    cut = selection.threshold(zc)
+    limit = cut + selection.margin
+    kind = "of peak" if selection.relative else "absolute"
+    peaks = c.max(axis=0)
+    rel = np.divide(100*c, peaks[None, :], out=np.zeros_like(c), where=peaks[None, :] > 0)
+    fig,(ax,bx)=plt.subplots(1,2,figsize=(11.8,5.4),gridspec_kw={'width_ratios':[1.4,1]},layout='constrained')
+    im=ax.pcolormesh(m,z,np.clip(rel.T,.1,100),cmap='viridis',norm=LogNorm(.1,100),rasterized=True)
+    zs=np.linspace(z[0],z[-1],1200);cuts=np.interp(zs,zc,cut);lims=cuts+selection.margin
+    ax.fill_betweenx(zs,cuts,m[-1],facecolor='none',edgecolor='black',hatch='///',linewidth=0)
+    line1,=ax.plot(lims,zs,color='#ff9600',ls='--',lw=2,label=f'Faintest qualifying bin ({100*selection.completeness_min:g}% {kind})')
+    line2,=ax.plot(cuts,zs,color='#db1f3c',lw=2,label=f'Selection limit ({selection.margin:g} mag brighter)')
+    for line in (line1,line2):line.set_path_effects([pe.Stroke(linewidth=3.8,foreground='white'),pe.Normal()])
+    ax.set(xlim=(m[0],m[-1]),ylim=(z[0],z[-1]),xlabel=r'$m_{2500\,\mathrm{\AA}}$ (mag)',ylabel='Redshift $z$',title='Completeness relative to the peak at each redshift')
+    cb=fig.colorbar(im,ax=ax,pad=.02,fraction=.045)
+    cb.set_ticks([.1,1,10,100]);cb.set_ticklabels(['0.1','1','10','100']);cb.set_label(r'$100\,p(I=1\mid m,z)/\max_m p(I=1\mid m,z)$ (%)')
+    valid = np.flatnonzero((peaks > 0) & (limit >= m[0]) & (limit <= m[-1]))
+    if not valid.size:
+        plt.close(fig)
+        return None
+    j = valid[np.argmin(abs(zc[valid]-2.))]
+    zz=zc[j];v=rel[:,j]
+    level = 100*selection.completeness_min if selection.relative else 100*selection.completeness_min/peaks[j]
+    ax.axhline(zz,color='white',lw=1,ls=':',alpha=.9)
+    bx.plot(mc,v,color='#234c73',marker='o',ms=3,lw=1.5,label='Completeness at bin centers')
+    bx.axhline(level,color='.35',ls=':',lw=1.2,label=f'{level:g}% of this slice’s peak')
+    bx.axvline(limit[j],color='#ff9600',ls='--',lw=2)
+    bx.axvline(cut[j],color='#db1f3c',lw=2)
+    bx.axvspan(cut[j],m[-1],facecolor='none',edgecolor='black',hatch='///',linewidth=0)
+    bx.annotate('',xy=(cut[j],65),xytext=(limit[j],65),arrowprops={'arrowstyle':'<->','color':'black','lw':1.3})
+    bx.text((cut[j]+limit[j])/2,78,f'{selection.margin:g} mag',ha='center',va='bottom',fontsize=10,bbox={'facecolor':'white','edgecolor':'none','pad':2})
+    bx.scatter([limit[j]],[v[np.argmin(abs(mc-limit[j]))]],s=60,facecolor='#ff9600',edgecolor='black',zorder=5)
+    bx.set(xlim=(m[0],m[-1]),ylim=(.1,160),yscale='log',xlabel=r'$m_{2500\,\mathrm{\AA}}$ (mag)',ylabel='Relative completeness (%)',title=rf'Example slice: $z={zz:.2f}$')
+    bx.set_yticks([.1,1,10,100],labels=['0.1','1','10','100']);bx.legend(loc='lower left',fontsize=8,framealpha=1)
+    fig.legend(handles=[line1,line2,Patch(facecolor='none',edgecolor='black',hatch='///',label='Excluded: fainter than selection limit')],loc='outside lower center',ncol=3,fontsize=9,frameon=False)
+    out = Path(plot_dir) / "completeness_map_per_redshift_peak_faint_cut.pdf"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with trace_completeness_step(out.name):
+        fig.savefig(out, dpi=300)
+    plt.close(fig)
+    return out

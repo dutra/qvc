@@ -90,7 +90,7 @@ def test_map_suite_guard_executes_only_when_requested(enabled, completeness):
     scope = dict(plot_completeness=enabled, completeness=completeness,
                  df_agn_completeness_parent=object(), df_agn_all=object(), completeness_mode='2d',
                  completeness_sim_file='unused', plot_path='unused', completeness_z_range=(0, 4.5),
-                 _build_completeness_params=map_call,
+                 _build_completeness_params=map_call, bright_subsample_cut=object(),
                  plot_completeness_vs_mag_at_redshifts=slices,
                  trace_completeness_step=lambda *a: nullcontext())
     exec(compile(ast.fix_missing_locations(ast.Module(body=[block], type_ignores=[])), '<map suite>', 'exec'), scope)
@@ -99,6 +99,7 @@ def test_map_suite_guard_executes_only_when_requested(enabled, completeness):
     if enabled and completeness:
         assert map_call.call_args.args[0] is scope['df_agn_completeness_parent']
         assert map_call.call_args.kwargs['plot'] is True
+        assert map_call.call_args.kwargs['bright_subsample_cut'] is scope['bright_subsample_cut']
     # This suite must run before the minimal branch returns.
     assert fn.body.index(block) < next(i for i, n in enumerate(fn.body)
         if isinstance(n, ast.If) and ast.unparse(n.test) == 'minimal_plots')

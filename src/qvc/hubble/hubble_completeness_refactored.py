@@ -68,7 +68,7 @@ COMPLETENESS_SMOOTH_SIGMA_MAG_ENV = "QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG"
 COMPLETENESS_SMOOTH_SIGMA_Z_ENV = "QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z"
 RELATIVE_COMPLETENESS_REFERENCE_PERCENTILE = 99.0
 RELATIVE_COMPLETENESS_MIN_PARENT_COUNT = 20.0
-RELATIVE_COMPLETENESS_CONTOUR_LEVELS = (10.0, 25.0, 50.0, 75.0, 90.0, 95.0, 99.0)
+RELATIVE_COMPLETENESS_CONTOUR_LEVELS = (10.0, 50.0, 90.0)
 FAINT_TAIL_FIT_WIDTH_MAG = 0.75
 FAINT_TAIL_MAX_FIT_WIDTH_MAG = 2.0
 FAINT_TAIL_DECAY_MIN = 0.02
@@ -1661,6 +1661,9 @@ def _plot_relative_completeness_percent(
     mag_edges,
     z_edges,
     plot_dir,
+    *,
+    completeness_grid,
+    bright_subsample_cut=None,
 ):
     """Smoothed colors and contours with one shared reference."""
     import matplotlib.pyplot as plt
@@ -1670,17 +1673,25 @@ def _plot_relative_completeness_percent(
         C_plot,
         H_true_s,
     )
+    completeness_grid = np.asarray(completeness_grid, dtype=float)
+    if completeness_grid.shape != relative_percent.shape:
+        raise ValueError("Contour and displayed completeness grids must align.")
+    # Preserve the displayed normalization; only the contour geometry changes.
+    contour_percent = 100.0 * np.clip(completeness_grid / reference, 0.0, 1.0)
+    contour_percent[~np.isfinite(contour_percent)] = 0.0
+    cmap = plt.get_cmap("viridis").copy()
+    cmap.set_bad(cmap(0.0))
     fig, ax = plt.subplots(figsize=(7, 5))
     im = ax.imshow(
         np.ma.masked_less_equal(relative_percent.T, 0.0),
         origin="lower",
         aspect="auto",
         extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
-        cmap="viridis",
+        cmap=cmap,
         norm=LogNorm(vmin=0.01, vmax=100.0, clip=True),
     )
-    data_min = float(np.nanmin(relative_percent))
-    data_max = float(np.nanmax(relative_percent))
+    data_min = float(np.nanmin(contour_percent))
+    data_max = float(np.nanmax(contour_percent))
     contour_levels = [
         level
         for level in RELATIVE_COMPLETENESS_CONTOUR_LEVELS
@@ -1690,10 +1701,10 @@ def _plot_relative_completeness_percent(
         contours = ax.contour(
             mag_centers,
             z_centers,
-            relative_percent.T,
+            contour_percent.T,
             levels=contour_levels,
             colors="white",
-            linewidths=1.3,
+            linewidths=0.8,
         )
         ax.clabel(
             contours,
@@ -1707,9 +1718,38 @@ def _plot_relative_completeness_percent(
     cbar.set_ticks([0.01, 0.1, 1.0, 10.0, 100.0])
     cbar.set_ticklabels(["0.01", "0.1", "1", "10", "100"])
     cbar.set_label("relative completeness (%)")
+    filename = "completeness_map_with_relative_percent_contours.pdf"
+    if bright_subsample_cut is not None:
+        from matplotlib.path import Path
+        from matplotlib.patches import Patch, PathPatch
+
+        removed = ~bright_subsample_cut.mask(
+            np.asarray(mag_centers)[:, None], np.asarray(z_centers)[None, :]
+        )
+        regions = []
+        for j in range(len(z_centers)):
+            transitions = np.diff(np.r_[False, removed[:, j], False].astype(int))
+            for start, stop in zip(np.flatnonzero(transitions == 1), np.flatnonzero(transitions == -1)):
+                left, right = mag_edges[start], mag_edges[stop]
+                bottom, top = z_edges[j], z_edges[j + 1]
+                regions.append(Path(
+                    [(left, bottom), (right, bottom), (right, top), (left, top), (left, bottom)],
+                    [Path.MOVETO, Path.LINETO, Path.LINETO, Path.LINETO, Path.CLOSEPOLY],
+                ))
+        if regions:
+            ax.add_patch(PathPatch(
+                Path.make_compound_path(*regions), facecolor="none",
+                edgecolor="black", hatch="///", linewidth=0, zorder=10,
+            ))
+        ax.legend(
+            handles=[Patch(facecolor="none", edgecolor="black", hatch="///",
+                           label="Removed by faint-end cut")],
+            loc="upper right", fontsize=8, framealpha=1.0,
+        ).set_zorder(11)
+        filename = "completeness_map_with_relative_percent_contours_faint_cut_masked.pdf"
     output_path = os.path.join(
         plot_dir,
-        "completeness_map_with_relative_percent_contours.pdf",
+        filename,
     )
     _save_completeness_figure(fig, output_path, dpi=600)
     plt.close(fig)
@@ -1737,6 +1777,7 @@ def get_completeness_function_2d(
     fill_along_z=False,
     z_range=None,
     magnitude_support_mode="hard-cut",
+    bright_subsample_cut=None,
 ):
     """
     Build p(detect | m, z)
@@ -1876,6 +1917,7 @@ def get_completeness_function_2d(
             # Derive contour geometry from the same smoothed grid as the image.
             fig, ax = plt.subplots(figsize=(7, 5))
             displayed_log_C = np.clip(log_C_plot, -4.0, 0.0)
+            contour_log_C = displayed_log_C
             im = ax.imshow(
                 displayed_log_C.T,
                 origin="lower",
@@ -1888,7 +1930,7 @@ def get_completeness_function_2d(
             contours = ax.contour(
                 mag_centers,
                 z_centers,
-                displayed_log_C.T,
+                contour_log_C.T,
                 colors="white",
                 linewidths=1.3,
             )
@@ -1910,7 +1952,15 @@ def get_completeness_function_2d(
             mag_edges,
             z_edges,
             plot_dir,
+            completeness_grid=C_plot,
         )
+        if bright_subsample_cut is not None:
+            from qvc.hubble.hubble_bright_subsample import plot_completeness_per_redshift_peak_faint_cut
+
+            plot_completeness_per_redshift_peak_faint_cut(
+                C, mag_centers, z_centers, mag_edges, z_edges,
+                bright_subsample_cut, plot_dir=plot_dir,
+            )
         _plot_counts_comparison(
             H_obs,
             H_true,
