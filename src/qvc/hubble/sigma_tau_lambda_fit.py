@@ -2,7 +2,6 @@
 
 import numpy as np
 import pandas as pd
-from scipy.optimize import minimize
 
 
 SDSS_LAMBDA_PIVOT = {
@@ -14,62 +13,116 @@ SDSS_LAMBDA_PIVOT = {
 }
 
 
-def log_broken_pl(lam, lam_s, d1, d2, ds):
-    """Smooth broken power law in log10 space, normalized to zero at lam_s."""
-    lam = np.asarray(lam, dtype=float)
-    ds = max(float(ds), 1e-3)
-    ln10 = np.log(10.0)
-    log10x = (np.log(lam) - np.log(float(lam_s))) / ln10
-    a = log10x / ds
-    log10_1p10a = np.logaddexp(0.0, a * ln10) / ln10
-    return d1 * log10x + ((d2 - d1) * ds) * (log10_1p10a - np.log10(2.0))
+def log_broken_pl(lam, lam_s, d1, d2):
+    """Continuous, sharp broken power law anchored at zero at ``lam_s``."""
+    x = np.log10(np.asarray(lam, dtype=float) / float(lam_s))
+    return d1 * np.minimum(x, 0.0) + d2 * np.maximum(x, 0.0)
 
 
-def jac_log_broken_pl(lam, lam_s, d1, d2, ds):
-    """Jacobian of log_broken_pl with respect to d1 and d2."""
-    lam = np.asarray(lam, dtype=float)
-    ds = max(float(ds), 1e-3)
-    ln10 = np.log(10.0)
-    log10x = (np.log(lam) - np.log(float(lam_s))) / ln10
-    a = log10x / ds
-    q = np.logaddexp(0.0, a * ln10) / ln10
-    t = q - np.log10(2.0)
-    return np.vstack([log10x - ds * t, ds * t])
+def _continuum_tau_logs_from_medians(df, *, bands, lam_s, disk_order):
+    """Return median-parameter continuum-only log tau values when available."""
+    required = {
+        "z",
+        "tau_fast_driver",
+        "tau_slow_driver",
+        "lag0",
+        "lambda_center_rf",
+    }
+    available_bands = [band for band in bands if f"lag_disk_{band}" in df.columns]
+    if not required.issubset(df.columns) or not available_bands:
+        return None
+
+    import jax
+    import jax.numpy as jnp
+
+    from qvc.light_curve.multiband_model_shared_latent_blr import (
+        continuum_effective_timescale,
+    )
+
+    numeric = lambda name: pd.to_numeric(df[name], errors="coerce").to_numpy(float)
+    tau_fast = numeric("tau_fast_driver")
+    tau_slow = numeric("tau_slow_driver")
+    lag0 = numeric("lag0")
+    lambda_center = numeric("lambda_center_rf")
+    z = numeric("z")
+    evaluate = jax.jit(
+        jax.vmap(
+            lambda fast, slow, lag: continuum_effective_timescale(
+                fast, slow, lag, disk_order=disk_order
+            )
+        )
+    )
+
+    def log_tau(lag):
+        valid = (
+            np.isfinite(tau_fast)
+            & (tau_fast > 0.0)
+            & np.isfinite(tau_slow)
+            & (tau_slow > 0.0)
+            & np.isfinite(lag)
+            & (lag > 0.0)
+            & np.isfinite(z)
+            & (z > -1.0)
+        )
+        result = np.full(len(df), np.nan)
+        result[valid] = np.asarray(
+            evaluate(
+                jnp.asarray(tau_fast[valid]),
+                jnp.asarray(tau_slow[valid]),
+                jnp.asarray(lag[valid]),
+            )
+        )
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.log10(result) - np.log10(1.0 + z)
+
+    lag_reference = lag0 * (float(lam_s) / lambda_center) ** (4.0 / 3.0)
+    values = {"uv": log_tau(lag_reference)}
+    values.update(
+        {band: log_tau(numeric(f"lag_disk_{band}")) for band in available_bands}
+    )
+    return values
 
 
-def _collect_sigma_tau_lambda_data(df, target, *, bands, lam_s):
-    del lam_s
+def _collect_sigma_tau_lambda_data(df, target, *, bands, lam_s, disk_order):
     if target == "sigma":
         value_template = "log_sigma_band_{}"
-        err_template = "log_sigma_band_{}_err"
         uv_col = "log_sigma_uv"
+        continuum_tau = None
     elif target == "tau":
         value_template = "log_tau_band_{}_RF"
-        err_template = "log_tau_band_{}_RF_err"
         uv_col = "log_tau_uv_rf"
+        continuum_tau = _continuum_tau_logs_from_medians(
+            df,
+            bands=bands,
+            lam_s=lam_s,
+            disk_order=disk_order,
+        )
     else:
         raise ValueError("target must be 'sigma' or 'tau'")
 
     z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
-    uv = pd.to_numeric(df[uv_col], errors="coerce").to_numpy(dtype=float)
+    uv = (
+        continuum_tau["uv"]
+        if continuum_tau is not None
+        else pd.to_numeric(df[uv_col], errors="coerce").to_numpy(dtype=float)
+    )
     lam_list = []
     y_abs_list = []
     y_res_list = []
-    err_list = []
     group_list = []
     band_list = []
     for band in bands:
         if band not in SDSS_LAMBDA_PIVOT:
             continue
         value_col = value_template.format(band)
-        if value_col not in df.columns:
-            continue
-        values = pd.to_numeric(df[value_col], errors="coerce").to_numpy(dtype=float)
-        err_col = err_template.format(band)
-        if err_col in df.columns:
-            errs = pd.to_numeric(df[err_col], errors="coerce").to_numpy(dtype=float)
+        if continuum_tau is not None and target == "tau":
+            if band not in continuum_tau:
+                continue
+            values = continuum_tau[band]
+        elif value_col in df.columns:
+            values = pd.to_numeric(df[value_col], errors="coerce").to_numpy(dtype=float)
         else:
-            errs = np.ones(len(df), dtype=float)
+            continue
         lam_rf = SDSS_LAMBDA_PIVOT[band] / (1.0 + z)
         mask = (
             np.isfinite(lam_rf)
@@ -79,12 +132,10 @@ def _collect_sigma_tau_lambda_data(df, target, *, bands, lam_s):
         )
         if not np.any(mask):
             continue
-        clean_errs = np.where(np.isfinite(errs) & (errs > 0.0), errs, 1.0)
         idx = np.flatnonzero(mask)
         lam_list.append(lam_rf[mask])
         y_abs_list.append(values[mask])
         y_res_list.append(values[mask] - uv[mask])
-        err_list.append(clean_errs[mask])
         group_list.append(idx)
         band_list.extend([band] * int(np.count_nonzero(mask)))
 
@@ -93,113 +144,95 @@ def _collect_sigma_tau_lambda_data(df, target, *, bands, lam_s):
     lam = np.concatenate(lam_list)
     y_abs = np.concatenate(y_abs_list)
     y_res = np.concatenate(y_res_list)
-    err = np.concatenate(err_list)
     group = np.concatenate(group_list)
-    _, group = np.unique(group, return_inverse=True)
-    weight = 1.0 / np.maximum(err * err, 1e-12)
     return {
         "lam": lam,
         "x": np.log10(lam),
         "y_abs": y_abs,
         "y_res": y_res,
-        "weight": weight,
         "group": group.astype(int),
+        "n_objects": len(df),
         "band": np.asarray(band_list, dtype=object),
+        "value_definition": (
+            "continuum_median_parameter_approximation"
+            if continuum_tau is not None and target == "tau"
+            else "stored_catalog_values"
+        ),
     }
 
 
-def _profile_sse(y, model, weight, group):
-    n_group = int(group.max()) + 1
-    num = np.zeros(n_group, dtype=float)
-    den = np.zeros(n_group, dtype=float)
-    np.add.at(num, group, weight * (y - model))
-    np.add.at(den, group, weight)
-    intercept = num / np.where(den > 0.0, den, 1.0)
-    fit = intercept[group] + model
-    return float(np.sum(weight * (y - fit) ** 2))
+def _fit_slopes(data, *, lam_s, positive, bootstrap_replicates, bootstrap_seed):
+    """Fit per-object lines, then a normal or lognormal slope population.
 
-
-def _hessian_num(objective, theta, eps=1e-3):
-    theta = np.asarray(theta, dtype=float)
-    h = eps * np.maximum(1.0, np.abs(theta))
-    hessian = np.zeros((2, 2), dtype=float)
-    for i in range(2):
-        ei = np.zeros(2, dtype=float)
-        ei[i] = h[i]
-        for j in range(2):
-            ej = np.zeros(2, dtype=float)
-            ej[j] = h[j]
-            hessian[i, j] = (
-                objective(theta + ei + ej)
-                - objective(theta + ei - ej)
-                - objective(theta - ei + ej)
-                + objective(theta - ei - ej)
-            ) / (4.0 * h[i] * h[j])
-    return 0.5 * (hessian + hessian.T)
-
-
-def _fit_slopes(data, *, lam_s, ds_fixed, bounds):
-    def objective(theta):
-        model = log_broken_pl(data["lam"], lam_s, float(theta[0]), float(theta[1]), ds_fixed)
-        return 0.5 * _profile_sse(data["y_abs"], model, data["weight"], data["group"])
-
-    theta = None
-    try:
-        result = minimize(
-            objective,
-            x0=np.array([0.0, 0.0], dtype=float),
-            method="L-BFGS-B",
-            bounds=bounds,
+    Missing sides remain NaN. Bootstrap entire catalog rows so all bands and
+    both slopes from a quasar move together, including differing side coverage.
+    Measurement errors are not used or deconvolved from population scatter.
+    """
+    x = np.log10(data["lam"] / float(lam_s))
+    design = np.column_stack([np.minimum(x, 0.0), np.maximum(x, 0.0)])
+    y = data["y_res"]
+    group = data["group"]
+    n_group = data["n_objects"]
+    num = np.zeros((n_group, 2))
+    den = np.zeros_like(num)
+    np.add.at(num, group, design * y[:, None])
+    np.add.at(den, group, design**2)
+    total_den = den.sum(axis=0)
+    if np.any(total_den <= 1e-12):
+        raise ValueError("broken power-law fit requires points on both sides of lam_s")
+    object_slopes = np.divide(
+        num, den, out=np.full_like(num, np.nan), where=den > 1e-12
+    )
+    counts = np.isfinite(object_slopes).sum(axis=0)
+    if np.any(counts < 2):
+        raise ValueError("population fit requires at least two objects on each side")
+    if positive and np.any(object_slopes[np.isfinite(object_slopes)] <= 0):
+        raise ValueError(
+            "lognormal tau population requires strictly positive per-object slopes"
         )
-        if result.success and np.all(np.isfinite(result.x)):
-            theta = np.asarray(result.x, dtype=float)
-    except Exception:
-        pass
+    transformed = np.log(object_slopes) if positive else object_slopes
 
-    if theta is None:
-        grid_1 = np.linspace(bounds[0][0], bounds[0][1], 41)
-        grid_2 = np.linspace(bounds[1][0], bounds[1][1], 41)
-        best_value = np.inf
-        best = (0.0, 0.0)
-        for d1 in grid_1:
-            for d2 in grid_2:
-                value = objective((d1, d2))
-                if value < best_value:
-                    best_value = value
-                    best = (float(d1), float(d2))
-        theta = np.asarray(best, dtype=float)
+    def population_mean(values):
+        location = np.nanmean(values, axis=0)
+        variance = np.nanvar(values, axis=0)
+        mean = np.exp(location + 0.5 * variance) if positive else location
+        return mean, location, np.sqrt(variance)
 
-    sse = 2.0 * objective(theta)
-    dof = max(1, len(data["lam"]) - (int(data["group"].max()) + 1) - 2)
-    redchi = float(sse / dof)
-    cov = None
-    try:
-        hessian = _hessian_num(objective, theta)
-        cov = np.linalg.inv(hessian) * redchi
-        if not np.all(np.isfinite(cov)):
-            cov = None
-    except Exception:
-        cov = None
-
-    err = np.full(2, np.nan, dtype=float)
-    if cov is not None:
-        err = np.sqrt(np.clip(np.diag(cov), 0.0, np.inf))
+    theta, location, scale = population_mean(transformed)
+    rng = np.random.default_rng(bootstrap_seed)
+    means = []
+    for _ in range(bootstrap_replicates):
+        sampled = transformed[rng.integers(n_group, size=n_group)]
+        if np.any(np.isfinite(sampled).sum(axis=0) == 0):
+            continue
+        means.append(population_mean(sampled)[0])
+    means = np.asarray(means)
+    if len(means) < 2 or not np.all(np.isfinite(means)):
+        raise ValueError("insufficient finite whole-object bootstrap fits")
+    cov = np.cov(means, rowvar=False, ddof=1)
+    err = np.sqrt(np.diag(cov))
+    mean_percentiles = np.percentile(means, [16, 84], axis=0).T
+    residual = y - design @ theta
+    # Descriptive shape check, not a calibrated goodness-of-fit p-value.
+    from scipy.stats import norm
+    empirical = np.nanpercentile(object_slopes, [16, 50, 84, 95], axis=0).T
+    modeled = location[:, None] + scale[:, None] * norm.ppf([0.16, 0.5, 0.84, 0.95])
+    if positive:
+        modeled = np.exp(modeled)
     return {
-        "d1": float(theta[0]),
-        "d2": float(theta[1]),
-        "d1_err": float(err[0]),
-        "d2_err": float(err[1]),
-        "cov": cov,
-        "redchi": redchi,
+        "d1": float(theta[0]), "d2": float(theta[1]),
+        "d1_err": float(err[0]), "d2_err": float(err[1]),
+        "cov": cov, "intercept": 0.0,
+        "rmse": float(np.sqrt(np.mean(residual**2))),
+        "mean_slope_percentiles": mean_percentiles,
+        "bootstrap_mean_slopes": means,
+        "bootstrap_replicates_valid": len(means),
+        "population_distribution": "lognormal" if positive else "normal",
+        "population_location": location, "population_scale": scale,
+        "empirical_population_quantiles": empirical,
+        "modeled_population_quantiles": modeled,
+        "object_slopes": object_slopes, "objects_per_slope": counts,
     }
-
-
-def _global_intercept(data, *, lam_s, d1, d2, ds):
-    model = log_broken_pl(data["lam"], lam_s, d1, d2, ds)
-    den = np.sum(data["weight"])
-    if not np.isfinite(den) or den <= 0.0:
-        return 0.0
-    return float(np.sum(data["weight"] * (data["y_res"] - model)) / den)
 
 
 def fit_sigma_tau_lambda_broken_pl(
@@ -207,76 +240,66 @@ def fit_sigma_tau_lambda_broken_pl(
     *,
     bands=("u", "g", "r", "i", "z"),
     lam_s=2500.0,
-    ds_fixed_sigma=0.1,
-    ds_fixed_tau=0.1,
     min_points=3,
     include_plot_payload=False,
+    bootstrap_replicates=1000,
+    bootstrap_seed=2500,
+    disk_order=3,
 ):
-    """Fit the postcut sigma/tau wavelength broken power-law diagnostic."""
+    """Fit population mean slopes with whole-quasar bootstrap uncertainty.
+
+    Tau slopes follow a positive lognormal; sigma slopes follow a normal.
+    Mean uncertainties come from bootstrap refits; the plotted population band
+    uses empirical per-object slope percentiles. When driver and disk fields are
+    available, tau is reconstructed as a continuum-only median-parameter
+    approximation. Measurement errors are not used.
+    """
+    if (
+        not isinstance(bootstrap_replicates, (int, np.integer))
+        or bootstrap_replicates < 2
+    ):
+        raise ValueError("bootstrap_replicates must be an integer >= 2")
+    if not np.isfinite(lam_s) or lam_s <= 0:
+        raise ValueError("lam_s must be finite and positive")
     required = {"z", "log_sigma_uv", "log_tau_uv_rf"}
     missing = sorted(required - set(df.columns))
     if missing:
         raise KeyError(f"missing columns {missing}")
-
-    sigma_data = _collect_sigma_tau_lambda_data(df, "sigma", bands=bands, lam_s=lam_s)
-    tau_data = _collect_sigma_tau_lambda_data(df, "tau", bands=bands, lam_s=lam_s)
-    sigma_n = 0 if sigma_data is None else len(sigma_data["lam"])
-    tau_n = 0 if tau_data is None else len(tau_data["lam"])
-    if sigma_n < min_points or tau_n < min_points:
-        raise ValueError(f"insufficient finite points (sigma={sigma_n}, tau={tau_n})")
-
-    fit_sigma = _fit_slopes(
-        sigma_data,
-        lam_s=lam_s,
-        ds_fixed=ds_fixed_sigma,
-        bounds=((-6.0, 6.0), (-6.0, 6.0)),
-    )
-    fit_tau = _fit_slopes(
-        tau_data,
-        lam_s=lam_s,
-        ds_fixed=ds_fixed_tau,
-        bounds=((-10.0, 10.0), (-10.0, 10.0)),
-    )
-    fit_sigma["intercept"] = _global_intercept(
-        sigma_data,
-        lam_s=lam_s,
-        d1=fit_sigma["d1"],
-        d2=fit_sigma["d2"],
-        ds=ds_fixed_sigma,
-    )
-    fit_tau["intercept"] = _global_intercept(
-        tau_data,
-        lam_s=lam_s,
-        d1=fit_tau["d1"],
-        d2=fit_tau["d2"],
-        ds=ds_fixed_tau,
-    )
-
-    result = {
-        "eta_sigma_blue": fit_sigma["d1"],
-        "eta_sigma_blue_err": fit_sigma["d1_err"],
-        "eta_sigma_red": fit_sigma["d2"],
-        "eta_sigma_red_err": fit_sigma["d2_err"],
-        "eta_tau_blue": fit_tau["d1"],
-        "eta_tau_blue_err": fit_tau["d1_err"],
-        "eta_tau_red": fit_tau["d2"],
-        "eta_tau_red_err": fit_tau["d2_err"],
-        "fit_sigma": fit_sigma,
-        "fit_tau": fit_tau,
-    }
-
-    if include_plot_payload:
-        result["sigma_data"] = sigma_data
-        result["tau_data"] = tau_data
+    result = {}
+    for target in ("sigma", "tau"):
+        data = _collect_sigma_tau_lambda_data(
+            df,
+            target,
+            bands=bands,
+            lam_s=lam_s,
+            disk_order=disk_order,
+        )
+        n = 0 if data is None else len(data["lam"])
+        if n < min_points:
+            raise ValueError(f"insufficient finite points ({target}={n})")
+        fit = _fit_slopes(
+            data,
+            lam_s=lam_s,
+            positive=(target == "tau"),
+            bootstrap_replicates=bootstrap_replicates,
+            bootstrap_seed=bootstrap_seed,
+        )
+        result[f"fit_{target}"] = fit
+        for side, key, i in (("blue", "d1", 0), ("red", "d2", 1)):
+            prefix = f"eta_{target}_{side}"
+            result[prefix] = fit[key]
+            result[prefix + "_err"] = fit[key + "_err"]
+            result[prefix + "_p16"] = float(fit["mean_slope_percentiles"][i, 0])
+            result[prefix + "_p84"] = float(fit["mean_slope_percentiles"][i, 1])
+        if include_plot_payload:
+            result[f"{target}_data"] = data
     return result
 
 
-def std_from_slope_cov(fit, lam_grid, *, lam_s, ds_fixed):
-    """Return the fit-curve standard deviation from a d1/d2 covariance."""
-    cov = fit.get("cov")
-    if cov is None:
-        return None
-    jac = jac_log_broken_pl(lam_grid, lam_s, fit["d1"], fit["d2"], ds_fixed)
-    var = np.einsum("in,ij,jn->n", jac, cov, jac)
-    std = np.sqrt(np.clip(var, 0.0, np.inf))
-    return std if np.all(np.isfinite(std)) else None
+def slope_population_band(fit, lam_grid, *, lam_s):
+    """Return the empirical 16th-84th percentile per-object slope envelope."""
+    q = fit["empirical_population_quantiles"][:, [0, 2]]
+    edge1 = log_broken_pl(lam_grid, lam_s, q[0, 0], q[1, 0])
+    edge2 = log_broken_pl(lam_grid, lam_s, q[0, 1], q[1, 1])
+    # Negative log wavelength reverses the ordering of the slope quantiles.
+    return np.minimum(edge1, edge2), np.maximum(edge1, edge2)

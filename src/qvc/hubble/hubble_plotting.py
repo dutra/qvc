@@ -67,7 +67,7 @@ from qvc.hubble.sigma_tau_lambda_fit import (
     SDSS_LAMBDA_PIVOT,
     fit_sigma_tau_lambda_broken_pl,
     log_broken_pl,
-    std_from_slope_cov,
+    slope_population_band,
 )
 from qvc.hubble.hubble_utils import (
     convert_M2500_to_logL2500,
@@ -2120,19 +2120,17 @@ def plot_sigma_tau_vs_lambda_broken_pl_fit(
     filename="sigma_tau_vs_lambda_broken_pl_fit_postcut.pdf",
     bands=("u", "g", "r", "i", "z"),
     lam_s=2500.0,
-    ds_fixed_sigma=0.1,
-    ds_fixed_tau=0.1,
     min_points=3,
+    disk_order=3,
 ):
-    """Plot UV-subtracted per-band sigma/tau versus rest wavelength with broken power-law fits."""
+    """Plot population mean relations and empirical 16th-84th slope bands."""
     try:
         fit_result = fit_sigma_tau_lambda_broken_pl(
             df,
             bands=bands,
             lam_s=lam_s,
-            ds_fixed_sigma=ds_fixed_sigma,
-            ds_fixed_tau=ds_fixed_tau,
             min_points=min_points,
+            disk_order=disk_order,
             include_plot_payload=True,
         )
     except (KeyError, ValueError) as exc:
@@ -2147,7 +2145,9 @@ def plot_sigma_tau_vs_lambda_broken_pl_fit(
     fit_sigma = fit_result["fit_sigma"]
     fit_tau = fit_result["fit_tau"]
 
-    xgrid = np.linspace(2, 5, 600)
+    # Evaluate plotted curves only across the displayed wavelength range so
+    # Matplotlib's automatic y limits reflect visible artists.
+    xgrid = np.linspace(2.81, 3.89, 600)
     xgrid = np.sort(np.unique(np.append(xgrid, np.log10(float(lam_s)))))
     lam_grid = 10.0**xgrid
     yfit_sigma = fit_sigma["intercept"] + log_broken_pl(
@@ -2155,17 +2155,15 @@ def plot_sigma_tau_vs_lambda_broken_pl_fit(
         lam_s,
         fit_sigma["d1"],
         fit_sigma["d2"],
-        ds_fixed_sigma,
     )
     yfit_tau = fit_tau["intercept"] + log_broken_pl(
         lam_grid,
         lam_s,
         fit_tau["d1"],
         fit_tau["d2"],
-        ds_fixed_tau,
     )
-    std_sigma = std_from_slope_cov(fit_sigma, lam_grid, lam_s=lam_s, ds_fixed=ds_fixed_sigma)
-    std_tau = std_from_slope_cov(fit_tau, lam_grid, lam_s=lam_s, ds_fixed=ds_fixed_tau)
+    band_sigma = slope_population_band(fit_sigma, lam_grid, lam_s=lam_s)
+    band_tau = slope_population_band(fit_tau, lam_grid, lam_s=lam_s)
 
     fig, (ax_sigma, ax_tau) = plt.subplots(
         2,
@@ -2206,21 +2204,21 @@ def plot_sigma_tau_vs_lambda_broken_pl_fit(
                 zorder=1,
             )
 
-    if std_sigma is not None:
+    if band_sigma is not None:
         ax_sigma.fill_between(
             xgrid,
-            yfit_sigma - std_sigma,
-            yfit_sigma + std_sigma,
+            band_sigma[0],
+            band_sigma[1],
             color="m",
             alpha=0.30,
             linewidth=0,
             zorder=4,
         )
-    if std_tau is not None:
+    if band_tau is not None:
         ax_tau.fill_between(
             xgrid,
-            yfit_tau - std_tau,
-            yfit_tau + std_tau,
+            band_tau[0],
+            band_tau[1],
             color="m",
             alpha=0.30,
             linewidth=0,
@@ -2279,9 +2277,7 @@ def plot_sigma_tau_vs_lambda_broken_pl_fit(
     if band_handles:
         ax_sigma.legend(handles=band_handles + model_handle, loc="upper right", frameon=False, ncol=2, fontsize=9)
 
-    ax_sigma.set_ylim(-0.45, 0.55)
     ax_tau.set_xlim(2.81, 3.89)
-    ax_tau.set_ylim(-0.10, 0.75)
 
     diagnostics_path = os.path.join(plot_path or "plots/hubble", "diagnostics")
     return _save_figure(
