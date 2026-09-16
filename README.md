@@ -56,7 +56,13 @@ First, create and activate a Python environment. We recommend Conda (https://www
 conda create -n jaxcpu -c conda-forge python=3.12.11 pip
 conda activate jaxcpu
 pip install -e .
+pip install --force-reinstall --no-deps "jaxsedfit @ git+https://github.com/burke86/jaxsedfit.git"
 ```
+
+JAXSEDFit follows the upstream default branch without a commit pin. The final
+command refreshes it even when upstream has not changed its package version;
+repeat it when updating an existing environment. Catalog manifests record the
+installed revision for provenance.
 
 Run the full demo workflow:
 

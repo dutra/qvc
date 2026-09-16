@@ -51,7 +51,6 @@ LOCAL_COMPATIBLE_PYTHON = Path(
 )
 BUNDLE_SUFFIX = "_joint_samples.h5"
 REEXEC_ENV = "QVC_LOCAL_SPECTRA_RESUME_REEXEC"
-EXPECTED_JAXSEDFIT_COMMIT = "bc9da74735260bd33b3da2076fd7929fdd592e0d"
 
 
 @dataclass(frozen=True)
@@ -354,26 +353,6 @@ def load_direct_v3_sources(
             bundle_path = bundle_by_name.pop(sdss_name, None)
             if bundle_path is None:
                 continue
-            with h5py.File(bundle_path, "r") as bundle_handle:
-                raw = bundle_handle.attrs.get("qvc_provenance_json", "")
-                if isinstance(raw, bytes):
-                    raw = raw.decode("utf-8")
-                try:
-                    bundle_provenance = json.loads(str(raw))
-                    bundle_jaxsedfit_commit = (
-                        bundle_provenance["runtime"]["dependencies"]
-                        ["JAXSEDFit"]["git"]["commit"]
-                    )
-                except (KeyError, TypeError, json.JSONDecodeError) as exc:
-                    raise ValueError(
-                        f"Posterior bundle lacks JAXSedFit provenance: {bundle_path}"
-                    ) from exc
-                if bundle_jaxsedfit_commit != EXPECTED_JAXSEDFIT_COMMIT:
-                    raise ValueError(
-                        f"Posterior bundle {bundle_path} records JAXSedFit "
-                        f"{bundle_jaxsedfit_commit!r}; expected "
-                        f"{EXPECTED_JAXSEDFIT_COMMIT!r}."
-                    )
             fraction_count = int(catalog.valid_count[row_index])
             if fraction_count <= 0:
                 raise ValueError(
@@ -1736,11 +1715,6 @@ def run_v3_build(args: argparse.Namespace, repo_root: Path) -> int:
     # malformed invocation fails on its direct cause.
     resolve_source_bundle_dir(source_run)
     commit, dirty, module_root = module_git_state("jaxsedfit")
-    if commit != EXPECTED_JAXSEDFIT_COMMIT:
-        raise RuntimeError(
-            f"Loaded JAXSedFit commit {commit!r}; expected "
-            f"{EXPECTED_JAXSEDFIT_COMMIT!r}."
-        )
     if dirty:
         raise RuntimeError(
             f"JAXSedFit checkout is dirty at {module_root}; "
@@ -1867,7 +1841,7 @@ def run_v3_build(args: argparse.Namespace, repo_root: Path) -> int:
             args.joint_posterior_selection_seed
         ),
         "mandatory_joint_psf_photometry": True,
-        "jaxsedfit_git_commit": EXPECTED_JAXSEDFIT_COMMIT,
+        "jaxsedfit_git_commit": commit,
         "driver_sha256": file_sha256(
             Path(getattr(args, "driver_path", __file__)).resolve()
         ),

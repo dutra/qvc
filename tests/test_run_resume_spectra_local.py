@@ -108,7 +108,8 @@ def test_discover_resume_objects_rejects_unmapped_bundle(tmp_path):
         local.discover_resume_objects(bundle_dir, input_csv)
 
 
-def test_direct_v3_sources_select_false_fit_row_with_matching_bundle(tmp_path):
+@pytest.mark.parametrize("jaxsedfit_commit", ["a" * 40, "b" * 40, "", None])
+def test_direct_v3_sources_select_false_fit_row_with_matching_bundle(tmp_path, jaxsedfit_commit):
     source_run = tmp_path / "run"
     source_run.mkdir()
     bundle_dir = source_run / "all"
@@ -119,8 +120,8 @@ def test_direct_v3_sources_select_false_fit_row_with_matching_bundle(tmp_path):
             {
                 "runtime": {
                     "dependencies": {
-                            "JAXSEDFit": {
-                            "git": {"commit": local.EXPECTED_JAXSEDFIT_COMMIT}
+                        "JAXSEDFit": {
+                            "git": {"commit": jaxsedfit_commit}
                         }
                     }
                 }
