@@ -6021,6 +6021,30 @@ def test_hubble_fit_cli_declares_and_forwards_minimal_plots():
     assert "plot_diagnostics" in load_kwargs
 
 
+@pytest.mark.parametrize("uniform", [False, True])
+def test_hubble_fit_cli_forwards_uniform_sampling_to_single_fit(uniform):
+    tree = ast.parse(Path(hubble_fit.__file__).read_text(encoding="utf-8"))
+    main_blocks = [
+        node for node in tree.body
+        if isinstance(node, ast.If)
+        and ast.unparse(node.test) == "__name__ == '__main__'"
+    ]
+    calls = [
+        node for main in main_blocks for node in ast.walk(main)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "run_single"
+    ]
+    assert len(calls) == 1
+    keywords = {kw.arg: kw.value for kw in calls[0].keywords}
+    expression = ast.Expression(keywords["uniform_redshift_distribution"])
+    forwarded = eval(
+        compile(expression, hubble_fit.__file__, "eval"),
+        {"args": SimpleNamespace(uniform_redshift_distribution=uniform)},
+    )
+    assert forwarded is uniform
+
+
 def test_resume_checkpoint_validates_cut_and_redshift_metadata():
     n_agn = 2
     payload = {

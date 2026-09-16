@@ -417,6 +417,45 @@ def test_multi_cosmology_fresh_context_is_computed_once(monkeypatch):
     assert calls == [["q0", "q1", "q2"]]
 
 
+@pytest.mark.parametrize("uniform", [False, True])
+@pytest.mark.parametrize("n", [2, 8])
+def test_shared_pivots_match_initial_selection_with_sampling(uniform, n):
+    frame = _reference_frame()
+    context = hubble_fit._prepare_shared_agn_pivot_context(
+        frame,
+        cosmo_models=["FlatLambdaCDM", "FlatwCDM"],
+        resume_by_model={"FlatLambdaCDM": False, "FlatwCDM": False},
+        z_range=(0.5, 1.5),
+        N=n,
+        uniform_redshift_distribution=uniform,
+        only_sna=False,
+        only_agn=False,
+        speed="fastest",
+        completeness=False,
+        completeness_mode="2d",
+        disable_ceph_dist_calibration=False,
+        use_planck_h0_prior=False,
+        use_planck_om_prior=False,
+        use_alpha_lambda_term=False,
+        use_eta_sigma_term=False,
+        use_redshift_log_f_term=False,
+        disable_sigma_clip_pass=True,
+        resume_stage="both",
+        prefix="unit",
+    )
+    selection = hubble_fit._select_agn_fit_selection(
+        frame, z_range=(0.5, 1.5), N=n,
+        uniform_redshift_distribution=uniform,
+    )
+    assert context.reference_object_ids == tuple(selection["object_id"])
+    assert len(selection) == (n if uniform else min(n, len(frame)))
+    if uniform and n > len(frame):
+        assert selection["object_id"].duplicated().any()
+    hubble_fit._validate_agn_pivot_context_for_reference(
+        context, selection, z_range=(0.5, 1.5),
+    )
+
+
 def test_fit_selection_applies_n_after_inclusive_redshift_cut():
     frame = pd.concat(
         [

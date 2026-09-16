@@ -6987,6 +6987,7 @@ if __name__ == "__main__":
                            cosmo_model=cosmo_model,
                 completeness=not args.disable_completeness, use_full_cov=not args.disable_full_covariance, resume=resume_by_model[cosmo_model], z_range=args.z_range,
                 speed=args.speed, N=effective_N, only_sna=args.only_sna, only_agn=args.only_agn,
+                uniform_redshift_distribution=args.uniform_redshift_distribution,
                 skip_plots=args.skip_plots, residuals_sigma_clip=args.residuals_sigma_clip,
                 disable_sigma_clip_pass=args.disable_sigma_clip_pass,
                 sigma_clip_threshold=args.sigma_clip_threshold,
