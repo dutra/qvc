@@ -6107,6 +6107,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                                 compare_r_sna=compare_r_sna,
                                 agn_pivot_context=agn_pivot_context,
                                 agn_xray_counts=agn_xray_counts,
+                                bright_subsample_cut=bright_subsample_cut,
                                 use_f_agn_psf_2500_sigmoid_term=(
                                     use_f_agn_psf_2500_sigmoid_term
                                 ),

@@ -4169,6 +4169,7 @@ def write_results_tex_variables(
     *,
     agn_pivot_context: AgnPivotContext,
     agn_xray_counts=None,
+    bright_subsample_cut=None,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
 ):
@@ -4192,6 +4193,19 @@ def write_results_tex_variables(
     def _cmd(name, content, model_suffix=""):
         cmd_name = f"result{result_prefix}{_clean(model_suffix)}{name}"
         return f"\\newcommand{{\\{cmd_name}}}{{\\ensuremath{{{content}}}}}"
+
+    if bright_subsample_cut is None:
+        lines.append("% Bright-subsample selection: disabled")
+        completeness_min = completeness_percent = margin = r"\mathrm{N/A}"
+    else:
+        mode = "relative-to-peak" if bright_subsample_cut.relative else "absolute"
+        lines.append(f"% Bright-subsample threshold: {mode} completeness; margin in magnitudes")
+        completeness_min = f"{bright_subsample_cut.completeness_min:g}"
+        completeness_percent = f"{100 * bright_subsample_cut.completeness_min:g}"
+        margin = f"{bright_subsample_cut.margin:g}"
+    lines.append(_cmd("BrightSubsampleCompletenessMin", completeness_min))
+    lines.append(_cmd("BrightSubsampleCompletenessPercent", completeness_percent))
+    lines.append(_cmd("BrightSubsampleMargin", margin))
 
     def _sym_percentile(data, percentiles=[16, 50, 84]):
         if len(data) == 0: return np.nan, np.nan
