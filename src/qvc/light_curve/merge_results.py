@@ -821,6 +821,12 @@ def write_stone_sigma_tau_identity_grid(rows, output_path: str, stone_fits_path=
         sigma_limits=STONE_SIGMA_LIMITS,
         tau_limits=STONE_TAU_LIMITS,
         figure_annotation=runtime_annotation,
+        expand_limits_for_errorbars=True,
+        style={
+            "contour_color": "tab:blue",
+            "contour_smoothing": 4.0,
+            "show_metric_count": False,
+        },
     )
     plt.close(fig)
     print(f"Wrote Stone sigma/tau identity grid to {output_path}")
@@ -927,6 +933,12 @@ def write_samelength_sigma_tau_identity_grid(x_rows, y_rows, output_path: str):
         output_path=output_path,
         sigma_limits=STONE_SIGMA_LIMITS,
         tau_limits=STONE_TAU_LIMITS,
+        expand_limits_for_errorbars=True,
+        style={
+            "contour_color": "tab:blue",
+            "contour_smoothing": 4.0,
+            "show_metric_count": False,
+        },
     )
     plt.close(fig)
     print(f"Wrote same-length sigma/tau identity grid to {output_path}")

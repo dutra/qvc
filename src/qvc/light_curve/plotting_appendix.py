@@ -6,6 +6,7 @@ import pandas as pd
 from matplotlib.lines import Line2D
 from matplotlib.legend_handler import HandlerBase
 from matplotlib.ticker import AutoMinorLocator, MultipleLocator
+from scipy.ndimage import gaussian_filter
 
 from qvc.light_curve.band_colors import BAND_COLORS
 
@@ -13,6 +14,67 @@ plt.style.use(Path(__file__).with_name("style.mplstyle"))
 
 
 COLORS = BAND_COLORS.copy()
+IDENTITY_CONTOUR_ENCLOSED_PROBABILITIES = (0.84, 0.68)
+
+
+def _density_contour_grid(
+    x,
+    y,
+    *,
+    xlim,
+    ylim,
+    bins=90,
+    smoothing=1.7,
+    enclosed_probabilities=IDENTITY_CONTOUR_ENCLOSED_PROBABILITIES,
+):
+    """Return a smoothed density grid and highest-density contour levels."""
+
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    finite = np.isfinite(x) & np.isfinite(y)
+    inside = (
+        finite
+        & (x >= xlim[0])
+        & (x <= xlim[1])
+        & (y >= ylim[0])
+        & (y <= ylim[1])
+    )
+    if np.count_nonzero(inside) < 2:
+        return None
+
+    histogram, x_edges, y_edges = np.histogram2d(
+        x[inside],
+        y[inside],
+        bins=int(bins),
+        range=[xlim, ylim],
+    )
+    density = gaussian_filter(histogram, sigma=float(smoothing))
+    ranked = np.sort(density[density > 0.0])[::-1]
+    if ranked.size == 0 or not np.isfinite(ranked.sum()) or ranked.sum() <= 0.0:
+        return None
+
+    probabilities = np.asarray(enclosed_probabilities, dtype=float)
+    if (
+        probabilities.ndim != 1
+        or probabilities.size == 0
+        or not np.all(np.isfinite(probabilities))
+        or np.any(probabilities <= 0.0)
+        or np.any(probabilities >= 1.0)
+    ):
+        raise ValueError("contour enclosed probabilities must lie strictly between 0 and 1")
+
+    cumulative = np.cumsum(ranked) / ranked.sum()
+    thresholds = [
+        ranked[min(np.searchsorted(cumulative, probability), ranked.size - 1)]
+        for probability in probabilities
+    ]
+    levels = np.unique(np.sort(thresholds))
+    if levels.size == 0:
+        return None
+
+    x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
+    y_centers = 0.5 * (y_edges[:-1] + y_edges[1:])
+    return x_centers, y_centers, density.T, levels
 
 
 class _ErrorbarLegendHandle:
@@ -158,15 +220,22 @@ def _format_panel_metrics(metrics, *, header=None):
     return "\n".join(lines)
 
 
-def _format_identity_panel_metrics(metrics, *, unit, header=None):
+def _format_identity_panel_metrics(
+    metrics,
+    *,
+    unit,
+    header=None,
+    include_count=True,
+):
     if metrics is None:
         return None
     lines = []
     if header:
         lines.append(header)
+    if include_count:
+        lines.append(f"N = {metrics['N']}")
     lines.extend(
         [
-            f"N = {metrics['N']}",
             f"Bias = {metrics['Bias']:.2f} {unit}",
             f"$\\sigma$ = {metrics['sigma']:.2f} {unit}",
         ]
@@ -198,8 +267,22 @@ def _annotate_panel_metrics(ax, metrics, *, loc="lower right", header=None, font
     )
 
 
-def _annotate_identity_panel_metrics(ax, metrics, *, unit, loc="lower right", header=None, fontsize=8.5):
-    text = _format_identity_panel_metrics(metrics, unit=unit, header=header)
+def _annotate_identity_panel_metrics(
+    ax,
+    metrics,
+    *,
+    unit,
+    loc="lower right",
+    header=None,
+    fontsize=8.5,
+    include_count=True,
+):
+    text = _format_identity_panel_metrics(
+        metrics,
+        unit=unit,
+        header=header,
+        include_count=include_count,
+    )
     if not text:
         return
     anchors = {
@@ -315,6 +398,7 @@ def plot_sigma_tau_identity_grid(
     tau_lims=None,
     layout="vertical",
     figure_annotation=None,
+    expand_limits_for_errorbars=False,
 ):
     label_fontsize = 14
     tick_fontsize = 12
@@ -332,6 +416,12 @@ def plot_sigma_tau_identity_grid(
         "error_capsize": 3,
         "error_capthick": 1,
         "rasterized": False,
+        "contour_color": None,
+        "contour_linewidth": 1.35,
+        "contour_bins": 90,
+        "contour_smoothing": 1.7,
+        "contour_enclosed_probabilities": IDENTITY_CONTOUR_ENCLOSED_PROBABILITIES,
+        "show_metric_count": True,
         **(style or {}),
     }
 
@@ -392,7 +482,7 @@ def plot_sigma_tau_identity_grid(
             ax.xaxis.set_minor_locator(minor)
             ax.yaxis.set_minor_locator(minor)
 
-    def _row_limits(keydict, quantity):
+    def _row_limits(keydict, quantity, *, include_errorbars=False):
         mins = []
         maxs = []
         for band in bands:
@@ -402,15 +492,33 @@ def plot_sigma_tau_identity_grid(
             panel_data, _ = _extract_xyerr(df_band, keydict, band)
             if panel_data is None:
                 continue
-            x, y, _, _ = panel_data
-            mins.append(min(np.nanmin(x), np.nanmin(y)))
-            maxs.append(max(np.nanmax(x), np.nanmax(y)))
+            x, y, xerr, yerr = panel_data
+
+            def _extent(values, errors):
+                if not include_errorbars or errors is None:
+                    return np.nanmin(values), np.nanmax(values)
+                if isinstance(errors, tuple):
+                    low, high = errors
+                else:
+                    low = high = errors
+                return (
+                    np.nanmin(values - np.asarray(low, dtype=float)),
+                    np.nanmax(values + np.asarray(high, dtype=float)),
+                )
+
+            x_lo, x_hi = _extent(x, xerr)
+            y_lo, y_hi = _extent(y, yerr)
+            mins.append(min(x_lo, y_lo))
+            maxs.append(max(x_hi, y_hi))
         if not mins:
             raise ValueError(f"No finite matched {quantity} values available for any band.")
         lo = min(mins)
         hi = max(maxs)
-        pad_floor = 0.2 if quantity == "sigma" else 0.5
-        pad = max(0.04 * (hi - lo), pad_floor)
+        if include_errorbars:
+            pad = max(0.02 * (hi - lo), 0.02)
+        else:
+            pad_floor = 0.2 if quantity == "sigma" else 0.5
+            pad = max(0.04 * (hi - lo), pad_floor)
         return (lo - pad, hi + pad)
 
     def _normalize_axis_limits(name, value):
@@ -429,8 +537,30 @@ def plot_sigma_tau_identity_grid(
             raise ValueError(f"{name} must satisfy lower < upper, got {value!r}.")
         return (lo, hi)
 
-    sigma_limits = sigma_limits or _row_limits(sigma_keys, "sigma")
-    tau_limits = tau_limits or _row_limits(tau_keys, "tau")
+    sigma_data_limits = _row_limits(
+        sigma_keys,
+        "sigma",
+        include_errorbars=expand_limits_for_errorbars,
+    )
+    tau_data_limits = _row_limits(
+        tau_keys,
+        "tau",
+        include_errorbars=expand_limits_for_errorbars,
+    )
+    if sigma_limits is None:
+        sigma_limits = sigma_data_limits
+    elif expand_limits_for_errorbars:
+        sigma_limits = (
+            min(sigma_limits[0], sigma_data_limits[0]),
+            max(sigma_limits[1], sigma_data_limits[1]),
+        )
+    if tau_limits is None:
+        tau_limits = tau_data_limits
+    elif expand_limits_for_errorbars:
+        tau_limits = (
+            min(tau_limits[0], tau_data_limits[0]),
+            max(tau_limits[1], tau_data_limits[1]),
+        )
     sigma_lims = _normalize_axis_limits("sigma_lims", sigma_lims)
     tau_lims = _normalize_axis_limits("tau_lims", tau_lims)
 
@@ -500,6 +630,29 @@ def plot_sigma_tau_identity_grid(
                 zorder=-8,
                 rasterized=style["rasterized"],
             )
+            if style["contour_color"] is not None:
+                contour_grid = _density_contour_grid(
+                    x,
+                    y,
+                    xlim=ax.get_xlim(),
+                    ylim=ax.get_ylim(),
+                    bins=style["contour_bins"],
+                    smoothing=style["contour_smoothing"],
+                    enclosed_probabilities=style[
+                        "contour_enclosed_probabilities"
+                    ],
+                )
+                if contour_grid is not None:
+                    x_centers, y_centers, density, levels = contour_grid
+                    ax.contour(
+                        x_centers,
+                        y_centers,
+                        density,
+                        levels=levels,
+                        colors=style["contour_color"],
+                        linewidths=style["contour_linewidth"],
+                        zorder=4,
+                    )
             ax.set_xlabel(_resolve_label(keydict.get("xlabel"), band), labelpad=2, fontsize=label_fontsize)
             ax.set_ylabel(_resolve_label(keydict.get("ylabel"), band), labelpad=2, fontsize=label_fontsize)
             legend_handle = _ErrorbarLegendHandle(
@@ -530,6 +683,7 @@ def plot_sigma_tau_identity_grid(
                 unit=metric_units[row_index],
                 loc="lower right",
                 fontsize=metric_fontsize,
+                include_count=style["show_metric_count"],
             )
 
     if layout == "vertical":
