@@ -6174,6 +6174,8 @@ def _range_partitioned_weighted_bin_stats(
         )
 
     below = summarize(z < z_lo, bins[0], z_lo)
+    if drop_lowest_out_of_range_bin and below[0].size:
+        below = tuple(values[1:] for values in below)
     inside = summarize(
         (z >= z_lo) & (z <= z_hi) & fit_membership,
         z_lo,
@@ -6655,6 +6657,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         min_count=3,
         center="mid",
         fit_membership_mask=fit_membership_mask,
+        drop_lowest_out_of_range_bin=True,
     )
 
     # Residual-panel bins use the same point-level fit-range partition as the
@@ -6668,6 +6671,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         min_count=3,
         center="mid",
         fit_membership_mask=fit_membership_mask,
+        drop_lowest_out_of_range_bin=True,
     )
 
     # Log-z bins for INSET (match inset xscale='log')

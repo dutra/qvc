@@ -48,3 +48,22 @@ def test_three_objects_displayed_but_two_omitted():
     np.testing.assert_allclose(outside[0], [3.245])
     np.testing.assert_array_equal(inside[3], [3])
     np.testing.assert_allclose(inside[2], [1/np.sqrt(3)])
+
+
+def test_lowest_out_of_range_bin_can_be_omitted_without_shifting_grid():
+    z = np.array([.11, .12, .13, .28, .29, .30, .45, .46, .47, 3.17, 3.18, 3.19])
+    edges = _hubble_linear_bin_edges(z, (.44, 3.16))
+    inside, outside = _range_partitioned_weighted_bin_stats(
+        z,
+        np.ones(len(z)),
+        np.ones(len(z)),
+        edges,
+        (.44, 3.16),
+        min_count=3,
+        center="mid",
+        drop_lowest_out_of_range_bin=True,
+    )
+
+    np.testing.assert_allclose(inside[0], [.525])
+    np.testing.assert_allclose(outside[0], [.355, 3.245])
+    np.testing.assert_array_equal(outside[3], [3, 3])
