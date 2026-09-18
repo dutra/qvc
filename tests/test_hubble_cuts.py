@@ -218,7 +218,7 @@ def test_previous_scalar_and_component_defaults_are_disabled():
         }
     )
     assert build_dlog_amp_blr_cuts() == []
-    assert len(EXCLUDED_SDSS_NAMES) == 13
+    assert len(EXCLUDED_SDSS_NAMES) == 19
     assert REL_APPARENT_MAG_2500_ERR_MAX is None
 
 
