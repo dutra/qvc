@@ -1338,7 +1338,7 @@ def get_model_params(
         #("sigma_b",   (-1,  1)),
 
         ("H0",       PLANCK_H0_PRIOR if use_planck_h0_prior else (60.0, 80.0)),
-        ("Om0",      PLANCK_OM0_PRIOR if use_planck_om_prior else (0.0, 1.0)),
+        ("Om0",      PLANCK_OM0_PRIOR if use_planck_om_prior else (0.2, 0.8)),
         
     ])
     if not use_alpha_lambda_term:
