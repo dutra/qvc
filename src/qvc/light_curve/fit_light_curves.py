@@ -6203,6 +6203,13 @@ def main():
                 save_obj_samples_to_hdf5(
                     obj_flat_samples,
                     oid,
+                    model_variant=args.model_variant,
+                    disk_order=(
+                        args.disk_order
+                        if args.model_variant == SHARED_LATENT_BLR_VARIANT
+                        else None
+                    ),
+                    fitted_bands=bands,
                     scalar_diagnostics={
                         "loo_chi2_eff": loo_residual_result["loo_chi2_eff"],
                         "loo_rms": loo_residual_result["loo_rms"],

@@ -5,9 +5,13 @@ import glob
 import multiprocessing
 import os
 import sys
+import warnings
+from functools import lru_cache
 from pathlib import Path
 
 import h5py
+import jax
+import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -16,8 +20,21 @@ from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from tqdm import tqdm
 
-from qvc.hubble.cuts import LOG_SIGMA_UV_MAX, LOG_SIGMA_UV_MIN, LOG_TAU_UV_RF_MAX, LOG_TAU_UV_RF_MIN
+from qvc.hubble.cuts import (
+    ETA_SIGMA_KL_MIN,
+    EXCLUDED_LIGHT_CURVE_SDSS_NAMES,
+    LIGHT_CURVE_N_POINTS_MIN,
+    LIGHT_CURVE_RHAT_MAX,
+    LOG_TAU_UV_RF_MAX,
+    LOG_TAU_UV_RF_MIN,
+    LOO_CHI2_EFF_MAX,
+    NUM_DIVERGENCES_MAX,
+    T_RF_LENGTH_MIN,
+    T_RF_OVER_TAU_UV_RF_MIN,
+    light_curve_point_count_series,
+)
 from qvc.hubble.hubble_utils import resolve_qvc_data_path
+from qvc.hubble.sigma_tau_lambda_fit import SDSS_LAMBDA_PIVOT
 from qvc.light_curve.multiband_generate_lc import (
     MACLEOD_BANDS,
     MACLEOD_COLUMNS,
@@ -25,14 +42,19 @@ from qvc.light_curve.multiband_generate_lc import (
     resolve_stone_s82_matches,
 )
 from qvc.light_curve.posterior_draws import (
-    LIGHT_CURVE_POSTERIOR_DRAW_COUNT,
+    LIGHT_CURVE_POSTERIOR_BANDS,
     LIGHT_CURVE_POSTERIOR_DRAW_FORMAT,
-    LIGHT_CURVE_POSTERIOR_DRAW_FORMAT_V1,
     LIGHT_CURVE_POSTERIOR_DRAW_GROUP,
     LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY,
     compact_log_sigma_tau_posterior_draws,
+    draw_dataset_names,
     read_light_curve_posterior_draw_group,
+    stack_light_curve_posterior_draw_payloads,
     write_light_curve_posterior_draw_group,
+)
+from qvc.light_curve.multiband_model_shared_latent_blr import (
+    DEFAULT_DISK_ORDER,
+    continuum_effective_timescale,
 )
 from qvc.light_curve.plotting_appendix import plot_sigma_tau_identity_grid
 from qvc.provenance import (
@@ -44,11 +66,25 @@ from qvc.provenance import (
 
 MACLEOD_YEAR_DAYS = 365.25
 MACLEOD_IDENTITY_BANDS = ("u", "g", "r", "i")
+MACLEOD_SIGMA_LIMITS = (-1.5, 0.2)
+MACLEOD_TAU_LIMITS = (1.5, 4.0)
 STONE_IDENTITY_BANDS = ("g", "r", "i")
 SUBERLAK_IDENTITY_BANDS = ("r",)
 STONE_SIGMA_LIMITS = (-1.6, 0.2)
 STONE_TAU_LIMITS = (1.4, 4.6)
 SUBERLAK_RELATIVE_PATH = "data/190807_Celerite_real_Jeff1_Shen2008-2011_s82drw_r.txt"
+
+
+@lru_cache(maxsize=None)
+def _continuum_timescale_draw_evaluator(disk_order):
+    disk_order = int(disk_order)
+    return jax.jit(
+        jax.vmap(
+            lambda tf, ts, lag: continuum_effective_timescale(
+                tf, ts, lag, disk_order=disk_order
+            )
+        )
+    )
 
 def _decode_h5_scalar(value):
     if isinstance(value, bytes):
@@ -109,7 +145,9 @@ def _load_h5_shard(path, expected_n):
         with h5py.File(path, "r") as hdf:
             source_git_commit = _read_optional_h5_scalar(hdf, path, "git_commit")
             source_run_datetime = _read_optional_h5_scalar(hdf, path, "run_datetime")
-            embedded_draws = read_light_curve_posterior_draw_group(hdf)
+            embedded_draws = read_light_curve_posterior_draw_group(
+                hdf, incompatible_as_missing=True
+            )
 
             row_columns = {}
             n_rows = None
@@ -156,15 +194,18 @@ def _load_h5_shard(path, expected_n):
                             )
                         row[LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY] = {
                             name: embedded_draws[name][idx]
-                            for name in (
-                                "log_sigma_uv",
-                                "log_tau_uv_rf",
-                                "posterior_index",
-                                "valid_count",
-                                "finite_source_draw_count",
-                                "source_draw_count",
-                            )
+                            for name in draw_dataset_names()
                         }
+                        for name in (
+                            "band_present",
+                            "valid_count",
+                            "finite_source_draw_count",
+                            "source_draw_count",
+                            "disk_order",
+                        ):
+                            row[LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY][name] = (
+                                embedded_draws[name][idx]
+                            )
                         row[LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY][
                             "selection_seed"
                         ] = embedded_draws["selection_seed"]
@@ -324,51 +365,32 @@ def collect_light_curve_posterior_draws(
     *,
     selection_seed=0,
     allow_missing=False,
+    posterior_disk_order=None,
 ):
-    """Collect paired sigma/tau posterior draws aligned with merged catalog rows."""
+    """Collect v3 UV and continuum per-band draws aligned with catalog rows."""
 
-    n_rows = len(quasars)
-    draw_shape = (n_rows, LIGHT_CURVE_POSTERIOR_DRAW_COUNT)
-    log_sigma_uv = np.full(draw_shape, np.nan, dtype=np.float32)
-    log_tau_uv_rf = np.full(draw_shape, np.nan, dtype=np.float32)
-    posterior_index = np.full(draw_shape, -1, dtype=np.int32)
-    valid_count = np.zeros(n_rows, dtype=np.int16)
-    finite_source_draw_count = np.zeros(n_rows, dtype=np.int32)
-    source_draw_count = np.zeros(n_rows, dtype=np.int32)
+    samples_dir = Path(samples_dir)
+    if posterior_disk_order is not None and int(posterior_disk_order) < 1:
+        raise ValueError("posterior_disk_order must be at least 1.")
+    payloads = []
     missing = []
-    payload_formats = set()
 
     for row_index, row in enumerate(quasars):
         object_id = _row_text(row, "object_id")
         embedded = row.get(LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY)
         if (
             embedded is not None
+            and embedded.get("format") == LIGHT_CURVE_POSTERIOR_DRAW_FORMAT
             and int(embedded.get("valid_count", 0)) > 0
             and int(embedded.get("selection_seed", 0)) == int(selection_seed)
         ):
-            for name in ("log_sigma_uv", "log_tau_uv_rf", "posterior_index"):
-                values = np.asarray(embedded[name])
-                if values.shape != (LIGHT_CURVE_POSTERIOR_DRAW_COUNT,):
-                    raise ValueError(
-                        f"Embedded posterior {name!r} for object_id={object_id!r} "
-                        f"has shape {values.shape}."
-                    )
-            log_sigma_uv[row_index] = embedded["log_sigma_uv"]
-            log_tau_uv_rf[row_index] = embedded["log_tau_uv_rf"]
-            posterior_index[row_index] = embedded["posterior_index"]
-            valid_count[row_index] = embedded["valid_count"]
-            finite_source_draw_count[row_index] = embedded[
-                "finite_source_draw_count"
-            ]
-            source_draw_count[row_index] = embedded["source_draw_count"]
-            payload_formats.add(
-                embedded.get("format", LIGHT_CURVE_POSTERIOR_DRAW_FORMAT_V1)
-            )
+            payloads.append(embedded)
             continue
 
         sample_path = _resolve_object_sample_path(row, samples_dir)
         if sample_path is None:
             missing.append(object_id or f"row {row_index}")
+            payloads.append(None)
             continue
 
         try:
@@ -383,7 +405,7 @@ def collect_light_curve_posterior_draws(
             )
 
         with h5py.File(sample_path, "r") as hdf:
-            required = ("log_sigma_uv", "log_tau_uv")
+            required = ("log_sigma_uv", "log_tau_uv", "eta_sigma")
             absent = [name for name in required if name not in hdf]
             if absent:
                 raise KeyError(
@@ -391,63 +413,148 @@ def collect_light_curve_posterior_draws(
                 )
             sigma_raw = np.asarray(hdf["log_sigma_uv"][...], dtype=float).reshape(-1)
             tau_raw = np.asarray(hdf["log_tau_uv"][...], dtype=float).reshape(-1)
+            eta_sigma = np.asarray(hdf["eta_sigma"][...], dtype=float).reshape(-1)
+            model_variant = hdf.attrs.get(
+                "model_variant", _row_text(row, "model_variant")
+            )
+            if isinstance(model_variant, bytes):
+                model_variant = model_variant.decode()
+            sample_disk_order = hdf.attrs.get("disk_order")
+            sample_bands = hdf.attrs.get("bands", "")
+            if isinstance(sample_bands, bytes):
+                sample_bands = sample_bands.decode()
             tau_definition = hdf.attrs.get("log_tau_uv_definition", "")
             if isinstance(tau_definition, bytes):
-                tau_definition = tau_definition.decode("utf-8")
-            payload_format = (
-                LIGHT_CURVE_POSTERIOR_DRAW_FORMAT
-                if tau_definition
-                == "continuum_only_disk_convolved_integral_timescale_at_rest_2500A_observer_frame_natural_log"
-                else LIGHT_CURVE_POSTERIOR_DRAW_FORMAT_V1
+                tau_definition = tau_definition.decode()
+            optional_names = (
+                "tau_fast_driver",
+                "tau_slow_driver",
+                "lag_disk",
+                "eta_tau",
             )
+            sample_values = {
+                name: np.asarray(hdf[name][...])
+                for name in optional_names
+                if name in hdf
+            }
+
+        bands_text = (
+            _row_text(row, "bands_kept")
+            or _row_text(row, "bands")
+            or str(sample_bands)
+        )
+        bands = tuple(part.strip() for part in bands_text.split(",") if part.strip())
+        if not bands:
+            raise ValueError(
+                f"Missing fitted band order for object_id={object_id!r}."
+            )
+        n_draws = len(sigma_raw)
+        if eta_sigma.shape != (n_draws,):
+            raise ValueError(f"eta_sigma shape mismatch in {sample_path}.")
+        log_sigma_band = {}
+        for band in bands:
+            lam_rf = SDSS_LAMBDA_PIVOT[band] / (1.0 + redshift)
+            log_sigma_band[band] = (
+                sigma_raw / np.log(10.0)
+                + eta_sigma * np.log10(lam_rf / 2500.0)
+            )
+
+        if str(model_variant) == "shared_latent_blr":
+            expected_tau_definition = (
+                "continuum_only_disk_convolved_integral_timescale_at_rest_"
+                "2500A_observer_frame_natural_log"
+            )
+            if tau_definition != expected_tau_definition:
+                raise ValueError(
+                    f"SLB sample file {sample_path} does not contain the required "
+                    "continuum-only 2500 A log_tau_uv definition."
+                )
+            required_slb = ("tau_fast_driver", "tau_slow_driver", "lag_disk")
+            absent = [name for name in required_slb if name not in sample_values]
+            if absent:
+                raise KeyError(
+                    f"SLB posterior sample file {sample_path} is missing {absent}."
+                )
+            if sample_disk_order is not None:
+                disk_order = int(sample_disk_order)
+            elif posterior_disk_order is not None:
+                disk_order = int(posterior_disk_order)
+            else:
+                disk_order = DEFAULT_DISK_ORDER
+                warnings.warn(
+                    "SLB posterior samples lack disk_order metadata; using the "
+                    f"model default {DEFAULT_DISK_ORDER}. Pass --posterior-disk-order "
+                    "to override it.",
+                    RuntimeWarning,
+                )
+            if disk_order < 1:
+                raise ValueError(
+                    f"Invalid disk_order={disk_order} in posterior samples."
+                )
+            lag_disk = np.asarray(sample_values["lag_disk"], dtype=float)
+            if lag_disk.shape != (n_draws, len(bands)):
+                raise ValueError(
+                    f"lag_disk shape {lag_disk.shape} in {sample_path} does not "
+                    f"match ({n_draws}, {len(bands)})."
+                )
+            tau_fast = np.asarray(sample_values["tau_fast_driver"], dtype=float).reshape(-1)
+            tau_slow = np.asarray(sample_values["tau_slow_driver"], dtype=float).reshape(-1)
+            if tau_fast.shape != (n_draws,) or tau_slow.shape != (n_draws,):
+                raise ValueError(f"Driver-timescale shape mismatch in {sample_path}.")
+            evaluate_band = _continuum_timescale_draw_evaluator(disk_order)
+            log_tau_cont_band_rf = {
+                band: np.log10(
+                    np.asarray(
+                        evaluate_band(
+                            jnp.asarray(tau_fast),
+                            jnp.asarray(tau_slow),
+                            jnp.asarray(lag_disk[:, index]),
+                        )
+                    )
+                )
+                - np.log10(1.0 + redshift)
+                for index, band in enumerate(bands)
+            }
+        else:
+            if "eta_tau" not in sample_values:
+                raise KeyError(
+                    f"Non-SLB posterior sample file {sample_path} is missing eta_tau."
+                )
+            eta_tau = np.asarray(sample_values["eta_tau"], dtype=float).reshape(-1)
+            log_tau_cont_band_rf = {
+                band: tau_raw / np.log(10.0)
+                - np.log10(1.0 + redshift)
+                + eta_tau
+                * np.log10(
+                    (SDSS_LAMBDA_PIVOT[band] / (1.0 + redshift)) / 2500.0
+                )
+                for band in bands
+            }
+            disk_order = 0
 
         compact = compact_log_sigma_tau_posterior_draws(
             sigma_raw,
             tau_raw,
+            log_sigma_band=log_sigma_band,
+            log_tau_cont_band_rf=log_tau_cont_band_rf,
+            bands=bands,
             redshift=redshift,
             object_id=object_id,
             selection_seed=selection_seed,
-            payload_format=payload_format,
+            disk_order=disk_order,
         )
-        payload_formats.add(payload_format)
-        log_sigma_uv[row_index] = compact["log_sigma_uv"]
-        log_tau_uv_rf[row_index] = compact["log_tau_uv_rf"]
-        posterior_index[row_index] = compact["posterior_index"]
-        valid_count[row_index] = compact["valid_count"]
-        finite_source_draw_count[row_index] = compact[
-            "finite_source_draw_count"
-        ]
-        source_draw_count[row_index] = compact["source_draw_count"]
+        payloads.append(compact)
 
     if missing and not allow_missing:
         preview = ", ".join(missing[:10])
         raise FileNotFoundError(
             f"Missing light-curve posterior sample files for {len(missing)} "
             f"merged row(s) in {samples_dir}: {preview}. Pass "
-            "--allow-missing-posterior-draws for a legacy/partial merge."
+            "--allow-missing-posterior-draws for a partial merge."
         )
-
-    if len(payload_formats) > 1:
-        raise ValueError(
-            "Cannot merge legacy and redefined light-curve posterior draw "
-            f"semantics in one catalog: {payload_formats}."
-        )
-
-    return {
-        "log_sigma_uv": log_sigma_uv,
-        "log_tau_uv_rf": log_tau_uv_rf,
-        "posterior_index": posterior_index,
-        "valid_count": valid_count,
-        "finite_source_draw_count": finite_source_draw_count,
-        "source_draw_count": source_draw_count,
-        "selection_seed": int(selection_seed),
-        "format": (
-            payload_formats.pop()
-            if payload_formats
-            else LIGHT_CURVE_POSTERIOR_DRAW_FORMAT
-        ),
-        "missing_count": len(missing),
-    }
+    stacked = stack_light_curve_posterior_draw_payloads(payloads)
+    stacked["missing_count"] = len(missing)
+    return stacked
 
 
 def summarize_source_provenance(file_list):
@@ -976,6 +1083,11 @@ def build_macleod_identity_plot_path(prefix: str, base_dir: str) -> str:
     return build_stone_identity_plot_path(prefix, base_dir)
 
 
+def build_macleod_hubble_light_curve_cut_plot_path(output_path: str) -> str:
+    path = Path(output_path)
+    return str(path.with_name(f"{path.stem}_hubble_lc_cuts{path.suffix}"))
+
+
 def build_suberlak_identity_plot_path(prefix: str, base_dir: str) -> str:
     base_path = Path(build_stone_identity_plot_path(prefix, base_dir))
     return str(base_path.with_name("sigma_tau_identity_grid_suberlak.pdf"))
@@ -1061,11 +1173,95 @@ def build_macleod_identity_plot_data(rows, macleod_dir=None, max_sep_arcsec=1.0)
             )
         )
         finite_range_mask = (
-            matched[f"macleod_tau_{band}"].between(LOG_TAU_UV_RF_MIN, LOG_TAU_UV_RF_MAX)
-            & matched[f"macleod_sigma_{band}"].between(LOG_SIGMA_UV_MIN, LOG_SIGMA_UV_MAX)
+            matched[f"macleod_tau_{band}"].between(*MACLEOD_TAU_LIMITS)
+            & matched[f"macleod_sigma_{band}"].between(*MACLEOD_SIGMA_LIMITS)
         )
         by_band[band] = matched.loc[m10_quality_mask & finite_range_mask].copy()
     return by_band
+
+
+def apply_macleod_hubble_light_curve_cuts(rows):
+    """Apply the active Hubble light-curve cuts, excluding spectral-fit cuts."""
+
+    selected = list(rows)
+    before = len(selected)
+    selected = [
+        row
+        for row in selected
+        if str(row.get("sdss_name", ""))
+        not in EXCLUDED_LIGHT_CURVE_SDSS_NAMES
+    ]
+    print(
+        "MacLeod Hubble LC cuts: manual exclusions "
+        f"{before} -> {len(selected)}"
+    )
+
+    scalar_cuts = (
+        ("loo_chi2_eff", None, LOO_CHI2_EFF_MAX),
+        ("num_divergences", None, NUM_DIVERGENCES_MAX),
+        ("log_tau_uv_rf_rhat", None, LIGHT_CURVE_RHAT_MAX),
+        ("log_sigma_uv_rhat", None, LIGHT_CURVE_RHAT_MAX),
+        ("t_rf_length", T_RF_LENGTH_MIN, None),
+        ("eta_sigma_kl", ETA_SIGMA_KL_MIN, None),
+        ("log_tau_uv_rf", LOG_TAU_UV_RF_MIN, LOG_TAU_UV_RF_MAX),
+    )
+    for field, lower, upper in scalar_cuts:
+        if lower is None and upper is None:
+            continue
+        before = len(selected)
+        kept = []
+        for row in selected:
+            try:
+                value = float(row[field])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not np.isfinite(value):
+                continue
+            if lower is not None and value < lower:
+                continue
+            if upper is not None and value > upper:
+                continue
+            kept.append(row)
+        selected = kept
+        print(
+            f"MacLeod Hubble LC cuts: {field} in [{lower}, {upper}] "
+            f"{before} -> {len(selected)}"
+        )
+
+    if LIGHT_CURVE_N_POINTS_MIN is not None and selected:
+        before = len(selected)
+        frame = pd.DataFrame(selected)
+        point_counts, _ = light_curve_point_count_series(
+            frame,
+            exclude_bands=("u",),
+        )
+        keep = np.isfinite(point_counts) & (
+            point_counts >= LIGHT_CURVE_N_POINTS_MIN
+        )
+        selected = [row for row, retain in zip(selected, keep) if retain]
+        print(
+            "MacLeod Hubble LC cuts: light_curve_n_points >= "
+            f"{LIGHT_CURVE_N_POINTS_MIN} {before} -> {len(selected)}"
+        )
+
+    if T_RF_OVER_TAU_UV_RF_MIN is not None:
+        before = len(selected)
+        kept = []
+        for row in selected:
+            try:
+                ratio = float(row["t_rf_length"]) / (
+                    10.0 ** float(row["log_tau_uv_rf"])
+                )
+            except (KeyError, TypeError, ValueError, OverflowError):
+                continue
+            if np.isfinite(ratio) and ratio >= T_RF_OVER_TAU_UV_RF_MIN:
+                kept.append(row)
+        selected = kept
+        print(
+            "MacLeod Hubble LC cuts: t_rf_over_tau_uv_rf >= "
+            f"{T_RF_OVER_TAU_UV_RF_MIN} {before} -> {len(selected)}"
+        )
+    return selected
 
 
 def write_macleod_sigma_tau_identity_grid(rows, output_path: str, macleod_dir=None):
@@ -1098,11 +1294,46 @@ def write_macleod_sigma_tau_identity_grid(rows, output_path: str, macleod_dir=No
         bands=MACLEOD_IDENTITY_BANDS,
         show=False,
         output_path=output_path,
-        style={"point_alpha": 0.25, "error_alpha": 0.08, "rasterized": False},
+        style={
+            "point_alpha": 0.25,
+            "error_alpha": 0.08,
+            "rasterized": False,
+            "contour_color": "tab:blue",
+            "show_metric_count": False,
+        },
     )
     plt.close(fig)
     print(f"Wrote MacLeod sigma/tau identity grid to {output_path}")
     return output_path
+
+
+def write_macleod_comparison_suite(
+    rows,
+    output_path: str,
+    *,
+    hubble_light_curve_cut_output_path: str | None = None,
+    macleod_dir=None,
+):
+    output_path = str(output_path)
+    if hubble_light_curve_cut_output_path is None:
+        hubble_light_curve_cut_output_path = (
+            build_macleod_hubble_light_curve_cut_plot_path(output_path)
+        )
+    all_rows_path = write_macleod_sigma_tau_identity_grid(
+        rows,
+        output_path,
+        macleod_dir=macleod_dir,
+    )
+    cut_rows = apply_macleod_hubble_light_curve_cuts(rows)
+    cut_rows_path = write_macleod_sigma_tau_identity_grid(
+        cut_rows,
+        hubble_light_curve_cut_output_path,
+        macleod_dir=macleod_dir,
+    )
+    return {
+        "all": all_rows_path,
+        "hubble_light_curve_cuts": cut_rows_path,
+    }
 
 
 def build_suberlak_identity_plot_data(rows, suberlak_path=None, max_sep_arcsec=1.0):
@@ -1353,6 +1584,16 @@ def main(argv=None):
         help="Optional output path for the MacLeod sigma/tau identity grid PDF.",
     )
     p.add_argument(
+        "--macleod-hubble-lc-cuts-plot-out",
+        type=str,
+        default=None,
+        help=(
+            "Optional output path for the companion MacLeod grid after the "
+            "active Hubble light-curve cuts. Defaults to a sibling of "
+            "--macleod-identity-plot-out."
+        ),
+    )
+    p.add_argument(
         "--plot-suberlak-sigma-tau-identity-grid",
         action="store_true",
         default=False,
@@ -1376,7 +1617,8 @@ def main(argv=None):
         default=None,
         help="Output format. If omitted and --out is given, inferred from its extension. If both omitted, defaults to .h5.",
     )
-    p.add_argument(
+    posterior_source = p.add_mutually_exclusive_group()
+    posterior_source.add_argument(
         "--posterior-samples-dir",
         type=str,
         default=None,
@@ -1386,18 +1628,36 @@ def main(argv=None):
             "--base-dir."
         ),
     )
+    posterior_source.add_argument(
+        "--posterior-samples-prefix",
+        type=str,
+        default=None,
+        help=(
+            "Light-curve posterior sample prefix resolved under the sibling "
+            "samples directory next to --base-dir."
+        ),
+    )
+    p.add_argument(
+        "--posterior-disk-order",
+        type=int,
+        default=None,
+        help=(
+            "Disk response order for SLB sample files that predate disk_order "
+            "metadata. Defaults to the current model default (3) with a warning."
+        ),
+    )
     p.add_argument(
         "--posterior-draw-seed",
         type=int,
         default=0,
-        help="Seed for deterministic per-object selection of 64 paired posterior draws.",
+        help="Seed for deterministic per-object selection of 128 paired posterior draws.",
     )
     p.add_argument(
         "--allow-missing-posterior-draws",
         action="store_true",
         default=False,
         help=(
-            "Write NaN/-1-padded posterior rows when legacy per-object sample "
+            "Write NaN/-1-padded posterior rows when per-object sample "
             "files are missing. By default an HDF5 merge fails instead."
         ),
     )
@@ -1405,7 +1665,7 @@ def main(argv=None):
         "--skip-posterior-draws",
         action="store_true",
         default=False,
-        help="Do not add the 64-draw light_curve_posterior_draws group to HDF5 output.",
+        help="Do not add the 128-draw light_curve_posterior_draws group to HDF5 output.",
     )
     p.add_argument(
         "--dedup-keys",
@@ -1503,7 +1763,11 @@ def main(argv=None):
 
     if args.plot_macleod_sigma_tau_identity_grid and all_quasars:
         plot_out = args.macleod_identity_plot_out or build_macleod_identity_plot_path(args.prefix, args.base_dir)
-        write_macleod_sigma_tau_identity_grid(all_quasars, plot_out)
+        write_macleod_comparison_suite(
+            all_quasars,
+            plot_out,
+            hubble_light_curve_cut_output_path=args.macleod_hubble_lc_cuts_plot_out,
+        )
 
     if args.plot_suberlak_sigma_tau_identity_grid and all_quasars:
         plot_out = args.suberlak_identity_plot_out or build_suberlak_identity_plot_path(args.prefix, args.base_dir)
@@ -1523,15 +1787,17 @@ def main(argv=None):
     elif out_format == "h5":
         posterior_draw_payload = None
         if not args.skip_posterior_draws:
+            sample_prefix = args.posterior_samples_prefix or args.prefix
             posterior_samples_dir = Path(
                 args.posterior_samples_dir
-                or Path(args.base_dir).parent / "samples" / args.prefix
+                or Path(args.base_dir).parent / "samples" / sample_prefix
             )
             posterior_draw_payload = collect_light_curve_posterior_draws(
                 all_quasars,
                 posterior_samples_dir,
                 selection_seed=args.posterior_draw_seed,
                 allow_missing=args.allow_missing_posterior_draws,
+                posterior_disk_order=args.posterior_disk_order,
             )
             populated = int(
                 np.count_nonzero(posterior_draw_payload["valid_count"])

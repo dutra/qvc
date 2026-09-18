@@ -784,7 +784,7 @@ def make_run_tag(
         else ""
     )
     light_curve_uncertainty_tag = (
-        "_lcpost64"
+        "_lcpost128"
         if normalize_light_curve_uncertainty_mode(
             light_curve_uncertainty_mode
         )
@@ -5872,7 +5872,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     if normalize_light_curve_uncertainty_mode(
         light_curve_uncertainty_mode
     ) == "posterior-draws":
-        compare_run_tag += "_lcpost64"
+        compare_run_tag += "_lcpost128"
     selection_tag = ""
     if completeness:
         selection_tag += f"_lf-{completeness_lf_model}"
@@ -7072,7 +7072,7 @@ if __name__ == "__main__":
         )
         logf_tag = "_logfz" if args.fit_redshift_log_f_term else ""
         light_curve_uncertainty_tag = (
-            "_lcpost64"
+            "_lcpost128"
             if args.light_curve_uncertainty_mode == "posterior-draws"
             else ""
         )

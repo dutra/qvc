@@ -277,8 +277,8 @@ def test_light_curve_posterior_draw_mode_changes_run_tag_only_when_requested():
     )
 
     assert default_tag == explicit_covariance_tag
-    assert "_lcpost64" not in default_tag
-    assert "_lcpost64" in posterior_draw_tag
+    assert "_lcpost128" not in default_tag
+    assert "_lcpost128" in posterior_draw_tag
 
 
 def test_unrounded_pivot_rule_changes_run_tag_only_when_requested():

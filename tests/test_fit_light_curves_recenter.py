@@ -693,6 +693,9 @@ def test_save_obj_samples_to_hdf5_writes_loo_scalar_diagnostics(monkeypatch, tmp
     multiband_fit_utils.save_obj_samples_to_hdf5(
         {"lag_blr": np.array([1.0, 2.0])},
         "object",
+        model_variant="shared_latent_blr",
+        disk_order=3,
+        fitted_bands=("g", "r"),
         scalar_diagnostics={"loo_chi2_eff": 1.25, "loo_rms": np.sqrt(1.25)},
     )
 
@@ -701,6 +704,9 @@ def test_save_obj_samples_to_hdf5_writes_loo_scalar_diagnostics(monkeypatch, tmp
         np.testing.assert_array_equal(hdf["lag_blr"][:], np.array([1.0, 2.0]))
         assert hdf["loo_chi2_eff"][()] == 1.25
         assert np.isclose(hdf["loo_rms"][()], np.sqrt(1.25))
+        assert hdf.attrs["model_variant"] == "shared_latent_blr"
+        assert hdf.attrs["disk_order"] == 3
+        assert hdf.attrs["bands"] == "g,r"
 
 
 def test_apply_resume_sample_save_policy_disables_sample_saving_on_resume():
@@ -1609,6 +1615,34 @@ def test_process_samples_stores_shared_latent_effective_band_timescales():
         expected_tau_uv_rf,
         rtol=2e-6,
     )
+    for index, band in enumerate(bands):
+        expected_tau_cont_rf = np.asarray(
+            [
+                np.log10(
+                    float(
+                        continuum_effective_timescale(
+                            tf,
+                            ts,
+                            samples[f"lag_disk_{band}"][draw],
+                            disk_order=3,
+                        )
+                    )
+                )
+                - np.log10(1.0 + z)
+                for draw, (tf, ts) in enumerate(zip(tau_fast, tau_slow))
+            ]
+        )
+        np.testing.assert_allclose(
+            payload[f"log_tau_cont_band_{band}_rf"][: payload["valid_count"]],
+            expected_tau_cont_rf,
+            rtol=2e-6,
+        )
+        np.testing.assert_allclose(
+            payload[f"log_sigma_band_{band}"][: payload["valid_count"]],
+            np.log10([0.18, 0.20, 0.22]),
+            rtol=2e-6,
+        )
+        assert payload["band_present"][["u", "g", "r", "i", "z"].index(band)]
     for band in bands:
         assert np.isfinite(result[f"log_tau_band_{band}_RF"])
         assert result[f"log_tau_band_{band}_RF"] == result[f"log_tau_effective_{band}_RF"]

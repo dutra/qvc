@@ -13,8 +13,6 @@ import logging
 
 from qvc.provenance import merge_history, read_hdf5_provenance, write_hdf5_provenance
 from qvc.light_curve.posterior_draws import (
-    LIGHT_CURVE_POSTERIOR_DRAW_FORMAT,
-    LIGHT_CURVE_POSTERIOR_DRAW_FORMAT_V1,
     LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY,
     compact_log_sigma_tau_posterior_draws,
     stack_light_curve_posterior_draw_payloads,
@@ -454,7 +452,9 @@ def load_all_samples_from_hdf5(file_path=None):
     logging.info(f"Loaded {len(samples)} datasets from {file_path}")
     return samples
 
-def save_all_samples_to_hdf5(samples):
+def save_all_samples_to_hdf5(
+    samples, *, model_variant=None, disk_order=None, fitted_bands=None
+):
     """
     Save all samples to an HDF5 file
     Args:
@@ -468,6 +468,12 @@ def save_all_samples_to_hdf5(samples):
 
     with h5py.File(file_path, "w") as hdf:
         _write_hdf5_run_metadata(hdf)
+        if model_variant is not None:
+            hdf.attrs["model_variant"] = str(model_variant)
+        if disk_order is not None:
+            hdf.attrs["disk_order"] = int(disk_order)
+        if fitted_bands is not None:
+            hdf.attrs["bands"] = ",".join(map(str, fitted_bands))
         if "tau_fast_driver" in samples and "tau_slow_driver" in samples:
             hdf.attrs["log_tau_uv_definition"] = (
                 "continuum_only_disk_convolved_integral_timescale_at_rest_"
@@ -522,7 +528,15 @@ def load_obj_samples_from_hdf5(object_id=None, file_path=None, *, return_metadat
     logging.info(f"Loaded {len(samples)} datasets from {file_path}")
     return (samples, metadata) if return_metadata else samples
 
-def save_obj_samples_to_hdf5(samples, object_id, scalar_diagnostics=None):
+def save_obj_samples_to_hdf5(
+    samples,
+    object_id,
+    scalar_diagnostics=None,
+    *,
+    model_variant=None,
+    disk_order=None,
+    fitted_bands=None,
+):
     """
     Save all samples to an HDF5 file, one file per object_id.
 
@@ -539,6 +553,12 @@ def save_obj_samples_to_hdf5(samples, object_id, scalar_diagnostics=None):
 
     with h5py.File(file_path, "w") as hdf:
         _write_hdf5_run_metadata(hdf)
+        if model_variant is not None:
+            hdf.attrs["model_variant"] = str(model_variant)
+        if disk_order is not None:
+            hdf.attrs["disk_order"] = int(disk_order)
+        if fitted_bands is not None:
+            hdf.attrs["bands"] = ",".join(map(str, fitted_bands))
         if "tau_fast_driver" in samples and "tau_slow_driver" in samples:
             hdf.attrs["log_tau_uv_definition"] = (
                 "continuum_only_disk_convolved_integral_timescale_at_rest_"
@@ -1071,9 +1091,13 @@ def process_samples(
                 disk_order=int(disk_order),
                 blr_order=int(erlang_order),
             )
-            return kernel.effective_timescales(), kernel.stationary_rms()
+            return (
+                kernel.effective_timescales(),
+                kernel.stationary_rms(),
+                kernel.continuum_effective_timescales(),
+            )
 
-        effective_tau_obs, total_rms_relflux = (
+        effective_tau_obs, total_rms_relflux, continuum_tau_obs = (
             np.asarray(value)
             for value in jax.jit(jax.vmap(band_moments_one))(
                 jnp.asarray(tau_fast_draws),
@@ -1085,6 +1109,9 @@ def process_samples(
             )
         )
         log_tau_band = np.log10(effective_tau_obs) - np.log10(1.0 + data["z"])
+        log_tau_cont_band_rf = np.log10(continuum_tau_obs) - np.log10(
+            1.0 + data["z"]
+        )
         log_sigma_total_rms_band = np.log10(
             total_rms_relflux * (2.5 / np.log(10.0))
         )
@@ -1180,18 +1207,26 @@ def process_samples(
     print("Hubble covariance term: ", cov_log_sigma_tau_reg)
     print("Hubble std terms: ", np.sqrt(vx), np.sqrt(vy))
 
+    if not shared_latent:
+        log_tau_cont_band_rf = log_tau_band
+
     result[LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY] = (
         compact_log_sigma_tau_posterior_draws(
             log_sigma_uv,
             log_tau_uv,
+            log_sigma_band={
+                band: log_sigma_band[:, index]
+                for index, band in enumerate(bands)
+            },
+            log_tau_cont_band_rf={
+                band: log_tau_cont_band_rf[:, index]
+                for index, band in enumerate(bands)
+            },
+            bands=bands,
             redshift=data["z"],
             object_id=data["object_id"],
             selection_seed=0,
-            payload_format=(
-                LIGHT_CURVE_POSTERIOR_DRAW_FORMAT
-                if shared_latent
-                else LIGHT_CURVE_POSTERIOR_DRAW_FORMAT_V1
-            ),
+            disk_order=int(disk_order) if shared_latent else 0,
         )
     )
 

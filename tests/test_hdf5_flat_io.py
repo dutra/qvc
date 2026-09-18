@@ -257,8 +257,12 @@ def test_save_quasar_list_hdf5_embeds_compact_sigma_tau_draws(
         compact_log_sigma_tau_posterior_draws(
             np.linspace(-2.0, 0.0, 100),
             np.linspace(3.0, 5.0, 100),
+            log_sigma_band={"g": np.linspace(-1.0, 0.0, 100)},
+            log_tau_cont_band_rf={"g": np.linspace(1.0, 2.0, 100)},
+            bands=("g",),
             redshift=quasar["z"],
             object_id=quasar["object_id"],
+            disk_order=3,
         )
     )
 
@@ -273,13 +277,15 @@ def test_save_quasar_list_hdf5_embeds_compact_sigma_tau_draws(
     )
     with h5py.File(output, "r") as handle:
         group = handle[LIGHT_CURVE_POSTERIOR_DRAW_GROUP]
-        assert group.attrs["format"] == "qvc_light_curve_posterior_draws_v2"
+        assert group.attrs["format"] == "qvc_light_curve_posterior_draws_v3"
         assert group.attrs["log_tau_uv_rf_definition"] == (
             "continuum_only_disk_convolved_integral_timescale_at_rest_2500A"
         )
-        assert group["log_sigma_uv"].shape == (1, 64)
-        assert group["log_tau_uv_rf"].shape == (1, 64)
-        assert group["valid_count"][0] == 64
+        assert group["log_sigma_uv"].shape == (1, 128)
+        assert group["log_tau_uv_rf"].shape == (1, 128)
+        assert group["log_sigma_band_g"].shape == (1, 128)
+        assert group["log_tau_cont_band_g_rf"].shape == (1, 128)
+        assert group["valid_count"][0] == 100
         assert LIGHT_CURVE_POSTERIOR_DRAW_PAYLOAD_KEY not in handle
 
     frame = read_quasars_from_hdf5_flat(output)
@@ -301,7 +307,7 @@ def test_save_quasar_list_hdf5_embeds_compact_sigma_tau_draws(
     )
     assert (
         frame_with_draws.iloc[0][LIGHT_CURVE_POSTERIOR_VALID_COUNT_COL]
-        == 64
+        == 100
     )
 
 
@@ -337,6 +343,10 @@ def test_read_quasars_from_hdf5_flat_normalizes_endian_for_updates(tmp_path):
 
     df = read_quasars_from_hdf5_flat(str(out_path))
     assert len(df) == 2
+    with pytest.raises(ValueError, match="regenerate the catalog"):
+        read_quasars_from_hdf5_flat(
+            str(out_path), include_light_curve_posterior_draws=True
+        )
 
     update_series = pd.Series([3.3], index=[0])
     out = df.copy()
