@@ -379,7 +379,16 @@ LOG_SIGMA_UV_MIN = None
 LOG_SIGMA_UV_MAX = None
 REDDENING_EBV_MAX = None
 
-VARIABILITY_CHI_SQ_RED_G_MIN = None
+VARIABILITY_CHI_SQ_RED_G_MIN = _cut_env_float(
+    "QVC_CUT_VARIABILITY_CHI_SQ_RED_G_MIN", None
+)
+if VARIABILITY_CHI_SQ_RED_G_MIN is not None and not (
+    np.isfinite(VARIABILITY_CHI_SQ_RED_G_MIN)
+    and VARIABILITY_CHI_SQ_RED_G_MIN >= 0.0
+):
+    raise ValueError(
+        "QVC_CUT_VARIABILITY_CHI_SQ_RED_G_MIN must be finite and nonnegative or none."
+    )
 F_HOST_2500_MAX = None
 F_HOST_2500_PSF_MAX = _cut_env_float("QVC_CUT_F_HOST_2500_PSF_MAX", None)
 if F_HOST_2500_PSF_MAX is not None and not 0.0 <= F_HOST_2500_PSF_MAX <= 1.0:
@@ -482,6 +491,7 @@ AGN_TIER2_PARAMETER_CUTS = (
     ("t_rf_length", T_RF_LENGTH_MIN, None),
     (LIGHT_CURVE_N_POINTS_COLUMN, LIGHT_CURVE_N_POINTS_MIN, None),
     ("SN_MEDIAN_ALL", SN_MEDIAN_ALL_MIN, None),
+    ("variability_chi_sq_red_g", VARIABILITY_CHI_SQ_RED_G_MIN, None),
     ("eta_sigma_kl", ETA_SIGMA_KL_MIN, None),
     ("log_tau_uv_rf", LOG_TAU_UV_RF_MIN, LOG_TAU_UV_RF_MAX),
     *(
