@@ -26,7 +26,7 @@ prior_profile = "centered_lcdm"
 num_agns = 2000
 num_runs = 64
 prior_campaign_tag = (
-    f"_prior-{prior_profile}" if prior_profile != "default" else ""
+    f"_prior-{prior_profile}" if prior_profile != "wa_offcenter" else ""
 )
 campaign = (
     f"fixed_truth_nagns{num_agns}_nruns{num_runs}_{speed}"
@@ -87,7 +87,7 @@ ARM_CHOICES = (
     "selected_estimated",
 )
 SPEED_CHOICES = ("fastest", "quick", "standard", "production")
-PRIOR_PROFILE_CHOICES = ("default", "centered_lcdm")
+PRIOR_PROFILE_CHOICES = ("wa_offcenter", "centered_lcdm")
 
 
 def parse_args(argv=None):
@@ -176,11 +176,7 @@ def runner_arguments(args):
         "--selection-width", str(selection_width),
         "--speed", args.speed,
         "--arms", *args.arms,
-        *(
-            ["--prior-profile", args.prior_profile]
-            if args.prior_profile != "default"
-            else []
-        ),
+        "--prior-profile", args.prior_profile,
         *[str(value) for value in extra_runner_args],
     ]
 

@@ -37,12 +37,16 @@ def test_submission_prefix_uses_requested_local_timestamp_format():
 def test_configured_centered_prior_profile_is_forwarded():
     values = runpy.run_path(str(SCRIPT))
     centered_args = values["parse_args"]([])
-    default_args = values["parse_args"](["--prior-profile", "default"])
+    wa_offcenter_args = values["parse_args"](
+        ["--prior-profile", "wa_offcenter"]
+    )
 
-    assert "--prior-profile" not in values["runner_arguments"](default_args)
     centered_arguments = values["runner_arguments"](centered_args)
     index = centered_arguments.index("--prior-profile")
     assert centered_arguments[index + 1] == "centered_lcdm"
+    wa_offcenter_arguments = values["runner_arguments"](wa_offcenter_args)
+    index = wa_offcenter_arguments.index("--prior-profile")
+    assert wa_offcenter_arguments[index + 1] == "wa_offcenter"
 
 
 def _write_executable(path, source):

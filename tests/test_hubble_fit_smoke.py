@@ -299,19 +299,19 @@ def test_unrounded_pivot_rule_changes_run_tag_only_when_requested():
     assert "_pivots-median" in unrounded_tag
 
 
-def test_centered_lcdm_default_preserves_distinct_legacy_run_tag():
+def test_centered_lcdm_default_preserves_distinct_wa_offcenter_run_tag():
     common = ("Flatw0waCDM", False, "fastest", None, (0.44, 3.16))
 
     default_tag = hubble_fit.make_run_tag(*common)
-    explicit_default_tag = hubble_fit.make_run_tag(
-        *common, prior_profile="default"
+    wa_offcenter_tag = hubble_fit.make_run_tag(
+        *common, prior_profile="wa_offcenter"
     )
     centered_tag = hubble_fit.make_run_tag(
         *common, prior_profile="centered_lcdm"
     )
 
     assert default_tag == centered_tag
-    assert "_prior-" not in explicit_default_tag
+    assert "_prior-" not in wa_offcenter_tag
     assert "_prior-centered_lcdm" in centered_tag
 
 
@@ -345,9 +345,24 @@ def test_centered_lcdm_prior_profile_bounds(cosmo_model, expected_dark_energy):
             assert centered_priors["M0_agn"][0] < pivoted_m0 < centered_priors["M0_agn"][1]
 
 
-def test_checkpoint_prior_metadata_allows_legacy_default_and_checks_centered(tmp_path):
+def test_checkpoint_prior_metadata_allows_legacy_wa_offcenter_and_checks_centered(tmp_path):
     hubble_fit._validate_checkpoint_prior_metadata(
-        {}, "legacy.h5", expected_prior_profile="default"
+        {}, "legacy.h5", expected_prior_profile="wa_offcenter"
+    )
+    wa_offcenter_priors, _, _ = hubble_model.get_model_params(
+        "Flatw0waCDM", prior_profile="wa_offcenter"
+    )
+    wa_offcenter_bounds_json = hubble_fit.canonical_prior_bounds_json(
+        wa_offcenter_priors
+    )
+    hubble_fit._validate_checkpoint_prior_metadata(
+        {
+            "prior_profile": "default",
+            "prior_bounds_json": wa_offcenter_bounds_json,
+        },
+        "pre_rename.h5",
+        expected_prior_profile="wa_offcenter",
+        expected_prior_bounds_json=wa_offcenter_bounds_json,
     )
     with pytest.raises(RuntimeError, match="predates prior-profile metadata"):
         hubble_fit._validate_checkpoint_prior_metadata(
@@ -1196,7 +1211,7 @@ def test_log_likelihood_enforces_selected_prior_profile(fake_data):
     )
     default_logl, default_blob = hubble_likelihood.log_likelihood(
         theta,
-        prior_profile="default",
+        prior_profile="wa_offcenter",
         **common,
     )
 
@@ -1206,7 +1221,7 @@ def test_log_likelihood_enforces_selected_prior_profile(fake_data):
     np.testing.assert_array_equal(default_blob, np.zeros((3, len(df_agn))))
 
 
-@pytest.mark.parametrize("prior_profile", ["default", "centered_lcdm"])
+@pytest.mark.parametrize("prior_profile", ["wa_offcenter", "centered_lcdm"])
 def test_flatw0wa_early_de_guard_is_opt_in(fake_data, prior_profile):
     df_agn, df_pantheon = fake_data
     priors, model_labels, _ = hubble_model.get_model_params(

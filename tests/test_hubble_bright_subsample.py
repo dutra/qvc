@@ -232,7 +232,7 @@ def test_run_tag_checkpoint_validation_and_mode_table():
         completeness_mode="2d", completeness_magnitude="attenuated", completeness_lf_model="shen",
         completeness_magnitude_support_mode="hard-cut", selection_attenuation_mode="fixed-offset",
         disable_sigma_clip_pass=True, disable_full_covariance=False, use_jax=False,
-        cosmo_models=["Flatw0waCDM"], prior_profile="default", cut_tier="2",
+        cosmo_models=["Flatw0waCDM"], prior_profile="wa_offcenter", cut_tier="2",
         magnitude_convention="dereddened",
         bright_subsample_completeness_min=0.9,
         bright_subsample_margin=1.0, bright_subsample_absolute=False,
