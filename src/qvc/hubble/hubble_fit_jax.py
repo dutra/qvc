@@ -852,6 +852,8 @@ def _nested_speed_preset(speed: str, ndim: int) -> tuple[int, int, float]:
     # NumPyro has no Dynesty batch/effective-sample controls; reuse quick.
     if speed in {"quicker", "quick"}:
         return 25, 10_000, 0.01
+    if speed == "medium":
+        return 175, 75_000, 0.01
     if speed == "standard":
         return 250, 100_000, 0.01
     raise ValueError(f"Unknown speed preset: {speed!r}")

@@ -22,10 +22,13 @@ from qvc.hubble.hubble_utils import (
 
 
 def test_speed_names_are_ordered_and_do_not_accept_legacy_aliases():
-    assert hubble_fit.SPEED_CHOICES == ("fastest", "quicker", "quick", "standard", "production")
+    assert hubble_fit.SPEED_CHOICES == (
+        "fastest", "quicker", "quick", "medium", "standard", "production",
+    )
     assert hubble_fit.normalize_speed("fastest") == "fastest"
     assert hubble_fit.normalize_speed("quicker") == "quicker"
     assert hubble_fit.normalize_speed("quick") == "quick"
+    assert hubble_fit.normalize_speed("medium") == "medium"
     assert hubble_fit.normalize_speed("standard") == "standard"
     assert hubble_fit.normalize_speed("production") == "production"
 
@@ -738,6 +741,25 @@ def test_quicker_dynesty_preset_and_warm_start():
 def test_quicker_numpyro_preset_uses_existing_quick_settings():
     from qvc.hubble.hubble_fit_jax import _nested_speed_preset
     assert _nested_speed_preset("quicker", 8) == _nested_speed_preset("quick", 8)
+
+
+def test_medium_sampling_presets_are_between_quick_and_standard():
+    assert hubble_fit.get_dynesty_speed_settings("medium", 8) == {
+        "dlogz_init": 0.01,
+        "nlive_init": 175,
+        "nlive_batch": 75,
+        "n_effective": 7500,
+    }
+    assert hubble_fit.get_dynesty_speed_settings("medium", 8, warm_start=True) == {
+        "dlogz_init": 0.01,
+        "nlive_init": 18,
+        "nlive_batch": 8,
+        "n_effective": 750,
+    }
+
+    from qvc.hubble.hubble_fit_jax import _nested_speed_preset
+
+    assert _nested_speed_preset("medium", 8) == (175, 75_000, 0.01)
 
 
 @pytest.mark.parametrize("only_sna,only_agn,mode", [(False, False, "joint"), (True, False, "sna"), (False, True, "agn")])
