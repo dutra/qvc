@@ -2241,6 +2241,14 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             df,
             plot_path=plot_path,
             show=False,
+            filename="sigma_tau_psd_free_precut.pdf",
+            tau_resolution_mode="filter",
+            free_only=True,
+        )
+        plot_psd_uv_recovery_comparison(
+            df,
+            plot_path=plot_path,
+            show=False,
             filename="sigma_tau_psd_fixed_precut.pdf",
             tau_resolution_mode="filter",
             fixed_only=True,
@@ -3062,6 +3070,14 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             show=False,
             filename="sigma_tau_psd_free_vs_fixed_postcut.pdf",
             tau_resolution_mode="filter",
+        )
+        plot_psd_uv_recovery_comparison(
+            df,
+            plot_path=plot_path,
+            show=False,
+            filename="sigma_tau_psd_free_postcut.pdf",
+            tau_resolution_mode="filter",
+            free_only=True,
         )
         plot_psd_uv_recovery_comparison(
             df,

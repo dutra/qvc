@@ -3361,6 +3361,7 @@ def plot_psd_uv_recovery_comparison(
     *,
     tau_resolution_mode="mark",
     nominal_psd_fmax=2e-3,
+    free_only=False,
     fixed_only=False,
 ):
     """Compare PSD fits with like-for-like model RMS and timescale estimates.
@@ -3377,6 +3378,8 @@ def plot_psd_uv_recovery_comparison(
         )
     if not np.isfinite(nominal_psd_fmax) or nominal_psd_fmax <= 0.0:
         raise ValueError("nominal_psd_fmax must be finite and positive.")
+    if free_only and fixed_only:
+        raise ValueError("free_only and fixed_only cannot both be True.")
     required = {
         "log_sigma_ls",
         "log_sigma_ls_err",
@@ -3394,6 +3397,14 @@ def plot_psd_uv_recovery_comparison(
         "psd_bpl_ref_band",
         "psd_bpl_ref_lambda_rf",
     }
+    if free_only:
+        required -= {
+            "log_sigma_ls_fixed",
+            "log_sigma_ls_fixed_err",
+            "log_tau_ls_fixed",
+            "log_tau_ls_fixed_err",
+            "psd_ls_fixed_valid",
+        }
     if not required.issubset(df.columns):
         missing = ", ".join(sorted(required - set(df.columns)))
         raise KeyError(
@@ -3401,6 +3412,8 @@ def plot_psd_uv_recovery_comparison(
         )
 
     def _numeric(column):
+        if free_only and "_fixed" in column and column not in df.columns:
+            return np.full(len(df), np.nan)
         return pd.to_numeric(df[column], errors="coerce").to_numpy(dtype=float)
 
     ref_band = (
@@ -3639,6 +3652,7 @@ def plot_psd_uv_recovery_comparison(
             r"$\log\,\sigma_{\rm PSD}$ (mag)",
             "sigma",
             None,
+            "tab:blue",
         ),
         (
             model_total_sigma_2500,
@@ -3650,6 +3664,7 @@ def plot_psd_uv_recovery_comparison(
             r"$\log\,\sigma_{\rm PSD}$ (mag)",
             "sigma",
             None,
+            "tab:blue",
         ),
         (
             model_total_tau,
@@ -3661,6 +3676,7 @@ def plot_psd_uv_recovery_comparison(
             r"$\log\,\tau_{\rm PSD}$ (days)",
             "tau",
             free_tau_resolution,
+            "tab:blue",
         ),
         (
             model_total_tau,
@@ -3672,6 +3688,7 @@ def plot_psd_uv_recovery_comparison(
             r"$\log\,\tau_{\rm PSD}$ (days)",
             "tau",
             fixed_tau_resolution,
+            "tab:blue",
         ),
     ]
 
@@ -3686,6 +3703,7 @@ def plot_psd_uv_recovery_comparison(
         ylabel,
         quantity,
         resolution_floor,
+        contour_color,
     ) in panel_inputs:
         mask = (
             valid
@@ -3718,6 +3736,7 @@ def plot_psd_uv_recovery_comparison(
                 "xlabel": xlabel,
                 "ylabel": ylabel,
                 "quantity": quantity,
+                "contour_color": contour_color,
             }
         )
 
@@ -3737,14 +3756,16 @@ def plot_psd_uv_recovery_comparison(
         upper = step * np.ceil((np.max(values) + margin) / step)
         return float(lower), float(upper)
 
-    if fixed_only:
+    if free_only:
+        panels = [panels[0], panels[2]]
+    elif fixed_only:
         panels = [panels[1], panels[3]]
     sigma_limits = _shared_limits([p for p in panels if p["quantity"] == "sigma"], step=0.05, margin_floor=0.06)
     tau_limits = _shared_limits([p for p in panels if p["quantity"] == "tau"], step=0.05, margin_floor=0.08)
     if sigma_limits is None and tau_limits is None:
         raise ValueError("No finite valid free-slope or fixed-slope PSD fits to plot.")
 
-    def _plot_kde_contours(ax, x, y):
+    def _plot_kde_contours(ax, x, y, color):
         if x.size <= 50:
             return
         try:
@@ -3768,7 +3789,7 @@ def plot_psd_uv_recovery_comparison(
                 y_grid,
                 density,
                 levels=levels,
-                colors="red",
+                colors=color,
                 linestyles=("solid", "solid"),
                 linewidths=(2.6, 3.2),
                 alpha=1.0,
@@ -3777,12 +3798,13 @@ def plot_psd_uv_recovery_comparison(
         except (ValueError, np.linalg.LinAlgError) as exc:
             print(f"[PSD-vs-UV KDE contours] skipped: {exc}")
 
+    single_model = free_only or fixed_only
     fig, axes = plt.subplots(
-        1 if fixed_only else 2,
+        1 if single_model else 2,
         2,
-        figsize=(11.2, 5.2) if fixed_only else (10.0, 9.0),
-        sharex=False if fixed_only else "row",
-        sharey=False if fixed_only else "row",
+        figsize=(11.2, 5.2) if single_model else (10.0, 9.0),
+        sharex=False if single_model else "row",
+        sharey=False if single_model else "row",
         squeeze=False,
         constrained_layout=True,
     )
@@ -3868,7 +3890,12 @@ def plot_psd_uv_recovery_comparison(
                     r"$\tau_{\rm model}<[2\pi f_{\max}(1+z)]^{-1}$"
                 ),
             )
-        _plot_kde_contours(ax, x[stats_mask], y[stats_mask])
+        _plot_kde_contours(
+            ax,
+            x[stats_mask],
+            y[stats_mask],
+            panel["contour_color"],
+        )
         ax.set_xlim(*limits)
         ax.set_ylim(*limits)
         ax.set_aspect("equal", adjustable="box")
@@ -3924,10 +3951,9 @@ def plot_psd_uv_recovery_comparison(
         if np.any(unresolved):
             ax.legend(loc="upper left", fontsize=8.5, frameon=True)
 
-    left_title = "Fixed-slope DRW" if fixed_only else "Free-slope BPL"
-    axes[0, 0].set_title(left_title, fontsize=14)
-    axes[0, 1].set_title(left_title if fixed_only else "Fixed-slope DRW", fontsize=14)
-    if not fixed_only:
+    if not single_model:
+        axes[0, 0].set_title("Free-slope BPL", fontsize=14)
+        axes[0, 1].set_title("Fixed-slope DRW", fontsize=14)
         axes[0, 1].tick_params(labelleft=False)
         axes[1, 1].tick_params(labelleft=False)
 
@@ -6127,6 +6153,7 @@ def _range_partitioned_weighted_bin_stats(
     min_count=3,
     center="mid",
     fit_membership_mask=None,
+    drop_lowest_out_of_range_bin=False,
 ):
     """Bin fit-range and out-of-range objects without mixed boundary bins.
 
@@ -6134,6 +6161,8 @@ def _range_partitioned_weighted_bin_stats(
     bin edges, and objects below, inside, and above the interval are binned
     independently.  The return value is ``(in_range_stats, out_of_range_stats)``,
     where each stats tuple has the same layout as :func:`_weighted_bin_stats`.
+    ``drop_lowest_out_of_range_bin`` removes only the lowest populated summary
+    bin; it does not change bin edges, membership, or the underlying objects.
     """
     z = np.asarray(z, dtype=float)
     y = np.asarray(y, dtype=float)

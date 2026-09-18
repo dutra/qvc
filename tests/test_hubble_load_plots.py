@@ -344,15 +344,27 @@ def test_load_agn_data_writes_psd_uv_recovery_comparisons(tmp_path, monkeypatch)
 
     assert [call[1]["filename"] for call in calls] == [
         "sigma_tau_psd_free_vs_fixed_precut.pdf",
+        "sigma_tau_psd_free_precut.pdf",
         "sigma_tau_psd_fixed_precut.pdf",
         "sigma_tau_psd_free_vs_fixed_postcut.pdf",
+        "sigma_tau_psd_free_postcut.pdf",
         "sigma_tau_psd_fixed_postcut.pdf",
     ]
     assert all(call[1]["plot_path"] == str(tmp_path / "plots") for call in calls)
     assert all(call[1]["tau_resolution_mode"] == "filter" for call in calls)
-    assert [call[1].get("fixed_only", False) for call in calls] == [
+    assert [call[1].get("free_only", False) for call in calls] == [
         False,
         True,
+        False,
+        False,
+        True,
+        False,
+    ]
+    assert [call[1].get("fixed_only", False) for call in calls] == [
+        False,
+        False,
+        True,
+        False,
         False,
         True,
     ]
@@ -403,8 +415,10 @@ def test_load_agn_data_writes_psd_uv_recovery_comparisons(tmp_path, monkeypatch)
     )
     assert [call[1]["filename"] for call in calls] == [
         "sigma_tau_psd_free_vs_fixed_precut.pdf",
+        "sigma_tau_psd_free_precut.pdf",
         "sigma_tau_psd_fixed_precut.pdf",
         "sigma_tau_psd_free_vs_fixed_postcut.pdf",
+        "sigma_tau_psd_free_postcut.pdf",
         "sigma_tau_psd_fixed_postcut.pdf",
     ]
 

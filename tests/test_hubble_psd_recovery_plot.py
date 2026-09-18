@@ -101,7 +101,7 @@ def test_plot_psd_uv_recovery_comparison_normalizes_and_filters(monkeypatch):
     assert output.endswith("plots/example/diagnostics/comparison.pdf")
 
 
-def test_plot_psd_uv_recovery_comparison_draws_thick_red_contours(monkeypatch):
+def test_plot_psd_uv_recovery_comparison_uses_model_specific_contours(monkeypatch):
     n_objects = 80
     phase = np.linspace(0.0, 4.0 * np.pi, n_objects)
     log_sigma_uv = np.linspace(-1.3, -0.45, n_objects)
@@ -156,9 +156,14 @@ def test_plot_psd_uv_recovery_comparison_draws_thick_red_contours(monkeypatch):
     hubble_plotting.plot_psd_uv_recovery_comparison(frame)
 
     assert len(contour_kwargs) == 4
+    assert [kwargs["colors"] for kwargs in contour_kwargs] == [
+        "tab:blue",
+        "tab:blue",
+        "tab:blue",
+        "tab:blue",
+    ]
     for kwargs in contour_kwargs:
         assert len(kwargs["levels"]) == 2
-        assert kwargs["colors"] == "red"
         assert kwargs["linestyles"] == ("solid", "solid")
         assert kwargs["linewidths"] == (2.6, 3.2)
 
@@ -341,3 +346,33 @@ def test_plot_psd_uv_recovery_requires_current_total_band_pairs(
     with pytest.raises(KeyError, match=missing_column):
         hubble_plotting.plot_psd_uv_recovery_comparison(frame)
     assert not save_called
+
+
+@pytest.mark.parametrize("only_flag", ["free_only", "fixed_only"])
+def test_plot_psd_uv_recovery_single_model_panels_have_no_titles(
+    monkeypatch,
+    only_flag,
+):
+    captured = {}
+    monkeypatch.setattr(
+        hubble_plotting,
+        "_save_figure",
+        lambda fig, path, **_kwargs: captured.update(fig=fig) or path,
+    )
+    frame = _psd_recovery_frame()
+    if only_flag == "free_only":
+        frame = frame.drop(
+            columns=[column for column in frame if "_fixed" in column]
+        )
+
+    hubble_plotting.plot_psd_uv_recovery_comparison(
+        frame,
+        **{only_flag: True},
+    )
+
+    fig = captured["fig"]
+    try:
+        assert len(fig.axes) == 2
+        assert [axis.get_title() for axis in fig.axes] == ["", ""]
+    finally:
+        plt.close(fig)
