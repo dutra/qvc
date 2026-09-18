@@ -567,20 +567,34 @@ def test_run_all_compare_sigma_only_still_compares_models_and_skips_corner_plots
     df_pantheon = _minimal_pantheon_df()
     compare_calls = []
     corner_calls = []
+    events = []
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(
-        hubble_fit,
-        "run_single",
-        lambda *args, **kwargs: (
+
+    def fake_run_single(*args, **kwargs):
+        fit_kind = "sna" if kwargs.get("only_sna") else "joint"
+        events.append(("fit", kwargs["cosmo_model"], fit_kind))
+        return (
             np.ones((4, 2)),
             ["H0", "Om0"],
             "interp",
-            -3.0 if not kwargs.get("only_sna") else -2.0,
+            -3.0 if fit_kind == "joint" else -2.0,
             0.1,
             None,
             13.8,
             0.2,
+        )
+
+    monkeypatch.setattr(
+        hubble_fit,
+        "run_single",
+        fake_run_single,
+    )
+    monkeypatch.setattr(
+        hubble_fit,
+        "print_incremental_model_significance",
+        lambda completed, **kwargs: events.append(
+            ("report", kwargs["just_completed"], tuple(completed))
         ),
     )
     monkeypatch.setattr(
@@ -616,6 +630,18 @@ def test_run_all_compare_sigma_only_still_compares_models_and_skips_corner_plots
 
     assert len(compare_calls) == 2
     assert corner_calls == []
+    assert events == [
+        ("fit", "FlatLambdaCDM", "joint"),
+        ("report", "FlatLambdaCDM", ("FlatLambdaCDM",)),
+        ("fit", "FlatLambdaCDM", "sna"),
+        ("fit", "Flatw0waCDM", "joint"),
+        (
+            "report",
+            "Flatw0waCDM",
+            ("FlatLambdaCDM", "Flatw0waCDM"),
+        ),
+        ("fit", "Flatw0waCDM", "sna"),
+    ]
 
 
 def test_run_all_minimal_plots_keeps_joint_and_sna_fits_and_skips_corners(monkeypatch, tmp_path):

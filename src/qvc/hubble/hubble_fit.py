@@ -80,6 +80,7 @@ from qvc.hubble.hubble_utils import (
     load_chains,
     load_pantheon_data,
     posterior_corr,
+    print_incremental_model_significance,
     reduced_chi_squared,
     render_ascii_table,
     read_quasars_from_hdf5_flat,
@@ -5960,6 +5961,20 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        skip_debiased_residual_plot=skip_debiased_residual_plot)
         
         samples_joint, model_labels_joint, dm_interp_joint, logZ_joint, logZerr_joint, debiased_residuals_joint, age_joint, age_err_joint = r
+        cosmo_models_result_dict[cosmo_model]['logZ'] = logZ_joint
+        cosmo_models_result_dict[cosmo_model]['logZerr'] = logZerr_joint
+        cosmo_models_result_dict[cosmo_model]['age'] = age_joint
+        cosmo_models_result_dict[cosmo_model]['age_err'] = age_err_joint
+        completed_joint_results = {
+            model: result
+            for model, result in cosmo_models_result_dict.items()
+            if "logZ" in result and "logZerr" in result
+        }
+        print_incremental_model_significance(
+            completed_joint_results,
+            total_models=len(cosmo_models),
+            just_completed=cosmo_model,
+        )
         #print(f"For model {cosmo_model}, universe age: {age:.3f} Gyr")
         if only_agn:
             samples_sna = None
@@ -6022,10 +6037,6 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                               use_redshift_log_f_term=use_redshift_log_f_term)
         
-        cosmo_models_result_dict[cosmo_model]['logZ'] = logZ_joint
-        cosmo_models_result_dict[cosmo_model]['logZerr'] = logZerr_joint
-        cosmo_models_result_dict[cosmo_model]['age'] = age_joint
-        cosmo_models_result_dict[cosmo_model]['age_err'] = age_err_joint
         cosmo_models_sna_result_dict[cosmo_model]['logZ'] = logZ_sna
         cosmo_models_sna_result_dict[cosmo_model]['logZerr'] = logZerr_sna
         cosmo_models_sna_result_dict[cosmo_model]['age'] = age_sna

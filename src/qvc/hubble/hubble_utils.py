@@ -3224,6 +3224,144 @@ def _render_ascii_table(headers, rows):
     return "\n".join(lines)
 
 
+def _render_colored_ascii_table(headers, rows, styles):
+    """Render an ANSI-colored table while aligning on the uncolored values."""
+    reset = "\033[0m"
+    bold = "\033[1m"
+    border_color = "\033[90m"
+    widths = [len(str(header)) for header in headers]
+    rendered_rows = [[str(value) for value in row] for row in rows]
+    for row in rendered_rows:
+        widths = [max(width, len(value)) for width, value in zip(widths, row)]
+
+    border = "+-" + "-+-".join("-" * width for width in widths) + "-+"
+
+    def _line(values, cell_styles):
+        cells = []
+        for value, width, style in zip(values, widths, cell_styles):
+            padded = value.ljust(width)
+            cells.append(f"{style}{padded}{reset}" if style else padded)
+        return "| " + " | ".join(cells) + " |"
+
+    lines = [
+        f"{border_color}{border}{reset}",
+        _line([str(header) for header in headers], [bold] * len(headers)),
+        f"{border_color}{border}{reset}",
+    ]
+    lines.extend(_line(row, row_styles) for row, row_styles in zip(rendered_rows, styles))
+    lines.append(f"{border_color}{border}{reset}")
+    return "\n".join(lines)
+
+
+def format_incremental_model_significance_table(
+        completed_models,
+        *,
+        total_models,
+        just_completed,
+        jeffreys_thresholds=(1.0, 2.5, 5.0),
+):
+    """Format cumulative pairwise evidence significance after one joint fit.
+
+    Every completed pair is shown, independent of model execution order.  For
+    stable scientific reporting, pairs containing ``Flatw0waCDM`` always put
+    that model on the left, so the sign of Δln Z has the same meaning even if
+    that model is run last.
+    """
+    reset = "\033[0m"
+    bold_cyan = "\033[1;36m"
+    cyan = "\033[36m"
+    green = "\033[1;32m"
+    yellow = "\033[33m"
+    magenta = "\033[1;35m"
+
+    items = []
+    for label, values in completed_models.items():
+        try:
+            logz = float(values["logZ"])
+            logz_err = float(values["logZerr"])
+        except Exception as exc:
+            raise ValueError(
+                f"Completed model {label!r} is missing numeric logZ/logZerr."
+            ) from exc
+        if not np.isfinite(logz) or not np.isfinite(logz_err) or logz_err < 0.0:
+            raise ValueError(
+                f"Completed model {label!r} has invalid evidence "
+                f"logZ={logz!r}, logZerr={logz_err!r}."
+            )
+        items.append((label, logz, logz_err))
+
+    completed_count = len(items)
+    title = (
+        f"{bold_cyan}CUMULATIVE HUBBLE MODEL SIGNIFICANCE"
+        f" — {completed_count}/{int(total_models)} MODELS COMPLETE{reset}"
+    )
+    status = f"Just completed: {green}{just_completed}{reset}"
+    if completed_count < 2:
+        return (
+            f"\n{title}\n{status}\n"
+            f"{yellow}Waiting for one more completed model before computing "
+            f"a significance.{reset}\n"
+        )
+
+    rows = []
+    styles = []
+    for left, right in combinations(items, 2):
+        if right[0] == "Flatw0waCDM" and left[0] != "Flatw0waCDM":
+            left, right = right, left
+        left_label, left_logz, left_err = left
+        right_label, right_logz, right_err = right
+        delta = left_logz - right_logz
+        delta_err = float(np.hypot(left_err, right_err))
+        sigma = _odds_sigma_summary_from_delta(delta, delta_err)
+        preferred = left_label if delta >= 0.0 else right_label
+        strength = _jeffreys_strength(abs(delta), jeffreys_thresholds)
+        rows.append(
+            (
+                f"{left_label} vs {right_label}",
+                preferred,
+                f"{delta:+.3f} ± {delta_err:.3f}",
+                (
+                    f"{sigma['sigma']:.3f} "
+                    f"-{sigma['sigma_err_lower']:.3f}"
+                    f"/+{sigma['sigma_err_upper']:.3f}"
+                ),
+                strength,
+            )
+        )
+        styles.append((cyan, green, yellow, magenta, ""))
+
+    headers = (
+        "comparison",
+        "preferred",
+        "Δln Z (left-right)",
+        "sigma_Z -err/+err",
+        "Jeffreys",
+    )
+    note = (
+        "sigma_Z is the two-sided odds-equivalent significance; its asymmetric "
+        "errors propagate the quoted nested-sampling evidence errors."
+    )
+    table = _render_colored_ascii_table(headers, rows, styles)
+    return f"\n{title}\n{status}\n{table}\n{note}\n"
+
+
+def print_incremental_model_significance(
+        completed_models,
+        *,
+        total_models,
+        just_completed,
+):
+    """Print the cumulative colored evidence-significance table."""
+    print(
+        format_incremental_model_significance_table(
+            completed_models,
+            total_models=total_models,
+            just_completed=just_completed,
+        ),
+        flush=True,
+    )
+
+
 def compare_models_by_log_evidence_all(
         df_agn,
         cosmo_models_dict,

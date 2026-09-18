@@ -2,6 +2,7 @@ import ast
 import inspect
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +39,47 @@ def _current_prior_checkpoint_metadata(cosmo_model="FlatLambdaCDM", priors=None)
         "prior_bounds_json": hubble_fit.canonical_prior_bounds_json(priors),
         "early_de_guard": False,
     }
+
+
+def _strip_ansi(value):
+    return re.sub(r"\x1b\[[0-9;]*m", "", value)
+
+
+def test_incremental_model_significance_is_colored_and_execution_order_independent():
+    completed = {
+        "FlatLambdaCDM": {"logZ": -108.0, "logZerr": 0.20},
+        "FlatwCDM": {"logZ": -105.0, "logZerr": 0.30},
+        "Flatw0waCDM": {"logZ": -98.0, "logZerr": 0.40},
+    }
+
+    rendered = hubble_utils.format_incremental_model_significance_table(
+        completed,
+        total_models=3,
+        just_completed="Flatw0waCDM",
+    )
+    plain = _strip_ansi(rendered)
+
+    assert "\x1b[" in rendered
+    assert "3/3 MODELS COMPLETE" in plain
+    assert "Just completed: Flatw0waCDM" in plain
+    assert "Flatw0waCDM vs FlatLambdaCDM" in plain
+    assert "Flatw0waCDM vs FlatwCDM" in plain
+    assert "+10.000 ± 0.447" in plain
+    assert "4.472" in plain
+    assert "two-sided odds-equivalent significance" in plain
+
+
+def test_incremental_model_significance_waits_until_two_models_complete():
+    rendered = hubble_utils.format_incremental_model_significance_table(
+        {"FlatwCDM": {"logZ": -105.0, "logZerr": 0.30}},
+        total_models=3,
+        just_completed="FlatwCDM",
+    )
+
+    plain = _strip_ansi(rendered)
+    assert "1/3 MODELS COMPLETE" in plain
+    assert "Waiting for one more completed model" in plain
+    assert "comparison" not in plain
 
 
 @pytest.fixture(autouse=True)
