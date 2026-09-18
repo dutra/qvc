@@ -1041,15 +1041,18 @@ def test_completeness_2d_plot_smoothing_is_display_only(tmp_path, monkeypatch):
     np.testing.assert_allclose(z_centers_plot, z_centers)
     np.testing.assert_allclose(comp_with_plot(mag_grid, z_grid), comp_no_plot(mag_grid, z_grid))
     raw_grid = np.asarray(comp_with_plot._interp.values)
-    expected_log_contours = np.clip(
-        np.log10(np.clip(gaussian_filter(raw_grid, sigma=(1, 1), mode="nearest"), 1e-12, None)),
-        -4.0,
-        0.0,
+    expected_absolute_percent = 100.0 * gaussian_filter(
+        raw_grid, sigma=(1, 1), mode="nearest"
     ).T
-    np.testing.assert_allclose(contour_grids[0], expected_log_contours)
+    np.testing.assert_allclose(contour_grids[0], expected_absolute_percent)
     np.testing.assert_allclose(contour_grids[1], relative_grids[0].T)
     assert (tmp_path / "completeness" / "completeness_map.pdf").exists()
     assert (
+        tmp_path
+        / "completeness"
+        / "completeness_map_with_absolute_percent_contours.pdf"
+    ).exists()
+    assert not (
         tmp_path / "completeness" / "completeness_map_with_log_contours.pdf"
     ).exists()
     assert (

@@ -68,7 +68,8 @@ COMPLETENESS_SMOOTH_SIGMA_MAG_ENV = "QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG"
 COMPLETENESS_SMOOTH_SIGMA_Z_ENV = "QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z"
 RELATIVE_COMPLETENESS_REFERENCE_PERCENTILE = 99.0
 RELATIVE_COMPLETENESS_MIN_PARENT_COUNT = 20.0
-RELATIVE_COMPLETENESS_CONTOUR_LEVELS = (10.0, 50.0, 90.0)
+RELATIVE_COMPLETENESS_CONTOUR_LEVELS = (25.0, 50.0, 75.0)
+ABSOLUTE_COMPLETENESS_CONTOUR_LEVELS = (10.0, 25.0, 50.0)
 FAINT_TAIL_FIT_WIDTH_MAG = 0.75
 FAINT_TAIL_MAX_FIT_WIDTH_MAG = 2.0
 FAINT_TAIL_DECAY_MIN = 0.02
@@ -1688,7 +1689,7 @@ def _plot_relative_completeness_percent(
         aspect="auto",
         extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
         cmap=cmap,
-        norm=LogNorm(vmin=0.01, vmax=100.0, clip=True),
+        norm=LogNorm(vmin=1.0, vmax=100.0, clip=True),
     )
     data_min = float(np.nanmin(contour_percent))
     data_max = float(np.nanmax(contour_percent))
@@ -1703,21 +1704,87 @@ def _plot_relative_completeness_percent(
             z_centers,
             contour_percent.T,
             levels=contour_levels,
-            colors="white",
+            colors="black",
             linewidths=0.8,
         )
-        ax.clabel(
-            contours,
-            inline=True,
-            fmt=lambda level: f"{level:.0f}%",
-            fontsize=7,
-        )
-    ax.set_ylabel(r"$z$")
-    ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
+        label_options = {
+            "inline": True,
+            "inline_spacing": 10,
+            "fmt": lambda level: f"{level:.0f}%",
+            "fontsize": 10,
+            "colors": "black",
+        }
+        label_positions = []
+        for level_index, _level in enumerate(contours.levels):
+            segments = [
+                np.asarray(segment, dtype=float)
+                for segment in contours.allsegs[level_index]
+                if np.asarray(segment).shape[0] >= 2
+            ]
+            if segments:
+                segment = max(segments, key=lambda values: np.ptp(values[:, 0]))
+                if np.isclose(_level, 25.0):
+                    target_redshift = 2.0
+                    start = segment[:-1]
+                    stop = segment[1:]
+                    crosses_target = (
+                        (start[:, 1] - target_redshift)
+                        * (stop[:, 1] - target_redshift)
+                        <= 0.0
+                    ) & (start[:, 1] != stop[:, 1])
+                    crossing_start = start[crosses_target]
+                    crossing_stop = stop[crosses_target]
+                    fraction = (
+                        (target_redshift - crossing_start[:, 1])
+                        / (crossing_stop[:, 1] - crossing_start[:, 1])
+                    )
+                    crossing_magnitude = crossing_start[:, 0] + fraction * (
+                        crossing_stop[:, 0] - crossing_start[:, 0]
+                    )
+                    center = 0.5 * (
+                        np.nanmin(segment[:, 0]) + np.nanmax(segment[:, 0])
+                    )
+                    if crossing_magnitude.size:
+                        label_position = np.array(
+                            [
+                                crossing_magnitude[
+                                    np.nanargmin(
+                                        np.abs(crossing_magnitude - center)
+                                    )
+                                ],
+                                target_redshift,
+                            ]
+                        )
+                    else:
+                        label_position = segment[
+                            np.nanargmin(
+                                np.abs(segment[:, 1] - target_redshift)
+                            )
+                        ]
+                else:
+                    upper = segment[
+                        segment[:, 1] >= np.nanpercentile(segment[:, 1], 75.0)
+                    ]
+                    center = 0.5 * (
+                        np.nanmin(segment[:, 0]) + np.nanmax(segment[:, 0])
+                    )
+                    label_position = upper[
+                        np.nanargmin(np.abs(upper[:, 0] - center))
+                    ]
+                label_positions.append(tuple(label_position))
+        if label_positions:
+            labels = ax.clabel(contours, manual=label_positions, **label_options)
+            for label in labels:
+                if label.get_text() == "25%":
+                    label.set_rotation(0)
+    ax.set_ylabel(r"$z$", fontsize=16)
+    ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)", fontsize=16)
+    ax.tick_params(axis="both", which="both", labelsize=14)
     cbar = fig.colorbar(im, ax=ax)
-    cbar.set_ticks([0.01, 0.1, 1.0, 10.0, 100.0])
-    cbar.set_ticklabels(["0.01", "0.1", "1", "10", "100"])
-    cbar.set_label("relative completeness (%)")
+    cbar.set_ticks([1.0, 10.0, 100.0])
+    cbar.set_ticklabels(["1", "10", "100"])
+    cbar.ax.tick_params(labelsize=14)
+    cbar.set_label("relative completeness (%)", fontsize=16)
     filename = "completeness_map_with_relative_percent_contours.pdf"
     if bright_subsample_cut is not None:
         from matplotlib.path import Path
@@ -1784,6 +1851,7 @@ def get_completeness_function_2d(
     """
     import os, h5py
     import matplotlib.pyplot as plt
+    from matplotlib.colors import LogNorm
     from scipy.ndimage import gaussian_filter
     import pandas as pd
     from astropy.cosmology import FlatLambdaCDM
@@ -1913,34 +1981,62 @@ def get_completeness_function_2d(
             _save_completeness_figure(plt.gcf(), os.path.join(plot_dir, "completeness_map.pdf"), dpi=600)
             plt.close()
 
-        with trace_completeness_step("completeness_map_with_log_contours.pdf"):
-            # Derive contour geometry from the same smoothed grid as the image.
+        with trace_completeness_step("completeness_map_with_absolute_percent_contours.pdf"):
+            # Show the absolute selected-to-parent ratio from the same smoothed
+            # grid as the standard completeness map.
             fig, ax = plt.subplots(figsize=(7, 5))
-            displayed_log_C = np.clip(log_C_plot, -4.0, 0.0)
-            contour_log_C = displayed_log_C
+            absolute_percent = 100.0 * np.clip(C_plot, 0.0, 1.0)
             im = ax.imshow(
-                displayed_log_C.T,
+                np.clip(absolute_percent, 0.1, 100.0).T,
                 origin="lower",
                 aspect="auto",
                 extent=[mag_edges[0], mag_edges[-1], z_edges[0], z_edges[-1]],
                 cmap="viridis",
-                vmin=-4,
-                vmax=0,
+                norm=LogNorm(vmin=0.1, vmax=100.0, clip=True),
             )
-            contours = ax.contour(
-                mag_centers,
-                z_centers,
-                contour_log_C.T,
-                colors="white",
-                linewidths=1.3,
-            )
-            ax.clabel(contours, inline=True, fmt="%.1f", fontsize=7)
-            ax.set_ylabel(r"$z$")
-            ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)")
+            contour_levels = [
+                level
+                for level in ABSOLUTE_COMPLETENESS_CONTOUR_LEVELS
+                if (
+                    np.nanmin(absolute_percent)
+                    <= level
+                    <= np.nanmax(absolute_percent)
+                )
+            ]
+            if contour_levels:
+                contours = ax.contour(
+                    mag_centers,
+                    z_centers,
+                    absolute_percent.T,
+                    levels=contour_levels,
+                    colors="black",
+                    linewidths=0.8,
+                )
+                ax.clabel(
+                    contours,
+                    inline=True,
+                    inline_spacing=10,
+                    fmt=lambda level: f"{level:.0f}%",
+                    fontsize=10,
+                    colors="black",
+                )
+            ax.set_ylabel(r"$z$", fontsize=16)
+            ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)", fontsize=16)
+            ax.tick_params(axis="both", which="both", labelsize=14)
             cbar = fig.colorbar(im, ax=ax)
-            cbar.set_label(r"Completeness $\log\,p(I{=}1\,|\,m,z)$")
-            _save_completeness_figure(fig,
-                os.path.join(plot_dir, "completeness_map_with_log_contours.pdf"),
+            cbar.set_ticks([0.1, 1.0, 10.0, 100.0])
+            cbar.set_ticklabels(["0.1", "1", "10", "100"])
+            cbar.ax.tick_params(labelsize=14)
+            cbar.set_label(
+                r"completeness $p_{\rm det}(I{=}1\mid m,z)$ (%)",
+                fontsize=16,
+            )
+            _save_completeness_figure(
+                fig,
+                os.path.join(
+                    plot_dir,
+                    "completeness_map_with_absolute_percent_contours.pdf",
+                ),
                 dpi=600,
             )
             plt.close(fig)

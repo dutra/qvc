@@ -17,7 +17,7 @@ def setup_sources(tmp_path, legacy=False):
         'hubble_diagram_debiased.pdf', 'hubble_diagram.pdf', 'agn_table.csv',
         'agn_table.tex', 'predicted_vs_actual_M2500_debias.pdf',
         'alphaOX_residuals.pdf', 'delta_alphaOX_residuals.pdf',
-        'completeness/completeness_map_with_relative_percent_contours.pdf')]
+        'completeness/completeness_map_with_absolute_percent_contours.pdf')]
     files += [base / 'diagnostics' / name for name in (
         'tier1_cuts_vs_redshift_precut.pdf', 'blr_postcut.pdf',
         'sigma_tau_vs_lambda_broken_pl_fit_postcut.pdf',
@@ -55,7 +55,7 @@ def test_exact_corner_sources_and_added_draft_assets(tmp_path, legacy):
     assert not list(dest.glob('*_noalphabeta.pdf'))
     assert (dest / 'agn_table.tex').read_bytes() == (run / 'agn_table.tex').read_bytes()
     assert (dest / 'sigma_tau_psd_fixed_postcut.pdf').exists()
-    assert (dest / 'completeness_map_with_relative_percent_contours.pdf').exists()
+    assert (dest / 'completeness_map_with_absolute_percent_contours.pdf').exists()
     assert not (dest / 'tier1_cuts_vs_redshift_precut.pdf').exists()
     assert not (dest / 'completeness_map.pdf').exists()
     assert not (dest / 'spectral_fraction_vs_redshift_cuts.pdf').exists()
@@ -63,13 +63,13 @@ def test_exact_corner_sources_and_added_draft_assets(tmp_path, legacy):
 
 def test_missing_sources_leave_existing_assets_untouched(tmp_path):
     _, run, _ = setup_sources(tmp_path)
-    (run / 'completeness/completeness_map_with_relative_percent_contours.pdf').unlink()
+    (run / 'completeness/completeness_map_with_absolute_percent_contours.pdf').unlink()
     dest = tmp_path / 'plots/paper'
     dest.mkdir(parents=True)
     (dest / 'hubble_diagram.pdf').write_text('previous paper figure')
     result = execute(tmp_path)
     assert result.returncode != 0
-    assert 'completeness_map_with_relative_percent_contours.pdf' in result.stderr
+    assert 'completeness_map_with_absolute_percent_contours.pdf' in result.stderr
     assert (dest / 'hubble_diagram.pdf').read_text() == 'previous paper figure'
     assert len(list(dest.iterdir())) == 1
 
