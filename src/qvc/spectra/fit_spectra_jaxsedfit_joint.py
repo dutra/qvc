@@ -1423,6 +1423,90 @@ def summarize_catalog_posterior(samples, prediction):
     return out
 
 
+def empty_spectral_component_fraction_summary():
+    """Stable scalar schema, including failed fits and unavailable components."""
+    return {
+        key: np.nan
+        for name in ("f_bc_3000", "f_fe_uv_3000", "f_br", "f_na")
+        for key in (name, f"{name}_err")
+    }
+
+
+def summarize_spectral_component_fractions(prediction, redshift):
+    """Summarize legacy component/continuum ratios from joint posterior draws.
+
+    Joint spectral sites are observed-frame f_nu (mJy). The continuum includes
+    host, Fe II and BC, but excludes emission lines. Monochromatic ratios use
+    the nearest fitted pixel to rest 3000 A, even outside coverage. Integrated
+    ratios use f_lambda, with the common conversion constant cancelling out.
+    """
+    out = empty_spectral_component_fraction_summary()
+    continuum_keys = (
+        "spectral_continuum_model", "spectral_feii_model", "spectral_balmer_model"
+    )
+    if any(key not in prediction for key in continuum_keys):
+        return out
+    continuum_parts = [np.asarray(prediction[key], dtype=float) for key in continuum_keys]
+    continuum_parts = [part[None, :] if part.ndim == 1 else part for part in continuum_parts]
+    shape = continuum_parts[0].shape
+    if len(shape) != 2 or 0 in shape or any(part.shape != shape for part in continuum_parts):
+        return out
+    wave = np.asarray(prediction.get("spec_wave_obs", []), dtype=float)
+    if wave.ndim == 1 and wave.size == shape[1]:
+        wave = np.broadcast_to(wave, shape)
+    if (
+        wave.shape != shape
+        or not np.all(np.isfinite(wave))
+        or np.any(wave <= 0.0)
+        or np.any(np.diff(wave, axis=1) <= 0.0)
+        or not np.isfinite(redshift)
+        or redshift <= -1.0
+    ):
+        return out
+    continuum = sum(continuum_parts)
+    nearest = np.argmin(np.abs(wave / (1.0 + redshift) - 3000.0), axis=1)
+    narrow_key = (
+        "spectral_line_model_narrow_aperture"
+        if "spectral_line_model_narrow_aperture" in prediction
+        else "spectral_line_model_narrow"
+    )
+    for name, key, integrated in (
+        ("f_bc_3000", "spectral_balmer_model", False),
+        ("f_fe_uv_3000", "spectral_feii_model", False),
+        ("f_br", "spectral_line_model_broad", True),
+        ("f_na", narrow_key, True),
+    ):
+        if key not in prediction:
+            continue
+        numerator = np.asarray(prediction[key], dtype=float)
+        if numerator.ndim == 1:
+            numerator = numerator[None, :]
+        if numerator.shape != shape:
+            continue
+        if integrated:
+            if shape[1] < 2:
+                continue
+            # f_lambda is proportional to f_nu/lambda_obs**2. Integrating in
+            # observed wavelength gives the same ratio as rest wavelength.
+            num_flux = np.where(np.isfinite(numerator), np.maximum(numerator, 0.0), np.nan)
+            den_flux = np.where(np.isfinite(continuum), np.maximum(continuum, 0.0), np.nan)
+            num = np.trapezoid(num_flux / wave**2, wave, axis=1)
+            den = np.trapezoid(den_flux / wave**2, wave, axis=1)
+            valid_den = den > 0.0
+        else:
+            rows = np.arange(shape[0])
+            num, den = numerator[rows, nearest], continuum[rows, nearest]
+            valid_den = den != 0.0
+        valid = np.isfinite(num) & np.isfinite(den) & valid_den
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            ratios = num[valid] / den[valid]
+        ratios = ratios[np.isfinite(ratios)]
+        if ratios.size:
+            median, err, _, _ = legacy.sym_percentile(ratios)
+            out[name], out[f"{name}_err"] = float(median), float(err)
+    return out
+
+
 def summarize_joint_chi2(prediction):
     """Summarize the required joint-fit chi-square diagnostic sites."""
     missing = [name for name in JOINT_CHI2_SITES if name not in prediction]
@@ -2008,6 +2092,10 @@ def write_joint_fit_results_hdf5(path, rows, *, provenance=None):
                 "joint_posterior_draw_source": pd.Series(dtype=str),
                 **{
                     name: pd.Series(dtype=float)
+                    for name in empty_spectral_component_fraction_summary()
+                },
+                **{
+                    name: pd.Series(dtype=float)
                     for name in JOINT_POSTERIOR_SCALAR_SUMMARY_FIELDS
                 },
             }
@@ -2457,6 +2545,7 @@ def _base_result(rec, args, *, execution_mode, resumed_from_path=""):
         }
     )
     result.update(empty_joint_chi2_summary())
+    result.update(empty_spectral_component_fraction_summary())
     result.update(empty_psf_agn_fraction_summary())
     result.update(empty_host_2500_psf_summary())
     result.update(empty_joint_hubble_posterior_summary())
@@ -2487,6 +2576,7 @@ def _base_result(rec, args, *, execution_mode, resumed_from_path=""):
 def _clear_compact_posterior_payloads(result):
     """Ensure a failed worker row cannot retain a partially built draw payload."""
 
+    result.update(empty_spectral_component_fraction_summary())
     result["_psf_agn_fraction_draws"] = np.full(
         (PSF_AGN_FRACTION_DRAW_COUNT, len(PSF_AGN_FRACTION_BANDS)),
         np.nan,
@@ -2748,6 +2838,7 @@ def run_one_fit(
             om0=config.galaxy.cosmology_om0,
         )
         result.update(summarize_catalog_posterior(fit_result.samples, prediction))
+        result.update(summarize_spectral_component_fractions(prediction, rec["z"]))
         result.update(summarize_joint_chi2(prediction))
         result.update(summarize_host_2500_psf(prediction))
         (
@@ -2923,6 +3014,9 @@ def _complete_resumed_fit(rec, args, source_path, fitter):
         om0=config.galaxy.cosmology_om0,
     )
     result.update(summarize_catalog_posterior(fitter.samples, prediction))
+    result.update(
+        summarize_spectral_component_fractions(prediction, config.observation.redshift)
+    )
     result.update(summarize_joint_chi2(prediction))
     result.update(summarize_host_2500_psf(prediction))
     (

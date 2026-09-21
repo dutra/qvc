@@ -1069,6 +1069,98 @@ def _run_record():
     }
 
 
+def _spectral_fraction_prediction():
+    # Correlated continuum amplitude and component fractions: taking a ratio
+    # of posterior medians would give a different result.
+    total = np.array([10.0, 20.0, 40.0, 80.0])[:, None] * np.ones((1, 3))
+    bc = np.array([0.1, 0.2, 0.3, 0.4])[:, None] * total
+    fe = 0.1 * total
+    return {
+        "spec_wave_obs": np.array([4000.0, 6000.0, 8000.0]),
+        "spectral_continuum_model": total - bc - fe,
+        "spectral_balmer_model": bc,
+        "spectral_feii_model": fe,
+        "spectral_line_model_broad": 2.0 * total,
+        "spectral_line_model_narrow": 0.8 * total,
+        "spectral_line_model_narrow_aperture": 0.2 * total,
+    }
+
+
+def _assert_spectral_fraction_summary(result):
+    expected = {
+        "f_bc_3000": 0.25, "f_bc_3000_err": 0.102,
+        "f_fe_uv_3000": 0.1, "f_fe_uv_3000_err": 0.0,
+        "f_br": 2.0, "f_br_err": 0.0,
+        "f_na": 0.2, "f_na_err": 0.0,
+    }
+    for key, value in expected.items():
+        assert result[key] == pytest.approx(value)
+
+
+def test_spectral_fractions_preserve_draw_ratios_and_aperture():
+    prediction = _spectral_fraction_prediction()
+    _assert_spectral_fraction_summary(
+        joint.summarize_spectral_component_fractions(prediction, 1.0)
+    )
+    del prediction["spectral_line_model_narrow_aperture"]
+    assert joint.summarize_spectral_component_fractions(prediction, 1.0)["f_na"] == pytest.approx(0.8)
+
+
+@pytest.mark.parametrize("redshift,index", [(1.1, 1), (0.0, 0), (3.0, 2)])
+def test_spectral_fractions_use_nearest_rest_pixel_even_outside_coverage(redshift, index):
+    prediction = _spectral_fraction_prediction()
+    prediction["spectral_balmer_model"] = np.tile([1.0, 2.0, 3.0], (4, 1))
+    prediction["spectral_feii_model"] = np.tile([3.0, 2.0, 1.0], (4, 1))
+    prediction["spectral_continuum_model"] = np.full((4, 3), 6.0)
+    prediction["spec_wave_obs"] = np.tile(prediction["spec_wave_obs"], (4, 1))
+    result = joint.summarize_spectral_component_fractions(prediction, redshift)
+    assert result["f_bc_3000"] == pytest.approx([0.1, 0.2, 0.3][index])
+    assert result["f_fe_uv_3000"] == pytest.approx([0.3, 0.2, 0.1][index])
+
+
+def test_spectral_line_fractions_integrate_flambda_with_positive_clipping():
+    prediction = {
+        "spec_wave_obs": np.array([2000.0, 4000.0]),
+        "spectral_continuum_model": np.array([[1.0, 1.0]]),
+        "spectral_feii_model": np.zeros((1, 2)),
+        "spectral_balmer_model": np.zeros((1, 2)),
+        "spectral_line_model_broad": np.array([[0.0, 4.0]]),
+        "spectral_line_model_narrow": np.array([[-5.0, 4.0]]),
+    }
+    result = joint.summarize_spectral_component_fractions(prediction, 0.0)
+    # Endpoint weights are 1 and 1/4: integrated ratio is 1/1.25, not 2.
+    assert result["f_br"] == pytest.approx(0.8)
+    assert result["f_na"] == pytest.approx(0.8)
+    assert result["f_bc_3000"] == result["f_bc_3000_err"] == 0.0
+
+
+def test_spectral_fractions_exclude_invalid_draws_and_missing_components():
+    prediction = _spectral_fraction_prediction()
+    for key in ("spectral_continuum_model", "spectral_feii_model", "spectral_balmer_model"):
+        prediction[key][0] = 0.0
+        prediction[key][1] = np.nan
+    del prediction["spectral_line_model_broad"]
+    result = joint.summarize_spectral_component_fractions(prediction, 1.0)
+    assert result["f_bc_3000"] == pytest.approx(0.35)
+    assert result["f_bc_3000_err"] == pytest.approx(0.034)
+    assert np.isnan(result["f_br"])
+    assert np.isnan(result["f_br_err"])
+    prediction["spectral_balmer_model"][:] = np.nan
+    assert all(np.isnan(value) for value in joint.summarize_spectral_component_fractions(prediction, 1.0).values())
+    del prediction["spectral_balmer_model"]
+    assert all(np.isnan(value) for value in joint.summarize_spectral_component_fractions(prediction, 1.0).values())
+
+
+def test_spectral_fraction_failure_schema_and_cleanup():
+    result = joint._base_result(_run_record(), SimpleNamespace(), execution_mode="fresh")
+    fields = joint.empty_spectral_component_fraction_summary()
+    assert len(fields) == 8
+    assert all(np.isnan(result[key]) for key in fields)
+    result.update(joint.summarize_spectral_component_fractions(_spectral_fraction_prediction(), 1.0))
+    joint._clear_compact_posterior_payloads(result)
+    assert all(np.isnan(result[key]) for key in fields)
+
+
 def _component_prediction(filter_names):
     total = np.tile(np.arange(1.0, len(filter_names) + 1.0), (4, 1))
     desired_host_fraction = np.array([0.2, 0.3, 0.4, 0.5])
@@ -1100,6 +1192,7 @@ def _component_prediction(filter_names):
             for index, name in enumerate(joint.JOINT_CHI2_SITES)
         }
     )
+    prediction.update(_spectral_fraction_prediction())
     return prediction
 
 
@@ -1202,6 +1295,7 @@ def test_joint_fit_result_writer_moves_private_draw_payload_out_of_catalog(tmp_p
         )
     )
     scalar_summary = joint.summarize_joint_hubble_posterior_draws(derived)
+    scalar_summary.update(joint.summarize_spectral_component_fractions(_spectral_fraction_prediction(), 1.0))
     scalar_summary.update(
         joint.summarize_host_2500_psf(
             {"component_host_fraction": np.array([[0.25], [0.20]])}
@@ -1267,6 +1361,7 @@ def test_joint_fit_result_writer_moves_private_draw_payload_out_of_catalog(tmp_p
         )
 
     catalog = read_spectra_catalog_hdf5(path)
+    _assert_spectral_fraction_summary(catalog.frame.iloc[0])
     assert catalog.joint_psf_photometry_bands == tuple(
         f"{band}_sdss" for band in "ugriz"
     )
@@ -2371,6 +2466,7 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
 
     result = joint.run_hybrid_fit(rec, args)
 
+    _assert_spectral_fraction_summary(result)
     assert result["fit_ok"] is True
     assert result["execution_mode"] == "resumed"
     assert result["object_id"] == rec["object_id"]
@@ -2505,6 +2601,7 @@ def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_
         resumed_from_path=tmp_path / "old" / "missing.h5",
     )
 
+    _assert_spectral_fraction_summary(result)
     assert result["fit_ok"] is True
     assert result["execution_mode"] == "fresh_missing_bundle"
     assert result["joint_reduced_chi2"] == pytest.approx(9.0)
