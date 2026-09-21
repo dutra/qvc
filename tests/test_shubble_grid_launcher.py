@@ -157,6 +157,41 @@ def test_generated_sbatch_has_resources_grid_mapping_and_paper_profile(tmp_path,
     assert "QVC_CUT_NUM_DIVERGENCES_MAX=0" in script
 
 
+def test_default_cuts_match_sep19b_standard_profile():
+    launcher = load_launcher()
+    args = launcher.parse_args(["--description", "sep19b_cuts"])
+    _, cuts = launcher.resolve_paper_settings(args, {})
+
+    assert cuts == {
+        "QVC_CUT_COMPLETENESS_MAG_2500_MIN": "17",
+        "QVC_CUT_COMPLETENESS_MAG_2500_MAX": "24",
+        "QVC_CUT_JAXSEDFIT_JOINT_REDUCED_CHI2_MAX": "1.2",
+        "QVC_CUT_SED_REDUCED_CHI2_MAX": "1.3",
+        "QVC_CUT_SPECTROSCOPY_REDUCED_CHI2_MAX": "1.1",
+        "QVC_CUT_LOO_CHI2_EFF_MAX": "1.05",
+        "QVC_CUT_SPECTRAL_RHAT_MAX": "1.05",
+        "QVC_CUT_LIGHT_CURVE_RHAT_MAX": "1.05",
+        "QVC_CUT_NUM_DIVERGENCES_MAX": "0",
+        "QVC_CUT_LOG_TAU_UV_RF_MIN": "1.3",
+        "QVC_CUT_T_RF_LENGTH_MIN": "none",
+        "QVC_CUT_LIGHT_CURVE_N_POINTS_MIN": "none",
+        "QVC_CUT_SN_MEDIAN_ALL_MIN": "3",
+        "QVC_CUT_VARIABILITY_CHI_SQ_RED_G_MIN": "20",
+        "QVC_CUT_ETA_SIGMA_KL_MIN": "none",
+        "QVC_CUT_LOG_TAU_UV_RF_MAX": "none",
+        "QVC_CUT_T_RF_OVER_TAU_UV_RF_MIN": "none",
+        "QVC_CUT_APPARENT_MAG_2500_ERR_MAX": "none",
+        "QVC_CUT_F_BC_3000_MAX": "none",
+        "QVC_CUT_F_FE_UV_3000_MAX": "none",
+        "QVC_CUT_F_HOST_2500_PSF_MAX": "none",
+        "QVC_CUT_FRAC_AGN_5100_MIN": "none",
+        "QVC_CUT_A_2500_TOTAL_MAX": "none",
+        "QVC_CUT_EBV_GAL_PLUS_EBV_AGN_MAX": "none",
+        "QVC_CUT_LOW_L2500_FHOST_LOG_L_MAX": "none",
+        "QVC_CUT_LOW_L2500_FHOST_PSF_MAX": "none",
+    }
+
+
 @pytest.mark.skipif(XONSH is None, reason="xonsh is required")
 def test_hubble_arguments_match_current_paper_fiducial_profile(monkeypatch, tmp_path):
     launcher = load_launcher()

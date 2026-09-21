@@ -6144,6 +6144,53 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     return cosmo_models_result_dict, cosmo_model_joint_samples, results_latex, compare_r
 
 
+def summarize_single_cosmo_result(
+    samples,
+    model_labels,
+    *,
+    logZ,
+    logZerr,
+    age,
+    age_err,
+    N,
+    z_range,
+):
+    """Build the compact per-model record used by grid-summary HDF5 files."""
+
+    samples = np.asarray(samples)
+    if samples.ndim != 2 or samples.shape[1] != len(model_labels):
+        raise ValueError(
+            "Single-run samples and model labels must have matching parameter dimensions."
+        )
+
+    result = {
+        "logZ": logZ,
+        "logZerr": logZerr,
+        "age": age,
+        "age_err": age_err,
+        "N": N,
+        "z_i": z_range[0],
+        "z_f": z_range[1],
+    }
+    for index, key in enumerate(model_labels):
+        median, err, lower, upper = sym_percentile(samples[:, index])
+        result[key] = median
+        result[f"{key}_err"] = err
+        result[f"{key}_err_lower"] = lower
+        result[f"{key}_err_upper"] = upper
+    return result
+
+
+def save_single_cosmo_results(prefix, mode_tag, models_dict):
+    """Persist a single-mode multi-model summary alongside posterior checkpoints."""
+
+    output_dir = get_qvc_result_dir() / "cosmo" / prefix
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"cosmo_results_single_{mode_tag}.hdf5"
+    save_cosmo_results_hdf5(str(output_path), models_dict)
+    return output_path
+
+
 def configure_completeness_run_args(args):
     """Validate AGN selection modes, or ignore them for direct SNe-only fits."""
     if args.only_sna:
@@ -7039,10 +7086,16 @@ if __name__ == "__main__":
                 df_agn_completeness_parent=df_agn_completeness_parent,
                 agn_pivot_context=agn_pivot_context)
             samples_joint, model_labels, dm_interp, logZ_joint, logZerr_joint, debiased_residuals, age, age_err = r
-            cosmo_models_dict[cosmo_model]['logZ'] = logZ_joint
-            cosmo_models_dict[cosmo_model]['logZerr'] = logZerr_joint
-            cosmo_models_dict[cosmo_model]['age'] = age
-            cosmo_models_dict[cosmo_model]['age_err'] = age_err
+            cosmo_models_dict[cosmo_model] = summarize_single_cosmo_result(
+                samples_joint,
+                model_labels,
+                logZ=logZ_joint,
+                logZerr=logZerr_joint,
+                age=age,
+                age_err=age_err,
+                N=effective_N,
+                z_range=args.z_range,
+            )
         zmin, zmax = args.z_range
         n_tag = "all" if effective_N is None else f"N{effective_N}"
         z_tag = f"z{zmin:.2f}_{zmax:.2f}".replace(".", "p")
@@ -7095,6 +7148,12 @@ if __name__ == "__main__":
                 "Skipping evidence comparison because only one cosmology model was requested: "
                 f"{args.cosmo_models}"
             )
+        output_path = save_single_cosmo_results(
+            args.prefix,
+            mode_tag,
+            cosmo_models_dict,
+        )
+        print(f"Saved single-run cosmology summary: {output_path}")
     elif args.run == "full":
         run_all(df_agn=df_agn, df_agn_all=df_agn_all, df_pantheon=df_pantheon, _sna_L=_sna_L, _sna_Lower=_sna_Lower, _sna_LogdetCov=_sna_LogdetCov, 
                 cosmo_models=args.cosmo_models, skip_plots=args.skip_plots,

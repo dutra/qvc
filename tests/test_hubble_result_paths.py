@@ -565,6 +565,78 @@ def test_run_all_saves_cosmo_results_under_result_dir(monkeypatch, tmp_path):
     assert expected.parent.is_dir()
 
 
+def test_summarize_single_cosmo_result_includes_grid_coordinates_and_parameters(
+    monkeypatch,
+):
+    samples = np.array([[60.0, 0.2], [70.0, 0.3], [80.0, 0.4]])
+    summaries = iter(
+        [
+            (70.0, 10.0, 9.0, 11.0),
+            (0.3, 0.1, 0.08, 0.12),
+        ]
+    )
+    monkeypatch.setattr(hubble_fit, "sym_percentile", lambda values: next(summaries))
+
+    result = hubble_fit.summarize_single_cosmo_result(
+        samples,
+        ["H0", "Om0"],
+        logZ=123.4,
+        logZerr=0.25,
+        age=13.8,
+        age_err=0.2,
+        N=2000,
+        z_range=(0.44, 2.5),
+    )
+
+    assert result == {
+        "logZ": 123.4,
+        "logZerr": 0.25,
+        "age": 13.8,
+        "age_err": 0.2,
+        "N": 2000,
+        "z_i": 0.44,
+        "z_f": 2.5,
+        "H0": 70.0,
+        "H0_err": 10.0,
+        "H0_err_lower": 9.0,
+        "H0_err_upper": 11.0,
+        "Om0": 0.3,
+        "Om0_err": 0.1,
+        "Om0_err_lower": 0.08,
+        "Om0_err_upper": 0.12,
+    }
+
+
+def test_save_single_cosmo_results_uses_result_dir(monkeypatch, tmp_path):
+    result_root = tmp_path / "result_root"
+    captured = {}
+    models = {"FlatLambdaCDM": {"logZ": 1.0}}
+    monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: result_root)
+    monkeypatch.setattr(
+        hubble_fit,
+        "save_cosmo_results_hdf5",
+        lambda filename, models_dict: captured.update(
+            {"filename": filename, "models": models_dict}
+        ),
+    )
+
+    output_path = hubble_fit.save_single_cosmo_results(
+        "campaign/N2000_zmax2.5",
+        "joint",
+        models,
+    )
+
+    expected = (
+        result_root
+        / "cosmo"
+        / "campaign/N2000_zmax2.5"
+        / "cosmo_results_single_joint.hdf5"
+    )
+    assert output_path == expected
+    assert expected.parent.is_dir()
+    assert captured == {"filename": str(expected), "models": models}
+
+
 def test_run_all_compare_sigma_only_still_compares_models_and_skips_corner_plots(monkeypatch, tmp_path):
     df_agn = _minimal_agn_df()
     df_pantheon = _minimal_pantheon_df()
