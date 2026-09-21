@@ -148,7 +148,12 @@ def test_generated_sbatch_has_resources_grid_mapping_and_paper_profile(tmp_path,
     assert 'CURRENT_PREFIX="${CAMPAIGN}/N${N}_zmax${ZMAX}"' in script
     assert grid_argv[grid_argv.index("--run") + 1] == "single"
     assert "--speed \\\n    quick" in script
-    for flag in ("--minimal-plots", "--uniform_redshift_distribution", "--skip-debiased-residual-plot"):
+    for flag in (
+        "--minimal-plots",
+        "--uniform_redshift_distribution",
+        "--early-de-guard",
+        "--skip-debiased-residual-plot",
+    ):
         assert flag in script
     for flag in ("--skip_plots", "--compare_sigma_only", "--plot-completeness"):
         assert flag not in script

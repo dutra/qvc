@@ -258,6 +258,7 @@ def hubble_arguments(*, n_value, zmax, prefix, speed, settings):
         "--disable_sigma_clip_pass",
         "--sigma_clip_threshold", "3.0",
         "--prior-profile", "centered_lcdm",
+        "--early-de-guard",
         "--skip-debiased-residual-plot",
         "--N", str(n_value),
         "--uniform_redshift_distribution",
