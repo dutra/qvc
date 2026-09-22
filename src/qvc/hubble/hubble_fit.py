@@ -5512,6 +5512,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
     r = plot_hubble(flat_samples, df_agn_pass2_plot_sample, df_pantheon,
                 cosmo_model=cosmo_model, z_pivot_agn=z_pivot_agn, show_residuals=True,
                 show_true=False, show=False, debias=False, plot_path=plot_path, verbose=False,
+                dmi_selection_sigma=dmi_selection_sigma_full,
                 sigma_clip_threshold=sigma_clip_threshold if apply_two_pass_sigma_clip else None,
                 z_range=z_range,
                 use_alpha_lambda_term=use_alpha_lambda_term,

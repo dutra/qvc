@@ -2067,6 +2067,11 @@ def test_run_single_threads_direct_full_sample_debias_arrays_to_plots(monkeypatc
         call for call in hubble_calls if call.get("debias")
     ]
     assert len(debiased_hubble_calls) == 2
+    biased_hubble_calls = [call for call in hubble_calls if not call.get("debias")]
+    assert len(biased_hubble_calls) == 1
+    np.testing.assert_allclose(
+        biased_hubble_calls[0]["dmi_selection_sigma"], direct_sigma_sel,
+    )
     for debiased_hubble_call in debiased_hubble_calls:
         np.testing.assert_allclose(
             debiased_hubble_call["dmi_values"],
@@ -3026,10 +3031,14 @@ def test_plot_predicted_vs_actual_m2500_marks_out_of_range_objects(monkeypatch, 
 
 
 @pytest.mark.parametrize("only_agn", [False, True])
-def test_plot_hubble_residual_chi2_annotation_uses_debiased_full_and_data_errors(
+@pytest.mark.parametrize("debias", [False, True])
+@pytest.mark.parametrize("have_selection_widths", [False, True])
+def test_plot_hubble_residual_chi2_annotation_uses_selection_widths(
     monkeypatch,
     tmp_path,
     only_agn,
+    debias,
+    have_selection_widths,
 ):
     from matplotlib.axes import Axes
 
@@ -3039,7 +3048,7 @@ def test_plot_hubble_residual_chi2_annotation_uses_debiased_full_and_data_errors
             0.43,
             0.44,
             0.60,
-            0.90,
+            0.70,
             1.00,
             1.10,
             1.20,
@@ -3077,6 +3086,7 @@ def test_plot_hubble_residual_chi2_annotation_uses_debiased_full_and_data_errors
     original_text = Axes.text
 
     def capture_text(self, x, y, s, *args, **kwargs):
+        assert kwargs.get("gid") != "agn-sample-counts"
         if kwargs.get("gid") == "hubble-fit-statistic-line":
             text_calls.append(
                 {
@@ -3086,6 +3096,7 @@ def test_plot_hubble_residual_chi2_annotation_uses_debiased_full_and_data_errors
                     "bbox": kwargs.get("bbox"),
                     "ha": kwargs.get("ha"),
                     "va": kwargs.get("va"),
+                    "fontsize": kwargs.get("fontsize"),
                 }
             )
         return original_text(self, x, y, s, *args, **kwargs)
@@ -3110,11 +3121,11 @@ def test_plot_hubble_residual_chi2_annotation_uses_debiased_full_and_data_errors
         z_pivot_agn=hubble_fit.z_pivot_agn,
         plot_path=str(tmp_path),
         show=False,
-        debias=True,
+        debias=debias,
         dm_interp=None,
-        dmi_values=np.zeros(len(df_agn), dtype=float),
+        dmi_values=np.full(len(df_agn), 0.25, dtype=float),
         dmi_sigma=dmi_sigma,
-        dmi_selection_sigma=sigma_sel,
+        dmi_selection_sigma=sigma_sel if have_selection_widths else None,
         z_range=z_range,
         only_agn=only_agn,
         residuals_csv_filename=None,
@@ -3133,66 +3144,62 @@ def test_plot_hubble_residual_chi2_annotation_uses_debiased_full_and_data_errors
         & (z >= z_range[0])
         & (z <= z_range[1])
     )
-    high_z_mask = common_mask & (z > 1.0)
-    expected_full, full_meta = hubble_utils.reduced_chi_squared(
-        residuals[common_mask],
-        full_sigma[common_mask],
-        n_params=n_agn_params,
-    )
-    expected_data, data_meta = hubble_utils.reduced_chi_squared(
-        residuals[common_mask],
-        data_sigma[common_mask],
-        n_params=n_agn_params,
-    )
-    expected_high_full, high_full_meta = hubble_utils.reduced_chi_squared(
-        residuals[high_z_mask],
-        full_sigma[high_z_mask],
-        n_params=n_agn_params,
-    )
-    expected_high_data, high_data_meta = hubble_utils.reduced_chi_squared(
-        residuals[high_z_mask],
-        data_sigma[high_z_mask],
-        n_params=n_agn_params,
-    )
-
-    # Both endpoints belong to the displayed fit-range statistic, while the
-    # neighboring objects remain excluded.  The two uncertainty models must
-    # also use the exact same objects.
-    assert full_meta["N_eff"] == data_meta["N_eff"] == 15
-    assert high_full_meta["N_eff"] == high_data_meta["N_eff"] == 11
-    assert full_meta["n_params"] == data_meta["n_params"] == n_agn_params
-
-    annotation = next(call for call in text_calls if "Debiased" in call["text"])
     annotation_text = "\n".join(call["text"] for call in text_calls)
-    assert len(text_calls) == 4
-    assert all(call["bbox"]["facecolor"] == "white" and call["bbox"]["alpha"] == 0.6 for call in text_calls)
-    assert "full / data only / selected" in annotation_text
-    assert "Median" in annotation_text
-    assert "Residual RMS:" in annotation_text
-    assert r"0.44\leq z\leq3.16" in annotation_text
-    assert "Selection-weighted" in annotation_text
-    assert r"\gamma_z=" in annotation_text
-    assert r"\Delta\chi^2=" in annotation_text
-    assert (
-        f"{expected_full:.2f} / {expected_data:.2f}"
-        in annotation_text
-    )
-    assert all("\n" not in call["text"] for call in text_calls)
-    assert annotation["x"] == 0.02
-    assert annotation["y"] == 0.05
-    assert annotation["ha"] == "left"
-    assert annotation["va"] == "bottom"
+    for forbidden in ("selected", "residual", "Median", "full", "data only", "trend"):
+        assert forbidden not in annotation_text
+    assert np.count_nonzero(common_mask) == 15
+    if debias:
+        assert len(text_calls) == (3 if have_selection_widths else 1)
+        assert all(
+            call["bbox"]["facecolor"] == "white"
+            and call["bbox"]["alpha"] == 0.6
+            for call in text_calls
+        )
+        assert rf"RMS ($0.44\leq z\leq3.16$): {np.sqrt(np.mean(residuals[common_mask] ** 2)):.3f} mag" in annotation_text
+        if have_selection_widths:
+            for lower, count in ((0.44, 15), (0.70, 13)):
+                mask = common_mask & (z >= lower)
+                assert np.count_nonzero(mask) == count
+                expected = np.sum((residuals[mask] / sigma_sel[mask]) ** 2) / (count - n_agn_params)
+                assert rf"$\chi^2_\nu$ (${lower:.2f}\leq z\leq3.16$): {expected:.2f}" in annotation_text
+        for annotation in text_calls:
+            assert annotation["x"] == 0.02
+            assert annotation["y"] == 0.10
+            assert annotation["ha"] == "left"
+            assert annotation["va"] == "bottom"
+            assert annotation["fontsize"] == 9
+        assert fit_quality_summary["n_fit"] == 15
+        for key, width in (("chi2_full", full_sigma), ("chi2_data_only", data_sigma)):
+            expected = np.sum((residuals[common_mask] / width[common_mask]) ** 2) / (15 - n_agn_params)
+            assert fit_quality_summary[key] == pytest.approx(expected)
+        assert fit_quality_summary["residual_rms"] == pytest.approx(np.sqrt(np.mean(residuals[common_mask] ** 2)))
+    else:
+        assert text_calls == []
+    hubble_plotting.plt.close("all")
 
-    assert fit_quality_summary["n_fit"] == 15
-    assert fit_quality_summary["chi2_full"] == pytest.approx(expected_full)
-    assert fit_quality_summary["chi2_data_only"] == pytest.approx(expected_data)
-    expected_selected, _ = hubble_utils.reduced_chi_squared(
-        residuals[common_mask], sigma_sel[common_mask], n_params=n_agn_params)
-    assert fit_quality_summary["chi2_selected"] == pytest.approx(expected_selected)
-    assert fit_quality_summary["residual_rms"] == pytest.approx(np.sqrt(np.mean(residuals[common_mask] ** 2)))
-    trend = fit_quality_summary["redshift_trend"]
-    assert f"{trend['slope_mag_per_dex']:+.2f}" in annotation_text
-    assert f"{trend['slope_err_mag_per_dex']:.2f}" in annotation_text
+
+def test_biased_residual_panel_ylim_contains_binned_error_bars():
+    inside = (
+        np.array([0.8, 1.2]),
+        np.array([-1.4, 0.9]),
+        np.array([0.3, 0.2]),
+        np.array([5, 6]),
+    )
+    outside = (
+        np.array([0.3, 3.4]),
+        np.array([-0.4, 1.8]),
+        np.array([0.1, 0.5]),
+        np.array([4, 3]),
+    )
+
+    lower, upper = hubble_plotting._biased_residual_panel_ylim(inside, outside)
+
+    assert lower == pytest.approx(-2.3 * 1.08)
+    assert upper == pytest.approx(2.3 * 1.08)
+    for stats in (inside, outside):
+        _, means, errors, _ = stats
+        assert np.all(means - errors > lower)
+        assert np.all(means + errors < upper)
 
 
 def test_plot_hubble_has_no_likelihood_space_chi2_override_arguments():

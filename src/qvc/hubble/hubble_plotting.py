@@ -6214,6 +6214,25 @@ def _range_partitioned_weighted_bin_stats(
     return inside, _concatenate_weighted_bin_stats((below, above))
 
 
+def _biased_residual_panel_ylim(*binned_stats, default=(-0.7, 0.7), padding=0.08):
+    """Return symmetric limits containing all binned residual error bars."""
+    extrema = []
+    for stats in binned_stats:
+        _, means, errors, _ = stats
+        means = np.asarray(means, dtype=float)
+        errors = np.asarray(errors, dtype=float)
+        valid = np.isfinite(means) & np.isfinite(errors) & (errors >= 0.0)
+        if np.any(valid):
+            extrema.extend((means[valid] - errors[valid], means[valid] + errors[valid]))
+    if not extrema:
+        return default
+    extent = float(np.max(np.abs(np.concatenate(extrema))))
+    if not np.isfinite(extent) or extent <= 0.0:
+        return default
+    limit = extent * (1.0 + float(padding))
+    return -limit, limit
+
+
 HUBBLE_PLOT_MAX_DRAWS = 500
 
 
@@ -7200,93 +7219,39 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 if np.any(chi2_redshift_mask) else np.nan,
                 redshift_trend=redshift_trend,
             )
-        high_z_chi2_mask = chi2_redshift_mask & (z_values > 1.0)
-        chi2_full_zgt1, chi2_data_only_zgt1 = _paired_reduced_chi2(
-            high_z_chi2_mask
-        )
-
-        if np.isfinite(chi2_full) and np.isfinite(chi2_data_only):
-            chi2_kind = "Debiased" if debias else "Biased"
-            chi2_annotation_lines = [
-                rf"{chi2_kind} $\chi^2_\nu$ (full / data only / selected)",
-                (
-                    rf"${z_range[0]:.2f}\leq z\leq{z_range[1]:.2f}$: "
-                    f"{chi2_full:.2f} / {chi2_data_only:.2f}"
-                ),
-            ]
-            if (
-                np.isfinite(chi2_full_zgt1)
-                and np.isfinite(chi2_data_only_zgt1)
-            ):
-                chi2_annotation_lines.append(
-                    (
-                        rf"$1.00<z\leq{z_range[1]:.2f}$: "
-                        f"{chi2_full_zgt1:.2f} / "
-                        f"{chi2_data_only_zgt1:.2f}"
-                    )
-                )
+        compact_lines = []
+        if debias:
             if sigma_sel is not None:
-                for line_index, mask in ((1, chi2_redshift_mask), (2, high_z_chi2_mask)):
-                    if line_index >= len(chi2_annotation_lines):
-                        continue
-                    valid = mask & np.isfinite(sigma_sel) & (sigma_sel > 0.0)
-                    selected_chi2, _ = reduced_chi_squared(
-                        residuals[valid], sigma_sel[valid], n_params=n_agn_params,
+                for lower, upper in (z_range, (max(0.70, z_range[0]), z_range[1])):
+                    valid = (
+                        chi2_redshift_mask & (z_values >= lower) & (z_values <= upper)
+                        & np.isfinite(sigma_sel) & (sigma_sel > 0.0)
                     )
-                    chi2_annotation_lines[line_index] += f" / {selected_chi2:.2f}"
-            else:
-                chi2_annotation_lines[0] = chi2_annotation_lines[0].replace(
-                    " / selected", ""
+                    if np.count_nonzero(valid) > n_agn_params:
+                        chi2_value, _ = reduced_chi_squared(
+                            residuals[valid], sigma_sel[valid], n_params=n_agn_params,
+                        )
+                        line = (
+                            rf"$\chi^2_\nu$ (${lower:.2f}\leq z\leq{upper:.2f}$): "
+                            f"{chi2_value:.2f}"
+                        )
+                        if line not in compact_lines:
+                            compact_lines.append(line)
+            if np.any(chi2_redshift_mask):
+                compact_lines.append(
+                    rf"RMS (${z_range[0]:.2f}\leq z\leq{z_range[1]:.2f}$): "
+                    f"{np.sqrt(np.mean(residuals[chi2_redshift_mask] ** 2)):.3f} mag"
                 )
-            widths = [mu_pred_std_with_scatter, mu_pred_std]
-            if sigma_sel is not None:
-                widths.append(sigma_sel)
-            median_widths = []
-            for width in widths:
-                valid = chi2_redshift_mask & np.isfinite(width) & (width > 0.0)
-                median_widths.append(f"{np.median(width[valid]):.3f}")
-            chi2_annotation_lines.append(
-                r"Median $\sigma$ (mag): " + " / ".join(median_widths)
-            )
-            chi2_annotation_lines.append(
-                f"Residual RMS: {np.sqrt(np.mean(residuals[chi2_redshift_mask] ** 2)):.3f} mag"
-            )
-            if (
-                redshift_trend is not None
-                and np.isfinite(redshift_trend["slope_mag_per_dex"])
-            ):
-                chi2_annotation_lines.append(
-                    (
-                        r"Selection-weighted $z$ trend: "
-                        rf"$\gamma_z={redshift_trend['slope_mag_per_dex']:+.2f}"
-                        rf"\pm{redshift_trend['slope_err_mag_per_dex']:.2f}$ "
-                        rf"mag dex$^{{-1}}$ "
-                        rf"$({redshift_trend['slope_significance_sigma']:+.1f}\sigma, "
-                        rf"\Delta\chi^2={redshift_trend['delta_chi2']:.1f})$"
-                    )
-                )
-            # Keep the fit-range summary compact enough to sit below the
-            # residual points; the CSV retains the per-object diagnostics.
-            range_summary = chi2_annotation_lines[1].split(": ", 1)[1]
-            compact_lines = [chi2_annotation_lines[0] + ": " + range_summary]
-            compact_lines.extend(
-                line for line in chi2_annotation_lines[2:]
-                if not line.startswith(r"$1.00<z")
-            )
-            compact_lines = [
-                line + rf" (${z_range[0]:.2f}\leq z\leq{z_range[1]:.2f}$)"
-                if line.startswith("Residual RMS:") else line
-                for line in compact_lines
-            ]
+        if compact_lines:
             for line_index, line in enumerate(compact_lines):
                 line_transform = mtransforms.offset_copy(
                     ax_resid.transAxes, fig=fig, x=0,
-                    y=9 * (len(compact_lines) - 1 - line_index), units="points",
+                    y=11 * (len(compact_lines) - 1 - line_index), units="points",
                 )
                 ax_resid.text(
-                    0.02, 0.05, line,
+                    0.02, 0.10, line,
                     transform=line_transform,
-                    ha="left", va="bottom", fontsize=7,
+                    ha="left", va="bottom", fontsize=9,
                     bbox=dict(
                         boxstyle="round,pad=0.12", facecolor="white",
                         alpha=0.6, edgecolor="none",
@@ -7294,12 +7259,18 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                     gid="hubble-fit-statistic-line",
                     zorder=20,
                 )
-        if df_calibrators is not None:
+        if debias:
             ax_resid.set_ylim(-0.7, 0.7)
-            ax_resid.set_xlim(df_calibrators['z'].min()*0.2, df_calibrators['z'].max()*1.1)
+            ax_resid.set_yticks([-0.5, 0.0, 0.5])
         else:
-            ax_resid.set_ylim(-0.7, 0.7)
-        ax_resid.set_yticks([-0.5, 0.0, 0.5])
+            ax_resid.set_ylim(
+                _biased_residual_panel_ylim(
+                    linear_residual_in,
+                    linear_residual_out,
+                )
+            )
+        if df_calibrators is not None:
+            ax_resid.set_xlim(df_calibrators['z'].min()*0.2, df_calibrators['z'].max()*1.1)
         #ax_resid.legend(frameon=True, loc="upper left", fontsize=10)
 
     for axi in (ax, inset_ax, ax_resid):
@@ -7423,18 +7394,6 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 )
 
     ax.legend(frameon=False, loc="lower center", bbox_to_anchor=(0.24, 0.06), fontsize=10)
-
-    # Fit membership is independent of display-only and highlighted clipped rows.
-    n_fitted_agn = int(np.count_nonzero(fit_membership_mask))
-    n_plotted_agn = int(np.count_nonzero(
-        np.isfinite(z_values) & np.isfinite(mu_pred_plot)
-    ))
-    ax.text(
-        0.03, 0.97,
-        f"AGNs: {n_fitted_agn:,} fitted; {n_plotted_agn:,} plotted",
-        transform=ax.transAxes, ha="left", va="top", fontsize=10,
-        zorder=20, gid="agn-sample-counts",
-    )
 
     # Save/show
     fig.tight_layout()
@@ -10774,6 +10733,23 @@ def plot_predicted_L2500_vs_sigmahat(
         x_log_ref_show = x_log_ref
         pred_M_err_show = 0
 
+    # Keep the complete asymmetric x error bars inside the axes and add equal
+    # logarithmic padding on both sides.  Basing the limits on the error-bar
+    # extents also keeps the data cloud centered when a few high-x objects have
+    # long upper uncertainties.
+    x_extent_lower = np.ravel(x_lower)
+    x_extent_upper = np.ravel(x_upper)
+    if df_calibrators is not None and len(df_calibrators) > 0:
+        x_extent_lower = np.concatenate((x_extent_lower, np.ravel(x_lower_show)))
+        x_extent_upper = np.concatenate((x_extent_upper, np.ravel(x_upper_show)))
+    finite_x_lower = x_extent_lower[np.isfinite(x_extent_lower) & (x_extent_lower > 0.0)]
+    finite_x_upper = x_extent_upper[np.isfinite(x_extent_upper) & (x_extent_upper > 0.0)]
+    x_errorbar_padding_dex = 0.35
+    x_axis_limits = (
+        10.0 ** (np.log10(np.min(finite_x_lower)) - x_errorbar_padding_dex),
+        10.0 ** (np.log10(np.max(finite_x_upper)) + x_errorbar_padding_dex),
+    )
+
     # --- Grid and band (unchanged) ---
     # x_min_err = np.min([np.min(x_log_ref - x_log_err_med), np.min(x_log_lower_show)])
     # x_max_err = np.max([np.max(x_log_ref + x_log_err_med), np.max(x_log_upper_show)])
@@ -11162,16 +11138,8 @@ def plot_predicted_L2500_vs_sigmahat(
     # --- Axes & labels ---
     ax.set_ylabel(r'$L_{2500\,\mathrm{\AA}}$ (erg s$^{-1}$)', fontsize=14)
     ax.set_xscale('log'); ax.set_yscale('log')
-    if df_calibrators is not None and len(df_calibrators) > 0:
-        # ax.set_xlim((2e-9, 6e13))
-        # ax.set_ylim((5e39, 2e48))
-        ax.set_xlim((1.2e-3, 1.25e2))
-        ax.set_ylim((np.min(10**ylog_med), np.max(10**ylog_med)))
-    else:
-        # ax.set_xlim((7e-8, 9e5))
-        # ax.set_ylim((3e42, 2e47))
-        ax.set_xlim((1.2e-3, 1.25e2))
-        ax.set_ylim((np.min(10**ylog_med), np.max(10**ylog_med)))
+    ax.set_xlim(x_axis_limits)
+    ax.set_ylim((np.min(10**ylog_med), np.max(10**ylog_med)))
 
     ax.xaxis.set_major_locator(LogLocator(base=10.0))
     ax.xaxis.set_minor_locator(LogLocator(base=10.0, subs=np.arange(2, 10) * 0.1, numticks=100))
@@ -13758,6 +13726,7 @@ def plot_redshift_histograms(df_pantheon, df_agn,
                             xscale="log",
                             bins=40,
                             z_range=(0.44, 3.16),
+                            restricted_z_min=0.7,
                             only_agn=False,
                             show=False):
     """
@@ -13777,7 +13746,11 @@ def plot_redshift_histograms(df_pantheon, df_agn,
     # --- AGN ---
     z_agn_all = df_agn[z_col_agn].to_numpy()
     z_agn_fid = df_agn[df_agn[z_col_agn].between(z_range[0], z_range[1])][z_col_agn].to_numpy()
-    z_agn_restricted = df_agn[df_agn[z_col_agn].between(1.0, z_range[1])][z_col_agn].to_numpy()
+    restricted_mask = (
+        (df_agn[z_col_agn] > restricted_z_min)
+        & (df_agn[z_col_agn] < z_range[1])
+    )
+    z_agn_restricted = df_agn.loc[restricted_mask, z_col_agn].to_numpy()
 
     # Remove non-positive values
     z_all = np.concatenate([z_sn, z_agn_all])
@@ -13842,7 +13815,7 @@ def plot_redshift_histograms(df_pantheon, df_agn,
         linestyle="--",
         color="0.7",
         linewidth=2.8,
-        label=rf"AGN ($\mathit{{restricted\ fitting\ sample}};\ 1.0<z<{z_range[1]}$)",
+        label=rf"AGN ($\mathit{{restricted\ fitting\ sample}};\ {restricted_z_min}<z<{z_range[1]}$)",
         zorder=-2
     )
 
