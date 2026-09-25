@@ -1191,11 +1191,13 @@ def validate_resume_checkpoint(
     expected_prior_bounds_json=None,
     expected_early_de_guard=False,
     bright_subsample_cut=None,
+    only_sna=False,
 ):
     _validate_checkpoint_bright_subsample(results, checkpoint_file, bright_subsample_cut)
-    _validate_strict_padded_checkpoint_metadata(
-        results, checkpoint_file, expected_cut_configuration_json
-    )
+    if not only_sna:
+        _validate_strict_padded_checkpoint_metadata(
+            results, checkpoint_file, expected_cut_configuration_json
+        )
     required_keys = {
         "flat_samples",
         "dmi_max_w",
@@ -3758,6 +3760,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     expected_prior_bounds_json=prior_bounds_json,
                     expected_early_de_guard=early_de_guard,
                     bright_subsample_cut=bright_subsample_cut,
+                    only_sna=only_sna,
                 )
             if not only_sna:
                 if stored_pivot_context != agn_pivot_context:
@@ -4818,6 +4821,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     ),
                     expected_early_de_guard=early_de_guard,
                     bright_subsample_cut=bright_subsample_cut,
+                    only_sna=only_sna,
                 )
                 pass2_warm_start_flat_samples = selected_resume_results["flat_samples"]
             _write_sigma_clip_diagnostics(

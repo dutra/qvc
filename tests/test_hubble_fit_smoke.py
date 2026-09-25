@@ -1597,6 +1597,30 @@ def test_strict_padded_resume_rejects_checkpoint_without_map_metadata():
         )
 
 
+def test_sna_resume_skips_strict_padded_completeness_metadata_validation():
+    expected_configuration = json.dumps(
+        {"completeness_interpolation_policy": "strict-padded-v1"}
+    )
+    payload = {
+        **_current_prior_checkpoint_metadata(),
+        "flat_samples": np.zeros((4, 1)),
+        "dmi_max_w": np.zeros(0),
+        "dmi_posterior_sigma": np.ones(0),
+        "integrals_max_w": np.zeros(0),
+        "logZ": 0.0,
+        "logZerr": 0.0,
+    }
+
+    hubble_fit.validate_resume_checkpoint(
+        payload,
+        "sna.h5",
+        ndim=1,
+        n_agn=0,
+        expected_cut_configuration_json=expected_configuration,
+        only_sna=True,
+    )
+
+
 @pytest.mark.parametrize("n_samples", [4, 1000])
 def test_compute_direct_full_sample_completeness_summaries_optionally_returns_selected_draws(
     fake_data,
