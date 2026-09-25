@@ -67,16 +67,19 @@ def test_plot_psd_uv_recovery_comparison_normalizes_and_filters(monkeypatch):
         assert axes[0, 1].get_title() == "Fixed-slope DRW"
         assert axes[0, 0].get_xlim() == pytest.approx(axes[0, 1].get_xlim())
         assert axes[1, 0].get_xlim() == pytest.approx(axes[1, 1].get_xlim())
-        assert "N = 2" in axes[0, 0].texts[0].get_text()
-        assert "Bias = +0.10 dex" in axes[0, 0].texts[0].get_text()
-        assert "N = 2" in axes[0, 1].texts[0].get_text()
-        assert "Bias = +0.05 dex" in axes[0, 1].texts[0].get_text()
+        assert "Bias = 0.10 dex" in axes[0, 0].texts[0].get_text()
+        assert "Bias = 0.05 dex" in axes[0, 1].texts[0].get_text()
+        assert "N =" not in axes[0, 0].texts[0].get_text()
+        assert axes[0, 0].get_legend().get_texts()[0].get_text() == "AGN"
+        assert axes[0, 0].xaxis.label.get_fontsize() == pytest.approx(14)
         wavelength_shift = -0.5 * np.log10(2500.0 / 3000.0)
-        free_sigma_points = next(
-            collection.get_offsets()
+        free_sigma_collection = next(
+            collection
             for collection in axes[0, 0].collections
             if collection.get_offsets().shape == (2, 2)
         )
+        free_sigma_points = free_sigma_collection.get_offsets()
+        assert free_sigma_collection.get_alpha() == pytest.approx(0.4)
         np.testing.assert_allclose(
             np.sort(np.asarray(free_sigma_points)[:, 0]),
             np.sort(np.asarray([-1.0, -0.6]) + wavelength_shift),
@@ -165,7 +168,7 @@ def test_plot_psd_uv_recovery_comparison_uses_model_specific_contours(monkeypatc
     for kwargs in contour_kwargs:
         assert len(kwargs["levels"]) == 2
         assert kwargs["linestyles"] == ("solid", "solid")
-        assert kwargs["linewidths"] == (2.6, 3.2)
+        assert kwargs["linewidths"] == 1.7
 
 
 def test_plot_psd_uv_recovery_marks_and_excludes_unresolved_tau(monkeypatch):
@@ -185,7 +188,7 @@ def test_plot_psd_uv_recovery_marks_and_excludes_unresolved_tau(monkeypatch):
     try:
         free_tau_ax = np.asarray(fig.axes).reshape(2, 2)[1, 0]
         summary = free_tau_ax.texts[0].get_text()
-        assert "N = 1" in summary
+        assert "N =" not in summary
         assert "Unresolved" not in summary
         assert any(
             collection.get_label().startswith("$\\tau_{\\rm model}<")
@@ -215,7 +218,7 @@ def test_plot_psd_uv_recovery_filters_unresolved_tau_points(monkeypatch):
     try:
         free_tau_ax = np.asarray(fig.axes).reshape(2, 2)[1, 0]
         summary = free_tau_ax.texts[0].get_text()
-        assert "N = 1" in summary
+        assert "N =" not in summary
         assert "Unresolved" not in summary
         assert not any(
             collection.get_label().startswith("$\\tau_{\\rm model}<")
@@ -374,5 +377,15 @@ def test_plot_psd_uv_recovery_single_model_panels_have_no_titles(
     try:
         assert len(fig.axes) == 2
         assert [axis.get_title() for axis in fig.axes] == ["", ""]
+        if only_flag == "fixed_only":
+            sigma_axis = fig.axes[0]
+            points = next(
+                np.asarray(collection.get_offsets())
+                for collection in sigma_axis.collections
+                if collection.get_offsets().shape == (2, 2)
+            )
+            plotted = np.concatenate([points[:, 0], points[:, 1]])
+            assert np.min(plotted) - sigma_axis.get_xlim()[0] >= 0.1
+            assert sigma_axis.get_xlim()[1] - np.max(plotted) >= 0.1
     finally:
         plt.close(fig)

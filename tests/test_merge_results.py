@@ -233,6 +233,7 @@ def test_write_macleod_identity_grid_enables_blue_sigma_contours(
     )
 
     assert captured["style"]["contour_color"] == "tab:blue"
+    assert captured["style"]["contour_linewidth"] == 1.7
     assert captured["style"]["show_metric_count"] is False
     assert plotting_appendix.IDENTITY_CONTOUR_ENCLOSED_PROBABILITIES == (0.84, 0.68)
 

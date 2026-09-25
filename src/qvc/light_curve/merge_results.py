@@ -931,6 +931,7 @@ def write_stone_sigma_tau_identity_grid(rows, output_path: str, stone_fits_path=
         expand_limits_for_errorbars=True,
         style={
             "contour_color": "tab:blue",
+            "contour_linewidth": 1.7,
             "contour_smoothing": 4.0,
             "show_metric_count": False,
         },
@@ -1043,6 +1044,7 @@ def write_samelength_sigma_tau_identity_grid(x_rows, y_rows, output_path: str):
         expand_limits_for_errorbars=True,
         style={
             "contour_color": "tab:blue",
+            "contour_linewidth": 1.7,
             "contour_smoothing": 4.0,
             "show_metric_count": False,
         },
@@ -1299,6 +1301,7 @@ def write_macleod_sigma_tau_identity_grid(rows, output_path: str, macleod_dir=No
             "error_alpha": 0.08,
             "rasterized": False,
             "contour_color": "tab:blue",
+            "contour_linewidth": 1.7,
             "show_metric_count": False,
         },
     )

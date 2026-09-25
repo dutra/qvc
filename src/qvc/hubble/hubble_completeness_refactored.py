@@ -2012,13 +2012,18 @@ def get_completeness_function_2d(
                     colors="black",
                     linewidths=0.8,
                 )
+                label_options = {
+                    "inline": True,
+                    "inline_spacing": 10,
+                    "fmt": lambda level: f"{level:.0f}%",
+                    "fontsize": 10,
+                    "colors": "black",
+                }
                 ax.clabel(
                     contours,
-                    inline=True,
-                    inline_spacing=10,
-                    fmt=lambda level: f"{level:.0f}%",
-                    fontsize=10,
-                    colors="black",
+                    levels=[10.0, 25.0],
+                    manual=[(19.1, 1.75), (17.9, 0.75), (21.1, 1.5)],
+                    **label_options,
                 )
             ax.set_ylabel(r"$z$", fontsize=16)
             ax.set_xlabel(r"$m_{2500\,\mathrm{\AA}}$ (mag)", fontsize=16)

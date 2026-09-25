@@ -31,6 +31,7 @@ from matplotlib.ticker import (
     NullLocator,
 )
 from scipy.interpolate import RegularGridInterpolator, interp1d
+from scipy.ndimage import gaussian_filter
 from scipy.optimize import minimize_scalar
 from scipy.stats import chi2 as chi2_distribution
 from scipy.stats import gaussian_kde, kurtosis, norm, normaltest, probplot, skew, spearmanr
@@ -3740,7 +3741,13 @@ def plot_psd_uv_recovery_comparison(
             }
         )
 
-    def _shared_limits(selected_panels, *, step, margin_floor):
+    def _shared_limits(
+        selected_panels,
+        *,
+        step,
+        margin_floor,
+        margin_fraction=0.04,
+    ):
         values = [
             values
             for panel in selected_panels
@@ -3751,7 +3758,7 @@ def plot_psd_uv_recovery_comparison(
             return None
         values = np.concatenate(values)
         span = float(np.max(values) - np.min(values))
-        margin = max(0.04 * span, margin_floor)
+        margin = max(margin_fraction * span, margin_floor)
         lower = step * np.floor((np.min(values) - margin) / step)
         upper = step * np.ceil((np.max(values) + margin) / step)
         return float(lower), float(upper)
@@ -3760,8 +3767,22 @@ def plot_psd_uv_recovery_comparison(
         panels = [panels[0], panels[2]]
     elif fixed_only:
         panels = [panels[1], panels[3]]
-    sigma_limits = _shared_limits([p for p in panels if p["quantity"] == "sigma"], step=0.05, margin_floor=0.06)
-    tau_limits = _shared_limits([p for p in panels if p["quantity"] == "tau"], step=0.05, margin_floor=0.08)
+    sigma_margin_fraction = 0.20 if fixed_only else 0.04
+    tau_margin_fraction = 0.30 if fixed_only else 0.04
+    sigma_margin_floor = 0.20 if fixed_only else 0.06
+    tau_margin_floor = 0.45 if fixed_only else 0.08
+    sigma_limits = _shared_limits(
+        [p for p in panels if p["quantity"] == "sigma"],
+        step=0.05,
+        margin_floor=sigma_margin_floor,
+        margin_fraction=sigma_margin_fraction,
+    )
+    tau_limits = _shared_limits(
+        [p for p in panels if p["quantity"] == "tau"],
+        step=0.05,
+        margin_floor=tau_margin_floor,
+        margin_fraction=tau_margin_fraction,
+    )
     if sigma_limits is None and tau_limits is None:
         raise ValueError("No finite valid free-slope or fixed-slope PSD fits to plot.")
 
@@ -3769,29 +3790,49 @@ def plot_psd_uv_recovery_comparison(
         if x.size <= 50:
             return
         try:
-            kde = gaussian_kde(np.vstack([x, y]), bw_method="scott")
-            xq = np.quantile(x, [0.01, 0.99])
-            yq = np.quantile(y, [0.01, 0.99])
-            x_range = float(xq[1] - xq[0])
-            y_range = float(yq[1] - yq[0])
-            if x_range <= 0.0 or y_range <= 0.0:
-                return
-            x_grid, y_grid = np.meshgrid(
-                np.linspace(xq[0] - 0.1 * x_range, xq[1] + 0.1 * x_range, 220),
-                np.linspace(yq[0] - 0.1 * y_range, yq[1] + 0.1 * y_range, 220),
+            xlim = ax.get_xlim()
+            ylim = ax.get_ylim()
+            inside = (
+                np.isfinite(x)
+                & np.isfinite(y)
+                & (x >= xlim[0])
+                & (x <= xlim[1])
+                & (y >= ylim[0])
+                & (y <= ylim[1])
             )
-            density = kde(
-                np.vstack([x_grid.ravel(), y_grid.ravel()])
-            ).reshape(x_grid.shape)
-            levels = _kde_conf_levels(density, conf=(0.954, 0.683))
+            if np.count_nonzero(inside) < 2:
+                return
+            histogram, x_edges, y_edges = np.histogram2d(
+                x[inside], y[inside], bins=90, range=[xlim, ylim]
+            )
+            density = gaussian_filter(histogram, sigma=4.0)
+            ranked = np.sort(density[density > 0.0])[::-1]
+            if ranked.size == 0 or ranked.sum() <= 0.0:
+                return
+            cumulative = np.cumsum(ranked) / ranked.sum()
+            levels = np.unique(
+                np.sort(
+                    [
+                        ranked[
+                            min(
+                                np.searchsorted(cumulative, probability),
+                                ranked.size - 1,
+                            )
+                        ]
+                        for probability in (0.954, 0.683)
+                    ]
+                )
+            )
+            x_grid = 0.5 * (x_edges[:-1] + x_edges[1:])
+            y_grid = 0.5 * (y_edges[:-1] + y_edges[1:])
             ax.contour(
                 x_grid,
                 y_grid,
-                density,
+                density.T,
                 levels=levels,
                 colors=color,
                 linestyles=("solid", "solid"),
-                linewidths=(2.6, 3.2),
+                linewidths=1.7,
                 alpha=1.0,
                 zorder=3,
             )
@@ -3829,6 +3870,8 @@ def plot_psd_uv_recovery_comparison(
             continue
         x = panel["x"]
         y = panel["y"]
+        ax.set_xlim(*limits)
+        ax.set_ylim(*limits)
         resolved = panel["resolved"]
         stats_mask = resolved if panel["quantity"] == "tau" else np.ones(
             x.size, dtype=bool
@@ -3842,25 +3885,27 @@ def plot_psd_uv_recovery_comparison(
                 xerr=panel["xerr"][resolved],
                 yerr=panel["yerr"][resolved],
                 fmt="none",
-                color="0.4",
-                alpha=0.15,
-                lw=0.75,
-                capsize=1.2,
-                capthick=0.6,
+                color="0.35",
+                alpha=0.28,
+                lw=1.4,
+                capsize=3,
+                capthick=1,
                 rasterized=True,
                 zorder=-3,
             )
             ax.scatter(
                 x[resolved],
                 y[resolved],
-                s=10,
+                s=18,
                 color="k",
-                alpha=0.58,
-                edgecolors="none",
+                alpha=0.4,
+                edgecolors="k",
+                linewidths=0.5,
                 rasterized=True,
                 zorder=-2,
             )
         unresolved = ~resolved
+        unresolved_handle = None
         if np.any(unresolved):
             ax.errorbar(
                 x[unresolved],
@@ -3876,7 +3921,7 @@ def plot_psd_uv_recovery_comparison(
                 rasterized=True,
                 zorder=-2,
             )
-            ax.scatter(
+            unresolved_handle = ax.scatter(
                 x[unresolved],
                 y[unresolved],
                 s=19,
@@ -3896,19 +3941,16 @@ def plot_psd_uv_recovery_comparison(
             y[stats_mask],
             panel["contour_color"],
         )
-        ax.set_xlim(*limits)
-        ax.set_ylim(*limits)
         ax.set_aspect("equal", adjustable="box")
-        ax.set_xlabel(panel["xlabel"])
-        ax.set_ylabel(panel["ylabel"])
+        ax.set_xlabel(panel["xlabel"], labelpad=2, fontsize=14)
+        ax.set_ylabel(panel["ylabel"], labelpad=2, fontsize=14)
         if delta.size:
             summary = (
-                f"N = {delta.size}\n"
-                f"Bias = {np.mean(delta):+.2f} dex\n"
+                f"Bias = {np.mean(delta):.2f} dex\n"
                 f"$\\sigma$ = {np.std(delta):.2f} dex"
             )
         else:
-            summary = "N = 0"
+            summary = "No resolved fits"
         ax.text(
             0.97,
             0.03,
@@ -3935,7 +3977,9 @@ def plot_psd_uv_recovery_comparison(
             right=True,
             which="major",
             length=4,
-            width=1.0,
+            width=1.1,
+            pad=2,
+            labelsize=12,
         )
         ax.tick_params(
             direction="in",
@@ -3943,13 +3987,37 @@ def plot_psd_uv_recovery_comparison(
             right=True,
             which="minor",
             length=2.5,
-            width=0.8,
+            width=0.9,
         )
         for spine in ax.spines.values():
             spine.set_linewidth(1.1)
 
-        if np.any(unresolved):
-            ax.legend(loc="upper left", fontsize=8.5, frameon=True)
+        legend_handle = ax.errorbar(
+            [np.nan],
+            [np.nan],
+            xerr=[1.0],
+            yerr=[1.0],
+            fmt="o",
+            color="k",
+            markerfacecolor="k",
+            markeredgecolor="k",
+            markeredgewidth=0.5,
+            markersize=np.sqrt(18),
+            ecolor="0.35",
+            elinewidth=1.4,
+            capsize=3,
+            alpha=0.9,
+            label="AGN",
+        )
+        handles = [legend_handle]
+        if unresolved_handle is not None:
+            handles.append(unresolved_handle)
+        ax.legend(
+            handles=handles,
+            loc="upper left",
+            frameon=False,
+            fontsize=13 if not np.any(unresolved) else 8.5,
+        )
 
     if not single_model:
         axes[0, 0].set_title("Free-slope BPL", fontsize=14)
@@ -10928,7 +10996,7 @@ def plot_predicted_L2500_vs_sigmahat(
                 ]
             elif debias:
                 contour_color = "tab:blue"
-                contour_linewidths = (2.0, 2.4)
+                contour_linewidths = (2.6, 3.2)
                 contour_handles = [
                     Line2D([0], [0], color=contour_color, lw=width, ls='-', label=label)
                     for width, label in zip(

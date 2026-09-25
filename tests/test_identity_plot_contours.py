@@ -53,6 +53,7 @@ def test_stone_identity_grid_uses_smooth_blue_contours(monkeypatch, tmp_path):
     )
 
     assert captured["style"]["contour_color"] == "tab:blue"
+    assert captured["style"]["contour_linewidth"] == 1.7
     assert captured["style"]["contour_smoothing"] == 4.0
 
 
@@ -74,4 +75,5 @@ def test_samelength_identity_grid_uses_smooth_blue_contours(
     )
 
     assert captured["style"]["contour_color"] == "tab:blue"
+    assert captured["style"]["contour_linewidth"] == 1.7
     assert captured["style"]["contour_smoothing"] == 4.0
