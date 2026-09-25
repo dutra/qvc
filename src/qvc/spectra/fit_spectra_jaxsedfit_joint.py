@@ -2425,8 +2425,9 @@ def preflight_resume_host_capture_bundles(records, args):
     for rec in records:
         path = posterior_bundle_path(args.resume, rec)
         if not path.is_file():
-            failures.append(f"{path}: missing")
-            continue
+            raise FileNotFoundError(
+                f"Missing saved posterior for object_id={rec.get('object_id')}: {path}"
+            )
         try:
             with h5py.File(path, "r") as handle:
                 unannotated_accepted = False
@@ -3155,8 +3156,8 @@ def run_hybrid_fit(rec, args):
     """Resume one selected object, retaining fallback only for non-model errors."""
     source_path = posterior_bundle_path(args.resume, rec)
     if not source_path.is_file():
-        raise IncompatibleHostCaptureResumeError(
-            _host_capture_resume_message(source_path, "expected bundle is missing")
+        raise FileNotFoundError(
+            f"Missing saved posterior for object_id={rec.get('object_id')}: {source_path}"
         )
 
     try:
@@ -3164,6 +3165,7 @@ def run_hybrid_fit(rec, args):
     except (
         IncompatibleHostCaptureResumeError,
         IncompatibleBALResumeError,
+        IncompatibleBalmerContinuumResumeError,
         M2500ReconstructionError,
     ):
         raise
@@ -3318,13 +3320,48 @@ def build_records(args):
     return records
 
 
+def run_object_safely(rec, args):
+    """Keep object failures local, including in spawned pool workers."""
+    source_path = ""
+    try:
+        if args.resume:
+            source_path = posterior_bundle_path(args.resume, rec)
+            preflight_resume_host_capture_bundles([rec], args)
+            result = run_hybrid_fit(rec, args)
+        else:
+            result = run_one_fit(rec, args)
+        if result.get("fit_ok", False):
+            validate_m2500_catalog_rows([result])
+            return result
+        error = result.get("error_message") or "Object processing failed"
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        if args.verbose:
+            traceback.print_exc()
+
+    # Rebuild from the empty schema so partial predictions cannot leak into
+    # failed rows. Only new-run artifacts for this object are removed.
+    try:
+        _remove_incomplete_resumed_outputs(rec, args)
+    except Exception as exc:
+        error += f"; output cleanup failed: {type(exc).__name__}: {exc}"
+    result = _base_result(
+        rec, args,
+        execution_mode="resume_failed" if args.resume else "fresh_failed",
+        resumed_from_path=source_path,
+    )
+    result["error_message"] = error
+    if args.resume:
+        result["resume_error_message"] = error
+    print(f"Object {rec.get('object_id')} failed: {error}", flush=True)
+    return result
+
+
 def run_fit(args):
     records = build_records(args)
     if not records:
         raise RuntimeError("No records to process.")
-    if args.resume:
-        preflight_resume_host_capture_bundles(records, args)
-    worker = partial(run_hybrid_fit if args.resume else run_one_fit, args=args)
+    worker = partial(run_object_safely, args=args)
     if args.resume:
         description = (
             "Joint SED+spectrum resume-only"
@@ -3372,7 +3409,13 @@ def run_fit(args):
     )
     validate_m2500_catalog_rows(rows)
     write_joint_fit_results_hdf5(args.fpath_out, rows, provenance=provenance)
-    print(f"Wrote {len(rows)} rows to {args.fpath_out}")
+    successful = sum(bool(row.get("fit_ok", False)) for row in rows)
+    print(
+        f"Wrote {len(rows)} rows to {args.fpath_out}: "
+        f"{successful} succeeded, {len(rows) - successful} failed."
+    )
+    if not successful:
+        raise SystemExit("All objects failed; the failure catalog was written.")
 
 
 def parse_args(argv=None):
@@ -3427,8 +3470,8 @@ def parse_args(argv=None):
         "--resume-only",
         action="store_true",
         help=(
-            "Fail if reconstruction from a saved posterior bundle fails; never "
-            "fall back to a fresh Optax/NUTS fit. Requires --resume."
+            "Record failed reconstructions as failed catalog rows and continue; "
+            "never fall back to a fresh Optax/NUTS fit. Requires --resume."
         ),
     )
     parser.add_argument(

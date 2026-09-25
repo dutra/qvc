@@ -544,3 +544,38 @@ def test_sfitspectra_retry_rejects_fresh_run_options(tmp_path, fresh_args):
     assert result.returncode == 2
     assert "--retry cannot be combined with fresh-run options" in result.stderr
     assert _sbatch_calls(calls_path) == []
+
+
+def test_sfitspectra_forwards_resume_only(tmp_path, monkeypatch):
+    root, script_path, csv_path, _, env = _fresh_workspace(tmp_path)
+    (root / 'results/data/jaxqsofit/old/all').mkdir(parents=True)
+    result = _run_fresh(root, script_path, env, '--chisq-csv', str(csv_path),
+                        '--description', 'reconstruct', '--resume', 'old', '--resume-only')
+    assert result.returncode == 0, result.stderr
+    generated = next((root / 'hpc_scripts/submit/jaxqsofit').glob('submit_*.sbatch')).read_text()
+    assert 'export RESUME_ONLY="1"' in generated
+    # Execute the generated Python block with a stub subprocess to inspect
+    # the actual command reaching the fitter, without submitting HPC work.
+    block = generated.split('"$PYTHON_BIN" - <<\'PY\'\n', 1)[1].split('\nPY\n', 1)[0]
+    for key, value in re.findall(r'^export (\w+)="([^"\n]*)"$', generated, re.M):
+        monkeypatch.setenv(key, value)
+    for key in ('CHUNK_SIZE', 'NPROC', 'CPUS_PER_TASK'):
+        match = re.search(rf'^export {key}="?(\d+)"?$', generated, re.M)
+        monkeypatch.setenv(key, match.group(1))
+    monkeypatch.setenv('TASK_ID', '0')
+    monkeypatch.chdir(root)
+    commands = []
+    monkeypatch.setattr(subprocess, 'run', lambda cmd, **kwargs: commands.append(cmd))
+    exec(compile(block, str(script_path), 'exec'), {})
+    assert len(commands) == 1
+    assert '--resume-only' in commands[0]
+    assert commands[0][commands[0].index('--resume') + 1].endswith('/old/all')
+
+
+def test_sfitspectra_resume_only_requires_resume(tmp_path):
+    root, script_path, csv_path, calls_path, env = _fresh_workspace(tmp_path)
+    result = _run_fresh(root, script_path, env, '--chisq-csv', str(csv_path),
+                        '--description', 'reconstruct', '--resume-only')
+    assert result.returncode == 2
+    assert '--resume-only requires --resume' in result.stderr
+    assert _sbatch_calls(calls_path) == []

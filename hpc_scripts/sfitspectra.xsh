@@ -351,6 +351,11 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--resume-only",
+    action="store_true",
+    help="Reconstruct saved posteriors only; record object failures without fresh fitting. Requires --resume.",
+)
+parser.add_argument(
     "--retry",
     metavar="FULL_JOB_NAME",
     default="",
@@ -368,6 +373,7 @@ fresh_run_options = (
     "--fit-script",
     "--fit-bal",
     "--resume",
+    "--resume-only",
 )
 fresh_run_option_was_explicit = any(
     arg == option or arg.startswith(f"{option}=")
@@ -390,6 +396,8 @@ if cli_args.description is None:
 
 fit_script = cli_args.fit_script
 resume_run_name = cli_args.resume.strip()
+if cli_args.resume_only and not resume_run_name:
+    parser.error("--resume-only requires --resume")
 if cli_args.fit_bal and fit_script != "fit_spectra_jaxsedfit_joint.py":
     parser.error("--fit-bal is supported only with fit_spectra_jaxsedfit_joint.py")
 if resume_run_name and fit_script != "fit_spectra_jaxsedfit_joint.py":
@@ -605,7 +613,7 @@ submission = submission_record(
             "cache_dir": cache_dir,
         },
         "outputs": {"output_dir": output_dir, "fig_dir": fig_dir},
-        "resume": {"directory": resume_dir, "run_name": resume_run_name},
+        "resume": {"directory": resume_dir, "run_name": resume_run_name, "only": cli_args.resume_only},
         "resources": {
             "partition": partition,
             "time": time_limit,
@@ -637,6 +645,7 @@ export PREFIX="{prefix}"
 export FIT_SCRIPT="{fit_script}"
 export FIT_MODULE="{fit_module}"
 export FIT_BAL="{int(cli_args.fit_bal)}"
+export RESUME_ONLY="{int(cli_args.resume_only)}"
 export SED_PHOTOMETRY_PATH="{sed_photometry_path}"
 export OUTPUT_DIR="{output_dir}"
 export OBJECT_IDS_FILE="{object_ids_file}"
@@ -687,6 +696,7 @@ prefix = os.environ["PREFIX"]
 fit_script = os.environ["FIT_SCRIPT"]
 fit_module = os.environ["FIT_MODULE"]
 fit_bal = os.environ["FIT_BAL"] == "1"
+resume_only = os.environ["RESUME_ONLY"] == "1"
 sed_photometry_path = os.environ["SED_PHOTOMETRY_PATH"]
 output_dir = os.environ["OUTPUT_DIR"]
 object_ids_file = os.environ["OBJECT_IDS_FILE"]
@@ -756,6 +766,8 @@ elif fit_script == "fit_spectra_jaxsedfit_joint.py":
             "--resume", resume_dir,
             "--resume-run-name", resume_run_name,
         ])
+        if resume_only:
+            cmd.append("--resume-only")
 else:
     raise ValueError(f"Unsupported FIT_SCRIPT in generated job: {{fit_script!r}}")
 

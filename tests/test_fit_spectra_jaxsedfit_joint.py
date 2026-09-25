@@ -1497,6 +1497,7 @@ def _hybrid_args(tmp_path):
     return SimpleNamespace(
         resume=str(tmp_path / "old"),
         resume_run_name="old_run",
+        resume_only=False,
         output_dir=str(tmp_path / "new"),
         fig_dir=str(tmp_path / "figs"),
         save_fig=True,
@@ -2267,11 +2268,11 @@ def test_parse_args_requires_resume_only_for_prepared_records(tmp_path):
         )
 
 
-def test_hybrid_missing_bundle_requires_fresh_spectral_run(monkeypatch, tmp_path):
+def test_hybrid_missing_bundle_reports_missing_file(monkeypatch, tmp_path):
     args = _hybrid_args(tmp_path)
     with pytest.raises(
-        joint.IncompatibleHostCaptureResumeError,
-        match="Run fresh spectral inference",
+        FileNotFoundError,
+        match="Missing saved posterior",
     ):
         joint.run_hybrid_fit(_run_record(), args)
 
@@ -2653,3 +2654,163 @@ def test_final_sed_disables_residuals_without_initialization_plots(tmp_path):
     args = SimpleNamespace(plot_init=False, progress=False)
     assert joint.fit_with_saved_initialization_plots(fitter, {}, args) == "final figure"
     assert fitter.plot_sed.__func__ is Fitter.plot_sed
+
+
+def _valid_safe_worker_row(rec, args):
+    row = joint._base_result(rec, args, execution_mode='resumed' if args.resume else 'fresh')
+    derived = joint.estimate_joint_hubble_posterior_draws(
+        {'log_agn_amp': np.log(np.array([1.e38, 1.1e38])),
+         'pl_slope': np.array([-1.8, -1.7]),
+         'ebv_gal': np.array([.02, .03]), 'ebv_agn': np.array([.03, .04])},
+        redshift=1.0)
+    prediction = {'component_host_fraction': np.array([[.25], [.20]])}
+    row.update(joint.summarize_joint_hubble_posterior_draws(derived))
+    row.update(joint.summarize_host_2500_psf(prediction))
+    (row['_joint_posterior_draws'], row['_joint_posterior_valid_count'],
+     row['_joint_posterior_index'], row['_joint_posterior_source_draw_count']) = (
+        joint.extract_compact_joint_posterior_draws(prediction, derived,
+                                                   object_id=rec['object_id'], seed=3))
+    row['_joint_psf_photometry_draws'] = np.full((64, 5), np.nan, dtype=np.float32)
+    row['_joint_psf_photometry_draws'][:2] = 1.0
+    row['_joint_psf_photometry_provenance'] = {
+        'prediction_source': 'synthetic_test', 'jaxsedfit_git_commit': 'a' * 40,
+    }
+    row['fit_ok'] = True
+    return row
+
+
+def _safe_worker_scenario(payload):
+    """Spawn-compatible fixture exercising the real protected worker."""
+    from unittest.mock import patch
+    rec, args, failure = payload
+
+    def process(record, received_args, *extra):
+        if record['object_id'] == 'bad':
+            if failure == 'interrupt':
+                raise KeyboardInterrupt()
+            if failure == 'model':
+                raise joint.IncompatibleBalmerContinuumResumeError('saved BC mismatch')
+            if failure in ('prediction', 'plot'):
+                partial = joint.posterior_bundle_path(received_args.output_dir, record)
+                partial.parent.mkdir(parents=True, exist_ok=True)
+                partial.write_bytes(b'partial')
+                raise RuntimeError(f'{failure} failed')
+        row = _valid_safe_worker_row(record, received_args)
+        row['f_bc_3000'] = .2
+        row['f_fe_uv_3000'] = .3
+        if record['object_id'] == 'bad' and failure == 'derived':
+            row['m_2500_dereddened'] = np.nan
+        return row
+
+    with patch.object(joint, '_run_resumed_fit', process), patch.object(
+        joint, 'run_one_fit', side_effect=AssertionError('Fresh inference called') if args.resume else process
+    ) as fresh:
+        row = joint.run_object_safely(rec, args)
+        if args.resume:
+            fresh.assert_not_called()
+        return row
+
+
+@pytest.mark.parametrize('nproc', [1, 2])
+@pytest.mark.parametrize('failure', ['missing', 'model', 'prediction', 'plot', 'derived'])
+def test_safe_resume_batch_continues(tmp_path, nproc, failure):
+    args = _hybrid_args(tmp_path)
+    args.resume_only = True
+    records = [dict(_run_record(), object_id=key, sdss_name=key) for key in ('first', 'bad', 'last')]
+    for rec in records:
+        if rec['object_id'] == 'bad' and failure == 'missing':
+            continue
+        path = joint.posterior_bundle_path(args.resume, rec)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with h5py.File(path, 'w') as handle:
+            handle.attrs[joint.HOST_CAPTURE_BUNDLE_ATTR] = joint.HOST_CAPTURE_BUNDLE_MARKER
+            handle.attrs[joint.HOST_CAPTURE_PSF_FWHM_ATTR] = joint.SDSS_TYPICAL_PSF_FWHM_ARCSEC
+            handle.attrs[joint.HOST_CAPTURE_QVC_FWHM_ATTR] = [joint.SDSS_STATIC_PSF_FWHM_ARCSEC[b] for b in 'ugriz']
+            handle.create_dataset('samples/log_host_capture_scale_arcsec', data=np.ones(2))
+    payloads = [(rec, args, failure) for rec in records]
+    if nproc == 1:
+        rows = list(map(_safe_worker_scenario, payloads))
+    else:
+        with joint.mp.get_context('spawn').Pool(nproc) as pool:
+            rows = list(pool.imap(_safe_worker_scenario, payloads))
+    assert [r['fit_ok'] for r in rows] == [True, False, True]
+    assert rows[1]['object_id'] == 'bad'
+    assert rows[1]['resumed_from_path'] == str(joint.posterior_bundle_path(args.resume, records[1]))
+    assert rows[1]['error_message']
+    assert np.isnan(rows[1]['f_bc_3000'])
+    assert rows[1]['_joint_posterior_valid_count'] == 0
+    assert rows[1]['fit_result_path'] == ''
+    assert not joint.posterior_bundle_path(args.output_dir, records[1]).exists()
+    assert rows[0]['f_bc_3000'] == .2
+    assert rows[2]['f_fe_uv_3000'] == .3
+    assert joint.posterior_bundle_path(args.resume, records[0]).is_file()
+    out = tmp_path / 'batch.h5'
+    joint.write_joint_fit_results_hdf5(out, rows)
+    with h5py.File(out) as handle:
+        assert handle['catalog/fit_ok'][:].tolist() == [True, False, True]
+
+
+@pytest.mark.parametrize('nproc', [1, 2])
+@pytest.mark.parametrize('failure', ['prediction', 'plot', 'derived'])
+def test_safe_fresh_batch_continues(tmp_path, failure, nproc):
+    args = _hybrid_args(tmp_path)
+    args.resume = None
+    payloads = [(dict(_run_record(), object_id=key, sdss_name=key), args, failure)
+                for key in ('first', 'bad', 'last')]
+    if nproc == 1:
+        rows = list(map(_safe_worker_scenario, payloads))
+    else:
+        with joint.mp.get_context('spawn').Pool(nproc) as pool:
+            rows = list(pool.imap(_safe_worker_scenario, payloads))
+    assert [r['fit_ok'] for r in rows] == [True, False, True]
+
+
+def test_safe_worker_does_not_swallow_interrupt(tmp_path):
+    args = _hybrid_args(tmp_path)
+    args.resume = None
+    with pytest.raises(KeyboardInterrupt):
+        _safe_worker_scenario((dict(_run_record(), object_id='bad'), args, 'interrupt'))
+
+
+@pytest.mark.parametrize('success', [False, True])
+def test_run_fit_writes_failures_and_reports_status(monkeypatch, tmp_path, success):
+    args = _hybrid_args(tmp_path)
+    args.resume_only = True
+    args.nproc = 1
+    args.catalog_progress = False
+    args.fpath_out = str(tmp_path / 'batch.h5')
+    args.fpath_in = args.sed_photometry_path = args.dr16q_fits = None
+    records = [dict(_run_record(), object_id='bad')]
+    if success:
+        records.append(dict(_run_record(), object_id='good'))
+    def worker(rec, args):
+        row = joint._base_result(rec, args, execution_mode='resume_failed')
+        if rec['object_id'] == 'good':
+            row = _valid_safe_worker_row(rec, args)
+        return row
+    monkeypatch.setattr(joint, 'build_records', lambda args: records)
+    monkeypatch.setattr(joint, 'run_object_safely', worker)
+    monkeypatch.setattr(joint, 'build_run_record', lambda *a, **k: {})
+    if success:
+        joint.run_fit(args)
+    else:
+        with pytest.raises(SystemExit, match='failure catalog was written'):
+            joint.run_fit(args)
+    with h5py.File(args.fpath_out) as handle:
+        assert len(handle['catalog/object_id']) == len(records)
+
+
+def test_run_fit_output_write_errors_remain_fatal(monkeypatch, tmp_path):
+    args = _hybrid_args(tmp_path)
+    args.nproc = 1
+    args.catalog_progress = False
+    args.fpath_out = str(tmp_path / 'batch.h5')
+    args.fpath_in = args.sed_photometry_path = args.dr16q_fits = None
+    monkeypatch.setattr(joint, 'build_records', lambda args: [_run_record()])
+    monkeypatch.setattr(joint, 'run_object_safely', _valid_safe_worker_row)
+    monkeypatch.setattr(joint, 'build_run_record', lambda *a, **k: {})
+    def fail_write(*a, **k):
+        raise OSError('disk full')
+    monkeypatch.setattr(joint, 'write_joint_fit_results_hdf5', fail_write)
+    with pytest.raises(OSError, match='disk full'):
+        joint.run_fit(args)

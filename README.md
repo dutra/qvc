@@ -316,6 +316,15 @@ The `hpc_scripts` folder contains Slurm/Yale-HPC-oriented helpers. Treat these a
     --description nested_N8000_BAL \
     --fit-bal
   ```
+  To regenerate catalogs and plots without any fresh inference, add
+  `--resume OLD_RUN_NAME --resume-only`. Saved bundles are read from
+  `results/data/jaxqsofit/OLD_RUN_NAME/all/`; outputs go into a new run.
+  Individual failures (including missing bundles) produce `fit_ok=False`
+  catalog rows and processing continues. A chunk with any successful objects
+  exits successfully; an entirely failed chunk writes its failure catalog
+  before exiting nonzero. Inspect `fit_ok` and `error_message` even for
+  completed Slurm tasks.
+
   To retry only tasks whose latest attempt ended unsuccessfully, pass the full
   original job name:
   ```bash
