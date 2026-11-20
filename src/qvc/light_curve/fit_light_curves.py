@@ -5516,6 +5516,16 @@ def main():
     parser.add_argument("--rf_length_cut", type=int, default=-1, help="Rest-frame cut (days).")
     parser.add_argument("--exact_same_length", action="store_true", help="Exact same RF length cut.")
     parser.add_argument("--load_stone_lcs", action="store_true", default=False, help="Use Stone LCs.")
+    parser.add_argument(
+        "--sdss_source",
+        choices=("dr16s82", "macleod"),
+        default="dr16s82",
+        help=(
+            "SDSS Stripe 82 photometry. 'dr16s82' reads dr16s82_sdssLCRaw.parquet. "
+            "'macleod' reads the recalibrated MacLeod et al. (2012) light curves "
+            "under data/MacLeod2010 and keeps only MacLeod quasars."
+        ),
+    )
     parser.add_argument("--disable_trace_plot", action="store_true", default=False, help="Disable MCMC trace plot.")
     parser.add_argument("--disable_combined_plot", action="store_true", default=False, help="Disable combined light-curve fit plot.")
     parser.add_argument("--disable_color_magnitude_plot", action="store_true", default=False, help="Disable color-magnitude plot.")
@@ -5700,6 +5710,7 @@ def main():
             N=args.N,
             skip=args.skip,
             outlier_half_window_days=args.outlier_half_window_days,
+            sdss_source=args.sdss_source,
         )
     print(f"Loaded {len(objs)} objects.")
 
