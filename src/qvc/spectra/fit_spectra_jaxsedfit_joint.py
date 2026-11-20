@@ -1225,9 +1225,7 @@ def build_joint_config(
         likelihood=LikelihoodConfig(
             use_host_capture_model=True,
             systematics_width=args.photometry_systematics,
-            spectrum_systematics_width=args.spectrum_systematics,
             spectrum_student_t_df=args.spectrum_student_t_df,
-            spectrum_weight_mode="resolution_elements",
             fit_spectrum_scale=True,
             spectrum_scale_prior_sigma_dex=args.spectrum_scale_prior_sigma_dex,
         ),
@@ -3502,7 +3500,6 @@ def parse_args(argv=None):
     parser.add_argument("--wave-max", type=float, default=8000.0)
     parser.add_argument("--sed-n-wave", type=int, default=512)
     parser.add_argument("--photometry-systematics", type=float, default=0.08)
-    parser.add_argument("--spectrum-systematics", type=float, default=0.08)
     parser.add_argument("--spectrum-student-t-df", type=float, default=5.0)
     parser.add_argument("--spectrum-scale-prior-sigma-dex", type=float, default=0.1)
     parser.add_argument("--line-flux-scale-mjy", type=float, default=0.1)

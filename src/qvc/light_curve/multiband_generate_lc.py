@@ -37,6 +37,10 @@ STONE_S82_MAX_SEP_ARCSEC = 1.0
 MACLEOD_DIR_RELATIVE_PATH = "data/MacLeod2010"
 MACLEOD_BANDS = ("u", "g", "r", "i")
 MACLEOD_S82_MAX_SEP_ARCSEC = 1.0
+MACLEOD_LC_DIR_RELATIVE_PATH = "data/MacLeod2010/QSO_S82"
+MACLEOD_LC_DB_RELATIVE_PATH = "data/MacLeod2010/DB_QSO_S82.dat"
+MACLEOD_LC_CACHE_RELATIVE_PATH = "data/MacLeod2010/macleod_s82_sdssLC.parquet"
+SDSS_SOURCES = ("dr16s82", "macleod")
 MACLEOD_COLUMNS = [
     "SDR5ID",
     "ra",
@@ -406,6 +410,83 @@ def cut_light_curve_restframe_window(lc_list, n_days=1800, same_length=False):
     return new_lc_list
 
 
+def load_macleod_sdss_lcs(
+    catalog=None,
+    *,
+    max_sep_arcsec=MACLEOD_S82_MAX_SEP_ARCSEC,
+    rebuild_cache=False,
+):
+    """Return MacLeod et al. (2012) S82 SDSS light curves in the dr16s82 SDSS schema.
+
+    The light curves are the recalibrated SDSS Stripe 82 quasar light curves
+    (``QSO_S82.tar.gz`` and ``DB_QSO_S82.dat`` from
+    https://faculty.washington.edu/ivezic/macleod/qso_dr7/). Each MacLeod quasar
+    is matched to ``Catalog.parquet`` by position, and the output uses the
+    columns ``objectId, mjd, psMag, psMagErr, filterID, psMagErr_p3``. MacLeod
+    errors are used unchanged for both error columns. Epochs flagged by MacLeod
+    (magnitude or error not positive, or magnitude of -99.99) are dropped. The
+    result is cached as a parquet file next to the light-curve folder.
+    """
+    lc_dir = Path(resolve_qvc_data_path(MACLEOD_LC_DIR_RELATIVE_PATH))
+    cache_path = lc_dir.parent / Path(MACLEOD_LC_CACHE_RELATIVE_PATH).name
+    if cache_path.exists() and not rebuild_cache:
+        return pd.read_parquet(cache_path)
+
+    db = pd.read_csv(
+        resolve_qvc_data_path(MACLEOD_LC_DB_RELATIVE_PATH),
+        sep=r"\s+",
+        comment="#",
+        header=None,
+        usecols=[0, 1, 2],
+        names=["dbID", "ra", "dec"],
+    )
+    if catalog is None:
+        catalog = pd.read_parquet(resolve_qvc_data_path("data/S82/Catalog.parquet"))
+    cat_coords = SkyCoord(catalog["RA"].to_numpy() * u.deg, catalog["DEC"].to_numpy() * u.deg)
+    db_coords = SkyCoord(db["ra"].to_numpy() * u.deg, db["dec"].to_numpy() * u.deg)
+    idx, sep, _ = db_coords.match_to_catalog_sky(cat_coords)
+    matched = sep.arcsec <= max_sep_arcsec
+    print(
+        f"MacLeod S82: matched {int(matched.sum())}/{len(db)} quasars to Catalog.parquet "
+        f"within {max_sep_arcsec:.1f} arcsec"
+    )
+    db = db.loc[matched].assign(objectId=catalog["objectId"].to_numpy()[idx[matched]])
+    db = db.loc[~db["objectId"].duplicated(keep="first")]
+
+    lc_columns = []
+    for band in "ugriz":
+        lc_columns += [f"mjd_{band}", band, f"err_{band}"]
+    lc_columns += ["ra_median", "dec_median"]
+    frames = []
+    for db_id, object_id in zip(db["dbID"], db["objectId"]):
+        table = pd.read_csv(lc_dir / str(db_id), sep=r"\s+", header=None, names=lc_columns)
+        for band in "ugriz":
+            frames.append(
+                pd.DataFrame(
+                    {
+                        "objectId": object_id,
+                        "mjd": table[f"mjd_{band}"].to_numpy(dtype=float),
+                        "psMag": table[band].to_numpy(dtype=float),
+                        "psMagErr": table[f"err_{band}"].to_numpy(dtype=float),
+                        "filterID": filters[band],
+                    }
+                )
+            )
+    lcs = pd.concat(frames, ignore_index=True)
+    good = (
+        np.isfinite(lcs["mjd"])
+        & (lcs["mjd"] > 0)
+        & (lcs["psMag"] > 0)
+        & (lcs["psMag"] < 90)
+        & (lcs["psMagErr"] > 0)
+    )
+    lcs = lcs.loc[good].reset_index(drop=True)
+    lcs["objectId"] = lcs["objectId"].astype(catalog["objectId"].dtype)
+    lcs["psMagErr_p3"] = lcs["psMagErr"]
+    lcs.to_parquet(cache_path)
+    return lcs
+
+
 def concat_light_curves(
     filter_object_ids=None,
     progress_bar=False,
@@ -414,12 +495,21 @@ def concat_light_curves(
     *,
     load_seeing=True,
     outlier_half_window_days=30.0,
+    sdss_source="dr16s82",
 ):
     """Vectorized light-curve concatenation.
 
     Missing seeing sidecars are optional. Set ``load_seeing=False`` for callers,
     such as spectral fitting, that do not use epoch-level seeing information.
+
+    ``sdss_source`` selects the SDSS photometry. The default ``"dr16s82"`` reads
+    ``dr16s82_sdssLCRaw.parquet``. ``"macleod"`` reads the recalibrated MacLeod
+    et al. (2012) S82 light curves instead (see ``load_macleod_sdss_lcs``), which
+    restricts the sample to the about 9,200 quasars in the MacLeod catalog and
+    carries no SDSS seeing values.
     """
+    if sdss_source not in SDSS_SOURCES:
+        raise ValueError(f"sdss_source must be one of {SDSS_SOURCES}, got {sdss_source!r}")
     if (
         not np.isfinite(outlier_half_window_days)
         or outlier_half_window_days <= 0
@@ -431,7 +521,10 @@ def concat_light_curves(
     )
 
     cat = pd.read_parquet(resolve_qvc_data_path("data/S82/Catalog.parquet")).set_index("idx")
-    sdss = pd.read_parquet(resolve_qvc_data_path("data/S82/dr16s82_sdssLCRaw.parquet"))
+    if sdss_source == "macleod":
+        sdss = load_macleod_sdss_lcs(cat.reset_index())
+    else:
+        sdss = pd.read_parquet(resolve_qvc_data_path("data/S82/dr16s82_sdssLCRaw.parquet"))
     sdss = sdss[sdss.mjd.notna()].copy()
     ps1 = pd.read_parquet(resolve_qvc_data_path("data/S82/dr16s82_ps1LCRaw.parquet"))
     ztf = pd.read_parquet(resolve_qvc_data_path("data/S82/dr16s82_ZuberLCRaw.parquet"))
@@ -454,7 +547,8 @@ def concat_light_curves(
         )
 
     if load_seeing:
-        sdss = _attach_seeing_sidecar(sdss, "sdss", ["objectId", "mjd", "filterID"])
+        if sdss_source == "dr16s82":
+            sdss = _attach_seeing_sidecar(sdss, "sdss", ["objectId", "mjd", "filterID"])
         ps1 = _attach_seeing_sidecar(ps1, "ps1", ["detectID"])
         ztf = _attach_seeing_sidecar(
             ztf,
