@@ -279,3 +279,55 @@ def test_apply_constant_flux_correction_to_objects_raises_when_h5_has_only_pl_co
             objs,
             spectra_fit_h5s=[spectra_h5],
         )
+
+
+def _object_with_both_fractions():
+    return {
+        "object_id": "123",
+        "z": 2.0,
+        "times": {"g": np.array([0.0, 10.0, 20.0], dtype=float)},
+        "mags": {"g": np.array([20.0, 20.1, 19.9], dtype=float)},
+        "magerrs": {"g": np.full(3, 0.03, dtype=float)},
+        "mags_mean": [20.0],
+        "f_AGN_psf_g": 0.8,
+        "f_AGN_psf_g_err": 0.02,
+        "f_cont_psf_g": 0.6,
+        "f_cont_psf_g_err": 0.03,
+    }
+
+
+def test_continuum_fraction_uses_f_cont_columns_and_removes_more_flux():
+    obj = _object_with_both_fractions()
+
+    agn_obj, _ = apply_constant_flux_correction_to_object(obj)
+    cont_obj, _ = apply_constant_flux_correction_to_object(obj, fraction="continuum")
+
+    agn_band = agn_obj["psf_constant_flux_band_summaries"]["g"]
+    cont_band = cont_obj["psf_constant_flux_band_summaries"]["g"]
+    assert agn_band["source_key"] == "f_AGN_psf_g"
+    assert cont_band["source_key"] == "f_cont_psf_g"
+    assert np.isclose(cont_band["agn_fraction"], 0.6)
+    assert np.isclose(cont_band["agn_fraction_err"], 0.03)
+    assert cont_band["constant_contaminant_flux"] > agn_band["constant_contaminant_flux"]
+    # A smaller variable fraction leaves a fainter, more variable light curve.
+    assert np.nanstd(cont_obj["mags"]["g"]) > np.nanstd(agn_obj["mags"]["g"])
+
+
+def test_continuum_fraction_requires_f_cont_columns_in_spectra_h5(monkeypatch):
+    objs = [_make_light_curve_object("123")]
+    spectra_h5, _ = _mock_spectra_h5(
+        monkeypatch,
+        [{"object_id": "123", "f_AGN_psf_g": 0.5}],
+    )
+
+    with pytest.raises(ValueError, match="f_cont_psf_<band>"):
+        apply_constant_flux_correction_to_objects(
+            objs,
+            spectra_fit_h5s=[spectra_h5],
+            fraction="continuum",
+        )
+
+
+def test_unknown_psf_fraction_is_rejected():
+    with pytest.raises(ValueError, match="PSF fraction must be one of"):
+        correction_module.psf_fraction_prefix("lines")

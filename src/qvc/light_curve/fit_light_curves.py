@@ -116,6 +116,8 @@ from qvc.light_curve.multiband_model_dho_blr_erlang_drw import (
     make_multiband_dho_blr_flux_linearized_erlang_drw_model,
 )
 from qvc.light_curve.psf_constant_flux_correction import (
+    DEFAULT_PSF_FRACTION,
+    PSF_FRACTION_PREFIXES,
     apply_constant_flux_correction_to_objects,
     attach_spectra_psf_fractions_to_objects,
     print_constant_flux_correction_summary,
@@ -5674,6 +5676,19 @@ def main():
             "before fitting or fractions are propagated in the likelihood."
         ),
     )
+    parser.add_argument(
+        "--psf-fraction",
+        choices=tuple(PSF_FRACTION_PREFIXES),
+        default=DEFAULT_PSF_FRACTION,
+        help=(
+            "Band fraction treated as variable when subtracting constant flux. "
+            "'agn' (default) uses f_AGN_psf_<band>, which treats the host and "
+            "narrow lines as constant. 'continuum' uses f_cont_psf_<band>, "
+            "which also removes the mean broad-line, Fe II and Balmer-continuum "
+            "flux so they do not dilute the continuum amplitude. 'continuum' "
+            "requires --psf-fraction-mode median."
+        ),
+    )
     args = parser.parse_args()
     try:
         apply_only_light_curve_plot_policy(args)
@@ -5720,11 +5735,17 @@ def main():
     if args.subtract_psf_constant_flux:
         if not args.spectra_fit_h5:
             raise ValueError("--subtract_psf_constant_flux requires --spectra_fit_h5.")
+        if args.psf_fraction != DEFAULT_PSF_FRACTION and args.psf_fraction_mode != "median":
+            raise ValueError(
+                f"--psf-fraction {args.psf_fraction} requires --psf-fraction-mode median. "
+                "Compact fraction draws exist only for the variable-AGN fraction."
+            )
         if args.psf_fraction_mode == "median":
             objs, correction_summary = apply_constant_flux_correction_to_objects(
                 objs,
                 spectra_fit_h5s=args.spectra_fit_h5,
                 progress_bar=args.progress,
+                fraction=args.psf_fraction,
             )
             print_constant_flux_correction_summary(correction_summary)
         else:
@@ -6335,6 +6356,10 @@ def main():
                 if args.subtract_psf_constant_flux
                 else "none"
             )
+            final_result["psf_fraction"] = (
+                args.psf_fraction if args.subtract_psf_constant_flux else "none"
+            )
+            used_fraction_prefix = PSF_FRACTION_PREFIXES[args.psf_fraction]
             final_result["psf_agn_fraction_valid_count"] = int(
                 obj.get("psf_agn_fraction_valid_count", 0)
             )
@@ -6345,8 +6370,8 @@ def main():
                     args.subtract_psf_constant_flux
                     and args.psf_fraction_mode == "median"
                 ):
-                    posterior_value = obj.get(f"f_AGN_psf_{band}", np.nan)
-                    posterior_error = obj.get(f"f_AGN_psf_{band}_err", np.nan)
+                    posterior_value = obj.get(f"{used_fraction_prefix}{band}", np.nan)
+                    posterior_error = obj.get(f"{used_fraction_prefix}{band}_err", np.nan)
                 else:
                     posterior_value = result.get(posterior_key, np.nan)
                     posterior_error = result.get(posterior_err_key, np.nan)
