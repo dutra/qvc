@@ -2177,6 +2177,116 @@ def summarize_psf_agn_fractions(
     return out
 
 
+# Per-filter component sites used for the band flux decomposition. Each site
+# is projected by JAXSEDFit through the fitted photometric filter curves.
+BAND_LINE_PHOTOMETRY_SITES = (
+    "spectral_line_photometry",
+    "spectral_extrapolated_broad_photometry",
+    "spectral_extrapolated_narrow_photometry",
+)
+BAND_FEII_PHOTOMETRY_SITES = (
+    "spectral_feii_photometry",
+    "spectral_extrapolated_feii_photometry",
+)
+BAND_BALMER_PHOTOMETRY_SITES = ("spectral_balmer_photometry",)
+BAND_COMPONENT_FRACTION_NAMES = ("cont", "line", "feii", "bc", "host")
+
+
+def empty_band_component_fraction_summary(bands=PSF_AGN_FRACTION_BANDS):
+    """Return the stable per-band schema for band flux component fractions."""
+    return {
+        key: np.nan
+        for band in bands
+        for name in BAND_COMPONENT_FRACTION_NAMES
+        for key in (f"f_{name}_psf_{band}", f"f_{name}_psf_{band}_err")
+    }
+
+
+def summarize_band_component_fractions(
+    prediction,
+    filter_names,
+    *,
+    bands=PSF_AGN_FRACTION_BANDS,
+):
+    """Summarize the posterior flux decomposition of each SDSS PSF band.
+
+    Each fraction is a component's share of the total predicted band flux.
+    ``line`` sums broad and narrow emission lines, including lines that fall
+    outside the spectrum. ``feii`` is the Fe II pseudo-continuum and ``bc``
+    the Balmer continuum. ``host`` is the captured host light. ``cont`` is the
+    remaining AGN light, which is the accretion-disk continuum. The five
+    fractions sum to one in every draw.
+
+    The light-curve model uses ``1 - f_cont`` as the dilution of the
+    continuum variability amplitude in magnitudes.
+    """
+    required = (
+        "pred_fluxes",
+        "variable_agn_fluxes",
+        "constant_agn_fluxes",
+        *BAND_LINE_PHOTOMETRY_SITES,
+        *BAND_FEII_PHOTOMETRY_SITES,
+        *BAND_BALMER_PHOTOMETRY_SITES,
+    )
+    missing = [name for name in required if prediction.get(name) is None]
+    if missing:
+        raise ValueError(
+            "JAXSEDFit prediction is missing band component sites: "
+            f"{missing}."
+        )
+    arrays = {name: np.asarray(prediction[name], dtype=float) for name in required}
+    total = arrays["pred_fluxes"]
+    if total.ndim != 2:
+        raise ValueError(
+            "JAXSEDFit component predictions must have shape (draw, filter); "
+            f"received {total.shape}."
+        )
+    bad_shape = [name for name, value in arrays.items() if value.shape != total.shape]
+    if bad_shape:
+        raise ValueError(
+            "JAXSEDFit band component predictions must match pred_fluxes in "
+            f"shape. Mismatched sites: {bad_shape}."
+        )
+    filter_names = [str(name) for name in filter_names]
+    if len(filter_names) != total.shape[1]:
+        raise ValueError(
+            "JAXSEDFit filter-name count does not match the prediction width: "
+            f"{len(filter_names)} != {total.shape[1]}."
+        )
+
+    agn = arrays["variable_agn_fluxes"] + arrays["constant_agn_fluxes"]
+    components = {
+        "line": sum(arrays[name] for name in BAND_LINE_PHOTOMETRY_SITES),
+        "feii": sum(arrays[name] for name in BAND_FEII_PHOTOMETRY_SITES),
+        "bc": sum(arrays[name] for name in BAND_BALMER_PHOTOMETRY_SITES),
+        "host": total - agn,
+    }
+    components["cont"] = agn - components["line"] - components["feii"] - components["bc"]
+
+    out = empty_band_component_fraction_summary(bands)
+    for band in bands:
+        filter_name = f"{band}_sdss"
+        indices = [i for i, name in enumerate(filter_names) if name == filter_name]
+        if len(indices) != 1:
+            raise ValueError(
+                f"Expected exactly one {filter_name!r} prediction, found {len(indices)}."
+            )
+        index = indices[0]
+        band_total = total[:, index]
+        valid = np.isfinite(band_total) & (band_total > 0.0)
+        for name, flux in components.items():
+            valid_name = valid & np.isfinite(flux[:, index])
+            if not np.any(valid_name):
+                raise ValueError(
+                    f"No valid posterior {name} fraction draws for band {band!r}."
+                )
+            fractions = flux[valid_name, index] / band_total[valid_name]
+            median, err, _, _ = legacy.sym_percentile(fractions)
+            out[f"f_{name}_psf_{band}"] = float(median)
+            out[f"f_{name}_psf_{band}_err"] = float(err)
+    return out
+
+
 def joint_saved_name(rec):
     """Return the stable JAXSEDFit observation name for one QVC record."""
     return f"z{float(rec['z']):.3f}_{rec['sdss_name']}_joint"
@@ -2546,6 +2656,7 @@ def _base_result(rec, args, *, execution_mode, resumed_from_path=""):
     result.update(empty_joint_chi2_summary())
     result.update(empty_spectral_component_fraction_summary())
     result.update(empty_psf_agn_fraction_summary())
+    result.update(empty_band_component_fraction_summary())
     result.update(empty_host_2500_psf_summary())
     result.update(empty_joint_hubble_posterior_summary())
     result.update(empty_hubble_convergence_summary())
@@ -2877,6 +2988,12 @@ def run_one_fit(
                 used_phot["filter_name"].astype(str).tolist(),
             )
         )
+        result.update(
+            summarize_band_component_fractions(
+                prediction,
+                used_phot["filter_name"].astype(str).tolist(),
+            )
+        )
         (
             result["_psf_agn_fraction_draws"],
             result["_psf_agn_fraction_valid_count"],
@@ -3051,6 +3168,12 @@ def _complete_resumed_fit(rec, args, source_path, fitter):
         )
     result.update(
         summarize_psf_agn_fractions(
+            prediction,
+            config.photometry.filter_names,
+        )
+    )
+    result.update(
+        summarize_band_component_fractions(
             prediction,
             config.photometry.filter_names,
         )

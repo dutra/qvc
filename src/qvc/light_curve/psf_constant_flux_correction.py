@@ -10,8 +10,12 @@ This module approximates AGN-only light curves by:
 4. converting the corrected light curve back to magnitudes for the existing GP
    pipeline.
 
-The required spectra inputs are per-bandpass PSF fractions saved as
-``f_AGN_psf_<band>``.
+The required spectra inputs are per-bandpass PSF fractions. The default
+``agn`` fraction is ``f_AGN_psf_<band>``, the variable-AGN share of the band
+flux. It treats the host and narrow lines as constant. The ``continuum``
+fraction is ``f_cont_psf_<band>``, the accretion-disk continuum share. It also
+removes the mean broad-line, Fe II and Balmer-continuum flux, so those
+components no longer dilute the continuum variability amplitude.
 """
 
 from __future__ import annotations
@@ -31,6 +35,21 @@ from qvc.light_curve.multiband_generate_lc import (
 from qvc.spectra.catalog_hdf5 import read_spectra_catalog_hdf5
 
 MAG_TO_FLUX_DERIV = 0.4 * np.log(10.0)
+PSF_FRACTION_PREFIXES = {
+    "agn": "f_AGN_psf_",
+    "continuum": "f_cont_psf_",
+}
+DEFAULT_PSF_FRACTION = "agn"
+
+
+def psf_fraction_prefix(fraction: str = DEFAULT_PSF_FRACTION) -> str:
+    """Return the spectra-catalog column prefix for one fraction definition."""
+
+    if fraction not in PSF_FRACTION_PREFIXES:
+        raise ValueError(
+            f"PSF fraction must be one of {tuple(PSF_FRACTION_PREFIXES)}, got {fraction!r}."
+        )
+    return PSF_FRACTION_PREFIXES[fraction]
 
 
 def normalize_object_id(value) -> str:
@@ -69,9 +88,11 @@ def load_spectra_psf_fractions(
     spectra_fit_h5s,
     *,
     include_fraction_draws: bool = False,
+    fraction: str = DEFAULT_PSF_FRACTION,
 ) -> dict[str, dict]:
     """Load scalar PSF fractions and, optionally, their compact joint draws."""
 
+    prefix = psf_fraction_prefix(fraction)
     if not spectra_fit_h5s:
         return {}
 
@@ -86,12 +107,12 @@ def load_spectra_psf_fractions(
         if "object_id" not in frame.columns:
             raise ValueError(f"Spectra HDF5 {resolved} is missing required column 'object_id'.")
         fraction_columns = [
-            column for column in frame.columns if column.startswith("f_AGN_psf_")
+            column for column in frame.columns if column.startswith(prefix)
         ]
         if not fraction_columns:
             raise ValueError(
                 f"Spectra HDF5 {resolved} is missing required per-band columns "
-                "'f_AGN_psf_<band>'."
+                f"'{prefix}<band>'."
             )
         for row_index, (_, row) in enumerate(frame.iterrows()):
             object_id = normalize_object_id(row["object_id"])
@@ -108,10 +129,19 @@ def load_spectra_psf_fractions(
     return rows
 
 
-def get_bandpass_agn_fraction(source: Mapping[str, object], band: str) -> tuple[float, float, str | None]:
-    """Return the variable-AGN/total fraction and its uncertainty for one photometric band."""
+def get_bandpass_agn_fraction(
+    source: Mapping[str, object],
+    band: str,
+    *,
+    fraction: str = DEFAULT_PSF_FRACTION,
+) -> tuple[float, float, str | None]:
+    """Return the variable fraction of one band's flux and its uncertainty.
 
-    band_key = f"f_AGN_psf_{band}"
+    ``fraction`` selects the variable-AGN (``agn``) or continuum-only
+    (``continuum``) share of the band flux.
+    """
+
+    band_key = f"{psf_fraction_prefix(fraction)}{band}"
     band_err_key = f"{band_key}_err"
     val = source.get(band_key, np.nan)
     err = source.get(band_err_key, np.nan)
@@ -217,6 +247,7 @@ def apply_constant_flux_correction_to_object(
     *,
     bands: Iterable[str] | None = None,
     reference_stat: str = "mean",
+    fraction: str = DEFAULT_PSF_FRACTION,
 ):
     """Return a corrected light-curve object plus a correction summary."""
 
@@ -245,7 +276,11 @@ def apply_constant_flux_correction_to_object(
     for band in bands:
         if band not in corrected_obj["mags"] or band not in lambda_pivot:
             continue
-        agn_fraction, agn_fraction_err, source_key = get_bandpass_agn_fraction(corrected_obj, str(band))
+        agn_fraction, agn_fraction_err, source_key = get_bandpass_agn_fraction(
+            corrected_obj,
+            str(band),
+            fraction=fraction,
+        )
         if not np.isfinite(agn_fraction):
             n_missing_fraction_bands += 1
             continue
@@ -290,10 +325,11 @@ def apply_constant_flux_correction_to_objects(
     spectra_fit_h5s,
     progress_bar: bool = False,
     reference_stat: str = "mean",
+    fraction: str = DEFAULT_PSF_FRACTION,
 ):
     """Apply spectra-informed constant-flux subtraction to a list of objects."""
 
-    spectra_rows = load_spectra_psf_fractions(spectra_fit_h5s)
+    spectra_rows = load_spectra_psf_fractions(spectra_fit_h5s, fraction=fraction)
     corrected_objs = []
     summary = {
         "n_objects": len(objs),
@@ -327,6 +363,7 @@ def apply_constant_flux_correction_to_objects(
         corrected_obj, object_summary = apply_constant_flux_correction_to_object(
             merged,
             reference_stat=reference_stat,
+            fraction=fraction,
         )
         corrected_objs.append(corrected_obj)
         summary["n_objects_with_spectra"] += 1
@@ -478,6 +515,16 @@ def main():
             "loader's photometric outlier rejection."
         ),
     )
+    parser.add_argument(
+        "--psf_fraction",
+        choices=tuple(PSF_FRACTION_PREFIXES),
+        default=DEFAULT_PSF_FRACTION,
+        help=(
+            "Band fraction treated as variable. 'agn' uses f_AGN_psf_<band>. "
+            "'continuum' uses f_cont_psf_<band> and also removes the mean "
+            "broad-line, Fe II and Balmer-continuum flux."
+        ),
+    )
     args = parser.parse_args()
 
     objs = concat_light_curves(
@@ -492,6 +539,7 @@ def main():
         spectra_fit_h5s=args.spectra_fit_h5,
         progress_bar=args.progress,
         reference_stat=args.reference_stat,
+        fraction=args.psf_fraction,
     )
     print_constant_flux_correction_summary(summary)
     print(f"Loaded {len(objs)} objects, corrected {len(corrected)} objects.")

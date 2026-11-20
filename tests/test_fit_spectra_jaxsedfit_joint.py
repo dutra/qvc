@@ -1174,6 +1174,13 @@ def _component_prediction(filter_names):
     prediction = {
         "pred_fluxes": total,
         "variable_agn_fluxes": 0.7 * total,
+        "constant_agn_fluxes": 0.05 * total,
+        "spectral_line_photometry": 0.10 * total,
+        "spectral_extrapolated_broad_photometry": 0.02 * total,
+        "spectral_extrapolated_narrow_photometry": 0.01 * total,
+        "spectral_feii_photometry": 0.04 * total,
+        "spectral_extrapolated_feii_photometry": 0.01 * total,
+        "spectral_balmer_photometry": 0.03 * total,
         "fracAGN_5100_fit": np.array([0.6, 0.8]),
         "formed_stellar_mass": np.array([1.0e10, 1.2e10]),
         "component_host_fraction": desired_host_fraction[:, None],
@@ -1525,6 +1532,46 @@ def test_joint_summaries_have_stable_native_schema():
         assert f"{name}_err" in chi2
     assert host_2500["f_host_2500_psf"] == pytest.approx(0.35)
     assert host_2500["f_host_2500_psf_err"] == pytest.approx(0.102)
+
+
+def test_band_component_fractions_decompose_each_sdss_band():
+    filter_names = [f"{band}_sdss" for band in "ugriz"]
+    prediction = _component_prediction(filter_names)
+
+    fractions = joint.summarize_band_component_fractions(prediction, filter_names)
+
+    assert set(joint.empty_band_component_fraction_summary()) == set(fractions)
+    expected = {"cont": 0.54, "line": 0.13, "feii": 0.05, "bc": 0.03, "host": 0.25}
+    for band in "ugriz":
+        for name, value in expected.items():
+            assert fractions[f"f_{name}_psf_{band}"] == pytest.approx(value)
+            assert fractions[f"f_{name}_psf_{band}_err"] == pytest.approx(0.0)
+        assert sum(
+            fractions[f"f_{name}_psf_{band}"] for name in expected
+        ) == pytest.approx(1.0)
+
+
+def test_band_component_fractions_use_each_filter_column():
+    filter_names = [f"{band}_sdss" for band in "ugriz"]
+    prediction = _component_prediction(filter_names)
+    line = np.array(prediction["spectral_line_photometry"], dtype=float)
+    line[:, 1] += 0.2 * np.asarray(prediction["pred_fluxes"])[:, 1]
+    prediction["spectral_line_photometry"] = line
+
+    fractions = joint.summarize_band_component_fractions(prediction, filter_names)
+
+    assert fractions["f_line_psf_g"] == pytest.approx(0.33)
+    assert fractions["f_cont_psf_g"] == pytest.approx(0.34)
+    assert fractions["f_line_psf_r"] == pytest.approx(0.13)
+
+
+def test_band_component_fractions_require_component_sites():
+    filter_names = [f"{band}_sdss" for band in "ugriz"]
+    prediction = _component_prediction(filter_names)
+    del prediction["spectral_balmer_photometry"]
+
+    with pytest.raises(ValueError, match="spectral_balmer_photometry"):
+        joint.summarize_band_component_fractions(prediction, filter_names)
 
 
 def test_catalog_summary_combines_latent_and_deterministic_scalar_sites():
