@@ -277,7 +277,9 @@ def assemble_comparison_pdf(
     writer = PdfWriter()
     writer.add_page(composite)
     writer.pages[0].compress_content_streams()
-    writer.compress_identical_objects(remove_identicals=True, remove_orphans=True)
+    # The defaults remove duplicate and orphaned objects in pypdf 6 and 7.
+    # pypdf 7 renamed both keyword arguments, so pass none.
+    writer.compress_identical_objects()
     with output_path.open("wb") as handle:
         writer.write(handle)
 

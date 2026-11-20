@@ -274,7 +274,6 @@ def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
         fit_bal=True,
         line_flux_scale_mjy=0.2,
         photometry_systematics=0.08,
-        spectrum_systematics=0.06,
         spectrum_student_t_df=7.0,
         spectrum_scale_prior_sigma_dex=0.12,
         fit_method="optax",
@@ -322,9 +321,11 @@ def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
     )
     assert config.agn.line_flux_scale_mjy == pytest.approx(0.2)
     assert config.inference.plot_init is True
-    assert config.likelihood.spectrum_systematics_width == pytest.approx(0.06)
+    # jaxsedfit fits the spectral jitter, so qvc sets no fixed spectrum floor.
+    assert not hasattr(config.likelihood, "spectrum_systematics_width")
     assert config.likelihood.spectrum_student_t_df == pytest.approx(7.0)
-    assert config.likelihood.spectrum_weight_mode == "resolution_elements"
+    # jaxsedfit weights every spectral pixel equally. The mode option was removed.
+    assert not hasattr(config.likelihood, "spectrum_weight_mode")
     assert config.likelihood.fit_spectrum_scale is True
     assert config.likelihood.spectrum_scale_prior_sigma_dex == pytest.approx(0.12)
     assert config.likelihood.use_host_capture_model is True
