@@ -283,6 +283,20 @@ APPENDIX_STEPS = [
     },
     {
         "type": "download",
+        "url": "https://faculty.washington.edu/ivezic/macleod/qso_dr7/QSO_S82.tar.gz",
+        "folder": "data/MacLeod2010",
+        "filename": "QSO_S82.tar.gz",
+        "skip_if_exists": "QSO_S82",
+    },
+    {
+        "type": "download",
+        "url": "https://faculty.washington.edu/ivezic/macleod/qso_dr7/DB_QSO_S82.dat.gz",
+        "folder": "data/MacLeod2010",
+        "filename": "DB_QSO_S82.dat.gz",
+        "skip_if_exists": "DB_QSO_S82.dat",
+    },
+    {
+        "type": "download",
         "url": "https://zenodo.org/records/7624056/files/TotalDat.fits.gz?download=1",
         "folder": "data/Stone2021",
         "filename": "TotalDat.fits.gz",
