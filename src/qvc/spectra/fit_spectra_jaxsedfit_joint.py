@@ -101,6 +101,12 @@ AGN_PREDICTION_OPTIONS = {
     "line_extrapolation_ew_scope": ("all", LINE_EXTRAPOLATION_EW_SCOPES),
     "narrow_line_extrapolation": ("template", NARROW_LINE_EXTRAPOLATION_MODES),
 }
+# jaxsedfit change that introduced each option (for clear start-up errors).
+AGN_PREDICTION_OPTION_SOURCES = {
+    "line_extrapolation_anchor": "jaxsedfit PR #163 (continuum-EW line anchor)",
+    "line_extrapolation_ew_scope": "jaxsedfit PR #163 (continuum-EW line anchor)",
+    "narrow_line_extrapolation": "jaxsedfit PR #164 (consistent line coverage)",
+}
 # HDF5 attribute recording the option values a re-saved bundle's draws were
 # sampled with, so a later resume still reports them.
 SAMPLED_AGN_OPTIONS_ATTR = "qvc_sampled_agn_options_json"
@@ -3625,7 +3631,27 @@ def run_object_safely(rec, args):
     return result
 
 
+def require_supported_agn_options(args):
+    """Fail once, before any object, if the installed jaxsedfit lacks a requested option."""
+    requested = requested_agn_options(args)
+    if not requested:
+        return
+    import dataclasses
+
+    from jaxsedfit import AGNConfig
+
+    fields = {field.name for field in dataclasses.fields(AGNConfig)}
+    missing = [name for name in requested if name not in fields]
+    if missing:
+        details = "; ".join(
+            f"--{name.replace('_', '-')} needs {AGN_PREDICTION_OPTION_SOURCES.get(name, 'a newer jaxsedfit')}"
+            for name in missing
+        )
+        raise SystemExit(f"The installed jaxsedfit does not support the requested option(s): {details}.")
+
+
 def run_fit(args):
+    require_supported_agn_options(args)
     records = build_records(args)
     if not records:
         raise RuntimeError("No records to process.")

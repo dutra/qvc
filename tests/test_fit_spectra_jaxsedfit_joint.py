@@ -3148,7 +3148,12 @@ def test_recorded_options_with_removed_names_are_ignored(monkeypatch, tmp_path):
 
 
 def test_cli_prediction_options_build_a_real_jaxsedfit_config(tmp_path):
-    """Every CLI prediction option must be a real AGNConfig field of the installed jaxsedfit."""
+    """Every CLI prediction option must build a real AGNConfig of the installed jaxsedfit.
+
+    An option is skipped only when the installed jaxsedfit predates the whole
+    jaxsedfit change that introduced it (none of that change's fields exist);
+    a partially present change, a renamed field or a removed one fails.
+    """
     jaxsedfit = pytest.importorskip("jaxsedfit")
     import dataclasses
 
@@ -3161,13 +3166,21 @@ def test_cli_prediction_options_build_a_real_jaxsedfit_config(tmp_path):
         ]
     )
     requested = joint.requested_agn_options(args)
-    assert set(requested) == set(joint.AGN_PREDICTION_OPTIONS)
+    assert set(requested) == set(joint.AGN_PREDICTION_OPTIONS) == set(joint.AGN_PREDICTION_OPTION_SOURCES)
     fields = {field.name for field in dataclasses.fields(jaxsedfit.AGNConfig)}
-    missing = set(requested) - fields
-    if missing:
-        pytest.skip(f"installed jaxsedfit lacks {sorted(missing)}")
-    agn = jaxsedfit.AGNConfig(**requested)
-    for name, value in requested.items():
+    by_source = {}
+    for name, source in joint.AGN_PREDICTION_OPTION_SOURCES.items():
+        by_source.setdefault(source, []).append(name)
+    supported = {}
+    for source, names in by_source.items():
+        present = [name for name in names if name in fields]
+        assert not present or len(present) == len(names), f"{source}: only {present} of {names} exist"
+        if present:
+            supported.update({name: requested[name] for name in names})
+    if not supported:
+        pytest.skip("installed jaxsedfit predates every prediction option")
+    agn = jaxsedfit.AGNConfig(**supported)
+    for name, value in supported.items():
         assert getattr(agn, name) == value
     record = {
         **_record_with_ugriz(),
@@ -3184,7 +3197,25 @@ def test_cli_prediction_options_build_a_real_jaxsedfit_config(tmp_path):
         flux=np.array([1.0, 1.1, 1.2]),
         err=np.array([0.1, 0.1, 0.1]),
         resolving_power=2000.0,
-        args=_anchor_config_args(tmp_path, **requested),
+        args=_anchor_config_args(tmp_path, **supported),
         aperture_diameter_arcsec=2.0,
     )
-    assert joint.config_agn_options(config) == requested
+    options = joint.config_agn_options(config)
+    for name, value in supported.items():
+        assert options[name] == value
+
+
+def test_unsupported_option_fails_once_at_start_up(monkeypatch, tmp_path):
+    from dataclasses import dataclass
+
+    @dataclass
+    class OldAGNConfig:
+        fit_agn: bool = True
+
+    monkeypatch.setitem(sys.modules, "jaxsedfit", SimpleNamespace(AGNConfig=OldAGNConfig))
+    args = joint.parse_args([*_common_fit_argv(tmp_path), "--line-extrapolation-anchor", "continuum_ew"])
+    monkeypatch.setattr(joint, "build_records", lambda args: pytest.fail("must fail before building records"))
+    with pytest.raises(SystemExit, match="--line-extrapolation-anchor needs jaxsedfit PR #163"):
+        joint.run_fit(args)
+    # Without options nothing is required.
+    joint.require_supported_agn_options(joint.parse_args(_common_fit_argv(tmp_path)))
