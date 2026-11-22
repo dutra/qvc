@@ -531,6 +531,7 @@ def test_sfitspectra_retry_requires_original_artifacts_and_sufficient_cpus(tmp_p
         ("--resume", ""),
         ("--fit-script", "fit_spectra.py"),
         ("--fit-bal",),
+        ("--line-extrapolation-anchor", "continuum_ew"),
     ],
 )
 def test_sfitspectra_retry_rejects_fresh_run_options(tmp_path, fresh_args):
@@ -579,3 +580,52 @@ def test_sfitspectra_resume_only_requires_resume(tmp_path):
     assert result.returncode == 2
     assert '--resume-only requires --resume' in result.stderr
     assert _sbatch_calls(calls_path) == []
+
+
+def _generated_fit_command(root, script_path, generated, monkeypatch):
+    block = generated.split('"$PYTHON_BIN" - <<\'PY\'\n', 1)[1].split('\nPY\n', 1)[0]
+    for key, value in re.findall(r'^export (\w+)="([^"\n]*)"$', generated, re.M):
+        monkeypatch.setenv(key, value)
+    for key in ('CHUNK_SIZE', 'NPROC', 'CPUS_PER_TASK'):
+        match = re.search(rf'^export {key}="?(\d+)"?$', generated, re.M)
+        monkeypatch.setenv(key, match.group(1))
+    monkeypatch.setenv('TASK_ID', '0')
+    monkeypatch.chdir(root)
+    commands = []
+    monkeypatch.setattr(subprocess, 'run', lambda cmd, **kwargs: commands.append(cmd))
+    exec(compile(block, str(script_path), 'exec'), {})
+    assert len(commands) == 1
+    return commands[0]
+
+
+@pytest.mark.parametrize("anchor", [None, "fitted_lines", "continuum_ew"])
+def test_sfitspectra_forwards_line_extrapolation_anchor(tmp_path, monkeypatch, anchor):
+    root, script_path, csv_path, _, env = _fresh_workspace(tmp_path)
+    (root / 'results/data/jaxqsofit/old/all').mkdir(parents=True)
+    extra = () if anchor is None else ('--line-extrapolation-anchor', anchor)
+    result = _run_fresh(root, script_path, env, '--chisq-csv', str(csv_path),
+                        '--description', 'anchor', '--resume', 'old', '--resume-only', *extra)
+    assert result.returncode == 0, result.stderr
+    generated = next((root / 'hpc_scripts/submit/jaxqsofit').glob('submit_*.sbatch')).read_text()
+    expected = anchor or 'fitted_lines'
+    assert f'export LINE_EXTRAPOLATION_ANCHOR="{expected}"' in generated
+    command = _generated_fit_command(root, script_path, generated, monkeypatch)
+    assert command[command.index('--line-extrapolation-anchor') + 1] == expected
+    assert '--resume-only' in command
+
+
+def test_sfitspectra_rejects_line_extrapolation_anchor_with_standalone_backend(tmp_path):
+    root, script_path, csv_path, _, env = _fresh_workspace(tmp_path)
+
+    result = _run_fresh(
+        root,
+        script_path,
+        env,
+        "--chisq-csv", str(csv_path),
+        "--description", "anchor",
+        "--fit-script", "fit_spectra.py",
+        "--line-extrapolation-anchor", "continuum_ew",
+    )
+
+    assert result.returncode != 0
+    assert "--line-extrapolation-anchor is supported only" in result.stderr

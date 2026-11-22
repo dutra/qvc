@@ -342,6 +342,17 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--line-extrapolation-anchor",
+    choices=("fitted_lines", "continuum_ew"),
+    default="fitted_lines",
+    help=(
+        "Anchor for broad lines outside the fitted spectrum, passed to "
+        "fit_spectra_jaxsedfit_joint.py. 'continuum_ew' ties them to the fitted "
+        "disc continuum through QSOGEN equivalent widths; with --resume it "
+        "re-predicts the saved draws without resampling."
+    ),
+)
+parser.add_argument(
     "--resume",
     metavar="OLD_RUN_NAME",
     default="",
@@ -372,6 +383,7 @@ fresh_run_options = (
     "--description",
     "--fit-script",
     "--fit-bal",
+    "--line-extrapolation-anchor",
     "--resume",
     "--resume-only",
 )
@@ -400,6 +412,13 @@ if cli_args.resume_only and not resume_run_name:
     parser.error("--resume-only requires --resume")
 if cli_args.fit_bal and fit_script != "fit_spectra_jaxsedfit_joint.py":
     parser.error("--fit-bal is supported only with fit_spectra_jaxsedfit_joint.py")
+if (
+    cli_args.line_extrapolation_anchor != "fitted_lines"
+    and fit_script != "fit_spectra_jaxsedfit_joint.py"
+):
+    parser.error(
+        "--line-extrapolation-anchor is supported only with fit_spectra_jaxsedfit_joint.py"
+    )
 if resume_run_name and fit_script != "fit_spectra_jaxsedfit_joint.py":
     parser.error("--resume is supported only with fit_spectra_jaxsedfit_joint.py")
 if resume_run_name:
@@ -645,6 +664,7 @@ export PREFIX="{prefix}"
 export FIT_SCRIPT="{fit_script}"
 export FIT_MODULE="{fit_module}"
 export FIT_BAL="{int(cli_args.fit_bal)}"
+export LINE_EXTRAPOLATION_ANCHOR="{cli_args.line_extrapolation_anchor}"
 export RESUME_ONLY="{int(cli_args.resume_only)}"
 export SED_PHOTOMETRY_PATH="{sed_photometry_path}"
 export OUTPUT_DIR="{output_dir}"
@@ -679,6 +699,7 @@ echo "PREFIX=$PREFIX"
 echo "FIT_SCRIPT=$FIT_SCRIPT"
 echo "FIT_MODULE=$FIT_MODULE"
 echo "FIT_BAL=$FIT_BAL"
+echo "LINE_EXTRAPOLATION_ANCHOR=$LINE_EXTRAPOLATION_ANCHOR"
 echo "SED_PHOTOMETRY_PATH=$SED_PHOTOMETRY_PATH"
 echo "OBJECT_IDS_FILE=$OBJECT_IDS_FILE"
 echo "OUTPUT_DIR=$OUTPUT_DIR"
@@ -696,6 +717,7 @@ prefix = os.environ["PREFIX"]
 fit_script = os.environ["FIT_SCRIPT"]
 fit_module = os.environ["FIT_MODULE"]
 fit_bal = os.environ["FIT_BAL"] == "1"
+line_extrapolation_anchor = os.environ["LINE_EXTRAPOLATION_ANCHOR"]
 resume_only = os.environ["RESUME_ONLY"] == "1"
 sed_photometry_path = os.environ["SED_PHOTOMETRY_PATH"]
 output_dir = os.environ["OUTPUT_DIR"]
@@ -761,6 +783,7 @@ elif fit_script == "fit_spectra_jaxsedfit_joint.py":
     ])
     if fit_bal:
         cmd.append("--fit-bal")
+    cmd.extend(["--line-extrapolation-anchor", line_extrapolation_anchor])
     if resume_dir:
         cmd.extend([
             "--resume", resume_dir,
