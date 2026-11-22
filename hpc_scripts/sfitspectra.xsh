@@ -353,6 +353,12 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--subtract-captured-native-narrow-lines",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="Passed through to the joint backend (absent: not passed).",
+)
+parser.add_argument(
     "--narrow-line-extrapolation",
     choices=("template", "optical_only", "none"),
     default=None,
@@ -406,6 +412,8 @@ fresh_run_options = (
     "--consistent-line-coverage",
     "--no-consistent-line-coverage",
     "--narrow-line-extrapolation",
+    "--subtract-captured-native-narrow-lines",
+    "--no-subtract-captured-native-narrow-lines",
     "--resume",
     "--resume-only",
 )
@@ -439,6 +447,7 @@ joint_prediction_options = {
     "--line-extrapolation-ew-scope": cli_args.line_extrapolation_ew_scope,
     "--consistent-line-coverage": cli_args.consistent_line_coverage,
     "--narrow-line-extrapolation": cli_args.narrow_line_extrapolation,
+    "--subtract-captured-native-narrow-lines": cli_args.subtract_captured_native_narrow_lines,
 }
 joint_prediction_args = []
 for option, value in joint_prediction_options.items():
