@@ -2939,7 +2939,7 @@ def _anchor_config_args(tmp_path, **options):
 @pytest.mark.parametrize(
     ("options", "expected"),
     [
-        ({}, {"line_extrapolation_anchor": "fitted_lines", "line_extrapolation_ew_scope": "blueward"}),
+        ({}, {"line_extrapolation_anchor": "fitted_lines", "line_extrapolation_ew_scope": "all"}),
         (
             {"line_extrapolation_anchor": "continuum_ew", "line_extrapolation_ew_scope": "all"},
             {"line_extrapolation_anchor": "continuum_ew", "line_extrapolation_ew_scope": "all"},
@@ -3145,3 +3145,46 @@ def test_recorded_options_with_removed_names_are_ignored(monkeypatch, tmp_path):
     assert sampled["line_extrapolation_anchor"] == "fitted_lines"
     assert "consistent_line_coverage" not in sampled
     assert "consistent_line_coverage" not in fitter._qvc_recorded_agn_options
+
+
+def test_cli_prediction_options_build_a_real_jaxsedfit_config(tmp_path):
+    """Every CLI prediction option must be a real AGNConfig field of the installed jaxsedfit."""
+    jaxsedfit = pytest.importorskip("jaxsedfit")
+    import dataclasses
+
+    args = joint.parse_args(
+        [
+            *_common_fit_argv(tmp_path),
+            "--line-extrapolation-anchor", "continuum_ew",
+            "--line-extrapolation-ew-scope", "blueward",
+            "--narrow-line-extrapolation", "optical_only",
+        ]
+    )
+    requested = joint.requested_agn_options(args)
+    assert set(requested) == set(joint.AGN_PREDICTION_OPTIONS)
+    fields = {field.name for field in dataclasses.fields(jaxsedfit.AGNConfig)}
+    missing = set(requested) - fields
+    if missing:
+        pytest.skip(f"installed jaxsedfit lacks {sorted(missing)}")
+    agn = jaxsedfit.AGNConfig(**requested)
+    for name, value in requested.items():
+        assert getattr(agn, name) == value
+    record = {
+        **_record_with_ugriz(),
+        "sdss_name": "000000.00+000000.0",
+        "z": 2.0,
+        "ra": 0.0,
+        "dec": 0.0,
+        "mjd": 55000.0,
+    }
+    config, _ = joint.build_joint_config(
+        record,
+        pd.DataFrame(),
+        lam=np.array([4000.0, 6000.0, 9000.0]),
+        flux=np.array([1.0, 1.1, 1.2]),
+        err=np.array([0.1, 0.1, 0.1]),
+        resolving_power=2000.0,
+        args=_anchor_config_args(tmp_path, **requested),
+        aperture_diameter_arcsec=2.0,
+    )
+    assert joint.config_agn_options(config) == requested

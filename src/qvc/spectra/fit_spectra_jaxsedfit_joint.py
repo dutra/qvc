@@ -98,7 +98,7 @@ LINE_EXTRAPOLATION_EW_SCOPES = ("blueward", "all")
 NARROW_LINE_EXTRAPOLATION_MODES = ("template", "optical_only", "none")
 AGN_PREDICTION_OPTIONS = {
     "line_extrapolation_anchor": ("fitted_lines", LINE_EXTRAPOLATION_ANCHORS),
-    "line_extrapolation_ew_scope": ("blueward", LINE_EXTRAPOLATION_EW_SCOPES),
+    "line_extrapolation_ew_scope": ("all", LINE_EXTRAPOLATION_EW_SCOPES),
     "narrow_line_extrapolation": ("template", NARROW_LINE_EXTRAPOLATION_MODES),
 }
 # HDF5 attribute recording the option values a re-saved bundle's draws were
@@ -3856,9 +3856,9 @@ def parse_args(argv=None):
         choices=LINE_EXTRAPOLATION_EW_SCOPES,
         default=None,
         help=(
-            "Lines anchored by 'continuum_ew': 'blueward' (jaxsedfit default) "
-            "only lines blueward of the spectrum, 'all' every uncovered broad "
-            "line. Absent: as for --line-extrapolation-anchor."
+            "Lines anchored by 'continuum_ew': 'all' (jaxsedfit default, both sides) "
+            "or 'blueward' (only lines blueward of the spectrum; redward lines "
+            "keep the fitted-line anchor). Absent: as for --line-extrapolation-anchor."
         ),
     )
     parser.add_argument(
