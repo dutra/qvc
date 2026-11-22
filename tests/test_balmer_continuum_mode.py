@@ -222,7 +222,7 @@ def test_resume_returns_bundle_constraint(tmp_path):
 
 def test_resume_refuses_bundle_without_bc_in_always_mode(tmp_path):
     with pytest.raises(
-        joint.IncompatibleBalmerContinuumResumeError, match="cannot gain one post hoc"
+        joint.IncompatibleBalmerContinuumResumeError, match="cannot gain or lose the BC component"
     ):
         _validate(
             _resume_fitter(UNCOVERED_REST, enabled=False),

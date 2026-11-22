@@ -146,10 +146,13 @@ DEFAULT_BALMER_CONTINUUM_MODE = "coverage"
 DEFAULT_BALMER_RATIO_PRIOR_MEDIAN = 0.16
 DEFAULT_BALMER_RATIO_PRIOR_SIGMA_LN = 0.7
 BALMER_RATIO_REFERENCE_ANGSTROM = 3000.0
-# (median, natural-log sigma) of the data-constrained covered fits
-# (posterior log error < 0.3): tau 1.24, velocity sigma 11,000-14,000 km/s.
-BALMER_PRIOR_HELD_TAU = (1.25, 0.3)
-BALMER_PRIOR_HELD_VEL_KMS = (12000.0, 0.5)
+# Medians of the data-constrained covered fits (posterior log error < 0.3):
+# tau 1.24, velocity sigma 11,000-14,000 km/s. The widths are kept small so
+# that the shape is effectively fixed: with looser shape priors (0.3, 0.5)
+# a high-S/N BOSS spectrum covering rest 1300-3700 A pushed tau to 0.5 and
+# the velocity to 21,000 km/s, turning the BC into a smooth continuum tilt.
+BALMER_PRIOR_HELD_TAU = (1.25, 0.1)
+BALMER_PRIOR_HELD_VEL_KMS = (12000.0, 0.1)
 BALMER_CONTINUUM_CONSTRAINTS = ("data", "prior", "off")
 
 
@@ -2616,7 +2619,7 @@ def validate_resume_balmer_continuum_fitter(
             f"the current {mode} policy requires {expected_enabled} for {coverage}. "
             "The coverage policy requires retained rest-frame coverage at or "
             "below 3000 Angstrom and at or above 4000 Angstrom, and --no-fit-bc "
-            "always disables it. A posterior sampled without BC cannot gain one "
+            "always disables it. A posterior cannot gain or lose the BC component "
             "post hoc: refit the object."
         )
     if saved != expected:
