@@ -18,6 +18,7 @@ import argparse
 import gc
 import hashlib
 import inspect
+import json
 import multiprocessing as mp
 import traceback
 import warnings
@@ -88,10 +89,19 @@ HOST_CAPTURE_BUNDLE_ATTR = "qvc_host_capture_model"
 HOST_CAPTURE_BUNDLE_MARKER = "static_sdss_psf_fwhm"
 HOST_CAPTURE_PSF_FWHM_ATTR = "qvc_f_host_2500_psf_fwhm_arcsec"
 HOST_CAPTURE_QVC_FWHM_ATTR = "qvc_sdss_psf_fwhm_arcsec"
-# Luminosity anchor for broad lines outside the fitted spectrum, passed to
-# jaxsedfit's ``AGNConfig.line_extrapolation_anchor``.
+# Prediction-only jaxsedfit AGN options exposed on the CLI. Each maps a CLI
+# destination to (AGNConfig field, jaxsedfit default, allowed values). A CLI
+# value of None keeps the bundle's value on resume and jaxsedfit's default on
+# fresh fits; only an explicit value overrides.
 LINE_EXTRAPOLATION_ANCHORS = ("fitted_lines", "continuum_ew")
-DEFAULT_LINE_EXTRAPOLATION_ANCHOR = "fitted_lines"
+LINE_EXTRAPOLATION_EW_SCOPES = ("blueward", "all")
+AGN_PREDICTION_OPTIONS = {
+    "line_extrapolation_anchor": ("fitted_lines", LINE_EXTRAPOLATION_ANCHORS),
+    "line_extrapolation_ew_scope": ("blueward", LINE_EXTRAPOLATION_EW_SCOPES),
+}
+# HDF5 attribute recording the option values a re-saved bundle's draws were
+# sampled with, so a later resume still reports them.
+SAMPLED_AGN_OPTIONS_ATTR = "qvc_sampled_agn_options_json"
 TOTAL_CAPTURE_PHOTOMETRY_METHODS = frozenset(
     {"profile", "auto", "model", "cmodel", "petrosian"}
 )
@@ -109,78 +119,91 @@ class IncompatibleBalmerContinuumResumeError(RuntimeError):
     """Raised when a resume bundle disagrees with the active BC policy."""
 
 
-def requested_line_extrapolation_anchor(args):
-    """Return the CLI out-of-coverage broad-line anchor."""
-    anchor = str(
-        getattr(args, "line_extrapolation_anchor", DEFAULT_LINE_EXTRAPOLATION_ANCHOR)
-        or DEFAULT_LINE_EXTRAPOLATION_ANCHOR
-    )
-    if anchor not in LINE_EXTRAPOLATION_ANCHORS:
-        raise ValueError(
-            f"Unsupported line extrapolation anchor {anchor!r}; expected one of "
-            f"{LINE_EXTRAPOLATION_ANCHORS}."
-        )
-    return anchor
+def requested_agn_options(args):
+    """Return the explicitly requested prediction-only AGN options."""
+    options = {}
+    for field, (_default, allowed) in AGN_PREDICTION_OPTIONS.items():
+        value = getattr(args, field, None)
+        if value is None:
+            continue
+        if allowed is not None and value not in allowed:
+            raise ValueError(f"Unsupported {field} {value!r}; expected one of {allowed}.")
+        options[field] = value
+    return options
 
 
-def config_line_extrapolation_anchor(config):
-    """Return the anchor stored in a jaxsedfit config (old configs: fitted_lines)."""
-    return str(
-        getattr(
-            getattr(config, "agn", None),
-            "line_extrapolation_anchor",
-            DEFAULT_LINE_EXTRAPOLATION_ANCHOR,
-        )
-    )
+def config_agn_options(config):
+    """Return every prediction-only AGN option of a config (old configs: defaults)."""
+    agn = getattr(config, "agn", None)
+    return {
+        field: getattr(agn, field, default)
+        for field, (default, _allowed) in AGN_PREDICTION_OPTIONS.items()
+    }
 
 
-def apply_line_extrapolation_anchor(config, anchor):
-    """Set the out-of-coverage broad-line anchor on a loaded jaxsedfit config.
+def apply_agn_options(config, options):
+    """Set prediction-only AGN options on a loaded jaxsedfit config.
 
-    The anchor changes no sampled parameter, so a saved posterior can be
-    re-predicted with a different anchor. Its draws were sampled with the
-    anchor stored in the bundle; the photometric line prediction is a post-hoc
+    These options change no sampled parameter, so a saved posterior can be
+    re-predicted with other values. Its draws were sampled with the values
+    stored in the bundle; the photometric prediction is a post-hoc
     recomputation.
     """
-    if config_line_extrapolation_anchor(config) == anchor:
-        return config
-    if not hasattr(config.agn, "line_extrapolation_anchor"):
-        raise RuntimeError(
-            "The installed jaxsedfit does not support "
-            "AGNConfig.line_extrapolation_anchor; cannot apply "
-            f"--line-extrapolation-anchor={anchor}."
-        )
-    config.agn.line_extrapolation_anchor = anchor
+    current = config_agn_options(config)
+    for field, value in options.items():
+        if current[field] == value:
+            continue
+        if not hasattr(config.agn, field):
+            raise RuntimeError(
+                f"The installed jaxsedfit does not support AGNConfig.{field}; "
+                f"cannot apply {field}={value!r}."
+            )
+        setattr(config.agn, field, value)
     return config
 
 
-def load_resume_fitter(source_path, args):
-    """Load a saved posterior with the CLI line-extrapolation anchor applied.
+def read_sampled_agn_options(path):
+    """Return the sampled-with options recorded by an earlier resume, if any."""
+    try:
+        with h5py.File(path, "r") as handle:
+            raw = handle.attrs.get(SAMPLED_AGN_OPTIONS_ATTR)
+    except OSError:
+        return None
+    if raw is None:
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode()
+    return dict(json.loads(str(raw)))
 
-    Returns the fitter and the anchor stored in the bundle (the one its draws
-    were sampled with).
+
+def load_resume_fitter(source_path, args):
+    """Load a saved posterior with the explicitly requested AGN options applied.
+
+    Returns the fitter and the option values its draws were sampled with:
+    those recorded by an earlier resume when present, else the bundle config's.
     """
     from jaxsedfit import JAXSEDFit
 
-    anchor = requested_line_extrapolation_anchor(args)
+    options = requested_agn_options(args)
+    recorded = read_sampled_agn_options(source_path) or {}
     sampled = {}
 
     def transform(config):
-        sampled["anchor"] = config_line_extrapolation_anchor(config)
-        return apply_line_extrapolation_anchor(config, anchor)
+        sampled.update(config_agn_options(config))
+        return apply_agn_options(config, options)
 
-    if "config_transform" in inspect.signature(JAXSEDFit.load).parameters:
+    if options:
+        if "config_transform" not in inspect.signature(JAXSEDFit.load).parameters:
+            raise RuntimeError(
+                "The installed jaxsedfit cannot change prediction options of a "
+                "saved posterior (JAXSEDFit.load lacks config_transform)."
+            )
         fitter = JAXSEDFit.load(source_path, config_transform=transform)
     else:
-        if anchor != DEFAULT_LINE_EXTRAPOLATION_ANCHOR:
-            raise RuntimeError(
-                "The installed jaxsedfit cannot change the line extrapolation "
-                "anchor of a saved posterior (JAXSEDFit.load lacks "
-                "config_transform)."
-            )
         fitter = JAXSEDFit.load(source_path)
-        sampled["anchor"] = config_line_extrapolation_anchor(fitter.config)
-    return fitter, sampled["anchor"]
+        sampled.update(config_agn_options(fitter.config))
+    sampled.update({key: value for key, value in recorded.items() if key in AGN_PREDICTION_OPTIONS})
+    return fitter, sampled
 
 
 def bal_enabled_for_redshift(args, redshift):
@@ -1255,14 +1278,9 @@ def build_joint_config(
         if bal_enabled_for_redshift(args, rec["z"])
         else None
     )
-    line_extrapolation_anchor = requested_line_extrapolation_anchor(args)
-    # Pass the field only when it differs from jaxsedfit's default so default
-    # fits stay valid with jaxsedfit versions that predate the option.
-    line_extrapolation_kwargs = (
-        {}
-        if line_extrapolation_anchor == DEFAULT_LINE_EXTRAPOLATION_ANCHOR
-        else {"line_extrapolation_anchor": line_extrapolation_anchor}
-    )
+    # Only explicitly requested options are passed, so default fits stay valid
+    # with jaxsedfit versions that predate them.
+    line_extrapolation_kwargs = requested_agn_options(args)
     config = FitConfig(
         observation=Observation(
             object_id=joint_saved_name(rec),
@@ -2407,7 +2425,15 @@ def verify_new_posterior_bundle(path):
     return path
 
 
-def annotate_posterior_bundle(path, args, rec, *, event_type="fit", source_path=None):
+def annotate_posterior_bundle(
+    path,
+    args,
+    rec,
+    *,
+    event_type="fit",
+    source_path=None,
+    sampled_agn_options=None,
+):
     """Attach QVC provenance after JAXSEDFit has finished writing its bundle."""
     path = verify_new_posterior_bundle(path)
     inputs = {
@@ -2451,6 +2477,12 @@ def annotate_posterior_bundle(path, args, rec, *, event_type="fit", source_path=
                 "New posterior bundle lacks log_host_capture_scale_arcsec samples."
             )
         handle.attrs[HOST_CAPTURE_BUNDLE_ATTR] = HOST_CAPTURE_BUNDLE_MARKER
+        if sampled_agn_options is not None:
+            # The re-saved config holds the re-prediction options; keep what
+            # the draws were actually sampled with.
+            handle.attrs[SAMPLED_AGN_OPTIONS_ATTR] = json.dumps(
+                dict(sampled_agn_options), sort_keys=True
+            )
         handle.attrs[HOST_CAPTURE_PSF_FWHM_ATTR] = SDSS_TYPICAL_PSF_FWHM_ARCSEC
         handle.attrs[HOST_CAPTURE_QVC_FWHM_ATTR] = np.asarray(
             [SDSS_STATIC_PSF_FWHM_ARCSEC[band] for band in PSF_AGN_FRACTION_BANDS],
@@ -2739,13 +2771,14 @@ def _base_result(rec, args, *, execution_mode, resumed_from_path=""):
                 getattr(args, "no_deredden", False)
             ),
             "joint_posterior_draw_source": str(execution_mode),
-            # Anchor used for the out-of-coverage broad-line photometry in this
-            # row, and the one the posterior draws were sampled with (they
-            # differ when a resume re-predicts an old bundle).
-            "line_extrapolation_anchor": requested_line_extrapolation_anchor(args),
-            "line_extrapolation_anchor_sampled": requested_line_extrapolation_anchor(args),
         }
     )
+    # Explicitly requested prediction options: the value used for this row and
+    # the value the posterior draws were sampled with (they differ when a
+    # resume re-predicts an old bundle). Absent flags add no columns.
+    for field, value in requested_agn_options(args).items():
+        result[field] = value
+        result[f"{field}_sampled"] = value
     result.update(empty_joint_chi2_summary())
     result.update(empty_spectral_component_fraction_summary())
     result.update(empty_psf_agn_fraction_summary())
@@ -3167,15 +3200,15 @@ def _run_resumed_fit(rec, args, source_path):
     """Regenerate one object from saved draws and write current-schema outputs."""
     fitter = None
     try:
-        fitter, sampled_anchor = load_resume_fitter(source_path, args)
+        fitter, sampled_options = load_resume_fitter(source_path, args)
         return _complete_resumed_fit(
-            rec, args, source_path, fitter, sampled_anchor=sampled_anchor
+            rec, args, source_path, fitter, sampled_options=sampled_options
         )
     finally:
         release_jaxsedfit_memory(fitter)
 
 
-def _complete_resumed_fit(rec, args, source_path, fitter, *, sampled_anchor=None):
+def _complete_resumed_fit(rec, args, source_path, fitter, *, sampled_options=None):
     """Build current catalog products from one already-loaded posterior."""
     from matplotlib import pyplot as plt
 
@@ -3185,18 +3218,15 @@ def _complete_resumed_fit(rec, args, source_path, fitter, *, sampled_anchor=None
         execution_mode="resumed",
         resumed_from_path=source_path,
     )
-    anchor = requested_line_extrapolation_anchor(args)
-    if config_line_extrapolation_anchor(fitter.config) != anchor:
-        raise ValueError(
-            "Loaded posterior uses line extrapolation anchor "
-            f"{config_line_extrapolation_anchor(fitter.config)!r}, not the "
-            f"requested {anchor!r}; load it with load_resume_fitter."
-        )
-    result["line_extrapolation_anchor_sampled"] = str(
-        sampled_anchor
-        if sampled_anchor is not None
-        else config_line_extrapolation_anchor(fitter.config)
-    )
+    current_options = config_agn_options(fitter.config)
+    sampled_options = dict(current_options if sampled_options is None else sampled_options)
+    for field, value in requested_agn_options(args).items():
+        if current_options[field] != value:
+            raise ValueError(
+                f"Loaded posterior uses {field}={current_options[field]!r}, not "
+                f"the requested {value!r}; load it with load_resume_fitter."
+            )
+        result[f"{field}_sampled"] = sampled_options[field]
     fitter.predictive = None
     validate_resume_host_capture_fitter(fitter, source_path)
     validate_resume_bal_fitter(
@@ -3341,6 +3371,7 @@ def _complete_resumed_fit(rec, args, source_path, fitter, *, sampled_anchor=None
                 rec,
                 event_type="resume",
                 source_path=source_path,
+                sampled_agn_options=sampled_options,
             )
         )
     else:
@@ -3798,15 +3829,25 @@ def parse_args(argv=None):
     parser.add_argument(
         "--line-extrapolation-anchor",
         choices=LINE_EXTRAPOLATION_ANCHORS,
-        default=DEFAULT_LINE_EXTRAPOLATION_ANCHOR,
+        default=None,
         help=(
             "Luminosity anchor for broad emission lines outside the fitted "
             "spectrum (still needed by the photometry). 'fitted_lines' scales "
             "the fixed-ratio broad template to the fitted covered lines; "
-            "'continuum_ew' ties each line to the fitted disc continuum "
-            "through QSOGEN rest equivalent widths. With --resume the value "
-            "overrides the bundle's stored anchor: the saved draws are "
-            "re-predicted, not resampled."
+            "'continuum_ew' ties them to the fitted disc continuum through "
+            "QSOGEN rest equivalent widths. Absent: jaxsedfit's default for "
+            "fresh fits, the bundle's stored value on --resume. An explicit "
+            "value on --resume re-predicts the saved draws without resampling."
+        ),
+    )
+    parser.add_argument(
+        "--line-extrapolation-ew-scope",
+        choices=LINE_EXTRAPOLATION_EW_SCOPES,
+        default=None,
+        help=(
+            "Lines anchored by 'continuum_ew': 'blueward' (jaxsedfit default) "
+            "only lines blueward of the spectrum, 'all' every uncovered broad "
+            "line. Absent: as for --line-extrapolation-anchor."
         ),
     )
     parser.add_argument("--no-fit-lines", dest="fit_lines", action="store_false")
