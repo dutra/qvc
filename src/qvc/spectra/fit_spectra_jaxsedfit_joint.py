@@ -205,7 +205,11 @@ def load_resume_fitter(source_path, args):
     else:
         fitter = JAXSEDFit.load(source_path)
         sampled.update(config_agn_options(fitter.config))
-    sampled.update({key: value for key, value in recorded.items() if key in AGN_PREDICTION_OPTIONS})
+    recorded = {key: value for key, value in recorded.items() if key in AGN_PREDICTION_OPTIONS}
+    sampled.update(recorded)
+    # Options a previous re-prediction recorded; reported on the row even
+    # without a flag so the catalog keeps the sampled-with provenance.
+    fitter._qvc_recorded_agn_options = recorded
     return fitter, sampled
 
 
@@ -3223,13 +3227,18 @@ def _complete_resumed_fit(rec, args, source_path, fitter, *, sampled_options=Non
     )
     current_options = config_agn_options(fitter.config)
     sampled_options = dict(current_options if sampled_options is None else sampled_options)
-    for field, value in requested_agn_options(args).items():
+    requested = requested_agn_options(args)
+    for field, value in requested.items():
         if current_options[field] != value:
             raise ValueError(
                 f"Loaded posterior uses {field}={current_options[field]!r}, not "
                 f"the requested {value!r}; load it with load_resume_fitter."
             )
         result[f"{field}_sampled"] = sampled_options[field]
+    for field in getattr(fitter, "_qvc_recorded_agn_options", None) or {}:
+        if field not in requested:
+            result[field] = current_options[field]
+            result[f"{field}_sampled"] = sampled_options[field]
     fitter.predictive = None
     validate_resume_host_capture_fitter(fitter, source_path)
     validate_resume_bal_fitter(

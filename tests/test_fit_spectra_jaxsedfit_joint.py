@@ -3080,6 +3080,17 @@ def test_resume_twice_keeps_the_sampled_with_anchor(monkeypatch, tmp_path):
     assert again["line_extrapolation_anchor"] == "continuum_ew"
     assert again["line_extrapolation_anchor_sampled"] == "fitted_lines"
 
+    # A no-flag resume of the re-predicted bundle still records provenance.
+    third = _hybrid_args(tmp_path)
+    third.resume = str(resaved.parent)
+    third.output_dir = str(tmp_path / "fourth")
+    third.save_fig = False
+    third.save_jaxsedfit_samples = False
+    plain = joint.run_hybrid_fit(rec, third)
+    assert plain["fit_ok"] is True
+    assert plain["line_extrapolation_anchor"] == "continuum_ew"
+    assert plain["line_extrapolation_anchor_sampled"] == "fitted_lines"
+
 
 def test_base_result_records_options_only_when_requested(tmp_path):
     args = _hybrid_args(tmp_path)
