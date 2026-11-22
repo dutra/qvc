@@ -364,6 +364,16 @@ parser.add_argument(
         "spectrum-fit job while preserving its original task and chunk IDs."
     ),
 )
+parser.add_argument(
+    "--balmer-continuum-mode",
+    choices=("coverage", "always"),
+    default="coverage",
+    help=(
+        "Balmer-continuum policy passed to fit_spectra_jaxsedfit_joint.py: "
+        "'coverage' fits it only when the spectrum covers rest 3000-4000 A; "
+        "'always' keeps it everywhere, prior-held where the edge is uncovered."
+    ),
+)
 cli_args = parser.parse_args()
 
 retry_job_name = cli_args.retry.strip()
@@ -374,6 +384,7 @@ fresh_run_options = (
     "--fit-bal",
     "--resume",
     "--resume-only",
+    "--balmer-continuum-mode",
 )
 fresh_run_option_was_explicit = any(
     arg == option or arg.startswith(f"{option}=")
@@ -402,6 +413,13 @@ if cli_args.fit_bal and fit_script != "fit_spectra_jaxsedfit_joint.py":
     parser.error("--fit-bal is supported only with fit_spectra_jaxsedfit_joint.py")
 if resume_run_name and fit_script != "fit_spectra_jaxsedfit_joint.py":
     parser.error("--resume is supported only with fit_spectra_jaxsedfit_joint.py")
+if (
+    cli_args.balmer_continuum_mode != "coverage"
+    and fit_script != "fit_spectra_jaxsedfit_joint.py"
+):
+    parser.error(
+        "--balmer-continuum-mode is supported only with fit_spectra_jaxsedfit_joint.py"
+    )
 if resume_run_name:
     normalized_resume_name = re.sub(r"[^A-Za-z0-9._-]+", "_", resume_run_name)
     if normalized_resume_name != resume_run_name or resume_run_name in {".", ".."}:
@@ -647,6 +665,7 @@ export FIT_MODULE="{fit_module}"
 export FIT_BAL="{int(cli_args.fit_bal)}"
 export RESUME_ONLY="{int(cli_args.resume_only)}"
 export SED_PHOTOMETRY_PATH="{sed_photometry_path}"
+export BALMER_CONTINUUM_MODE="{cli_args.balmer_continuum_mode}"
 export OUTPUT_DIR="{output_dir}"
 export OBJECT_IDS_FILE="{object_ids_file}"
 export CHUNK_SIZE={chunk_size}
@@ -681,6 +700,7 @@ echo "FIT_MODULE=$FIT_MODULE"
 echo "FIT_BAL=$FIT_BAL"
 echo "SED_PHOTOMETRY_PATH=$SED_PHOTOMETRY_PATH"
 echo "OBJECT_IDS_FILE=$OBJECT_IDS_FILE"
+echo "BALMER_CONTINUUM_MODE=$BALMER_CONTINUUM_MODE"
 echo "OUTPUT_DIR=$OUTPUT_DIR"
 echo "FIG_DIR=$FIG_DIR"
 echo "RESUME_DIR=$RESUME_DIR"
@@ -699,6 +719,7 @@ fit_bal = os.environ["FIT_BAL"] == "1"
 resume_only = os.environ["RESUME_ONLY"] == "1"
 sed_photometry_path = os.environ["SED_PHOTOMETRY_PATH"]
 output_dir = os.environ["OUTPUT_DIR"]
+balmer_continuum_mode = os.environ.get("BALMER_CONTINUUM_MODE", "coverage")
 object_ids_file = os.environ["OBJECT_IDS_FILE"]
 chunk_size = int(os.environ["CHUNK_SIZE"])
 nproc = int(os.environ["NPROC"])
@@ -768,6 +789,7 @@ elif fit_script == "fit_spectra_jaxsedfit_joint.py":
         ])
         if resume_only:
             cmd.append("--resume-only")
+    cmd.extend(["--balmer-continuum-mode", balmer_continuum_mode])
 else:
     raise ValueError(f"Unsupported FIT_SCRIPT in generated job: {{fit_script!r}}")
 
