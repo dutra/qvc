@@ -353,6 +353,12 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--consistent-line-coverage",
+    action=argparse.BooleanOptionalAction,
+    default=None,
+    help="Passed through to the joint backend (absent: not passed).",
+)
+parser.add_argument(
     "--line-extrapolation-ew-scope",
     choices=("blueward", "all"),
     default=None,
@@ -391,6 +397,8 @@ fresh_run_options = (
     "--fit-bal",
     "--line-extrapolation-anchor",
     "--line-extrapolation-ew-scope",
+    "--consistent-line-coverage",
+    "--no-consistent-line-coverage",
     "--resume",
     "--resume-only",
 )
@@ -422,10 +430,20 @@ if cli_args.fit_bal and fit_script != "fit_spectra_jaxsedfit_joint.py":
 joint_prediction_options = {
     "--line-extrapolation-anchor": cli_args.line_extrapolation_anchor,
     "--line-extrapolation-ew-scope": cli_args.line_extrapolation_ew_scope,
+    "--consistent-line-coverage": cli_args.consistent_line_coverage,
 }
+joint_prediction_args = []
 for option, value in joint_prediction_options.items():
-    if value is not None and fit_script != "fit_spectra_jaxsedfit_joint.py":
+    if value is None:
+        continue
+    if fit_script != "fit_spectra_jaxsedfit_joint.py":
         parser.error(f"{option} is supported only with fit_spectra_jaxsedfit_joint.py")
+    if value is True:
+        joint_prediction_args.append(option)
+    elif value is False:
+        joint_prediction_args.append(option.replace("--", "--no-", 1))
+    else:
+        joint_prediction_args.extend([option, value])
 if resume_run_name and fit_script != "fit_spectra_jaxsedfit_joint.py":
     parser.error("--resume is supported only with fit_spectra_jaxsedfit_joint.py")
 if resume_run_name:
@@ -671,7 +689,7 @@ export PREFIX="{prefix}"
 export FIT_SCRIPT="{fit_script}"
 export FIT_MODULE="{fit_module}"
 export FIT_BAL="{int(cli_args.fit_bal)}"
-export JOINT_PREDICTION_OPTIONS="{' '.join(f'{k}={v}' for k, v in joint_prediction_options.items() if v is not None)}"
+export JOINT_PREDICTION_ARGS="{' '.join(joint_prediction_args)}"
 export RESUME_ONLY="{int(cli_args.resume_only)}"
 export SED_PHOTOMETRY_PATH="{sed_photometry_path}"
 export OUTPUT_DIR="{output_dir}"
@@ -706,7 +724,7 @@ echo "PREFIX=$PREFIX"
 echo "FIT_SCRIPT=$FIT_SCRIPT"
 echo "FIT_MODULE=$FIT_MODULE"
 echo "FIT_BAL=$FIT_BAL"
-echo "JOINT_PREDICTION_OPTIONS=$JOINT_PREDICTION_OPTIONS"
+echo "JOINT_PREDICTION_ARGS=$JOINT_PREDICTION_ARGS"
 echo "SED_PHOTOMETRY_PATH=$SED_PHOTOMETRY_PATH"
 echo "OBJECT_IDS_FILE=$OBJECT_IDS_FILE"
 echo "OUTPUT_DIR=$OUTPUT_DIR"
@@ -724,7 +742,7 @@ prefix = os.environ["PREFIX"]
 fit_script = os.environ["FIT_SCRIPT"]
 fit_module = os.environ["FIT_MODULE"]
 fit_bal = os.environ["FIT_BAL"] == "1"
-joint_prediction_options = os.environ["JOINT_PREDICTION_OPTIONS"].split()
+joint_prediction_args = os.environ["JOINT_PREDICTION_ARGS"].split()
 resume_only = os.environ["RESUME_ONLY"] == "1"
 sed_photometry_path = os.environ["SED_PHOTOMETRY_PATH"]
 output_dir = os.environ["OUTPUT_DIR"]
@@ -790,9 +808,7 @@ elif fit_script == "fit_spectra_jaxsedfit_joint.py":
     ])
     if fit_bal:
         cmd.append("--fit-bal")
-    for option in joint_prediction_options:
-        name, value = option.split("=", 1)
-        cmd.extend([name, value])
+    cmd.extend(joint_prediction_args)
     if resume_dir:
         cmd.extend([
             "--resume", resume_dir,

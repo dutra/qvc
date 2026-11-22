@@ -98,6 +98,7 @@ LINE_EXTRAPOLATION_EW_SCOPES = ("blueward", "all")
 AGN_PREDICTION_OPTIONS = {
     "line_extrapolation_anchor": ("fitted_lines", LINE_EXTRAPOLATION_ANCHORS),
     "line_extrapolation_ew_scope": ("blueward", LINE_EXTRAPOLATION_EW_SCOPES),
+    "consistent_line_coverage": (False, (True, False)),
 }
 # HDF5 attribute recording the option values a re-saved bundle's draws were
 # sampled with, so a later resume still reports them.
@@ -3848,6 +3849,18 @@ def parse_args(argv=None):
             "Lines anchored by 'continuum_ew': 'blueward' (jaxsedfit default) "
             "only lines blueward of the spectrum, 'all' every uncovered broad "
             "line. Absent: as for --line-extrapolation-anchor."
+        ),
+    )
+    parser.add_argument(
+        "--consistent-line-coverage",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "jaxsedfit agn.consistent_line_coverage: decide fitted-or-"
+            "extrapolated for every emission line with one centre-based "
+            "coverage rule (no Ly-alpha double counting when the spectrum "
+            "starts between ~1228 and ~1294 A rest). Absent: jaxsedfit's "
+            "default for fresh fits, the bundle's value on --resume."
         ),
     )
     parser.add_argument("--no-fit-lines", dest="fit_lines", action="store_false")

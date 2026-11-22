@@ -2968,6 +2968,7 @@ def test_build_joint_config_sets_prediction_options(tmp_path, options, expected)
         args=_anchor_config_args(tmp_path, **options),
         aperture_diameter_arcsec=2.0,
     )
+    expected = {**expected, "consistent_line_coverage": False}
     assert joint.config_agn_options(config) == expected
     restored = jaxsedfit.config.fit_config_from_mapping(config.to_dict())
     assert joint.config_agn_options(restored) == expected
@@ -3096,3 +3097,18 @@ def test_base_result_records_options_only_when_requested(tmp_path):
     frame = read_spectra_catalog_hdf5(path).frame
     assert list(frame["line_extrapolation_anchor"]) == ["continuum_ew"]
     assert list(frame["line_extrapolation_anchor_sampled"]) == ["fitted_lines"]
+
+
+def test_parse_args_and_resume_consistent_line_coverage(monkeypatch, tmp_path):
+    common = _common_fit_argv(tmp_path)
+    assert joint.parse_args(common).consistent_line_coverage is None
+    args = joint.parse_args([*common, "--consistent-line-coverage"])
+    assert joint.requested_agn_options(args) == {"consistent_line_coverage": True}
+    assert joint.parse_args([*common, "--no-consistent-line-coverage"]).consistent_line_coverage is False
+
+    _stub_jaxsedfit_load(monkeypatch, {"consistent_line_coverage": False})
+    fitter, sampled = joint.load_resume_fitter(tmp_path / "bundle.h5", args)
+    assert fitter.config.agn.consistent_line_coverage is True
+    assert sampled["consistent_line_coverage"] is False
+    row = joint._base_result(_run_record(), args, execution_mode="fresh")
+    assert row["consistent_line_coverage"] is True

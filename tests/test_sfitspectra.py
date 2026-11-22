@@ -533,6 +533,7 @@ def test_sfitspectra_retry_requires_original_artifacts_and_sufficient_cpus(tmp_p
         ("--fit-bal",),
         ("--line-extrapolation-anchor", "continuum_ew"),
         ("--line-extrapolation-ew-scope", "all"),
+        ("--consistent-line-coverage",),
     ],
 )
 def test_sfitspectra_retry_rejects_fresh_run_options(tmp_path, fresh_args):
@@ -639,3 +640,20 @@ def test_sfitspectra_rejects_line_extrapolation_anchor_with_standalone_backend(t
 
     assert result.returncode != 0
     assert "--line-extrapolation-anchor is supported only" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("flag", "expected"),
+    [((), None), (("--consistent-line-coverage",), "--consistent-line-coverage"),
+     (("--no-consistent-line-coverage",), "--no-consistent-line-coverage")],
+)
+def test_sfitspectra_forwards_consistent_line_coverage(tmp_path, monkeypatch, flag, expected):
+    root, script_path, csv_path, _, env = _fresh_workspace(tmp_path)
+    (root / 'results/data/jaxqsofit/old/all').mkdir(parents=True)
+    result = _run_fresh(root, script_path, env, '--chisq-csv', str(csv_path),
+                        '--description', 'coverage', '--resume', 'old', *flag)
+    assert result.returncode == 0, result.stderr
+    generated = next((root / 'hpc_scripts/submit/jaxqsofit').glob('submit_*.sbatch')).read_text()
+    command = _generated_fit_command(root, script_path, generated, monkeypatch)
+    present = [token for token in command if token.endswith('consistent-line-coverage')]
+    assert present == ([] if expected is None else [expected])
