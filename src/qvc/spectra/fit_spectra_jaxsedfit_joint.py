@@ -95,10 +95,12 @@ HOST_CAPTURE_QVC_FWHM_ATTR = "qvc_sdss_psf_fwhm_arcsec"
 # fresh fits; only an explicit value overrides.
 LINE_EXTRAPOLATION_ANCHORS = ("fitted_lines", "continuum_ew")
 LINE_EXTRAPOLATION_EW_SCOPES = ("blueward", "all")
+NARROW_LINE_EXTRAPOLATION_MODES = ("template", "optical_only", "none")
 AGN_PREDICTION_OPTIONS = {
     "line_extrapolation_anchor": ("fitted_lines", LINE_EXTRAPOLATION_ANCHORS),
     "line_extrapolation_ew_scope": ("blueward", LINE_EXTRAPOLATION_EW_SCOPES),
     "consistent_line_coverage": (False, (True, False)),
+    "narrow_line_extrapolation": ("template", NARROW_LINE_EXTRAPOLATION_MODES),
 }
 # HDF5 attribute recording the option values a re-saved bundle's draws were
 # sampled with, so a later resume still reports them.
@@ -3861,6 +3863,17 @@ def parse_args(argv=None):
             "coverage rule (no Ly-alpha double counting when the spectrum "
             "starts between ~1228 and ~1294 A rest). Absent: jaxsedfit's "
             "default for fresh fits, the bundle's value on --resume."
+        ),
+    )
+    parser.add_argument(
+        "--narrow-line-extrapolation",
+        choices=NARROW_LINE_EXTRAPOLATION_MODES,
+        default=None,
+        help=(
+            "jaxsedfit agn.narrow_line_extrapolation: 'template' scales the "
+            "Seyfert-2 template to the fitted narrow lines, 'optical_only' drops "
+            "extrapolated narrow lines blueward of rest 3000 A, 'none' drops all. "
+            "Absent: jaxsedfit's default for fresh fits, the bundle's value on --resume."
         ),
     )
     parser.add_argument("--no-fit-lines", dest="fit_lines", action="store_false")

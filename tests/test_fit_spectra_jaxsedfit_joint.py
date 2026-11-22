@@ -2968,7 +2968,7 @@ def test_build_joint_config_sets_prediction_options(tmp_path, options, expected)
         args=_anchor_config_args(tmp_path, **options),
         aperture_diameter_arcsec=2.0,
     )
-    expected = {**expected, "consistent_line_coverage": False}
+    expected = {**expected, "consistent_line_coverage": False, "narrow_line_extrapolation": "template"}
     assert joint.config_agn_options(config) == expected
     restored = jaxsedfit.config.fit_config_from_mapping(config.to_dict())
     assert joint.config_agn_options(restored) == expected
@@ -3112,3 +3112,14 @@ def test_parse_args_and_resume_consistent_line_coverage(monkeypatch, tmp_path):
     assert sampled["consistent_line_coverage"] is False
     row = joint._base_result(_run_record(), args, execution_mode="fresh")
     assert row["consistent_line_coverage"] is True
+
+
+def test_narrow_line_extrapolation_option(monkeypatch, tmp_path):
+    common = _common_fit_argv(tmp_path)
+    assert joint.parse_args(common).narrow_line_extrapolation is None
+    args = joint.parse_args([*common, "--narrow-line-extrapolation", "optical_only"])
+    assert joint.requested_agn_options(args) == {"narrow_line_extrapolation": "optical_only"}
+    _stub_jaxsedfit_load(monkeypatch, {"narrow_line_extrapolation": "template"})
+    fitter, sampled = joint.load_resume_fitter(tmp_path / "bundle.h5", args)
+    assert fitter.config.agn.narrow_line_extrapolation == "optical_only"
+    assert sampled["narrow_line_extrapolation"] == "template"

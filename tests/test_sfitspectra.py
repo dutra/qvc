@@ -534,6 +534,7 @@ def test_sfitspectra_retry_requires_original_artifacts_and_sufficient_cpus(tmp_p
         ("--line-extrapolation-anchor", "continuum_ew"),
         ("--line-extrapolation-ew-scope", "all"),
         ("--consistent-line-coverage",),
+        ("--narrow-line-extrapolation", "optical_only"),
     ],
 )
 def test_sfitspectra_retry_rejects_fresh_run_options(tmp_path, fresh_args):
@@ -606,6 +607,7 @@ def _generated_fit_command(root, script_path, generated, monkeypatch):
         (),
         ("--line-extrapolation-anchor", "fitted_lines"),
         ("--line-extrapolation-anchor", "continuum_ew", "--line-extrapolation-ew-scope", "all"),
+        ("--narrow-line-extrapolation", "optical_only"),
     ],
 )
 def test_sfitspectra_forwards_prediction_options_only_when_given(tmp_path, monkeypatch, extra):
@@ -617,7 +619,7 @@ def test_sfitspectra_forwards_prediction_options_only_when_given(tmp_path, monke
     generated = next((root / 'hpc_scripts/submit/jaxqsofit').glob('submit_*.sbatch')).read_text()
     command = _generated_fit_command(root, script_path, generated, monkeypatch)
     expected = dict(zip(extra[0::2], extra[1::2]))
-    for option in ('--line-extrapolation-anchor', '--line-extrapolation-ew-scope'):
+    for option in ('--line-extrapolation-anchor', '--line-extrapolation-ew-scope', '--narrow-line-extrapolation'):
         if option in expected:
             assert command[command.index(option) + 1] == expected[option]
         else:
