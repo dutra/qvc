@@ -133,6 +133,94 @@ def balmer_continuum_enabled_for_coverage(args, wavelength_rest, valid_mask=None
     )
 
 
+# Balmer-continuum (BC) policy. "coverage" (the default) fits the BC only when
+# the retained spectrum brackets the Balmer edge, so the BC switches off above
+# z ~ 1.30 (SDSS-I/II) or z ~ 1.59 (BOSS). "always" keeps it for every object;
+# where the edge is not covered its amplitude is held by a log-normal prior on
+# BC / disc continuum at rest 3000 A and its shape by tight population priors.
+BALMER_CONTINUUM_MODES = ("coverage", "always")
+DEFAULT_BALMER_CONTINUUM_MODE = "coverage"
+# Measured from covered fits (z > 0.8, m_2500 < 21, n = 1788) of the
+# Nov 20 catalog: median BC/continuum at 3000 A of 0.163, 68% log scatter
+# 0.71 (0.69 after removing the median posterior error in quadrature).
+DEFAULT_BALMER_RATIO_PRIOR_MEDIAN = 0.16
+DEFAULT_BALMER_RATIO_PRIOR_SIGMA_LN = 0.7
+BALMER_RATIO_REFERENCE_ANGSTROM = 3000.0
+# (median, natural-log sigma) of the data-constrained covered fits
+# (posterior log error < 0.3): tau 1.24, velocity sigma 11,000-14,000 km/s.
+BALMER_PRIOR_HELD_TAU = (1.25, 0.3)
+BALMER_PRIOR_HELD_VEL_KMS = (12000.0, 0.5)
+BALMER_CONTINUUM_CONSTRAINTS = ("data", "prior", "off")
+
+
+def requested_balmer_continuum_mode(args):
+    """Return the validated BC mode requested on the command line."""
+    mode = str(getattr(args, "balmer_continuum_mode", DEFAULT_BALMER_CONTINUUM_MODE))
+    if mode not in BALMER_CONTINUUM_MODES:
+        raise ValueError(
+            f"Unknown Balmer-continuum mode {mode!r}; expected one of "
+            f"{BALMER_CONTINUUM_MODES}."
+        )
+    return mode
+
+
+def balmer_continuum_constraint(args, wavelength_rest, valid_mask=None):
+    """Return how the BC is constrained for one spectrum.
+
+    ``"data"`` when the retained pixels bracket the Balmer edge (the coverage
+    policy), ``"prior"`` when they do not but ``--balmer-continuum-mode always``
+    keeps the BC under the informative prior, and ``"off"`` otherwise.
+    """
+    if balmer_continuum_enabled_for_coverage(args, wavelength_rest, valid_mask):
+        return "data"
+    if bool(getattr(args, "fit_bc", True)) and (
+        requested_balmer_continuum_mode(args) == "always"
+    ):
+        return "prior"
+    return "off"
+
+
+def balmer_continuum_prior_settings(args):
+    """Return the jaxsedfit AGNConfig fields of the prior-held BC."""
+    median = float(
+        getattr(args, "balmer_ratio_prior_median", DEFAULT_BALMER_RATIO_PRIOR_MEDIAN)
+    )
+    sigma = float(
+        getattr(
+            args, "balmer_ratio_prior_sigma_ln", DEFAULT_BALMER_RATIO_PRIOR_SIGMA_LN
+        )
+    )
+    return {
+        "balmer_ratio_prior": (median, sigma),
+        "balmer_ratio_reference_rest": BALMER_RATIO_REFERENCE_ANGSTROM,
+        "balmer_tau_prior": tuple(float(v) for v in BALMER_PRIOR_HELD_TAU),
+        "balmer_vel_prior": tuple(float(v) for v in BALMER_PRIOR_HELD_VEL_KMS),
+    }
+
+
+def apply_balmer_continuum_prior(agn, args):
+    """Set the prior-held BC fields on a jaxsedfit AGNConfig."""
+    settings = balmer_continuum_prior_settings(args)
+    missing = [name for name in settings if not hasattr(agn, name)]
+    if missing:
+        raise RuntimeError(
+            "--balmer-continuum-mode always needs a jaxsedfit AGNConfig with "
+            f"{missing}; update jaxsedfit."
+        )
+    for name, value in settings.items():
+        setattr(agn, name, value)
+
+
+def config_balmer_continuum_constraint(config):
+    """Return "data", "prior" or "off" for a built or loaded jaxsedfit config."""
+    agn = getattr(config, "agn", None)
+    if not bool(getattr(agn, "fit_balmer_continuum", False)):
+        return "off"
+    if getattr(agn, "balmer_ratio_prior", None) is not None:
+        return "prior"
+    return "data"
+
+
 def _fits_table_scalar(hdul, column_name):
     """Return the first scalar found for a column in a spectrum FITS file."""
     for hdu in hdul[1:]:
@@ -1151,11 +1239,8 @@ def build_joint_config(
     )
     if not np.any(spec_good):
         raise RuntimeError("No spectral pixels remain inside the rest wavelength range.")
-    fit_balmer_continuum = balmer_continuum_enabled_for_coverage(
-        args,
-        wave_rf,
-        spec_good,
-    )
+    bc_constraint = balmer_continuum_constraint(args, wave_rf, spec_good)
+    fit_balmer_continuum = bc_constraint != "off"
 
     psf_fwhm = [
         None if not np.isfinite(legacy.safe_float(value)) else float(value)
@@ -1257,6 +1342,8 @@ def build_joint_config(
     config.prior_config.host.log_sfh_burst_tau_gyr = dist.Uniform(
         np.log(0.01), np.log(0.2)
     )
+    if bc_constraint == "prior":
+        apply_balmer_continuum_prior(config.agn, args)
     config.validate()
     return config, phot
 
@@ -2473,7 +2560,12 @@ def validate_resume_balmer_continuum_fitter(
     *,
     redshift,
 ):
-    """Require a resume bundle to match the current spectral-coverage BC policy."""
+    """Require a resume bundle to match the current BC policy.
+
+    A bundle sampled without BC cannot gain one post hoc (and vice versa), and
+    a prior-held BC must have been sampled under the current prior. Returns the
+    bundle's BC constraint ("data", "prior" or "off").
+    """
     config = getattr(fitter, "config", None)
     spectroscopy = getattr(config, "spectroscopy", None)
     if spectroscopy is None:
@@ -2506,25 +2598,49 @@ def validate_resume_balmer_continuum_fitter(
     wavelength_rest = (
         np.concatenate(retained_rest) if retained_rest else np.asarray([], dtype=float)
     )
-    expected_enabled = balmer_continuum_enabled_for_coverage(
-        args,
-        wavelength_rest,
-    )
+    expected = balmer_continuum_constraint(args, wavelength_rest)
+    expected_enabled = expected != "off"
     agn = getattr(config, "agn", None)
-    saved_enabled = bool(getattr(agn, "fit_balmer_continuum", False))
+    saved = config_balmer_continuum_constraint(config)
+    saved_enabled = saved != "off"
+    if wavelength_rest.size:
+        coverage = (
+            f"{np.min(wavelength_rest):.1f}--{np.max(wavelength_rest):.1f} Angstrom"
+        )
+    else:
+        coverage = "no retained valid rest-frame pixels"
+    mode = requested_balmer_continuum_mode(args)
     if saved_enabled != expected_enabled:
-        if wavelength_rest.size:
-            coverage = (
-                f"{np.min(wavelength_rest):.1f}--{np.max(wavelength_rest):.1f} Angstrom"
-            )
-        else:
-            coverage = "no retained valid rest-frame pixels"
         raise IncompatibleBalmerContinuumResumeError(
             f"Resume bundle {path} has fit_balmer_continuum={saved_enabled}, but "
-            f"the current coverage policy requires {expected_enabled} for {coverage}. "
-            "BC requires retained rest-frame coverage at or below 3000 Angstrom "
-            "and at or above 4000 Angstrom, and --no-fit-bc always disables it."
+            f"the current {mode} policy requires {expected_enabled} for {coverage}. "
+            "The coverage policy requires retained rest-frame coverage at or "
+            "below 3000 Angstrom and at or above 4000 Angstrom, and --no-fit-bc "
+            "always disables it. A posterior sampled without BC cannot gain one "
+            "post hoc: refit the object."
         )
+    if saved != expected:
+        raise IncompatibleBalmerContinuumResumeError(
+            f"Resume bundle {path} has a {saved}-constrained BC, but the current "
+            f"{mode} policy requires a {expected}-constrained BC for {coverage}."
+        )
+    if expected == "prior":
+        current = balmer_continuum_prior_settings(args)
+        for name, value in current.items():
+            stored = getattr(agn, name, None)
+            stored_values = (
+                np.atleast_1d(np.asarray(stored, dtype=float))
+                if stored is not None
+                else np.asarray([np.nan])
+            )
+            if stored_values.shape != np.atleast_1d(value).shape or not np.allclose(
+                stored_values, np.atleast_1d(np.asarray(value, dtype=float))
+            ):
+                raise IncompatibleBalmerContinuumResumeError(
+                    f"Resume bundle {path} was sampled with {name}={stored!r}, "
+                    f"but the current prior-held BC uses {value!r}."
+                )
+    return saved
 
 
 def preflight_resume_host_capture_bundles(records, args):
@@ -2680,6 +2796,11 @@ def _base_result(rec, args, *, execution_mode, resumed_from_path=""):
     )
     result["_joint_psf_photometry_draws"] = None
     result["_joint_psf_photometry_provenance"] = None
+    # Requested BC mode and, once the fit configuration exists, whether this
+    # object's BC was constrained by the spectrum ("data"), held by the prior
+    # ("prior"), or not fitted ("off").
+    result["balmer_continuum_mode"] = requested_balmer_continuum_mode(args)
+    result["balmer_continuum_constraint"] = ""
     return result
 
 
@@ -2928,6 +3049,9 @@ def run_one_fit(
             args,
             aperture_diameter_arcsec=aperture_diameter_arcsec,
         )
+        result["balmer_continuum_constraint"] = config_balmer_continuum_constraint(
+            config
+        )
         from jaxsedfit import JAXSEDFit
 
         fitter = JAXSEDFit(config)
@@ -3099,7 +3223,7 @@ def _complete_resumed_fit(rec, args, source_path, fitter):
         source_path,
         expected_enabled=bal_enabled_for_redshift(args, rec["z"]),
     )
-    validate_resume_balmer_continuum_fitter(
+    result["balmer_continuum_constraint"] = validate_resume_balmer_continuum_fitter(
         fitter,
         source_path,
         args,
@@ -3695,7 +3819,41 @@ def parse_args(argv=None):
     parser.add_argument("--no-fit-bc", dest="fit_bc", action="store_false")
     parser.add_argument("--no-save-fig", dest="save_fig", action="store_false")
     parser.add_argument("--no-save-jaxsedfit-samples", dest="save_jaxsedfit_samples", action="store_false")
+    parser.add_argument(
+        "--balmer-continuum-mode",
+        choices=BALMER_CONTINUUM_MODES,
+        default=DEFAULT_BALMER_CONTINUUM_MODE,
+        help=(
+            "'coverage' (default) fits the Balmer continuum only when the "
+            "spectrum covers rest 3000-4000 Angstrom. 'always' fits it for every "
+            "object; where the edge is not covered, a log-normal prior on BC / "
+            "disc continuum at rest 3000 Angstrom holds its amplitude and tight "
+            "population priors hold its optical depth and velocity."
+        ),
+    )
+    parser.add_argument(
+        "--balmer-ratio-prior-median",
+        type=float,
+        default=DEFAULT_BALMER_RATIO_PRIOR_MEDIAN,
+        help="Median BC / disc continuum at rest 3000 Angstrom of the prior-held BC.",
+    )
+    parser.add_argument(
+        "--balmer-ratio-prior-sigma-ln",
+        type=float,
+        default=DEFAULT_BALMER_RATIO_PRIOR_SIGMA_LN,
+        help="Natural-log width of the prior-held BC / disc continuum prior.",
+    )
     args = parser.parse_args(argv)
+    if not (
+        np.isfinite(args.balmer_ratio_prior_median)
+        and args.balmer_ratio_prior_median > 0.0
+        and np.isfinite(args.balmer_ratio_prior_sigma_ln)
+        and args.balmer_ratio_prior_sigma_ln > 0.0
+    ):
+        parser.error(
+            "--balmer-ratio-prior-median and --balmer-ratio-prior-sigma-ln must "
+            "be positive."
+        )
     if args.fpath_out is None:
         args.fpath_out = args.fpath_out_opt
     if args.mode == "fit" and not args.fpath_out:
