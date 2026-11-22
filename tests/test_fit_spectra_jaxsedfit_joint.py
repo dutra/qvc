@@ -2970,9 +2970,7 @@ def test_build_joint_config_sets_prediction_options(tmp_path, options, expected)
     )
     expected = {
         **expected,
-        "consistent_line_coverage": False,
         "narrow_line_extrapolation": "template",
-        "subtract_captured_native_narrow_lines": False,
     }
     assert joint.config_agn_options(config) == expected
     restored = jaxsedfit.config.fit_config_from_mapping(config.to_dict())
@@ -3115,21 +3113,6 @@ def test_base_result_records_options_only_when_requested(tmp_path):
     assert list(frame["line_extrapolation_anchor_sampled"]) == ["fitted_lines"]
 
 
-def test_parse_args_and_resume_consistent_line_coverage(monkeypatch, tmp_path):
-    common = _common_fit_argv(tmp_path)
-    assert joint.parse_args(common).consistent_line_coverage is None
-    args = joint.parse_args([*common, "--consistent-line-coverage"])
-    assert joint.requested_agn_options(args) == {"consistent_line_coverage": True}
-    assert joint.parse_args([*common, "--no-consistent-line-coverage"]).consistent_line_coverage is False
-
-    _stub_jaxsedfit_load(monkeypatch, {"consistent_line_coverage": False})
-    fitter, sampled = joint.load_resume_fitter(tmp_path / "bundle.h5", args)
-    assert fitter.config.agn.consistent_line_coverage is True
-    assert sampled["consistent_line_coverage"] is False
-    row = joint._base_result(_run_record(), args, execution_mode="fresh")
-    assert row["consistent_line_coverage"] is True
-
-
 def test_narrow_line_extrapolation_option(monkeypatch, tmp_path):
     common = _common_fit_argv(tmp_path)
     assert joint.parse_args(common).narrow_line_extrapolation is None
@@ -3141,14 +3124,24 @@ def test_narrow_line_extrapolation_option(monkeypatch, tmp_path):
     assert sampled["narrow_line_extrapolation"] == "template"
 
 
-def test_subtract_captured_native_narrow_lines_option(monkeypatch, tmp_path):
+
+
+def test_removed_jaxsedfit_switches_are_not_cli_options(tmp_path, capsys):
     common = _common_fit_argv(tmp_path)
-    assert joint.parse_args(common).subtract_captured_native_narrow_lines is None
-    args = joint.parse_args([*common, "--subtract-captured-native-narrow-lines"])
-    assert joint.requested_agn_options(args) == {"subtract_captured_native_narrow_lines": True}
-    _stub_jaxsedfit_load(monkeypatch, {"subtract_captured_native_narrow_lines": False})
-    fitter, sampled = joint.load_resume_fitter(tmp_path / "bundle.h5", args)
-    assert fitter.config.agn.subtract_captured_native_narrow_lines is True
-    assert sampled["subtract_captured_native_narrow_lines"] is False
-    row = joint._base_result(_run_record(), args, execution_mode="fresh")
-    assert row["subtract_captured_native_narrow_lines"] is True
+    for flag in ("--consistent-line-coverage", "--subtract-captured-native-narrow-lines"):
+        with pytest.raises(SystemExit):
+            joint.parse_args([*common, flag])
+    assert "consistent_line_coverage" not in joint.AGN_PREDICTION_OPTIONS
+
+
+def test_recorded_options_with_removed_names_are_ignored(monkeypatch, tmp_path):
+    path = tmp_path / "bundle.h5"
+    with h5py.File(path, "w") as handle:
+        handle.attrs[joint.SAMPLED_AGN_OPTIONS_ATTR] = json.dumps(
+            {"line_extrapolation_anchor": "fitted_lines", "consistent_line_coverage": False}
+        )
+    _stub_jaxsedfit_load(monkeypatch, {"line_extrapolation_anchor": "continuum_ew"})
+    fitter, sampled = joint.load_resume_fitter(path, SimpleNamespace())
+    assert sampled["line_extrapolation_anchor"] == "fitted_lines"
+    assert "consistent_line_coverage" not in sampled
+    assert "consistent_line_coverage" not in fitter._qvc_recorded_agn_options

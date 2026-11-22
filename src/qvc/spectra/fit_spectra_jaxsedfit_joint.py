@@ -99,9 +99,7 @@ NARROW_LINE_EXTRAPOLATION_MODES = ("template", "optical_only", "none")
 AGN_PREDICTION_OPTIONS = {
     "line_extrapolation_anchor": ("fitted_lines", LINE_EXTRAPOLATION_ANCHORS),
     "line_extrapolation_ew_scope": ("blueward", LINE_EXTRAPOLATION_EW_SCOPES),
-    "consistent_line_coverage": (False, (True, False)),
     "narrow_line_extrapolation": ("template", NARROW_LINE_EXTRAPOLATION_MODES),
-    "subtract_captured_native_narrow_lines": (False, (True, False)),
 }
 # HDF5 attribute recording the option values a re-saved bundle's draws were
 # sampled with, so a later resume still reports them.
@@ -3864,18 +3862,6 @@ def parse_args(argv=None):
         ),
     )
     parser.add_argument(
-        "--consistent-line-coverage",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help=(
-            "jaxsedfit agn.consistent_line_coverage: decide fitted-or-"
-            "extrapolated for every emission line with one centre-based "
-            "coverage rule (no Ly-alpha double counting when the spectrum "
-            "starts between ~1228 and ~1294 A rest). Absent: jaxsedfit's "
-            "default for fresh fits, the bundle's value on --resume."
-        ),
-    )
-    parser.add_argument(
         "--narrow-line-extrapolation",
         choices=NARROW_LINE_EXTRAPOLATION_MODES,
         default=None,
@@ -3884,18 +3870,6 @@ def parse_args(argv=None):
             "Seyfert-2 template to the fitted narrow lines, 'optical_only' drops "
             "extrapolated narrow lines blueward of rest 3000 A, 'none' drops all. "
             "Absent: jaxsedfit's default for fresh fits, the bundle's value on --resume."
-        ),
-    )
-    parser.add_argument(
-        "--subtract-captured-native-narrow-lines",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help=(
-            "jaxsedfit agn.subtract_captured_native_narrow_lines: when replacing "
-            "the native SED lines by the spectral ones, subtract the native narrow "
-            "lines only in their host-captured amount (fixes a double subtraction; "
-            "changes the photometric likelihood). Absent: jaxsedfit's default for "
-            "fresh fits, the bundle's value on --resume."
         ),
     )
     parser.add_argument("--no-fit-lines", dest="fit_lines", action="store_false")
