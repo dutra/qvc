@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -2428,21 +2429,7 @@ def test_fresh_m2500_reconstruction_error_is_not_silenced(monkeypatch, tmp_path)
         joint.run_one_fit(_run_record(), args)
 
 
-def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
-    rec = _run_record()
-    args = _hybrid_args(tmp_path)
-    source = joint.posterior_bundle_path(args.resume, rec)
-    source.parent.mkdir(parents=True)
-    source.write_bytes(b"immutable old posterior")
-    filter_names = [f"{band}_sdss" for band in "ugriz"]
-    prediction = _component_prediction(filter_names)
-    prediction.update(
-        {
-            "ebv_gal": np.full(4, 0.02),
-            "ebv_agn": np.full(4, 0.03),
-        }
-    )
-
+def _dummy_resume_fitter_cls(rec, prediction, filter_names, agn=None):
     class DummyFitter:
         predictive = {"stale": np.array([1.0])}
         samples = {
@@ -2465,6 +2452,7 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
                 ],
             ),
             likelihood=SimpleNamespace(use_host_capture_model=True),
+            agn=SimpleNamespace(**(agn or {})),
             galaxy=SimpleNamespace(cosmology_h0=70.0, cosmology_om0=0.3),
         )
 
@@ -2501,6 +2489,26 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
             fig = plt.figure()
             fig.savefig(output_path)
             return fig
+
+    return DummyFitter
+
+
+def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
+    rec = _run_record()
+    args = _hybrid_args(tmp_path)
+    source = joint.posterior_bundle_path(args.resume, rec)
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"immutable old posterior")
+    filter_names = [f"{band}_sdss" for band in "ugriz"]
+    prediction = _component_prediction(filter_names)
+    prediction.update(
+        {
+            "ebv_gal": np.full(4, 0.02),
+            "ebv_agn": np.full(4, 0.03),
+        }
+    )
+
+    DummyFitter = _dummy_resume_fitter_cls(rec, prediction, filter_names)
 
     monkeypatch.setitem(
         sys.modules,
@@ -2542,6 +2550,9 @@ def test_resumed_fit_recomputes_and_writes_new_schema(monkeypatch, tmp_path):
     )
     assert result["mw_deredden_applied"] is True
     assert result["joint_posterior_draw_source"] == "resume_bundle_reprocess"
+    # No prediction-option flag: no option columns.
+    assert "line_extrapolation_anchor" not in result
+    assert "line_extrapolation_anchor_sampled" not in result
     assert result["_joint_posterior_valid_count"] == 4
     np.testing.assert_array_equal(result["_joint_posterior_index"][:4], [0, 1, 2, 3])
     np.testing.assert_allclose(
@@ -2862,3 +2873,349 @@ def test_run_fit_output_write_errors_remain_fatal(monkeypatch, tmp_path):
     monkeypatch.setattr(joint, 'write_joint_fit_results_hdf5', fail_write)
     with pytest.raises(OSError, match='disk full'):
         joint.run_fit(args)
+
+
+def _common_fit_argv(tmp_path):
+    return [
+        "--mode", "fit",
+        str(tmp_path / "out.h5"),
+        "--sed-photometry-path", str(tmp_path / "phot.csv"),
+        "--filter_object_id", "1",
+    ]
+
+
+def test_parse_args_prediction_options_default_none_and_choices(tmp_path, capsys):
+    common = _common_fit_argv(tmp_path)
+    args = joint.parse_args(common)
+    assert args.line_extrapolation_anchor is None
+    assert args.line_extrapolation_ew_scope is None
+    assert joint.requested_agn_options(args) == {}
+    args = joint.parse_args(
+        [*common, "--line-extrapolation-anchor", "continuum_ew", "--line-extrapolation-ew-scope", "all"]
+    )
+    assert joint.requested_agn_options(args) == {
+        "line_extrapolation_anchor": "continuum_ew",
+        "line_extrapolation_ew_scope": "all",
+    }
+    with pytest.raises(SystemExit):
+        joint.parse_args([*common, "--line-extrapolation-anchor", "qsogen"])
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def _anchor_config_args(tmp_path, **options):
+    args = SimpleNamespace(
+        no_deredden=False,
+        wave_min=1250.0,
+        wave_max=8000.0,
+        dsps_ssp_fn="unused-in-config-construction.h5",
+        sed_n_wave=512,
+        fit_lines=True,
+        fit_fe=True,
+        fit_bc=True,
+        fit_bal=False,
+        line_flux_scale_mjy=0.1,
+        photometry_systematics=0.08,
+        spectrum_student_t_df=5.0,
+        spectrum_scale_prior_sigma_dex=0.1,
+        fit_method="optax",
+        optax_steps=10,
+        optax_lr=5.0e-3,
+        seed=3,
+        nuts_warmup=10,
+        nuts_samples=10,
+        nuts_chains=1,
+        nuts_target_accept=0.9,
+        dense_mass="blocks",
+        output_dir=tmp_path / "results",
+        fig_dir=tmp_path / "figures",
+        save_fig=False,
+        save_jaxsedfit_samples=False,
+    )
+    for key, value in options.items():
+        setattr(args, key, value)
+    return args
+
+
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [
+        ({}, {"line_extrapolation_anchor": "fitted_lines", "line_extrapolation_ew_scope": "all"}),
+        (
+            {"line_extrapolation_anchor": "continuum_ew", "line_extrapolation_ew_scope": "all"},
+            {"line_extrapolation_anchor": "continuum_ew", "line_extrapolation_ew_scope": "all"},
+        ),
+    ],
+)
+def test_build_joint_config_sets_prediction_options(tmp_path, options, expected):
+    jaxsedfit = pytest.importorskip("jaxsedfit")
+    if not hasattr(jaxsedfit.AGNConfig(), "line_extrapolation_ew_scope"):
+        pytest.skip("installed jaxsedfit predates the prediction options")
+    record = {
+        **_record_with_ugriz(),
+        "sdss_name": "000000.00+000000.0",
+        "z": 2.0,
+        "ra": 0.0,
+        "dec": 0.0,
+        "mjd": 55000.0,
+    }
+    config, _ = joint.build_joint_config(
+        record,
+        pd.DataFrame(),
+        lam=np.array([4000.0, 6000.0, 9000.0]),
+        flux=np.array([1.0, 1.1, 1.2]),
+        err=np.array([0.1, 0.1, 0.1]),
+        resolving_power=2000.0,
+        args=_anchor_config_args(tmp_path, **options),
+        aperture_diameter_arcsec=2.0,
+    )
+    expected = {
+        **expected,
+        "narrow_line_extrapolation": "template",
+    }
+    assert joint.config_agn_options(config) == expected
+    restored = jaxsedfit.config.fit_config_from_mapping(config.to_dict())
+    assert joint.config_agn_options(restored) == expected
+
+
+def _stub_jaxsedfit_load(monkeypatch, stored_agn, *, supports_transform=True, factory=None):
+    """Install a fake jaxsedfit whose load applies ``config_transform`` like the real one."""
+    built = {}
+
+    def make():
+        if factory is not None:
+            return factory()
+        return SimpleNamespace(config=SimpleNamespace(agn=SimpleNamespace(**stored_agn)))
+
+    if supports_transform:
+        def load(path, *, config_transform=None):
+            fitter = make()
+            if config_transform is not None:
+                fitter.config = config_transform(fitter.config)
+            built["options"] = joint.config_agn_options(fitter.config)
+            return fitter
+    else:
+        def load(path):
+            return make()
+
+    monkeypatch.setitem(sys.modules, "jaxsedfit", SimpleNamespace(JAXSEDFit=SimpleNamespace(load=load)))
+    return built
+
+
+@pytest.mark.parametrize(
+    ("stored", "requested", "expected_anchor", "expected_sampled"),
+    [
+        ({}, None, "fitted_lines", "fitted_lines"),
+        ({"line_extrapolation_anchor": "fitted_lines"}, "continuum_ew", "continuum_ew", "fitted_lines"),
+        # An absent flag keeps the bundle's anchor instead of forcing the default.
+        ({"line_extrapolation_anchor": "continuum_ew"}, None, "continuum_ew", "continuum_ew"),
+        ({"line_extrapolation_anchor": "continuum_ew"}, "fitted_lines", "fitted_lines", "continuum_ew"),
+    ],
+)
+def test_load_resume_fitter_applies_only_explicit_options(
+    monkeypatch, tmp_path, stored, requested, expected_anchor, expected_sampled
+):
+    _stub_jaxsedfit_load(monkeypatch, stored)
+    fitter, sampled = joint.load_resume_fitter(
+        tmp_path / "missing.h5", SimpleNamespace(line_extrapolation_anchor=requested)
+    )
+    assert joint.config_agn_options(fitter.config)["line_extrapolation_anchor"] == expected_anchor
+    assert sampled["line_extrapolation_anchor"] == expected_sampled
+
+
+def test_load_resume_fitter_rejects_options_unsupported_by_installed_jaxsedfit(monkeypatch, tmp_path):
+    args = SimpleNamespace(line_extrapolation_anchor="continuum_ew")
+    _stub_jaxsedfit_load(monkeypatch, {})
+    with pytest.raises(RuntimeError, match="does not support"):
+        joint.load_resume_fitter(tmp_path / "bundle.h5", args)
+    _stub_jaxsedfit_load(monkeypatch, {"line_extrapolation_anchor": "fitted_lines"}, supports_transform=False)
+    with pytest.raises(RuntimeError, match="config_transform"):
+        joint.load_resume_fitter(tmp_path / "bundle.h5", args)
+    fitter, sampled = joint.load_resume_fitter(tmp_path / "bundle.h5", SimpleNamespace())
+    assert sampled["line_extrapolation_anchor"] == "fitted_lines"
+
+
+def test_complete_resumed_fit_rejects_fitter_with_other_anchor(tmp_path):
+    args = _hybrid_args(tmp_path)
+    args.line_extrapolation_anchor = "continuum_ew"
+    fitter = SimpleNamespace(
+        config=SimpleNamespace(agn=SimpleNamespace(line_extrapolation_anchor="fitted_lines"))
+    )
+    with pytest.raises(ValueError, match="line_extrapolation_anchor"):
+        joint._complete_resumed_fit(_run_record(), args, tmp_path / "bundle.h5", fitter)
+
+
+def test_resume_twice_keeps_the_sampled_with_anchor(monkeypatch, tmp_path):
+    rec = _run_record()
+    filter_names = [f"{band}_sdss" for band in "ugriz"]
+    prediction = _component_prediction(filter_names)
+    prediction.update({"ebv_gal": np.full(4, 0.02), "ebv_agn": np.full(4, 0.03)})
+    DummyFitter = _dummy_resume_fitter_cls(
+        rec, prediction, filter_names, agn={"line_extrapolation_anchor": "fitted_lines"}
+    )
+    _stub_jaxsedfit_load(monkeypatch, {}, factory=DummyFitter)
+    monkeypatch.setattr(joint, "save_spectrum_figure", lambda fitter, record, fig_dir: Path(fig_dir) / "spectrum.pdf")
+
+    first = _hybrid_args(tmp_path)
+    first.line_extrapolation_anchor = "continuum_ew"
+    first.save_fig = False
+    source = joint.posterior_bundle_path(first.resume, rec)
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"original bundle sampled with fitted_lines")
+    row = joint.run_hybrid_fit(rec, first)
+    assert row["line_extrapolation_anchor"] == "continuum_ew"
+    assert row["line_extrapolation_anchor_sampled"] == "fitted_lines"
+    resaved = Path(row["fit_result_path"])
+    with h5py.File(resaved, "r") as handle:
+        recorded = json.loads(handle.attrs[joint.SAMPLED_AGN_OPTIONS_ATTR])
+    assert recorded["line_extrapolation_anchor"] == "fitted_lines"
+
+    # The re-saved bundle's config now says continuum_ew (the stub mimics it);
+    # a second resume must still report the original sampled-with anchor.
+    DummyFitter.config.agn.line_extrapolation_anchor = "continuum_ew"
+    second = _hybrid_args(tmp_path)
+    second.resume = str(resaved.parent)
+    second.output_dir = str(tmp_path / "third")
+    second.line_extrapolation_anchor = "continuum_ew"
+    second.save_fig = False
+    second.save_jaxsedfit_samples = False
+    again = joint.run_hybrid_fit(rec, second)
+    assert again["fit_ok"] is True
+    assert again["line_extrapolation_anchor"] == "continuum_ew"
+    assert again["line_extrapolation_anchor_sampled"] == "fitted_lines"
+
+    # A no-flag resume of the re-predicted bundle still records provenance.
+    third = _hybrid_args(tmp_path)
+    third.resume = str(resaved.parent)
+    third.output_dir = str(tmp_path / "fourth")
+    third.save_fig = False
+    third.save_jaxsedfit_samples = False
+    plain = joint.run_hybrid_fit(rec, third)
+    assert plain["fit_ok"] is True
+    assert plain["line_extrapolation_anchor"] == "continuum_ew"
+    assert plain["line_extrapolation_anchor_sampled"] == "fitted_lines"
+
+
+def test_base_result_records_options_only_when_requested(tmp_path):
+    args = _hybrid_args(tmp_path)
+    args.line_extrapolation_anchor = "continuum_ew"
+    row = joint._base_result(_run_record(), args, execution_mode="resumed")
+    assert row["line_extrapolation_anchor"] == "continuum_ew"
+    assert row["line_extrapolation_anchor_sampled"] == "continuum_ew"
+    assert "line_extrapolation_ew_scope" not in row
+    plain = joint._base_result(_run_record(), _hybrid_args(tmp_path), execution_mode="fresh")
+    assert not any(key.startswith("line_extrapolation") for key in plain)
+
+    row["line_extrapolation_anchor_sampled"] = "fitted_lines"
+    path = tmp_path / "catalog.h5"
+    write_joint_fit_results_hdf5(path, [row])
+    frame = read_spectra_catalog_hdf5(path).frame
+    assert list(frame["line_extrapolation_anchor"]) == ["continuum_ew"]
+    assert list(frame["line_extrapolation_anchor_sampled"]) == ["fitted_lines"]
+
+
+def test_narrow_line_extrapolation_option(monkeypatch, tmp_path):
+    common = _common_fit_argv(tmp_path)
+    assert joint.parse_args(common).narrow_line_extrapolation is None
+    args = joint.parse_args([*common, "--narrow-line-extrapolation", "optical_only"])
+    assert joint.requested_agn_options(args) == {"narrow_line_extrapolation": "optical_only"}
+    _stub_jaxsedfit_load(monkeypatch, {"narrow_line_extrapolation": "template"})
+    fitter, sampled = joint.load_resume_fitter(tmp_path / "bundle.h5", args)
+    assert fitter.config.agn.narrow_line_extrapolation == "optical_only"
+    assert sampled["narrow_line_extrapolation"] == "template"
+
+
+
+
+def test_removed_jaxsedfit_switches_are_not_cli_options(tmp_path, capsys):
+    common = _common_fit_argv(tmp_path)
+    for flag in ("--consistent-line-coverage", "--subtract-captured-native-narrow-lines"):
+        with pytest.raises(SystemExit):
+            joint.parse_args([*common, flag])
+    assert "consistent_line_coverage" not in joint.AGN_PREDICTION_OPTIONS
+
+
+def test_recorded_options_with_removed_names_are_ignored(monkeypatch, tmp_path):
+    path = tmp_path / "bundle.h5"
+    with h5py.File(path, "w") as handle:
+        handle.attrs[joint.SAMPLED_AGN_OPTIONS_ATTR] = json.dumps(
+            {"line_extrapolation_anchor": "fitted_lines", "consistent_line_coverage": False}
+        )
+    _stub_jaxsedfit_load(monkeypatch, {"line_extrapolation_anchor": "continuum_ew"})
+    fitter, sampled = joint.load_resume_fitter(path, SimpleNamespace())
+    assert sampled["line_extrapolation_anchor"] == "fitted_lines"
+    assert "consistent_line_coverage" not in sampled
+    assert "consistent_line_coverage" not in fitter._qvc_recorded_agn_options
+
+
+def test_cli_prediction_options_build_a_real_jaxsedfit_config(tmp_path):
+    """Every CLI prediction option must build a real AGNConfig of the installed jaxsedfit.
+
+    An option is skipped only when the installed jaxsedfit predates the whole
+    jaxsedfit change that introduced it (none of that change's fields exist);
+    a partially present change, a renamed field or a removed one fails.
+    """
+    jaxsedfit = pytest.importorskip("jaxsedfit")
+    import dataclasses
+
+    args = joint.parse_args(
+        [
+            *_common_fit_argv(tmp_path),
+            "--line-extrapolation-anchor", "continuum_ew",
+            "--line-extrapolation-ew-scope", "blueward",
+            "--narrow-line-extrapolation", "optical_only",
+        ]
+    )
+    requested = joint.requested_agn_options(args)
+    assert set(requested) == set(joint.AGN_PREDICTION_OPTIONS) == set(joint.AGN_PREDICTION_OPTION_SOURCES)
+    fields = {field.name for field in dataclasses.fields(jaxsedfit.AGNConfig)}
+    by_source = {}
+    for name, source in joint.AGN_PREDICTION_OPTION_SOURCES.items():
+        by_source.setdefault(source, []).append(name)
+    supported = {}
+    for source, names in by_source.items():
+        present = [name for name in names if name in fields]
+        assert not present or len(present) == len(names), f"{source}: only {present} of {names} exist"
+        if present:
+            supported.update({name: requested[name] for name in names})
+    if not supported:
+        pytest.skip("installed jaxsedfit predates every prediction option")
+    agn = jaxsedfit.AGNConfig(**supported)
+    for name, value in supported.items():
+        assert getattr(agn, name) == value
+    record = {
+        **_record_with_ugriz(),
+        "sdss_name": "000000.00+000000.0",
+        "z": 2.0,
+        "ra": 0.0,
+        "dec": 0.0,
+        "mjd": 55000.0,
+    }
+    config, _ = joint.build_joint_config(
+        record,
+        pd.DataFrame(),
+        lam=np.array([4000.0, 6000.0, 9000.0]),
+        flux=np.array([1.0, 1.1, 1.2]),
+        err=np.array([0.1, 0.1, 0.1]),
+        resolving_power=2000.0,
+        args=_anchor_config_args(tmp_path, **supported),
+        aperture_diameter_arcsec=2.0,
+    )
+    options = joint.config_agn_options(config)
+    for name, value in supported.items():
+        assert options[name] == value
+
+
+def test_unsupported_option_fails_once_at_start_up(monkeypatch, tmp_path):
+    from dataclasses import dataclass
+
+    @dataclass
+    class OldAGNConfig:
+        fit_agn: bool = True
+
+    monkeypatch.setitem(sys.modules, "jaxsedfit", SimpleNamespace(AGNConfig=OldAGNConfig))
+    args = joint.parse_args([*_common_fit_argv(tmp_path), "--line-extrapolation-anchor", "continuum_ew"])
+    monkeypatch.setattr(joint, "build_records", lambda args: pytest.fail("must fail before building records"))
+    with pytest.raises(SystemExit, match="--line-extrapolation-anchor needs jaxsedfit PR #163"):
+        joint.run_fit(args)
+    # Without options nothing is required.
+    joint.require_supported_agn_options(joint.parse_args(_common_fit_argv(tmp_path)))
