@@ -736,3 +736,40 @@ def test_sfitspectra_retry_accepts_memory_and_time_overrides(tmp_path):
     assert "--mem=80G" in call and "--time=8:00:00" in call and "--cpus-per-task=1" in call
     rejected = _run_retry(root, script_path, env, "--cpus-per-task", "4")
     assert rejected.returncode == 2
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        ((), []),
+        (("--drop-sub-lyman-photometry",), ["--drop-sub-lyman-photometry"]),
+        (
+            ("--drop-sub-lyman-photometry", "--sub-lyman-max-fraction", "0.25"),
+            ["--drop-sub-lyman-photometry", "--sub-lyman-max-fraction", "0.25"],
+        ),
+        (
+            ("--drop-sub-lyman-photometry", "--sub-lyman-rest-wavelength", "1216"),
+            ["--drop-sub-lyman-photometry", "--sub-lyman-rest-wavelength", "1216.0"],
+        ),
+    ],
+)
+def test_sfitspectra_forwards_sub_lyman_exclusion_only_when_given(tmp_path, monkeypatch, extra, expected):
+    root, script_path, csv_path, _, env = _fresh_workspace(tmp_path)
+    result = _run_fresh(root, script_path, env, '--chisq-csv', str(csv_path),
+                        '--description', 'sublyman', *extra)
+    assert result.returncode == 0, result.stderr
+    generated = next((root / 'hpc_scripts/submit/jaxqsofit').glob('submit_*.sbatch')).read_text()
+    command = _generated_fit_command(root, script_path, generated, monkeypatch)
+    present = [arg for arg in command if 'sub-lyman' in arg]
+    assert present == [arg for arg in expected if arg.startswith('--')]
+    for option, value in zip(expected[1::2], expected[2::2]):
+        assert command[command.index(option) + 1] == value
+
+
+def test_sfitspectra_rejects_sub_lyman_parameters_without_the_flag(tmp_path):
+    root, script_path, csv_path, calls_path, env = _fresh_workspace(tmp_path)
+    result = _run_fresh(root, script_path, env, '--chisq-csv', str(csv_path),
+                        '--description', 'sublyman', '--sub-lyman-max-fraction', '0.3')
+    assert result.returncode == 2
+    assert 'require --drop-sub-lyman-photometry' in result.stderr
+    assert _sbatch_calls(calls_path) == []

@@ -170,6 +170,123 @@ def apply_agn_options(config, options):
     return config
 
 
+# Exclusion of broadband photometry below the rest-frame Lyman limit
+# (--drop-sub-lyman-photometry, off by default). Below 912 A the transmission
+# of one sightline depends on its Lyman-limit systems, while the model applies
+# the mean IGM, so those bands cannot be fitted object by object. With the
+# option on, a band is left out of the photometric likelihood and of every
+# photometric chi-square (stored and reference) when more than
+# --sub-lyman-max-fraction of its flat-f_nu response lies below
+# --sub-lyman-rest-wavelength * (1 + z). The values map to these jaxsedfit
+# LikelihoodConfig fields (None = off).
+PHOTOMETRY_EXCLUSION_WAVELENGTH_FIELD = "exclude_photometry_below_rest_wavelength"
+PHOTOMETRY_EXCLUSION_FRACTION_FIELD = "exclude_photometry_max_fraction_below"
+PHOTOMETRY_EXCLUSION_FIELDS = (
+    PHOTOMETRY_EXCLUSION_WAVELENGTH_FIELD,
+    PHOTOMETRY_EXCLUSION_FRACTION_FIELD,
+)
+DEFAULT_SUB_LYMAN_REST_WAVELENGTH = 912.0
+DEFAULT_SUB_LYMAN_MAX_FRACTION = 0.5
+# Catalogue columns: the setting a row was predicted with (NaN = off), the one
+# its posterior draws were sampled with (they differ when a resume re-predicts
+# an old bundle with another setting), and the bands left out.
+PHOTOMETRY_EXCLUSION_COLUMNS = {
+    PHOTOMETRY_EXCLUSION_WAVELENGTH_FIELD: "photometry_exclusion_rest_wavelength",
+    PHOTOMETRY_EXCLUSION_FRACTION_FIELD: "photometry_exclusion_max_fraction",
+}
+# Key of the sampled-with exclusion inside the SAMPLED_AGN_OPTIONS_ATTR record.
+SAMPLED_PHOTOMETRY_EXCLUSION_KEY = "photometry_exclusion"
+
+
+def requested_photometry_exclusion(args):
+    """Return the jaxsedfit LikelihoodConfig fields of the sub-Lyman exclusion ({} when off)."""
+    if not bool(getattr(args, "drop_sub_lyman_photometry", False)):
+        return {}
+    wavelength = getattr(args, "sub_lyman_rest_wavelength", None)
+    fraction = getattr(args, "sub_lyman_max_fraction", None)
+    return {
+        PHOTOMETRY_EXCLUSION_WAVELENGTH_FIELD: float(
+            DEFAULT_SUB_LYMAN_REST_WAVELENGTH if wavelength is None else wavelength
+        ),
+        PHOTOMETRY_EXCLUSION_FRACTION_FIELD: float(
+            DEFAULT_SUB_LYMAN_MAX_FRACTION if fraction is None else fraction
+        ),
+    }
+
+
+def config_photometry_exclusion(config):
+    """Return the exclusion fields of a jaxsedfit config ({} when off or unsupported)."""
+    likelihood = getattr(config, "likelihood", None)
+    wavelength = getattr(likelihood, PHOTOMETRY_EXCLUSION_WAVELENGTH_FIELD, None)
+    if wavelength is None:
+        return {}
+    return {
+        PHOTOMETRY_EXCLUSION_WAVELENGTH_FIELD: float(wavelength),
+        PHOTOMETRY_EXCLUSION_FRACTION_FIELD: float(
+            getattr(likelihood, PHOTOMETRY_EXCLUSION_FRACTION_FIELD, DEFAULT_SUB_LYMAN_MAX_FRACTION)
+        ),
+    }
+
+
+def apply_photometry_exclusion(config, exclusion):
+    """Set the exclusion fields on a loaded jaxsedfit config before its context is built."""
+    likelihood = getattr(config, "likelihood", None)
+    for field, value in exclusion.items():
+        if not hasattr(likelihood, field):
+            raise RuntimeError(
+                f"The installed jaxsedfit does not support LikelihoodConfig.{field}; "
+                "cannot apply --drop-sub-lyman-photometry."
+            )
+        setattr(likelihood, field, value)
+    return config
+
+
+def photometry_exclusion_columns(exclusion, *, suffix=""):
+    """Catalogue columns of one exclusion setting (NaN when off)."""
+    return {
+        f"{column}{suffix}": float(exclusion[field]) if field in exclusion else np.nan
+        for field, column in PHOTOMETRY_EXCLUSION_COLUMNS.items()
+    }
+
+
+def excluded_photometry_summary(context, filter_names):
+    """Return the bands a model context leaves out of the likelihood.
+
+    ``photometry_filters_excluded`` lists them comma-separated (empty when none)
+    and ``n_photometry_excluded`` counts them; ``n_photometry`` keeps counting
+    every supplied band.
+    """
+    names = [str(name) for name in filter_names]
+    excluded = np.asarray(
+        getattr(context, "photometry_rest_excluded", np.zeros(0, dtype=bool)), dtype=bool
+    )
+    if excluded.shape != (len(names),):
+        excluded = np.zeros(len(names), dtype=bool)
+    return {
+        "photometry_filters_excluded": ",".join(
+            name for name, flag in zip(names, excluded) if flag
+        ),
+        "n_photometry_excluded": int(np.sum(excluded)),
+    }
+
+
+def require_photometry_exclusion_support(args):
+    """Fail once, before any object, if jaxsedfit lacks the rest-frame exclusion."""
+    if not requested_photometry_exclusion(args):
+        return
+    import dataclasses
+
+    from jaxsedfit import LikelihoodConfig
+
+    fields = {field.name for field in dataclasses.fields(LikelihoodConfig)}
+    missing = [name for name in PHOTOMETRY_EXCLUSION_FIELDS if name not in fields]
+    if missing:
+        raise SystemExit(
+            "--drop-sub-lyman-photometry needs a jaxsedfit whose LikelihoodConfig has "
+            f"{missing} (branch feat/drop-sub-lyman-photometry)."
+        )
+
+
 def read_sampled_agn_options(path):
     """Return the sampled-with options recorded by an earlier resume, if any."""
     try:
@@ -193,14 +310,19 @@ def load_resume_fitter(source_path, args):
     from jaxsedfit import JAXSEDFit
 
     options = requested_agn_options(args)
+    exclusion = requested_photometry_exclusion(args)
     recorded = read_sampled_agn_options(source_path) or {}
     sampled = {}
 
     def transform(config):
         sampled.update(config_agn_options(config))
-        return apply_agn_options(config, options)
+        sampled[SAMPLED_PHOTOMETRY_EXCLUSION_KEY] = config_photometry_exclusion(config)
+        config = apply_agn_options(config, options)
+        # The exclusion changes only which bands enter the likelihood, not the
+        # sampled parameters, so saved draws can be re-predicted with it.
+        return apply_photometry_exclusion(config, exclusion)
 
-    if options:
+    if options or exclusion:
         if "config_transform" not in inspect.signature(JAXSEDFit.load).parameters:
             raise RuntimeError(
                 "The installed jaxsedfit cannot change prediction options of a "
@@ -210,6 +332,9 @@ def load_resume_fitter(source_path, args):
     else:
         fitter = JAXSEDFit.load(source_path)
         sampled.update(config_agn_options(fitter.config))
+        sampled[SAMPLED_PHOTOMETRY_EXCLUSION_KEY] = config_photometry_exclusion(fitter.config)
+    if isinstance(recorded.get(SAMPLED_PHOTOMETRY_EXCLUSION_KEY), dict):
+        sampled[SAMPLED_PHOTOMETRY_EXCLUSION_KEY] = dict(recorded[SAMPLED_PHOTOMETRY_EXCLUSION_KEY])
     recorded = {key: value for key, value in recorded.items() if key in AGN_PREDICTION_OPTIONS}
     sampled.update(recorded)
     # Options a previous re-prediction recorded; reported on the row even
@@ -1371,6 +1496,9 @@ def build_joint_config(
             ),
             fit_spectrum_scale=True,
             spectrum_scale_prior_sigma_dex=args.spectrum_scale_prior_sigma_dex,
+            # Passed only when requested, so default fits keep working with
+            # jaxsedfit versions that predate the option.
+            **requested_photometry_exclusion(args),
         ),
         inference=InferenceConfig(
             method=args.fit_method,
@@ -1763,13 +1891,13 @@ def _resume_compare_rows(path):
     return _RESUME_COMPARE_CACHE[path]
 
 
-def compare_resumed_prediction(result, rows, *, object_id):
+def compare_resumed_prediction(result, rows, *, object_id, columns=RESUME_COMPARE_COLUMNS):
     """Return the differences between re-predicted and previously stored values."""
     previous = rows.get(str(object_id).strip())
     if previous is None:
         return [f"object {object_id} is not in the comparison catalogue"]
     problems = []
-    for column in RESUME_COMPARE_COLUMNS:
+    for column in columns:
         if column not in previous:
             continue
         old = legacy.safe_float(previous[column])
@@ -2958,6 +3086,10 @@ def _base_result(rec, args, *, execution_mode, resumed_from_path=""):
     for field, value in requested_agn_options(args).items():
         result[field] = value
         result[f"{field}_sampled"] = value
+    # Sub-Lyman photometry exclusion requested for this row (NaN = off).
+    exclusion = requested_photometry_exclusion(args)
+    result.update(photometry_exclusion_columns(exclusion))
+    result.update(photometry_exclusion_columns(exclusion, suffix="_sampled"))
     result.update(empty_joint_chi2_summary())
     result.update(empty_spectral_component_fraction_summary())
     result.update(empty_psf_agn_fraction_summary())
@@ -3348,6 +3480,15 @@ def run_one_fit(
                     )
         result["n_photometry"] = int(len(used_phot))
         result["photometry_filters"] = ",".join(used_phot["filter_name"].astype(str))
+        exclusion = config_photometry_exclusion(config)
+        result.update(photometry_exclusion_columns(exclusion))
+        result.update(photometry_exclusion_columns(exclusion, suffix="_sampled"))
+        result.update(
+            excluded_photometry_summary(
+                getattr(fitter, "context", None),
+                used_phot["filter_name"].astype(str).tolist(),
+            )
+        )
         result["fit_result_path"] = str(fit_result.path or "")
         if args.save_jaxsedfit_samples:
             annotate_posterior_bundle(
@@ -3552,13 +3693,36 @@ def _complete_resumed_fit(rec, args, source_path, fitter, *, sampled_options=Non
     result["photometry_filters"] = ",".join(
         str(name) for name in config.photometry.filter_names
     )
+    # The exclusion this row was predicted with, and the one its draws were
+    # sampled with (the bundle's, or what an earlier resume recorded).
+    exclusion = config_photometry_exclusion(config)
+    sampled_exclusion = dict(
+        sampled_options.get(SAMPLED_PHOTOMETRY_EXCLUSION_KEY, exclusion) or {}
+    )
+    result.update(photometry_exclusion_columns(exclusion))
+    result.update(photometry_exclusion_columns(sampled_exclusion, suffix="_sampled"))
+    result.update(
+        excluded_photometry_summary(
+            getattr(fitter, "context", None), config.photometry.filter_names
+        )
+    )
 
     compare_catalog = getattr(args, "resume_compare_catalog", None)
     result["resume_compare_catalog"] = str(compare_catalog or "")
     result["resume_prediction_mismatch"] = ""
     if compare_catalog:
+        # A changed exclusion changes the chi-squares by design; m_2500 must
+        # still match, since the draws and the model are the same.
+        columns = (
+            RESUME_COMPARE_COLUMNS
+            if exclusion == sampled_exclusion
+            else tuple(name for name in RESUME_COMPARE_COLUMNS if "chi2" not in name)
+        )
         problems = compare_resumed_prediction(
-            result, _resume_compare_rows(compare_catalog), object_id=rec["object_id"]
+            result,
+            _resume_compare_rows(compare_catalog),
+            object_id=rec["object_id"],
+            columns=columns,
         )
         if problems:
             message = (
@@ -3849,6 +4013,7 @@ def require_supported_agn_options(args):
 def run_fit(args):
     require_supported_agn_options(args)
     require_reference_chi2_support()
+    require_photometry_exclusion_support(args)
     records = build_records(args)
     if not records:
         raise RuntimeError("No records to process.")
@@ -4122,6 +4287,39 @@ def parse_args(argv=None):
             "Absent: jaxsedfit's default for fresh fits, the bundle's value on --resume."
         ),
     )
+    parser.add_argument(
+        "--drop-sub-lyman-photometry",
+        action="store_true",
+        help=(
+            "Leave broadband photometry below the rest-frame Lyman limit out of the "
+            "photometric likelihood and of every photometric chi-square (stored and "
+            "reference). A band is dropped when more than --sub-lyman-max-fraction "
+            "of its flat-f_nu response lies below --sub-lyman-rest-wavelength*(1+z): "
+            "with the defaults GALEX FUV at z > 0.67, NUV at z > 1.53 and SDSS u at "
+            "z > 2.92. The model fluxes of dropped bands are still predicted. Rows "
+            "record the setting and the dropped bands (photometry_filters_excluded). "
+            "On --resume the saved draws are re-predicted with it. Off by default."
+        ),
+    )
+    parser.add_argument(
+        "--sub-lyman-rest-wavelength",
+        type=float,
+        default=None,
+        help=(
+            "Rest wavelength cut in Angstrom for --drop-sub-lyman-photometry "
+            f"(default {DEFAULT_SUB_LYMAN_REST_WAVELENGTH:g}, the Lyman limit)."
+        ),
+    )
+    parser.add_argument(
+        "--sub-lyman-max-fraction",
+        type=float,
+        default=None,
+        help=(
+            "Largest fraction of a band's response below the cut that keeps the band, "
+            f"in [0, 1) (default {DEFAULT_SUB_LYMAN_MAX_FRACTION:g}: drop a band when "
+            "most of it lies below the cut; 0 drops any band touching it)."
+        ),
+    )
     parser.add_argument("--no-fit-lines", dest="fit_lines", action="store_false")
     parser.add_argument("--no-fit-fe", dest="fit_fe", action="store_false")
     parser.add_argument("--no-fit-bc", dest="fit_bc", action="store_false")
@@ -4176,6 +4374,21 @@ def parse_args(argv=None):
             "--resume-only, --allow-unannotated-resume-bundle, "
             "--resume-records-path and --resume-compare-catalog require --resume."
         )
+    if not args.drop_sub_lyman_photometry and (
+        args.sub_lyman_rest_wavelength is not None or args.sub_lyman_max_fraction is not None
+    ):
+        parser.error(
+            "--sub-lyman-rest-wavelength and --sub-lyman-max-fraction require "
+            "--drop-sub-lyman-photometry."
+        )
+    if args.sub_lyman_rest_wavelength is not None and not (
+        np.isfinite(args.sub_lyman_rest_wavelength) and args.sub_lyman_rest_wavelength > 0.0
+    ):
+        parser.error("--sub-lyman-rest-wavelength must be positive and finite.")
+    if args.sub_lyman_max_fraction is not None and not (
+        0.0 <= args.sub_lyman_max_fraction < 1.0
+    ):
+        parser.error("--sub-lyman-max-fraction must lie in [0, 1).")
     args.dense_mass = {"true": True, "false": False}.get(args.dense_mass, args.dense_mass)
     return args
 

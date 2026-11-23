@@ -391,6 +391,28 @@ parser.add_argument(
     help="Lines anchored by continuum_ew (passed through; absent: not passed).",
 )
 parser.add_argument(
+    "--drop-sub-lyman-photometry",
+    action="store_true",
+    help=(
+        "Leave broadband photometry below the rest-frame Lyman limit out of the "
+        "photometric likelihood and chi-squares (passed to "
+        "fit_spectra_jaxsedfit_joint.py; off by default). With --resume it "
+        "re-predicts the saved draws with those bands dropped."
+    ),
+)
+parser.add_argument(
+    "--sub-lyman-rest-wavelength",
+    type=float,
+    default=None,
+    help="Rest-frame cut in Angstrom for --drop-sub-lyman-photometry (backend default 912).",
+)
+parser.add_argument(
+    "--sub-lyman-max-fraction",
+    type=float,
+    default=None,
+    help="Largest band response fraction below the cut that keeps a band (backend default 0.5).",
+)
+parser.add_argument(
     "--cpus-per-task",
     type=positive_int,
     default=cpus_per_task,
@@ -497,6 +519,9 @@ fresh_run_options = (
     "--line-extrapolation-anchor",
     "--line-extrapolation-ew-scope",
     "--narrow-line-extrapolation",
+    "--drop-sub-lyman-photometry",
+    "--sub-lyman-rest-wavelength",
+    "--sub-lyman-max-fraction",
     "--nuts-warmup",
     "--nuts-samples",
     "--nuts-chains",
@@ -547,6 +572,22 @@ for option, value in joint_prediction_options.items():
         joint_prediction_args.append(option.replace("--", "--no-", 1))
     else:
         joint_prediction_args.extend([option, value])
+sub_lyman_options = {
+    "--sub-lyman-rest-wavelength": cli_args.sub_lyman_rest_wavelength,
+    "--sub-lyman-max-fraction": cli_args.sub_lyman_max_fraction,
+}
+if cli_args.drop_sub_lyman_photometry:
+    if fit_script != "fit_spectra_jaxsedfit_joint.py":
+        parser.error("--drop-sub-lyman-photometry is supported only with fit_spectra_jaxsedfit_joint.py")
+    joint_prediction_args.append("--drop-sub-lyman-photometry")
+    for option, value in sub_lyman_options.items():
+        if value is not None:
+            joint_prediction_args.extend([option, repr(float(value))])
+elif any(value is not None for value in sub_lyman_options.values()):
+    parser.error(
+        "--sub-lyman-rest-wavelength and --sub-lyman-max-fraction require "
+        "--drop-sub-lyman-photometry"
+    )
 if resume_run_name and fit_script != "fit_spectra_jaxsedfit_joint.py":
     parser.error("--resume is supported only with fit_spectra_jaxsedfit_joint.py")
 if resume_run_name:
