@@ -17,6 +17,8 @@ from __future__ import annotations
 import argparse
 import gc
 import hashlib
+import inspect
+import json
 import multiprocessing as mp
 import traceback
 import warnings
@@ -87,6 +89,27 @@ HOST_CAPTURE_BUNDLE_ATTR = "qvc_host_capture_model"
 HOST_CAPTURE_BUNDLE_MARKER = "static_sdss_psf_fwhm"
 HOST_CAPTURE_PSF_FWHM_ATTR = "qvc_f_host_2500_psf_fwhm_arcsec"
 HOST_CAPTURE_QVC_FWHM_ATTR = "qvc_sdss_psf_fwhm_arcsec"
+# Prediction-only jaxsedfit AGN options exposed on the CLI. Each maps a CLI
+# destination to (AGNConfig field, jaxsedfit default, allowed values). A CLI
+# value of None keeps the bundle's value on resume and jaxsedfit's default on
+# fresh fits; only an explicit value overrides.
+LINE_EXTRAPOLATION_ANCHORS = ("fitted_lines", "continuum_ew")
+LINE_EXTRAPOLATION_EW_SCOPES = ("blueward", "all")
+NARROW_LINE_EXTRAPOLATION_MODES = ("template", "optical_only", "none")
+AGN_PREDICTION_OPTIONS = {
+    "line_extrapolation_anchor": ("fitted_lines", LINE_EXTRAPOLATION_ANCHORS),
+    "line_extrapolation_ew_scope": ("all", LINE_EXTRAPOLATION_EW_SCOPES),
+    "narrow_line_extrapolation": ("template", NARROW_LINE_EXTRAPOLATION_MODES),
+}
+# jaxsedfit change that introduced each option (for clear start-up errors).
+AGN_PREDICTION_OPTION_SOURCES = {
+    "line_extrapolation_anchor": "jaxsedfit PR #163 (continuum-EW line anchor)",
+    "line_extrapolation_ew_scope": "jaxsedfit PR #163 (continuum-EW line anchor)",
+    "narrow_line_extrapolation": "jaxsedfit PR #164 (consistent line coverage)",
+}
+# HDF5 attribute recording the option values a re-saved bundle's draws were
+# sampled with, so a later resume still reports them.
+SAMPLED_AGN_OPTIONS_ATTR = "qvc_sampled_agn_options_json"
 TOTAL_CAPTURE_PHOTOMETRY_METHODS = frozenset(
     {"profile", "auto", "model", "cmodel", "petrosian"}
 )
@@ -102,6 +125,97 @@ class IncompatibleBALResumeError(RuntimeError):
 
 class IncompatibleBalmerContinuumResumeError(RuntimeError):
     """Raised when a resume bundle disagrees with the active BC policy."""
+
+
+def requested_agn_options(args):
+    """Return the explicitly requested prediction-only AGN options."""
+    options = {}
+    for field, (_default, allowed) in AGN_PREDICTION_OPTIONS.items():
+        value = getattr(args, field, None)
+        if value is None:
+            continue
+        if allowed is not None and value not in allowed:
+            raise ValueError(f"Unsupported {field} {value!r}; expected one of {allowed}.")
+        options[field] = value
+    return options
+
+
+def config_agn_options(config):
+    """Return every prediction-only AGN option of a config (old configs: defaults)."""
+    agn = getattr(config, "agn", None)
+    return {
+        field: getattr(agn, field, default)
+        for field, (default, _allowed) in AGN_PREDICTION_OPTIONS.items()
+    }
+
+
+def apply_agn_options(config, options):
+    """Set prediction-only AGN options on a loaded jaxsedfit config.
+
+    These options change no sampled parameter, so a saved posterior can be
+    re-predicted with other values. Its draws were sampled with the values
+    stored in the bundle; the photometric prediction is a post-hoc
+    recomputation.
+    """
+    current = config_agn_options(config)
+    for field, value in options.items():
+        if current[field] == value:
+            continue
+        if not hasattr(config.agn, field):
+            raise RuntimeError(
+                f"The installed jaxsedfit does not support AGNConfig.{field}; "
+                f"cannot apply {field}={value!r}."
+            )
+        setattr(config.agn, field, value)
+    return config
+
+
+def read_sampled_agn_options(path):
+    """Return the sampled-with options recorded by an earlier resume, if any."""
+    try:
+        with h5py.File(path, "r") as handle:
+            raw = handle.attrs.get(SAMPLED_AGN_OPTIONS_ATTR)
+    except OSError:
+        return None
+    if raw is None:
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode()
+    return dict(json.loads(str(raw)))
+
+
+def load_resume_fitter(source_path, args):
+    """Load a saved posterior with the explicitly requested AGN options applied.
+
+    Returns the fitter and the option values its draws were sampled with:
+    those recorded by an earlier resume when present, else the bundle config's.
+    """
+    from jaxsedfit import JAXSEDFit
+
+    options = requested_agn_options(args)
+    recorded = read_sampled_agn_options(source_path) or {}
+    sampled = {}
+
+    def transform(config):
+        sampled.update(config_agn_options(config))
+        return apply_agn_options(config, options)
+
+    if options:
+        if "config_transform" not in inspect.signature(JAXSEDFit.load).parameters:
+            raise RuntimeError(
+                "The installed jaxsedfit cannot change prediction options of a "
+                "saved posterior (JAXSEDFit.load lacks config_transform)."
+            )
+        fitter = JAXSEDFit.load(source_path, config_transform=transform)
+    else:
+        fitter = JAXSEDFit.load(source_path)
+        sampled.update(config_agn_options(fitter.config))
+    recorded = {key: value for key, value in recorded.items() if key in AGN_PREDICTION_OPTIONS}
+    sampled.update(recorded)
+    # Options a previous re-prediction recorded; reported on the row even
+    # without a flag so the catalog keeps the sampled-with provenance.
+    fitter._qvc_recorded_agn_options = recorded
+    return fitter, sampled
 
 
 def bal_enabled_for_redshift(args, redshift):
@@ -1176,6 +1290,9 @@ def build_joint_config(
         if bal_enabled_for_redshift(args, rec["z"])
         else None
     )
+    # Only explicitly requested options are passed, so default fits stay valid
+    # with jaxsedfit versions that predate them.
+    line_extrapolation_kwargs = requested_agn_options(args)
     config = FitConfig(
         observation=Observation(
             object_id=joint_saved_name(rec),
@@ -1221,6 +1338,7 @@ def build_joint_config(
             fit_balmer_continuum=fit_balmer_continuum,
             line_flux_scale_mjy=args.line_flux_scale_mjy,
             custom_components=bal_components,
+            **line_extrapolation_kwargs,
         ),
         likelihood=LikelihoodConfig(
             use_host_capture_model=True,
@@ -2319,7 +2437,15 @@ def verify_new_posterior_bundle(path):
     return path
 
 
-def annotate_posterior_bundle(path, args, rec, *, event_type="fit", source_path=None):
+def annotate_posterior_bundle(
+    path,
+    args,
+    rec,
+    *,
+    event_type="fit",
+    source_path=None,
+    sampled_agn_options=None,
+):
     """Attach QVC provenance after JAXSEDFit has finished writing its bundle."""
     path = verify_new_posterior_bundle(path)
     inputs = {
@@ -2363,6 +2489,12 @@ def annotate_posterior_bundle(path, args, rec, *, event_type="fit", source_path=
                 "New posterior bundle lacks log_host_capture_scale_arcsec samples."
             )
         handle.attrs[HOST_CAPTURE_BUNDLE_ATTR] = HOST_CAPTURE_BUNDLE_MARKER
+        if sampled_agn_options is not None:
+            # The re-saved config holds the re-prediction options; keep what
+            # the draws were actually sampled with.
+            handle.attrs[SAMPLED_AGN_OPTIONS_ATTR] = json.dumps(
+                dict(sampled_agn_options), sort_keys=True
+            )
         handle.attrs[HOST_CAPTURE_PSF_FWHM_ATTR] = SDSS_TYPICAL_PSF_FWHM_ARCSEC
         handle.attrs[HOST_CAPTURE_QVC_FWHM_ATTR] = np.asarray(
             [SDSS_STATIC_PSF_FWHM_ARCSEC[band] for band in PSF_AGN_FRACTION_BANDS],
@@ -2653,6 +2785,12 @@ def _base_result(rec, args, *, execution_mode, resumed_from_path=""):
             "joint_posterior_draw_source": str(execution_mode),
         }
     )
+    # Explicitly requested prediction options: the value used for this row and
+    # the value the posterior draws were sampled with (they differ when a
+    # resume re-predicts an old bundle). Absent flags add no columns.
+    for field, value in requested_agn_options(args).items():
+        result[field] = value
+        result[f"{field}_sampled"] = value
     result.update(empty_joint_chi2_summary())
     result.update(empty_spectral_component_fraction_summary())
     result.update(empty_psf_agn_fraction_summary())
@@ -3072,17 +3210,17 @@ def run_one_fit(
 
 def _run_resumed_fit(rec, args, source_path):
     """Regenerate one object from saved draws and write current-schema outputs."""
-    from jaxsedfit import JAXSEDFit
-
     fitter = None
     try:
-        fitter = JAXSEDFit.load(source_path)
-        return _complete_resumed_fit(rec, args, source_path, fitter)
+        fitter, sampled_options = load_resume_fitter(source_path, args)
+        return _complete_resumed_fit(
+            rec, args, source_path, fitter, sampled_options=sampled_options
+        )
     finally:
         release_jaxsedfit_memory(fitter)
 
 
-def _complete_resumed_fit(rec, args, source_path, fitter):
+def _complete_resumed_fit(rec, args, source_path, fitter, *, sampled_options=None):
     """Build current catalog products from one already-loaded posterior."""
     from matplotlib import pyplot as plt
 
@@ -3092,6 +3230,20 @@ def _complete_resumed_fit(rec, args, source_path, fitter):
         execution_mode="resumed",
         resumed_from_path=source_path,
     )
+    current_options = config_agn_options(fitter.config)
+    sampled_options = dict(current_options if sampled_options is None else sampled_options)
+    requested = requested_agn_options(args)
+    for field, value in requested.items():
+        if current_options[field] != value:
+            raise ValueError(
+                f"Loaded posterior uses {field}={current_options[field]!r}, not "
+                f"the requested {value!r}; load it with load_resume_fitter."
+            )
+        result[f"{field}_sampled"] = sampled_options[field]
+    for field in getattr(fitter, "_qvc_recorded_agn_options", None) or {}:
+        if field not in requested:
+            result[field] = current_options[field]
+            result[f"{field}_sampled"] = sampled_options[field]
     fitter.predictive = None
     validate_resume_host_capture_fitter(fitter, source_path)
     validate_resume_bal_fitter(
@@ -3236,6 +3388,7 @@ def _complete_resumed_fit(rec, args, source_path, fitter):
                 rec,
                 event_type="resume",
                 source_path=source_path,
+                sampled_agn_options=sampled_options,
             )
         )
     else:
@@ -3478,7 +3631,27 @@ def run_object_safely(rec, args):
     return result
 
 
+def require_supported_agn_options(args):
+    """Fail once, before any object, if the installed jaxsedfit lacks a requested option."""
+    requested = requested_agn_options(args)
+    if not requested:
+        return
+    import dataclasses
+
+    from jaxsedfit import AGNConfig
+
+    fields = {field.name for field in dataclasses.fields(AGNConfig)}
+    missing = [name for name in requested if name not in fields]
+    if missing:
+        details = "; ".join(
+            f"--{name.replace('_', '-')} needs {AGN_PREDICTION_OPTION_SOURCES.get(name, 'a newer jaxsedfit')}"
+            for name in missing
+        )
+        raise SystemExit(f"The installed jaxsedfit does not support the requested option(s): {details}.")
+
+
 def run_fit(args):
+    require_supported_agn_options(args)
     records = build_records(args)
     if not records:
         raise RuntimeError("No records to process.")
@@ -3688,6 +3861,41 @@ def parse_args(argv=None):
             "Disable BAL fitting. By default, the built-in N V, Si IV, and "
             f"C IV BAL components are fitted only for objects with z > "
             f"{BAL_MIN_REDSHIFT_EXCLUSIVE:g}."
+        ),
+    )
+    parser.add_argument(
+        "--line-extrapolation-anchor",
+        choices=LINE_EXTRAPOLATION_ANCHORS,
+        default=None,
+        help=(
+            "Luminosity anchor for broad emission lines outside the fitted "
+            "spectrum (still needed by the photometry). 'fitted_lines' scales "
+            "the fixed-ratio broad template to the fitted covered lines; "
+            "'continuum_ew' ties them to the fitted disc continuum through "
+            "QSOGEN rest equivalent widths. Absent: jaxsedfit's default for "
+            "fresh fits, the bundle's stored value on --resume. An explicit "
+            "value on --resume re-predicts the saved draws without resampling."
+        ),
+    )
+    parser.add_argument(
+        "--line-extrapolation-ew-scope",
+        choices=LINE_EXTRAPOLATION_EW_SCOPES,
+        default=None,
+        help=(
+            "Lines anchored by 'continuum_ew': 'all' (jaxsedfit default, both sides) "
+            "or 'blueward' (only lines blueward of the spectrum; redward lines "
+            "keep the fitted-line anchor). Absent: as for --line-extrapolation-anchor."
+        ),
+    )
+    parser.add_argument(
+        "--narrow-line-extrapolation",
+        choices=NARROW_LINE_EXTRAPOLATION_MODES,
+        default=None,
+        help=(
+            "jaxsedfit agn.narrow_line_extrapolation: 'template' scales the "
+            "Seyfert-2 template to the fitted narrow lines, 'optical_only' drops "
+            "extrapolated narrow lines blueward of rest 3000 A, 'none' drops all. "
+            "Absent: jaxsedfit's default for fresh fits, the bundle's value on --resume."
         ),
     )
     parser.add_argument("--no-fit-lines", dest="fit_lines", action="store_false")
