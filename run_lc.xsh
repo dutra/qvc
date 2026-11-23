@@ -13,8 +13,8 @@ from time import perf_counter
 object_ids = [
     #1406458, good lr0003
     1467775,
-    1385200,
-    1437146
+    #1385200,
+    #1437146
 
     #1443303,
     #1388730,
@@ -23,7 +23,7 @@ object_ids = [
     # 1391093,
     # 1388129,
 ]
-description = "aug28d_erlang_sharedlatent_iters2_svithennuts_psflogitnormal_svi10000w250s100lr0003_stonechisq_specaug24_v3"
+description = "nov20_subtract_psf_constant_flux_continuum"
 nproc = 1
 repo_root = Path(__file__).resolve().parent
 spectra_fit_h5 = repo_root / (
@@ -78,7 +78,10 @@ def fit_object(index, object_id):
         "--disable_color_magnitude_plot",
         "--disable_recovery_plot",
         "--disable_sigma_tau_lambda_plot",
-        #"--spectra_fit_h5", str(spectra_fit_h5),
+        "--subtract_psf_constant_flux",
+        "--psf-fraction", "continuum",
+        "--psf-fraction-mode", "median",
+        "--spectra_fit_h5", str(spectra_fit_h5),
         #"--psf-fraction-mode", "logit-normal",
         #"--subtract_psf_constant_flux",
 #        "--fast_solver",

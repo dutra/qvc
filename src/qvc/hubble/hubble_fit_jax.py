@@ -467,6 +467,31 @@ def _interp_regular_4d(x, y, z, w, x_grid, y_grid, z_grid, w_grid, values):
     return jnp.where(valid, jnp.clip(out, 0.0, 1.0), 0.0)
 
 
+def _piecewise_linear_gaussian_mass_jax(nodes, p_det, mean, sigma):
+    """Exact int N(m; mean, sigma) p(m) dm for p linear between nodes (last axis).
+
+    Same closed form as the NumPy likelihood's
+    ``_piecewise_linear_gaussian_moments``, so both are independent of the
+    map's bin size and agree to rounding.
+    """
+    t = (nodes - mean) / sigma
+    tail = jax_ndtr(-jnp.abs(t))
+    cdf = jnp.where(t < 0.0, tail, 1.0 - tail)
+    upper = jnp.where(t > 0.0, tail, 1.0 - tail)
+    pdf = jnp.exp(-0.5 * t * t) / jnp.sqrt(2.0 * jnp.pi)
+    a, b = t[..., :-1], t[..., 1:]
+    j0 = jnp.where(a > 0.0, upper[..., :-1] - upper[..., 1:], cdf[..., 1:] - cdf[..., :-1])
+    j1 = pdf[..., :-1] - pdf[..., 1:]
+    p_det = jnp.broadcast_to(p_det, t.shape)
+    width = b - a
+    positive = width > 0.0
+    slope = jnp.where(
+        positive, (p_det[..., 1:] - p_det[..., :-1]) / jnp.where(positive, width, 1.0), 0.0
+    )
+    offset = p_det[..., :-1] - slope * a
+    return jnp.sum(offset * j0 + slope * j1, axis=-1)
+
+
 def _completeness_loglike_jax(m_model, mu_err, z, completeness, f_host_2500_psf, alpha_lambda):
     if completeness is None:
         return 0.0
@@ -504,8 +529,7 @@ def _completeness_loglike_jax(m_model, mu_err, z, completeness, f_host_2500_psf,
             completeness["z_centers"],
             completeness["cube"],
         )
-    pdf_model = jnp.exp(_normal_logpdf(m_grid[None, :], m_model[:, None], sig))
-    Z = _trapz_jax(pdf_model * p_det, m_grid, axis=1)
+    Z = _piecewise_linear_gaussian_mass_jax(m_grid[None, :], p_det, m_model[:, None], sig)
     if completeness.get("has_magnitude_tails", False):
         support = completeness["magnitude_support"]
         map_bounds = completeness["map_magnitude_bounds"]
@@ -938,6 +962,7 @@ def run_single_jax(
     only_agn=False,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_redshift_mean_term=False,
     use_redshift_log_f_term=False,
     early_de_guard=False,
     seed=42,
@@ -947,6 +972,8 @@ def run_single_jax(
     _require_jax_stack()
     if use_alpha_lambda_term:
         raise NotImplementedError("run_single_jax does not support --fit_alpha_lambda_term yet.")
+    if use_redshift_mean_term:
+        raise NotImplementedError("JAX fitting does not support mean redshift evolution.")
     if use_eta_sigma_term:
         raise NotImplementedError("run_single_jax does not support --fit_eta_sigma_term yet.")
     if use_redshift_log_f_term:

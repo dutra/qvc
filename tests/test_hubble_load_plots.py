@@ -206,6 +206,11 @@ def test_load_agn_data_makes_spectral_fraction_pre_and_postcut_plots(tmp_path, m
     monkeypatch.setattr(hubble_utils, "populate_xray", lambda value: value)
     _patch_load_agn_plotters(monkeypatch)
     calls = []
+    amplitude_calls = []
+    monkeypatch.setattr(
+        hubble_plotting, "plot_spectral_component_amplitudes",
+        lambda data, **kwargs: amplitude_calls.append((data.copy(), kwargs)),
+    )
     monkeypatch.setattr(
         hubble_plotting, "plot_spectral_fractions_cut_sample",
         lambda data, **kwargs: calls.append((data.copy(), kwargs)),
@@ -222,6 +227,14 @@ def test_load_agn_data_makes_spectral_fraction_pre_and_postcut_plots(tmp_path, m
     ]
     assert [len(call[0]) for call in calls] == [25, 25]
     assert calls[0][1]["xlim"] == calls[1][1]["xlim"]
+
+
+    assert [call[1]["filename"] for call in amplitude_calls] == [
+        "spectral_component_amplitudes_vs_redshift_precut.pdf",
+        "spectral_component_amplitudes_vs_redshift_postcut.pdf",
+    ]
+    for (actual, _), (expected, _) in zip(amplitude_calls, calls):
+        pd.testing.assert_frame_equal(actual, expected)
 
 
 def test_load_agn_data_makes_pre_and_postcut_joint_sed_and_blr_plots(tmp_path, monkeypatch):
@@ -1229,3 +1242,131 @@ def test_load_agn_data_missing_csc_preserves_selected_sample(tmp_path, monkeypat
     assert all_rows.attrs['csc_catalog_available'] is False
     assert not selected.xray_matched.any()
     assert 'alphaOX' not in selected
+
+
+def test_spectral_fractions_cut_sample_custom_panels_wrap_into_rows(tmp_path, monkeypatch):
+    rng = np.random.default_rng(0)
+    n = 60
+    frame = pd.DataFrame({
+        "z": rng.uniform(0.5, 3.0, n),
+        **{name: rng.uniform(1e-3, 0.5, n) for name in ("a", "b", "c", "d")},
+    })
+    figures = []
+    monkeypatch.setattr(
+        hubble_plotting, "_save_figure",
+        lambda fig, path, **_kwargs: figures.append((fig, path)) or path,
+    )
+    panels = [(name, name.upper()) for name in ("a", "b", "c", "d")]
+
+    path = hubble_plotting.plot_spectral_fractions_cut_sample(
+        frame, plot_path=str(tmp_path), filename="custom.pdf", panels=panels,
+    )
+
+    assert path == str(tmp_path / "diagnostics" / "custom.pdf")
+    fig = figures[0][0]
+    axes = fig.axes
+    assert len(axes) == 6 and tuple(fig.get_size_inches()) == (12, 8)
+    assert [ax.get_visible() for ax in axes] == [True] * 4 + [False] * 2
+    assert [ax.get_legend().get_texts()[0].get_text() for ax in axes[:4]] == ["A", "B", "C", "D"]
+    assert [ax.get_ylabel() != "" for ax in axes[:4]] == [True, False, False, True]
+    # Panel "b" and "c" have no panel below them, so they carry the x label.
+    assert [ax.get_xlabel() for ax in axes[:4]] == ["", "$z$", "$z$", "$z$"]
+    hubble_plotting.plot_spectral_fractions_cut_sample(
+        frame, plot_path=str(tmp_path), panels=panels, max_columns=len(panels),
+    )
+    one_row = figures[1][0]
+    assert len(one_row.axes) == 4 and tuple(one_row.get_size_inches()) == (16, 4)
+    assert [ax.get_xlabel() for ax in one_row.axes] == ["$z$"] * 4
+    assert hubble_plotting.plot_spectral_fractions_cut_sample(
+        frame, plot_path=str(tmp_path), panels=[("missing", "M")],
+    ) is None
+
+
+def test_spectral_fractions_cut_sample_default_panels_unchanged(tmp_path, monkeypatch):
+    rng = np.random.default_rng(1)
+    n = 40
+    frame = pd.DataFrame({
+        "z": rng.uniform(0.5, 3.0, n),
+        **{name: rng.uniform(1e-3, 0.5, n)
+           for name in ("f_bc_3000", "f_fe_uv_3000", "f_host_2500_psf")},
+    })
+    figures = []
+    monkeypatch.setattr(
+        hubble_plotting, "_save_figure",
+        lambda fig, path, **_kwargs: figures.append(fig) or path,
+    )
+    hubble_plotting.plot_spectral_fractions_cut_sample(frame, plot_path=str(tmp_path))
+    fig = figures[0]
+    assert len(fig.axes) == 3 and tuple(fig.get_size_inches()) == (12, 4)
+    assert [ax.get_xlabel() for ax in fig.axes] == ["$z$"] * 3
+    assert [ax.get_ylabel() for ax in fig.axes] == ["Component fraction", "", ""]
+    assert hubble_plotting.plot_spectral_fractions_cut_sample(
+        frame.drop(columns="f_fe_uv_3000"), plot_path=str(tmp_path),
+    ) is None
+
+
+def test_spectral_fractions_cut_sample_panel_axes_are_independent(tmp_path, monkeypatch):
+    rng = np.random.default_rng(3)
+    n = 400
+    amplitude = 10 ** rng.uniform(-4.0, -2.0, n)
+    amplitude[:3] = [1e3, -1.0, np.nan]  # one high outlier, one non-positive, one NaN
+    log_mass = rng.uniform(9.0, 10.0, n)
+    log_mass[0] = 30.0  # far above the robust range
+    covering = rng.uniform(0.05, 0.95, n)
+    frame = pd.DataFrame({
+        "z": rng.uniform(1.0, 2.0, n), "amp": amplitude, "logm": log_mass, "fcov": covering,
+    })
+    figures = []
+    monkeypatch.setattr(
+        hubble_plotting, "_save_figure",
+        lambda fig, path, **_kwargs: figures.append(fig) or path,
+    )
+    panels = [("amp", "Amp"), ("logm", "Mass"), ("fcov", "Torus")]
+    panel_axes = [
+        {"scale": "log", "ylabel": "A [mJy]"},
+        {"scale": "linear", "ylabel": "log M"},
+        {"scale": "linear", "ylim": (0.0, 1.0)},
+    ]
+
+    hubble_plotting.plot_spectral_fractions_cut_sample(
+        frame, plot_path=str(tmp_path), panels=panels, panel_axes=panel_axes,
+        max_columns=len(panels),
+    )
+
+    amp_ax, mass_ax, cov_ax = figures[0].axes
+    assert [ax.get_yscale() for ax in (amp_ax, mass_ax, cov_ax)] == ["log", "linear", "linear"]
+    assert [ax.get_ylabel() for ax in (amp_ax, mass_ax, cov_ax)] == ["A [mJy]", "log M", ""]
+    # x range follows the sample's own redshift span when xlim is not given.
+    assert 0.95 < amp_ax.get_xlim()[0] < 1.0 and 2.0 < amp_ax.get_xlim()[1] < 2.05
+    # Robust limits: the outliers do not stretch the axes.
+    low, high = amp_ax.get_ylim()
+    assert 1e-6 < low < 1e-4 and 1e-2 < high < 1.0
+    low, high = mass_ax.get_ylim()
+    assert 7.0 < low < 9.0 and 10.0 < high < 12.0
+    assert cov_ax.get_ylim() == (0.0, 1.0)
+
+    def arrow_counts(ax):
+        return {line.get_marker(): line.get_xdata().size for line in ax.lines}
+
+    # Outliers become edge arrows instead of disappearing; NaN is dropped.
+    assert arrow_counts(amp_ax)[r"$\uparrow$"] == 1
+    assert arrow_counts(amp_ax)[r"$\downarrow$"] == 1
+    assert arrow_counts(amp_ax)["o"] == n - 3
+    assert arrow_counts(mass_ax)[r"$\uparrow$"] == 1
+    assert arrow_counts(cov_ax) == {"o": n}
+    # Each panel gets 68.3%/95.4% density contours drawn in its own coordinate.
+    for ax in (amp_ax, mass_ax, cov_ax):
+        assert len(ax.collections) >= 1
+    assert [ax.get_legend().get_texts()[0].get_text() for ax in figures[0].axes] == [
+        "Amp", "Mass", "Torus",
+    ]
+
+    with pytest.raises(ValueError):
+        hubble_plotting.plot_spectral_fractions_cut_sample(
+            frame, plot_path=str(tmp_path), panels=panels, panel_axes=panel_axes[:2],
+        )
+    with pytest.raises(ValueError):
+        hubble_plotting.plot_spectral_fractions_cut_sample(
+            frame, plot_path=str(tmp_path), panels=panels[:1],
+            panel_axes=[{"scale": "symlog"}],
+        )

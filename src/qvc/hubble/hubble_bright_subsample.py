@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 
 from qvc.hubble.hubble_completeness_refactored import (
+    COMPLETENESS_GROUP_COL,
     COMPLETENESS_MAG_COL,
     prepare_completeness_magnitude_columns,
 )
@@ -38,6 +39,24 @@ class BrightSubsamplePlotData:
     def write(self, cut, *, plot_path, z_range, completeness_magnitude, plot):
         destination = Path(plot_path) / "completeness"
         destination.mkdir(parents=True, exist_ok=True)
+        if isinstance(cut, GroupedBrightSubsampleCut):
+            # Per-group thresholds, counts and cut-on-map figures.
+            cut.summary_frame().to_csv(destination / "bright_subsample_thresholds.csv", index=False)
+            summarize_bright_subsample_cut(self.before, self.keep, cut, z_range=z_range).to_csv(
+                destination / "bright_subsample_counts.csv", index=False
+            )
+            index = group_index_from_frame(self.before)
+            group_params = self.completeness_params[0].group_params
+            for position, name in enumerate(cut.groups):
+                rows = index == position
+                if plot:
+                    plot_bright_subsample_cut(
+                        *group_params[name][:3], cut.cut_for(name), self.before.loc[rows],
+                        np.asarray(self.keep)[rows], z_range=z_range,
+                        completeness_magnitude=completeness_magnitude, plot_path=plot_path,
+                        filename=f"bright_subsample_cut_group_{name}.pdf",
+                    )
+            return
         cut.summary_frame().to_csv(destination / "bright_subsample_thresholds.csv", index=False)
         summarize_bright_subsample_cut(self.before, self.keep, cut, z_range=z_range).to_csv(
             destination / "bright_subsample_counts.csv", index=False
@@ -222,6 +241,11 @@ class BrightCutCompletenessModel:
         values, keep = np.broadcast_arrays(values, keep)
         return np.where(keep, values, 0.0)
 
+    def selection_cut_magnitude(self, z, group_index=None):
+        """Per-object hard cut; the likelihood ends its integral exactly here."""
+        del group_index
+        return self.bright_subsample_cut.threshold(z)
+
     def __getattr__(self, name):
         inner = self.__dict__.get("_inner")
         if inner is None or name.startswith("__"):
@@ -243,6 +267,13 @@ def wrap_completeness_params(completeness_params, cut):
     if completeness_params is None or cut is None:
         return completeness_params
     model = completeness_params[0]
+    if isinstance(cut, GroupedBrightSubsampleCut) or isinstance(model, GroupedCompletenessModel):
+        if not isinstance(model, GroupedCompletenessModel) or model.bright_subsample_cut != cut:
+            raise ValueError(
+                "Per-group bright cuts require the grouped completeness model built "
+                "with the same cuts (see build_grouped_completeness_params)."
+            )
+        return completeness_params
     if isinstance(model, BrightCutCompletenessModel):
         if model.bright_subsample_cut != cut:
             raise ValueError("Completeness model already carries a different bright cut.")
@@ -255,7 +286,10 @@ def apply_bright_subsample_cut(df, cut, *, completeness_magnitude):
     prepared = prepare_completeness_magnitude_columns(df, completeness_magnitude)
     magnitude = prepared[COMPLETENESS_MAG_COL].to_numpy(dtype=float)
     z = prepared["z"].to_numpy(dtype=float)
-    keep = cut.mask(magnitude, z)
+    if isinstance(cut, GroupedBrightSubsampleCut):
+        keep = cut.mask(magnitude, z, group_index_from_frame(prepared))
+    else:
+        keep = cut.mask(magnitude, z)
     kept = df.loc[keep].copy()
     kept.attrs.update(df.attrs)
     kept.attrs[BRIGHT_SUBSAMPLE_JSON_ATTR] = cut.to_json()
@@ -391,6 +425,18 @@ def plot_bright_subsample_cut(
 
 def summarize_bright_subsample_cut(df, keep, cut, *, z_range, n_bins=6):
     """Per-redshift-bin counts before and after the cut, for the fit range."""
+    if isinstance(cut, GroupedBrightSubsampleCut):
+        index = group_index_from_frame(df)
+        keep = np.asarray(keep, dtype=bool)
+        frames = []
+        for position, name in enumerate(cut.groups):
+            rows = index == position
+            frame = summarize_bright_subsample_cut(
+                df.loc[rows], keep[rows], cut.cut_for(name), z_range=z_range, n_bins=n_bins
+            )
+            frame.insert(0, "completeness_group", name)
+            frames.append(frame)
+        return pd.concat(frames, ignore_index=True)
     z = pd.to_numeric(df["z"], errors="coerce").to_numpy(dtype=float)
     edges = np.linspace(float(z_range[0]), float(z_range[1]), int(n_bins) + 1)
     in_range = (z >= edges[0]) & (z <= edges[-1])
@@ -469,3 +515,295 @@ def plot_completeness_per_redshift_peak_faint_cut(
         fig.savefig(out, dpi=300)
     plt.close(fig)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Per-target-selection completeness maps
+# ---------------------------------------------------------------------------
+COMPLETENESS_MAP_GROUP_MODES = ("single", "spectrograph")
+# Default when the option is not given; falls back to "single" (with a notice)
+# when its prerequisites are missing (see hubble_fit.configure_completeness_run_args).
+DEFAULT_COMPLETENESS_MAP_GROUPS = "spectrograph"
+# SDSS-I/II spectra end with MJD 54663 (DR7); BOSS/eBOSS spectra start at 55000+.
+SPECTROGRAPH_MJD_BOUNDARY = 55000.0
+SPECTROGRAPH_GROUPS = ("sdss", "boss")
+SPECTROGRAPH_GROUP_RULE = (
+    f"spectrum mjd < {SPECTROGRAPH_MJD_BOUNDARY:g}: sdss (SDSS-I/II); otherwise boss (BOSS/eBOSS)"
+)
+
+
+def normalize_completeness_map_groups(mode):
+    mode = "single" if mode is None else str(mode).strip().lower()
+    if mode not in COMPLETENESS_MAP_GROUP_MODES:
+        raise ValueError(
+            f"completeness map groups must be one of {COMPLETENESS_MAP_GROUP_MODES}; got {mode!r}."
+        )
+    return mode
+
+
+def assign_completeness_groups(df, mode, *, allow_missing=False):
+    """Return a copy of ``df`` with the integer ``COMPLETENESS_GROUP_COL``.
+
+    ``mode='spectrograph'`` splits by the MJD of the spectrum used in the fit
+    (``SPECTROGRAPH_GROUP_RULE``).  Every row must carry a finite ``mjd``
+    unless ``allow_missing``, in which case such rows get group -1 (no map;
+    they must not enter the selection likelihood).
+    """
+    mode = normalize_completeness_map_groups(mode)
+    if df is None or mode == "single":
+        return df
+    if "mjd" not in df.columns:
+        raise KeyError("--completeness-map-groups spectrograph requires an 'mjd' column.")
+    mjd = pd.to_numeric(df["mjd"], errors="coerce").to_numpy(dtype=float)
+    bad = ~np.isfinite(mjd)
+    if np.any(bad) and not allow_missing:
+        raise ValueError(
+            f"--completeness-map-groups spectrograph: {int(bad.sum())} rows lack a finite spectrum mjd."
+        )
+    out = df.copy()
+    out.attrs.update(df.attrs)
+    group = np.where(mjd < SPECTROGRAPH_MJD_BOUNDARY, 0, 1)
+    out[COMPLETENESS_GROUP_COL] = np.where(bad, -1, group).astype(np.int64)
+    return out
+
+
+def completeness_group_prerequisite_problem(df):
+    """Reason the spectrograph grouping cannot be built from ``df`` (None if it can)."""
+    if df is None:
+        return None
+    if "mjd" not in df.columns:
+        return "the input catalog has no spectrum 'mjd' column"
+    mjd = pd.to_numeric(df["mjd"], errors="coerce").to_numpy(dtype=float)
+    missing = int(np.count_nonzero(~np.isfinite(mjd)))
+    if missing:
+        return f"{missing} objects lack a finite spectrum mjd"
+    return None
+
+
+def group_index_from_frame(df):
+    if COMPLETENESS_GROUP_COL not in df.columns:
+        raise KeyError(f"Per-group completeness requires the {COMPLETENESS_GROUP_COL!r} column.")
+    return np.asarray(df[COMPLETENESS_GROUP_COL].to_numpy(), dtype=np.int64)
+
+
+@dataclass(frozen=True)
+class GroupedBrightSubsampleCut:
+    """One redshift-dependent bright cut per target-selection group.
+
+    Each group's cut is derived from that group's own completeness map with
+    the same rule (``completeness_min`` x per-redshift peak, minus ``margin``).
+    """
+
+    group_mode: str
+    groups: tuple
+    cuts: tuple
+    group_rule: str = SPECTROGRAPH_GROUP_RULE
+
+    def __post_init__(self):
+        groups = tuple(str(name) for name in self.groups)
+        cuts = tuple(self.cuts)
+        if len(groups) < 1 or len(groups) != len(cuts):
+            raise ValueError("groups and cuts must be nonempty and equal in length.")
+        if not all(isinstance(cut, BrightSubsampleCut) for cut in cuts):
+            raise TypeError("cuts must be BrightSubsampleCut instances.")
+        first = cuts[0]
+        for cut in cuts[1:]:
+            if (cut.completeness_min, cut.margin, cut.relative) != (
+                first.completeness_min, first.margin, first.relative
+            ):
+                raise ValueError("All group cuts must share the same rule.")
+        object.__setattr__(self, "groups", groups)
+        object.__setattr__(self, "cuts", cuts)
+
+    completeness_min = property(lambda self: self.cuts[0].completeness_min)
+    margin = property(lambda self: self.cuts[0].margin)
+    relative = property(lambda self: self.cuts[0].relative)
+
+    def _index(self, group_index, shape):
+        index = np.broadcast_to(np.asarray(group_index, dtype=np.int64), shape)
+        if np.any((index < 0) | (index >= len(self.groups))):
+            raise ValueError("completeness group index outside the configured groups.")
+        return index
+
+    def threshold(self, z, group_index):
+        z = np.asarray(z, dtype=float)
+        index = self._index(group_index, z.shape)
+        out = np.empty(z.shape, dtype=float)
+        for position, cut in enumerate(self.cuts):
+            rows = index == position
+            out[rows] = cut.threshold(z[rows])
+        return out
+
+    def mask(self, magnitude, z, group_index):
+        magnitude, z = np.broadcast_arrays(np.asarray(magnitude, dtype=float), np.asarray(z, dtype=float))
+        return np.isfinite(magnitude) & np.isfinite(z) & (magnitude <= self.threshold(z, group_index))
+
+    def cut_for(self, name):
+        return self.cuts[self.groups.index(name)]
+
+    def run_tag(self):
+        return self.cuts[0].run_tag() + f"_compgroups-{self.group_mode}"
+
+    def to_json(self):
+        return json.dumps(
+            {
+                "group_mode": self.group_mode,
+                "group_rule": self.group_rule,
+                "groups": list(self.groups),
+                "cuts": {name: json.loads(cut.to_json()) for name, cut in zip(self.groups, self.cuts)},
+            },
+            sort_keys=True,
+        )
+
+    @classmethod
+    def from_json(cls, text):
+        payload = json.loads(text)
+        groups = tuple(payload["groups"])
+        return cls(
+            group_mode=payload["group_mode"],
+            groups=groups,
+            cuts=tuple(BrightSubsampleCut.from_json(json.dumps(payload["cuts"][name])) for name in groups),
+            group_rule=payload.get("group_rule", ""),
+        )
+
+    def summary_frame(self):
+        frames = []
+        for name, cut in zip(self.groups, self.cuts):
+            frame = cut.summary_frame()
+            frame.insert(0, "completeness_group", name)
+            frames.append(frame)
+        return pd.concat(frames, ignore_index=True)
+
+
+def bright_subsample_cut_from_json(text):
+    """Decode either a single or a per-group bright cut."""
+    payload = json.loads(text)
+    if "groups" in payload:
+        return GroupedBrightSubsampleCut.from_json(text)
+    return BrightSubsampleCut.from_json(text)
+
+
+class GroupedCompletenessModel:
+    """Per-object dispatch to one (bright-cut-wrapped) map per group.
+
+    Called with ``group_index`` (one integer per row of the redshift axis),
+    each row is evaluated with its own group's map and cut.  Called without
+    it, the model returns the union selection probability
+    ``sum_g p_g(m, z) 1[m <= cut_g(z)]`` (used only for plots of the map).
+    All group maps share the magnitude/redshift grids and support, so grid
+    attributes fall through to the first group's model.
+    """
+
+    requires_group_index = True
+
+    def __init__(self, models, cut, group_params=None, union_params=None):
+        if not isinstance(cut, GroupedBrightSubsampleCut):
+            raise TypeError("cut must be a GroupedBrightSubsampleCut.")
+        models = tuple(models)
+        if len(models) != len(cut.groups):
+            raise ValueError("Need one completeness model per group.")
+        self.__dict__["_models"] = models
+        self.__dict__["bright_subsample_cut"] = cut
+        self.__dict__["group_params"] = dict(group_params or {})
+        self.__dict__["union_params"] = union_params
+
+    @property
+    def groups(self):
+        return self.bright_subsample_cut.groups
+
+    def __call__(self, mag, z, *extra, group_index=None):
+        models = self.__dict__["_models"]
+        if group_index is None:
+            return sum(np.asarray(model(mag, z, *extra), dtype=float) for model in models)
+        z = np.asarray(z, dtype=float)
+        mag = np.asarray(mag, dtype=float)
+        n_rows = z.shape[0]
+        index = np.asarray(group_index, dtype=np.int64).reshape(-1)
+        if index.shape[0] != n_rows:
+            raise ValueError("group_index must have one entry per redshift row.")
+        if np.any((index < 0) | (index >= len(models))):
+            raise ValueError("completeness group index outside the configured groups.")
+        shape = np.broadcast_shapes(mag.shape, z.shape, *(np.shape(value) for value in extra))
+        out = np.zeros(shape, dtype=float)
+
+        def rows_of(value, rows):
+            value = np.asarray(value)
+            return value[rows] if value.ndim and value.shape[0] == n_rows and n_rows != 1 else value
+
+        for position, model in enumerate(models):
+            rows = index == position
+            if not np.any(rows):
+                continue
+            out[rows] = np.broadcast_to(
+                np.asarray(model(rows_of(mag, rows), z[rows], *(rows_of(v, rows) for v in extra)), dtype=float),
+                (int(rows.sum()),) + shape[1:],
+            )
+        return out
+
+    def selection_cut_magnitude(self, z, group_index=None):
+        if group_index is None:
+            raise ValueError("Grouped completeness needs group_index for its hard cuts.")
+        return self.bright_subsample_cut.threshold(z, group_index)
+
+    def __getattr__(self, name):
+        models = self.__dict__.get("_models")
+        if not models or name.startswith("__"):
+            raise AttributeError(name)
+        return getattr(models[0], name)
+
+    def __setattr__(self, name, value):
+        self.__dict__[name] = value
+
+    @property
+    def grid(self):
+        grid = dict(getattr(self.__dict__["_models"][0], "grid", {}))
+        grid["bright_subsample_cut"] = self.bright_subsample_cut.to_json()
+        return grid
+
+
+def build_grouped_completeness_params(build_map, parent, cut=None, *, completeness_min=None,
+                                      margin=None, relative=True, group_mode="spectrograph",
+                                      groups=SPECTROGRAPH_GROUPS, plot_path=None, plot=False):
+    """Build one completeness map per group from the same mock.
+
+    ``build_map(frame, count_scale=..., plot=..., plot_path=...)`` returns the
+    usual completeness tuple for one parent (sub)sample.  The union map is built
+    first; every group map reuses its mock-count normalization, so each group
+    map is ``N_selected_in_group(m, z) / (scale * N_mock(m, z))`` and the group
+    maps sum to the union map (up to the [0, 1] clip).  The mock is not split:
+    it stands for the whole quasar population that either selection could
+    have targeted.  When ``cut`` is None the per-group cuts are derived from
+    each group's map with the single-map rule.  Returns
+    ``(grouped_params, cut, union_params, group_params)``.
+    """
+    import os
+
+    union = build_map(parent, count_scale=None, plot=plot, plot_path=plot_path)
+    scale = float(getattr(union[0], "count_scale"))
+    index = group_index_from_frame(parent)
+    group_params = {}
+    for position, name in enumerate(groups):
+        subset = parent.loc[index == position]
+        if len(subset) == 0:
+            raise ValueError(f"Completeness group {name!r} has no parent objects.")
+        group_params[name] = build_map(
+            subset,
+            count_scale=scale,
+            plot=plot,
+            plot_path=None if plot_path is None else os.path.join(plot_path, f"completeness_group_{name}"),
+        )
+    if cut is None:
+        cut = GroupedBrightSubsampleCut(
+            group_mode=group_mode,
+            groups=tuple(groups),
+            cuts=tuple(
+                derive_bright_subsample_cut(
+                    params[0], params[1], params[2],
+                    completeness_min=completeness_min, margin=margin, relative=relative,
+                )
+                for params in group_params.values()
+            ),
+        )
+    models = [BrightCutCompletenessModel(group_params[name][0], cut.cut_for(name)) for name in groups]
+    grouped = (GroupedCompletenessModel(models, cut, group_params, union),) + tuple(union[1:])
+    return grouped, cut, union, group_params

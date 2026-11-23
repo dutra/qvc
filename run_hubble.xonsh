@@ -20,8 +20,19 @@ $SHEN_PUBTOOLS_PATH = __xonsh__.env.get(
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 from qvc.hubble.completeness_grid import launcher_completeness_options
+# Opt in from the terminal with --fit_redshift_log_f_term (or hyphenated alias).
+# Leave other arguments to the completeness parser, which rejects unknown flags.
+launcher_args = list(__xonsh__.env.get("ARGS", [])[1:])
+redshift_flags = {"--fit_redshift_log_f_term", "--fit-redshift-log-f-term"}
+mean_redshift_flags = {"--fit_redshift_mean_term", "--fit-redshift-mean-term"}
+fit_redshift_mean = any(arg in mean_redshift_flags for arg in launcher_args)
+fit_redshift_log_f = any(arg in redshift_flags for arg in launcher_args)
+redshift_fit_args = ["--fit_redshift_log_f_term"] if fit_redshift_log_f else []
+if fit_redshift_mean:
+    redshift_fit_args.append("--fit_redshift_mean_term")
+redshift_tag = ("_logfz" if fit_redshift_log_f else "") + ("_meanz" if fit_redshift_mean else "")
 completeness_grid_options = launcher_completeness_options(
-    __xonsh__.env.get("ARGS", [])[1:],
+    [arg for arg in launcher_args if arg not in redshift_flags | mean_redshift_flags],
     {
         "QVC_HUBBLE_COMPLETENESS_MAG_BIN_WIDTH": "0.2",
         "QVC_HUBBLE_COMPLETENESS_Z_BIN_WIDTH": "0.2",
@@ -38,6 +49,15 @@ completeness_smooth_sigma_z = completeness_grid_options["QVC_HUBBLE_COMPLETENESS
 # Runtime is model-dependent.
 # Environment overrides support isolated, reproducible cut-search members.
 speed = __xonsh__.env.get("QVC_HUBBLE_SPEED", "quick")
+prior_profile = str(__xonsh__.env.get("QVC_HUBBLE_PRIOR_PROFILE", "centered_lcdm")).strip()
+# Optional AGN-only preset: broad default H0 prior (60--80), no bright
+# completeness selection, and tails magnitude support (14--32 guard).
+# Usage: QVC_HUBBLE_MODE=agn-only-no-bright-cut xonsh run_hubble.xonsh
+fit_mode = str(__xonsh__.env.get("QVC_HUBBLE_MODE", "joint")).strip().lower()
+if fit_mode not in {"joint", "agn-only-no-bright-cut"}:
+    raise ValueError("QVC_HUBBLE_MODE must be joint or agn-only-no-bright-cut")
+agn_only = fit_mode == "agn-only-no-bright-cut"
+fit_mode_args = ["--only_agn"] if agn_only else []
 cosmo_models = str(__xonsh__.env.get(
     "QVC_HUBBLE_COSMO_MODELS", "Flatw0waCDM FlatLambdaCDM FlatwCDM"
 )).split()
@@ -53,7 +73,7 @@ completeness_magnitude = __xonsh__.env.get(
     "QVC_HUBBLE_COMPLETENESS_MAGNITUDE", "attenuated"
 )
 completeness_magnitude_support_mode = str(
-    __xonsh__.env.get("QVC_HUBBLE_COMPLETENESS_MAGNITUDE_SUPPORT_MODE", "hard-cut")
+    __xonsh__.env.get("QVC_HUBBLE_COMPLETENESS_MAGNITUDE_SUPPORT_MODE", "tails" if agn_only else "hard-cut")
 ).strip().lower()
 if completeness_magnitude_support_mode not in {"tails", "hard-cut"}:
     raise ValueError(
@@ -93,7 +113,7 @@ if not math.isfinite(bright_subsample_margin) or bright_subsample_margin < 0.0:
         f"got {bright_subsample_margin_raw!r}."
     )
 bright_subsample_min_raw = str(
-    __xonsh__.env.get("QVC_HUBBLE_BRIGHT_SUBSAMPLE_COMPLETENESS_MIN", "0.1")
+    __xonsh__.env.get("QVC_HUBBLE_BRIGHT_SUBSAMPLE_COMPLETENESS_MIN", "none" if agn_only else "0.1")
 ).strip().lower()
 if bright_subsample_min_raw == "none":
     bright_subsample_args = []
@@ -112,6 +132,28 @@ else:
         "--bright-subsample-completeness-min", f"{bright_subsample_min:g}",
         "--bright-subsample-margin", f"{bright_subsample_margin:g}",
     ]
+# Completeness maps per target selection. Unset (default): hubble_fit uses one
+# map and bright cut per spectrum source (spectrograph: SDSS-I/II vs BOSS) and
+# falls back to a single map, with a notice, when no bright cut is requested.
+# Set QVC_HUBBLE_COMPLETENESS_MAP_GROUPS=single (or spectrograph) to force a mode.
+completeness_map_groups_raw = str(
+    __xonsh__.env.get("QVC_HUBBLE_COMPLETENESS_MAP_GROUPS", "")
+).strip().lower()
+if completeness_map_groups_raw not in {"", "single", "spectrograph"}:
+    raise ValueError("QVC_HUBBLE_COMPLETENESS_MAP_GROUPS must be single or spectrograph (or unset).")
+if completeness_map_groups_raw == "spectrograph" and not bright_subsample_args:
+    raise ValueError(
+        "QVC_HUBBLE_COMPLETENESS_MAP_GROUPS=spectrograph requires a bright-subsample cut."
+    )
+if completeness_map_groups_raw:
+    completeness_map_groups = completeness_map_groups_raw
+    completeness_map_group_args = ["--completeness-map-groups", completeness_map_groups]
+else:
+    completeness_map_groups = (
+        "spectrograph (default)" if bright_subsample_args
+        else "single (default falls back: no bright-subsample cut)"
+    )
+    completeness_map_group_args = []
 z_min_raw = str(__xonsh__.env.get("QVC_HUBBLE_Z_MIN", "0.44")).strip()
 try:
     z_min = float(z_min_raw)
@@ -119,7 +161,9 @@ except ValueError as exc:
     raise ValueError("QVC_HUBBLE_Z_MIN must be finite and below 3.16.") from exc
 if not math.isfinite(z_min) or not 0.0 <= z_min < 3.16:
     raise ValueError("QVC_HUBBLE_Z_MIN must be finite and in [0, 3.16).")
-result_prefix = str(__xonsh__.env.get("QVC_HUBBLE_RESULT_PREFIX", "fiducial")).strip()
+result_prefix = str(__xonsh__.env.get(
+    "QVC_HUBBLE_RESULT_PREFIX", ("agnonly_h0wide_no_brightcut" if agn_only else "fiducial") + redshift_tag
+)).strip()
 if not result_prefix:
     raise ValueError("QVC_HUBBLE_RESULT_PREFIX must not be empty.")
 
@@ -231,23 +275,31 @@ completeness_sim_args = (
 )
 $PREFIX = __xonsh__.env.get(
     "QVC_HUBBLE_PREFIX",
-    f"sep25a_etamodified_node_slb_bsc01m02_sed13loo105rhat105_cs02020103_chisq20_wang_specw500s500_h5sep141232_tier{cut_tier}_{speed}",
+    (f"agnonly_h0wide_no_brightcut_tier{cut_tier}_{speed}" if agn_only else
+     f"sep25a_etamodified_node_slb_bsc01m02_sed13loo105rhat105_cs02020103_chisq20_wang_specw500s500_h5sep141232_tier{cut_tier}_{speed}") + redshift_tag,
 )
 
 prefix = $PREFIX
 echo "Running hubble_fit.py and PREFIX=" $PREFIX
+echo "Using Hubble fit mode:" @(fit_mode)
+echo "Fit mean-luminosity redshift evolution:" @(str(fit_redshift_mean))
+echo "Fit intrinsic-scatter redshift evolution:" @(str(fit_redshift_log_f))
 echo "Using cumulative Hubble cut tier:" @(cut_tier)
 echo "Using light-curve uncertainty mode:" @(light_curve_uncertainty_mode)
 echo "Using completeness magnitude support mode:" @(completeness_magnitude_support_mode)
 echo "Using bright-subsample margin:" @(f"{bright_subsample_margin:g}")
 echo "Using bright-subsample completeness minimum:" @(bright_subsample_min_raw)
+echo "Using completeness map groups:" @(completeness_map_groups)
 echo "Using Hubble cut thresholds:"
 for name, value in cut_thresholds.items():
     echo "  " @(name) "=" @(value)
 
 python -m qvc.hubble.hubble_fit \
+    @(fit_mode_args) \
+    @(redshift_fit_args) \
     @(resume_args) \
     @(bright_subsample_args) \
+    @(completeness_map_group_args) \
     --cosmo_models @(cosmo_models) \
     --run single \
     --speed @(speed) \
@@ -268,7 +320,7 @@ python -m qvc.hubble.hubble_fit \
     --prefix @(prefix) \
     --disable_sigma_clip_pass \
     --sigma_clip_threshold 3.0 \
-    --prior-profile centered_lcdm \
+    --prior-profile @(prior_profile) \
     --skip-debiased-residual-plot \
     --early-de-guard \
     --minimal-plots \

@@ -1428,6 +1428,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         plot_sigma_uv_vs_tau_uv_rf,
         plot_sigma_uv_host_correction,
         plot_spectral_fractions_cut_sample,
+        plot_spectral_component_amplitudes,
         plot_suberlak_style_sigma_tau_fits,
         plot_tau_sigma_vs_wu_catalog,
         plot_tau_sigma_vs_redshift,
@@ -1475,6 +1476,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         plot_sigma_uv_vs_tau_uv_rf = _skip_diagnostic_plot
         plot_sigma_uv_host_correction = _skip_diagnostic_plot
         plot_spectral_fractions_cut_sample = _skip_diagnostic_plot
+        plot_spectral_component_amplitudes = _skip_diagnostic_plot
         plot_suberlak_style_sigma_tau_fits = _skip_diagnostic_plot
         plot_tau_sigma_vs_wu_catalog = _skip_diagnostic_plot
         plot_tau_sigma_vs_redshift = _skip_diagnostic_plot
@@ -2577,6 +2579,10 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         filename="spectral_fractions_vs_redshift_precut.pdf",
         xlim=spectral_xlim,
     )
+    plot_spectral_component_amplitudes(
+        df_all, plot_path=plot_path,
+        filename="spectral_component_amplitudes_vs_redshift_precut.pdf",
+    )
 
     # Tier 1: mandatory fit quality whenever the selected level is >= 1.
     if apply_tier1:
@@ -3133,6 +3139,10 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         df, plot_path=plot_path,
         filename="spectral_fractions_vs_redshift_postcut.pdf",
         xlim=spectral_xlim,
+    )
+    plot_spectral_component_amplitudes(
+        df, plot_path=plot_path,
+        filename="spectral_component_amplitudes_vs_redshift_postcut.pdf",
     )
     plot_cut_diagnostics(df_all.copy(), df.copy(), bins=30, cut_info="all cuts", save_path=cuts_plot_dir)
     colorpanel_cols = [col for col in ("f_host_2500", "f_host_center", "f_bc_3000", "wrms") if col in df_all.columns]
@@ -3716,6 +3726,7 @@ def extract_cosmo_results_from_samples(
     value_fmt="{:.3f}",
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
+    use_redshift_mean_term=None,
     use_f_agn_psf_2500_sigmoid_term=None,
     use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
@@ -3757,6 +3768,7 @@ def extract_cosmo_results_from_samples(
         only_agn=only_agn,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -3767,6 +3779,7 @@ def extract_cosmo_results_from_samples(
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -3827,6 +3840,7 @@ def display_results_summary(
     z_pivot_agn,
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
+    use_redshift_mean_term=None,
     use_f_agn_psf_2500_sigmoid_term=None,
     use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
@@ -3845,6 +3859,7 @@ def display_results_summary(
         only_agn=None,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -3875,6 +3890,7 @@ def display_results_summary(
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -4007,6 +4023,7 @@ def compute_age_universe_with_error(
     random_seed=None,
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
+    use_redshift_mean_term=None,
     use_f_agn_psf_2500_sigmoid_term=None,
     use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
@@ -4047,6 +4064,7 @@ def compute_age_universe_with_error(
         only_agn=None,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -4056,6 +4074,7 @@ def compute_age_universe_with_error(
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -4143,6 +4162,7 @@ def compute_pivot_redshift(flat_samples, cosmo_model, z_min=0.0, z_max=4.0):
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -4215,6 +4235,7 @@ def posterior_corr(flat_samples, cosmo_model, z_pivot_agn):
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -4377,6 +4398,7 @@ def write_results_tex_variables(
     agn_pivot_context: AgnPivotContext,
     agn_xray_counts=None,
     bright_subsample_cut=None,
+    use_redshift_mean_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
 ):
@@ -4521,6 +4543,7 @@ def write_results_tex_variables(
             only_agn=option_flags["only_agn"],
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_redshift_mean_term=option_flags["use_redshift_mean_term"],
             use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
             use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -4565,6 +4588,7 @@ def write_results_tex_variables(
         option_flags = resolve_model_option_flags(
             model_name,
             flat_samples.shape[1],
+            use_redshift_mean_term=use_redshift_mean_term,
             use_f_agn_psf_2500_sigmoid_term=(
                 use_f_agn_psf_2500_sigmoid_term
             ),
@@ -4577,6 +4601,7 @@ def write_results_tex_variables(
             only_agn=option_flags["only_agn"],
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_redshift_mean_term=option_flags["use_redshift_mean_term"],
             use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
             use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],

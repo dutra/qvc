@@ -1,0 +1,30 @@
+{
+  "release_commit": "c447f0fea703fcd0fff57de5000947b5ca81286b",
+  "files": {
+    "chain.txt.gz": {
+      "url": "https://raw.githubusercontent.com/PantheonPlusSH0ES/DataRelease/c447f0fea703fcd0fff57de5000947b5ca81286b/Pantheon%2B_Data/5_COSMOLOGY/chains/Pantheon%2BOnly/Pantheon%2Bonly_Flatw0waCDM.txt.gz",
+      "sha256": "805ad8a2d045cf5408042139cbc9832e0425e6202a8b29ef3317c4ec4fb385be",
+      "bytes": 4359262
+    },
+    "likelihood.py": {
+      "url": "https://raw.githubusercontent.com/PantheonPlusSH0ES/DataRelease/c447f0fea703fcd0fff57de5000947b5ca81286b/Pantheon%2B_Data/5_COSMOLOGY/cosmosis_likelihoods/Pantheon%2B_only_cosmosis_likelihood.py",
+      "sha256": "7bc222fedc11a3d496ef4c5c18b2e111842dcef4d2bb65d22e9597eb9be191a4",
+      "bytes": 4000
+    },
+    "Pantheon+SH0ES.dat": {
+      "url": "https://raw.githubusercontent.com/PantheonPlusSH0ES/DataRelease/c447f0fea703fcd0fff57de5000947b5ca81286b/Pantheon%2B_Data/4_DISTANCES_AND_COVAR/Pantheon%2BSH0ES.dat",
+      "sha256": "1cb0fc379ef066afdc2ffd1857681cc478024570d8a3eba284fb645775198cf8",
+      "bytes": 579283
+    },
+    "Pantheon+SH0ES_STAT+SYS.cov": {
+      "url": "https://raw.githubusercontent.com/PantheonPlusSH0ES/DataRelease/c447f0fea703fcd0fff57de5000947b5ca81286b/Pantheon%2B_Data/4_DISTANCES_AND_COVAR/Pantheon%2BSH0ES_STAT%2BSYS.cov",
+      "sha256": "abf806d966485e64afdb359c87bffc0ecc00d05eff0a31ced66f247385df0fdc",
+      "bytes": 33284960
+    },
+    "camb_interface_2022.py": {
+      "url": "https://raw.githubusercontent.com/joezuntz/cosmosis-standard-library/a341f599d10d3cc6ffae84dc81b5b3825b0f6e69/boltzmann/camb/camb_interface.py",
+      "sha256": "54ea1932f4398016d0f3bfa15593f7e07fe6e0533a4238b3f3738ae1ead864ab",
+      "bytes": 27713
+    }
+  }
+}

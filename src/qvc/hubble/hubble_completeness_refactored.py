@@ -61,6 +61,9 @@ COMPLETENESS_MAG_COL = "completeness_m_2500"
 COMPLETENESS_MAG_ERR_COL = "completeness_m_2500_err"
 COMPLETENESS_FHOST_COL = "f_host_2500_psf"
 COMPLETENESS_FHOST_ERR_COL = "f_host_2500_psf_err"
+# Integer index of the target-selection group whose completeness map applies to
+# each object (only present when per-group completeness maps are requested).
+COMPLETENESS_GROUP_COL = "completeness_group_index"
 VALID_COMPLETENESS_MAGNITUDES = ("dereddened", "attenuated")
 DEFAULT_COMPLETENESS_SMOOTH_SIGMA_MAG = 0.10
 DEFAULT_COMPLETENESS_SMOOTH_SIGMA_Z = 0.30
@@ -1845,9 +1848,15 @@ def get_completeness_function_2d(
     z_range=None,
     magnitude_support_mode="hard-cut",
     bright_subsample_cut=None,
+    count_scale=None,
 ):
     """
     Build p(detect | m, z)
+
+    ``count_scale`` overrides the mock-to-catalog count normalization (the
+    mock H5 metadata or the bright-end estimate).  Per-group maps pass the
+    union map's scale so that the group maps sum to the union map.  The scale
+    actually used is stored on the returned model as ``count_scale``.
     """
     import os, h5py
     import matplotlib.pyplot as plt
@@ -1867,6 +1876,8 @@ def get_completeness_function_2d(
         mock_count_scale = f.attrs.get("mock_count_scale")
         declared_z_min = float(f.attrs.get("mock_redshift_min", np.nan))
         declared_z_max = float(f.attrs.get("mock_redshift_max", np.nan))
+    if count_scale is not None:
+        mock_count_scale = float(count_scale)
 
     # Filter finite
     z_obs = df_agn["z"].to_numpy(dtype=float)
@@ -2116,6 +2127,7 @@ def get_completeness_function_2d(
             tail_parent_counts_2d=H_true,
             tail_observed_counts_2d=H_obs,
         )
+    completeness2d.count_scale = float(count_scale_used)
     if plot and completeness2d.magnitude_support_mode == "tails":
         with trace_completeness_step("completeness_magnitude_tails.pdf + .json"):
             _plot_magnitude_tail_diagnostics(

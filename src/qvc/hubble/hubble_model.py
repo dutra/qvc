@@ -18,6 +18,8 @@ AGN_F_AGN_PSF_2500_FLUX_FRACTION_PARAM = (
 )
 AGN_F_AGN_PSF_2500_OBS = "f_AGN_psf_2500"
 AGN_F_AGN_PSF_2500_ERR = "f_AGN_psf_2500_err"
+AGN_MEAN_Z_PARAM = "gamma_mean_z"
+AGN_MEAN_Z_OBS = "z"
 AGN_LOGF_Z_PARAM = "gamma_log_f_z"
 AGN_INTRINSIC_SCATTER_MAG_CENTER = 2.5 * 0.2  # 0.2 dex in luminosity = 0.5 mag
 AGN_LOG_F_PRIOR_HALF_WIDTH = 0.8
@@ -33,10 +35,12 @@ AGN_FIXED_PIVOT_RULE = "fixed_sigma_tau_v1"
 AGN_PIVOT_RULES = (AGN_PIVOT_RULE, AGN_UNROUNDED_PIVOT_RULE, AGN_FIXED_PIVOT_RULE)
 WA_OFFCENTER_PRIOR_PROFILE = "wa_offcenter"
 CENTERED_LCDM_PRIOR_PROFILE = "centered_lcdm"
+CENTERED_LCDM_OM01_PRIOR_PROFILE = "centered_lcdm_om01"
 DEFAULT_PRIOR_PROFILE = CENTERED_LCDM_PRIOR_PROFILE
 PRIOR_PROFILE_CHOICES = (
     WA_OFFCENTER_PRIOR_PROFILE,
     CENTERED_LCDM_PRIOR_PROFILE,
+    CENTERED_LCDM_OM01_PRIOR_PROFILE,
 )
 CENTERED_LCDM_PRIOR_BOUNDS = {
     "M0_agn": (-26.0, -18.0),
@@ -60,6 +64,7 @@ def normalize_prior_profile(prior_profile):
 def get_agn_model_spec(
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_redshift_mean_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
 ):
@@ -89,6 +94,9 @@ def get_agn_model_spec(
         req_params += (AGN_ALPHA_LAMBDA_PARAM,)
         req_obs += (AGN_ALPHA_LAMBDA_OBS,)
         req_errs += (AGN_ALPHA_LAMBDA_ERR,)
+    if use_redshift_mean_term:
+        req_params += (AGN_MEAN_Z_PARAM,)
+        req_obs += (AGN_MEAN_Z_OBS,)
     if use_eta_sigma_term:
         req_params += (AGN_ETA_SIGMA_PARAM,)
         req_obs += (AGN_ETA_SIGMA_OBS,)
@@ -114,6 +122,7 @@ def get_agn_model_spec(
 agn_model_req_params, agn_model_req_obs, agn_model_req_errs = get_agn_model_spec(
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_redshift_mean_term=False,
 )
 agn_model_pidx = {k: i for i, k in enumerate(agn_model_req_params)}
 agn_model_oidx = {k: i for i, k in enumerate(agn_model_req_obs)}
@@ -138,6 +147,7 @@ def infer_model_option_flags(cosmo_model, sample_dim, only_sna=False, only_agn=F
                     use_planck_h0_prior=False,
                     use_alpha_lambda_term=use_alpha_lambda_term,
                     use_eta_sigma_term=use_eta_sigma_term,
+                    use_redshift_mean_term=False,
                     use_redshift_log_f_term=use_redshift_log_f_term,
                     use_f_agn_psf_2500_sigmoid_term=False,
                     use_f_agn_psf_2500_flux_fraction_term=False,
@@ -156,6 +166,7 @@ def infer_model_option_flags(cosmo_model, sample_dim, only_sna=False, only_agn=F
         return {
             "use_alpha_lambda_term": use_alpha_lambda_term,
             "use_eta_sigma_term": use_eta_sigma_term,
+            "use_redshift_mean_term": False,
             "use_redshift_log_f_term": use_redshift_log_f_term,
             "use_f_agn_psf_2500_sigmoid_term": False,
             "use_f_agn_psf_2500_flux_fraction_term": False,
@@ -176,6 +187,7 @@ def resolve_model_option_flags(
     use_planck_h0_prior=False,
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
+    use_redshift_mean_term=None,
     use_redshift_log_f_term=None,
     use_f_agn_psf_2500_sigmoid_term=None,
     use_f_agn_psf_2500_flux_fraction_term=None,
@@ -190,6 +202,8 @@ def resolve_model_option_flags(
             "The f_AGN_psf_2500 sigmoid and flux-fraction terms are "
             "mutually exclusive."
         )
+    # Mean evolution must be explicit: its one extra dimension can also be
+    # explained by an older optional regressor. Never guess it from shape.
     combos = []
     only_agn_options = (False,) if only_sna and only_agn is None else (
         (False, True) if only_agn is None else (bool(only_agn),)
@@ -225,6 +239,7 @@ def resolve_model_option_flags(
                                 use_planck_h0_prior=use_planck_h0_prior,
                                 use_alpha_lambda_term=alpha_flag,
                                 use_eta_sigma_term=eta_flag,
+                                use_redshift_mean_term=bool(use_redshift_mean_term),
                                 use_redshift_log_f_term=logf_flag,
                                 use_f_agn_psf_2500_sigmoid_term=sigmoid_flag,
                                 use_f_agn_psf_2500_flux_fraction_term=(
@@ -237,6 +252,7 @@ def resolve_model_option_flags(
                                     "only_agn": only_agn_flag,
                                     "use_alpha_lambda_term": alpha_flag,
                                     "use_eta_sigma_term": eta_flag,
+                                    "use_redshift_mean_term": bool(use_redshift_mean_term),
                                     "use_redshift_log_f_term": logf_flag,
                                     "use_f_agn_psf_2500_sigmoid_term": sigmoid_flag,
                                     "use_f_agn_psf_2500_flux_fraction_term": (
@@ -271,6 +287,7 @@ def resolve_model_option_flags(
             "only_agn": matches[0]["only_agn"],
             "use_alpha_lambda_term": matches[0]["use_alpha_lambda_term"],
             "use_eta_sigma_term": matches[0]["use_eta_sigma_term"],
+            "use_redshift_mean_term": matches[0]["use_redshift_mean_term"],
             "use_redshift_log_f_term": matches[0]["use_redshift_log_f_term"],
             "use_f_agn_psf_2500_sigmoid_term": matches[0][
                 "use_f_agn_psf_2500_sigmoid_term"
@@ -284,6 +301,7 @@ def resolve_model_option_flags(
     requested = {
         "use_alpha_lambda_term": use_alpha_lambda_term,
         "use_eta_sigma_term": use_eta_sigma_term,
+        "use_redshift_mean_term": use_redshift_mean_term,
         "use_redshift_log_f_term": use_redshift_log_f_term,
         "use_f_agn_psf_2500_sigmoid_term": use_f_agn_psf_2500_sigmoid_term,
         "use_f_agn_psf_2500_flux_fraction_term": (
@@ -295,6 +313,7 @@ def resolve_model_option_flags(
             {
                 "use_alpha_lambda_term": combo["use_alpha_lambda_term"],
                 "use_eta_sigma_term": combo["use_eta_sigma_term"],
+                "use_redshift_mean_term": combo["use_redshift_mean_term"],
                 "use_redshift_log_f_term": combo["use_redshift_log_f_term"],
                 "only_agn": combo["only_agn"],
                 "use_f_agn_psf_2500_sigmoid_term": combo[
@@ -353,12 +372,14 @@ def agn_model_pack_params(
     params_dict,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_redshift_mean_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
 ):
     req_params, _, _ = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=(
             use_f_agn_psf_2500_flux_fraction_term
@@ -474,6 +495,7 @@ class AgnPivotContext:
         self,
         use_alpha_lambda_term=False,
         use_eta_sigma_term=False,
+        use_redshift_mean_term=False,
         use_f_agn_psf_2500_sigmoid_term=False,
         use_f_agn_psf_2500_flux_fraction_term=False,
     ):
@@ -482,6 +504,7 @@ class AgnPivotContext:
         _, expected_names, _ = get_agn_model_spec(
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_mean_term=use_redshift_mean_term,
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
             use_f_agn_psf_2500_flux_fraction_term=(
                 use_f_agn_psf_2500_flux_fraction_term
@@ -517,6 +540,7 @@ def build_agn_pivot_context(
     z_range,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_redshift_mean_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
     round_pivots=True,
@@ -530,6 +554,7 @@ def build_agn_pivot_context(
     _, req_obs, _ = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=(
             use_f_agn_psf_2500_flux_fraction_term
@@ -558,6 +583,9 @@ def build_agn_pivot_context(
             "Cannot compute AGN pivots: no reference objects fall inside "
             f"inclusive z_range={z_range!r}."
         )
+
+    if use_redshift_mean_term and np.any(z[fit_mask] <= -1.0):
+        raise ValueError("Mean redshift evolution requires finite z > -1.")
 
     pivot_values = []
     for name in req_obs:
@@ -615,6 +643,7 @@ def agn_model_pack_obs(
     obs_dict,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_redshift_mean_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
     *,
@@ -623,6 +652,7 @@ def agn_model_pack_obs(
     _, req_obs, req_errs = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=(
             use_f_agn_psf_2500_flux_fraction_term
@@ -631,6 +661,10 @@ def agn_model_pack_obs(
     _require(req_obs, obs_dict, "observables")
     _require(req_errs, obs_dict, "errors")
     obs = np.array([obs_dict[k] for k in req_obs], dtype=float)
+    if use_redshift_mean_term:
+        z = obs[req_obs.index(AGN_MEAN_Z_OBS)]
+        if np.any(~np.isfinite(z) | (z <= -1.0)):
+            raise ValueError("Mean redshift evolution requires finite z > -1.")
     err = np.array([obs_dict[k] for k in req_errs], dtype=float)
     if (
         use_f_agn_psf_2500_sigmoid_term
@@ -665,6 +699,7 @@ def agn_model_pack_obs(
         err,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=(
             use_f_agn_psf_2500_flux_fraction_term
@@ -683,6 +718,7 @@ def agn_model_pack_obs(
     pivots = pivot_context.as_array(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=(
             use_f_agn_psf_2500_flux_fraction_term
@@ -730,12 +766,14 @@ def M_model_agn(
     pivots_array,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_redshift_mean_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
 ):
     req_params, req_obs, _ = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=(
             use_f_agn_psf_2500_flux_fraction_term
@@ -774,6 +812,11 @@ def M_model_agn(
         alpha_lambda = obs_arr[oidx[AGN_ALPHA_LAMBDA_OBS]]
         alpha_lambda_pivot = pivots_array[oidx[AGN_ALPHA_LAMBDA_OBS]]
         M_pred = M_pred + gamma_alpha_lambda * (alpha_lambda - alpha_lambda_pivot)
+    if use_redshift_mean_term:
+        M_pred = M_pred + params_arr[pidx[AGN_MEAN_Z_PARAM]] * np.log10(
+            (1.0 + obs_arr[oidx[AGN_MEAN_Z_OBS]])
+            / (1.0 + pivots_array[oidx[AGN_MEAN_Z_OBS]])
+        )
     if use_eta_sigma_term:
         gamma_eta_sigma = params_arr[pidx[AGN_ETA_SIGMA_PARAM]]
         eta_sigma = obs_arr[oidx[AGN_ETA_SIGMA_OBS]]
@@ -802,6 +845,7 @@ def M_model_agn_posterior_samples(
     pivots_array,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_redshift_mean_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
 ):
@@ -824,6 +868,7 @@ def M_model_agn_posterior_samples(
     req_params, req_obs, _ = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=(
             use_f_agn_psf_2500_flux_fraction_term
@@ -863,6 +908,11 @@ def M_model_agn_posterior_samples(
         )
     if use_eta_sigma_term:
         coefficient_terms.append((AGN_ETA_SIGMA_PARAM, AGN_ETA_SIGMA_OBS))
+    if use_redshift_mean_term:
+        predicted += samples[:, pidx[AGN_MEAN_Z_PARAM], None] * np.log10(
+            (1.0 + observables[oidx[AGN_MEAN_Z_OBS]][None, :])
+            / (1.0 + pivots[oidx[AGN_MEAN_Z_OBS]])
+        )
     for parameter_name, observable_name in coefficient_terms:
         predicted += (
             samples[:, pidx[parameter_name], None]
@@ -920,6 +970,7 @@ def validate_agn_observable_uncertainties(
     err_arr,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_redshift_mean_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
     *,
@@ -935,6 +986,7 @@ def validate_agn_observable_uncertainties(
     _, _, req_errs = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=(
             use_f_agn_psf_2500_flux_fraction_term
@@ -1039,6 +1091,7 @@ def M_model_agn_observable_variance_posterior(
     err_arr,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_redshift_mean_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
     *,
@@ -1055,6 +1108,7 @@ def M_model_agn_observable_variance_posterior(
     req_params, req_obs, req_errs = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=(
             use_f_agn_psf_2500_flux_fraction_term
@@ -1080,6 +1134,7 @@ def M_model_agn_observable_variance_posterior(
         errors,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=(
             use_f_agn_psf_2500_flux_fraction_term
@@ -1177,6 +1232,7 @@ def M_model_agn_err(
     check_negative=False,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_redshift_mean_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
     include_sigma_tau=True,
@@ -1184,6 +1240,7 @@ def M_model_agn_err(
     req_params, req_obs, req_errs = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=(
             use_f_agn_psf_2500_flux_fraction_term
@@ -1201,6 +1258,7 @@ def M_model_agn_err(
         err_arr,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=(
             use_f_agn_psf_2500_flux_fraction_term
@@ -1294,6 +1352,7 @@ def get_model_params(
     fixed_h0=None,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_redshift_mean_term=False,
     use_redshift_log_f_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
@@ -1323,13 +1382,14 @@ def get_model_params(
         (
             "M0_agn",
             CENTERED_LCDM_PRIOR_BOUNDS["M0_agn"]
-            if prior_profile == CENTERED_LCDM_PRIOR_PROFILE
+            if prior_profile in (CENTERED_LCDM_PRIOR_PROFILE, CENTERED_LCDM_OM01_PRIOR_PROFILE)
             else (-26.0, -18.0),
         ),
         ("alpha_agn", (-20,  20.0)),
         ("beta_agn",  (-20.0,  20.0)),
         (AGN_ALPHA_LAMBDA_PARAM, (-20.0, 20.0)),
         (AGN_ETA_SIGMA_PARAM, (-20.0, 20.0)),
+        (AGN_MEAN_Z_PARAM, (-20.0, 20.0)),
         # The first f_AGN sigmoid run reached the original A_f=-5 and x0=1
         # edges.  The midpoint may legitimately lie outside the observed
         # fraction interval: it locates the sigmoid transition and is not an
@@ -1353,15 +1413,18 @@ def get_model_params(
         # ("x0_red",   (-5.0,  5.0)),    # bend near where trend starts
 
         ("log_f",     AGN_LOG_F_PRIOR),
-        (AGN_LOGF_Z_PARAM, (-10.0, 10.0)),
+        (AGN_LOGF_Z_PARAM, (-20.0, 20.0)),
         #("sigma_b",   (-1,  1)),
 
         ("H0",       PLANCK_H0_PRIOR if use_planck_h0_prior else (60.0, 80.0)),
-        ("Om0",      PLANCK_OM0_PRIOR if use_planck_om_prior else (0.2, 0.8)),
+        ("Om0", PLANCK_OM0_PRIOR if use_planck_om_prior else
+         (0.0, 1.0) if prior_profile == CENTERED_LCDM_OM01_PRIOR_PROFILE else (0.2, 0.8)),
         
     ])
     if not use_alpha_lambda_term:
         priors.pop(AGN_ALPHA_LAMBDA_PARAM)
+    if not use_redshift_mean_term:
+        priors.pop(AGN_MEAN_Z_PARAM)
     if not use_eta_sigma_term:
         priors.pop(AGN_ETA_SIGMA_PARAM)
     if not use_f_agn_psf_2500_sigmoid_term:
@@ -1387,7 +1450,7 @@ def get_model_params(
             (
                 "w0",
                 CENTERED_LCDM_PRIOR_BOUNDS["w0"]
-                if prior_profile == CENTERED_LCDM_PRIOR_PROFILE
+                if prior_profile in (CENTERED_LCDM_PRIOR_PROFILE, CENTERED_LCDM_OM01_PRIOR_PROFILE)
                 else (-3.0, 1.0),
             )
         ])
@@ -1396,13 +1459,13 @@ def get_model_params(
             (
                 "w0",
                 CENTERED_LCDM_PRIOR_BOUNDS["w0"]
-                if prior_profile == CENTERED_LCDM_PRIOR_PROFILE
+                if prior_profile in (CENTERED_LCDM_PRIOR_PROFILE, CENTERED_LCDM_OM01_PRIOR_PROFILE)
                 else (-3.0, 1.0),
             ),
             (
                 "wa",
                 CENTERED_LCDM_PRIOR_BOUNDS["wa"]
-                if prior_profile == CENTERED_LCDM_PRIOR_PROFILE
+                if prior_profile in (CENTERED_LCDM_PRIOR_PROFILE, CENTERED_LCDM_OM01_PRIOR_PROFILE)
                 else (-30, 1),
             ),
         ])
@@ -1426,6 +1489,7 @@ def get_model_params(
         "alpha_agn": r"$\alpha_{\rm AGN}$",
         "beta_agn": r"$\beta_{\rm AGN}$",
         AGN_ALPHA_LAMBDA_PARAM: r"$\gamma_{\alpha_\lambda}$",
+        AGN_MEAN_Z_PARAM: r"$\gamma_{M,z}$",
         AGN_ETA_SIGMA_PARAM: r"$\gamma_{\eta_\sigma}$",
         AGN_F_AGN_PSF_2500_AMPLITUDE_PARAM: r"$A_{f,2500}$",
         AGN_F_AGN_PSF_2500_LOG_STEEPNESS_PARAM: r"$\log k_{f,2500}$",

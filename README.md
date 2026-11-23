@@ -333,6 +333,24 @@ To fetch appendix datasets:
 python -m qvc.setup_data --appendix
 ```
 
+The Hubble launcher supports optional redshift evolution in the mean AGN
+absolute-magnitude relation and in its intrinsic scatter:
+
+```bash
+QVC_HUBBLE_MODE=agn-only-no-bright-cut \
+xonsh run_hubble.xonsh --fit_redshift_mean_term --fit_redshift_log_f_term
+```
+
+Either flag can be used alone. The mean term adds
+`gamma_mean_z * log10((1+z)/(1+z_pivot))` to predicted absolute magnitude,
+where its pivot is the median redshift of the fit's immutable reference sample.
+The scatter term evolves `log_f(z)` using the existing scatter pivot.
+Both gamma priors are uniform on `[-20, 20]`. Default launcher output prefixes
+gain `_meanz` and/or `_logfz`; explicit prefix overrides remain unchanged.
+These options use the Dynesty backend. The AGN-only preset retains completeness
+correction but disables the bright-subsample cut and uses `tails` magnitude
+support with the 14–32 guard.
+
 The Stone, MacLeod, and same-length comparison plots were generated using Yale's HPC by running the `hpc_scripts/sfitlc.py` script.
 
 ## HPC Scripts

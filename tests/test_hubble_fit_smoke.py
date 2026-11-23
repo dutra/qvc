@@ -6286,7 +6286,7 @@ def test_run_hubble_forwards_configurable_cumulative_cut_tier():
     assert "tiers are cumulative" in runner
     assert '"QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_MAG": "0.10"' in runner
     assert '"QVC_HUBBLE_COMPLETENESS_SMOOTH_SIGMA_Z": "0.30"' in runner
-    assert '"QVC_HUBBLE_COMPLETENESS_MAGNITUDE_SUPPORT_MODE", "hard-cut"' in runner
+    assert '"QVC_HUBBLE_COMPLETENESS_MAGNITUDE_SUPPORT_MODE", "tails" if agn_only else "hard-cut"' in runner
     assert "--completeness-magnitude-support-mode @(completeness_magnitude_support_mode)" in runner
     assert '"QVC_CUT_A_2500_TOTAL_MAX": "none"' in runner
     assert '"QVC_CUT_EBV_GAL_PLUS_EBV_AGN_MAX": "none"' in runner
@@ -6464,3 +6464,30 @@ def test_single_and_full_deliver_same_selected_and_parent_ids(monkeypatch, tmp_p
     assert calls[0] == calls[1]
     assert calls[0][0] == selected.object_id.tolist()
     assert calls[0][1] == parent.object_id.tolist()
+
+
+def test_l2500_label_uses_full_posterior_before_thinning(monkeypatch, tmp_path):
+    import matplotlib.pyplot as plt
+
+    frame = _make_fake_agn_sample(n_agn=8)
+    priors, labels, _ = hubble_model.get_model_params("FlatLambdaCDM", only_sna=False)
+    theta = np.array([(priors[k][0] + priors[k][1]) / 2 for k in labels])
+    samples = np.tile(theta, (2001, 1))
+    samples[:, labels.index("M0_agn")] = -23.0
+    samples[:, labels.index("alpha_agn")] = 7.3
+    samples[:, labels.index("beta_agn")] = -2.5
+    # The plotting stride selects a deliberately unrepresentative subset.
+    samples[::4, labels.index("M0_agn")] = -22.0
+    samples[::4, labels.index("alpha_agn")] = 6.0
+    captured = []
+    monkeypatch.setattr(hubble_plotting, "_save_figure",
+                        lambda fig, *args, **kwargs: captured.append(fig))
+    hubble_plotting.plot_predicted_L2500_vs_sigmahat(
+        samples, frame, "FlatLambdaCDM", z_pivot_agn=1.0,
+        plot_path=str(tmp_path), debias=False,
+        agn_pivot_context=_agn_pivot_context(frame, (0.44, 3.16)),
+    )
+    label = captured[0].axes[0].get_xlabel()
+    assert r"1.58\times10^{45}" in label
+    assert "^{-2.92}" in label
+    plt.close(captured[0])

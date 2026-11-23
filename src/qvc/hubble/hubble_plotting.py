@@ -936,6 +936,7 @@ def plot_blr_line_lags_vs_l2500(
     clipped_mask=None,
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
+    use_redshift_mean_term=None,
     use_f_agn_psf_2500_sigmoid_term=None,
     use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
@@ -952,6 +953,7 @@ def plot_blr_line_lags_vs_l2500(
         np.asarray(flat_samples).shape[1],
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -961,6 +963,7 @@ def plot_blr_line_lags_vs_l2500(
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -5467,6 +5470,7 @@ def plot_dynesty(
     show=False,
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
+    use_redshift_mean_term=None,
     use_f_agn_psf_2500_sigmoid_term=None,
     use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
@@ -5484,6 +5488,7 @@ def plot_dynesty(
         only_agn=bool(only_agn),
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5494,6 +5499,7 @@ def plot_dynesty(
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -5552,6 +5558,7 @@ def plot_traces(
     plot_path="plots/hubble",
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
+    use_redshift_mean_term=None,
     use_f_agn_psf_2500_sigmoid_term=None,
     use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
@@ -5581,6 +5588,7 @@ def plot_traces(
         only_sna=only_sna,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5591,6 +5599,7 @@ def plot_traces(
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -5632,6 +5641,7 @@ def plot_posterior_corner(
     plot_path="plots/hubble",
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
+    use_redshift_mean_term=None,
     use_f_agn_psf_2500_sigmoid_term=None,
     use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
@@ -5653,6 +5663,7 @@ def plot_posterior_corner(
         only_sna=only_sna,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5663,6 +5674,7 @@ def plot_posterior_corner(
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -5704,6 +5716,7 @@ def plot_cosmo_corner(
     only_agn=False,
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
+    use_redshift_mean_term=None,
     use_f_agn_psf_2500_sigmoid_term=None,
     use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
@@ -5724,6 +5737,7 @@ def plot_cosmo_corner(
         only_agn=only_agn,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5733,6 +5747,7 @@ def plot_cosmo_corner(
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -6371,6 +6386,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 dmi_values=None, dmi_sigma=None, dmi_selection_sigma=None, clipped_mask=None,
                 filename=None, sigma_clip_threshold=None,
                 use_alpha_lambda_term=None, use_eta_sigma_term=None,
+                use_redshift_mean_term=None,
                 use_f_agn_psf_2500_sigmoid_term=None,
                 use_f_agn_psf_2500_flux_fraction_term=None,
                 use_redshift_log_f_term=None,
@@ -6484,6 +6500,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         only_agn=only_agn,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -6493,6 +6510,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -6549,6 +6567,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         df_agn,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         pivot_context=agn_pivot_context,
@@ -6556,6 +6575,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     agn_parameter_names, _, _ = get_agn_model_spec(
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
     )
@@ -6568,6 +6588,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         agn_pivot_arr,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
     )
@@ -6599,6 +6620,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             pivots_array=agn_pivot_arr,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_redshift_mean_term=option_flags["use_redshift_mean_term"],
             use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         )
@@ -6628,7 +6650,10 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
     sigma_lens = sigma_lens_from_dc(df_agn['z'].values, cosmo)
 
     apparent_mag_err = df_agn['apparent_mag_2500_err'].values
-    z_err = sigma_mu_from_z_err(df_agn["z"].values, df_agn["z_err"].values, cosmo)
+    z_err = sigma_mu_from_z_err(
+        df_agn["z"].values, df_agn["z_err"].values, cosmo,
+        results.get("gamma_mean_z", 0.0) if option_flags["use_redshift_mean_term"] else 0.0,
+    )
     m_app_var = apparent_mag_err**2
     lens_var = sigma_lens**2
     z_var = z_err**2
@@ -7083,6 +7108,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             results,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_redshift_mean_term=option_flags["use_redshift_mean_term"],
             use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         )
@@ -7107,6 +7133,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             agn_obs_med,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_redshift_mean_term=option_flags["use_redshift_mean_term"],
             use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
             pivot_context=agn_pivot_context,
@@ -7119,6 +7146,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 agn_pivot_arr,
                 use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
                 use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+                use_redshift_mean_term=option_flags["use_redshift_mean_term"],
                 use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
             )
@@ -7138,6 +7166,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
         option_flags_other = resolve_model_option_flags(
             cosmo_model_other,
             np.asarray(cosmo_model_samples_other).shape[1],
+            use_redshift_mean_term=option_flags["use_redshift_mean_term"],
             use_f_agn_psf_2500_sigmoid_term=option_flags[
                 "use_f_agn_psf_2500_sigmoid_term"
             ],
@@ -7150,6 +7179,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             only_agn=option_flags_other["only_agn"],
             use_alpha_lambda_term=option_flags_other["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags_other["use_eta_sigma_term"],
+            use_redshift_mean_term=option_flags_other["use_redshift_mean_term"],
             use_f_agn_psf_2500_sigmoid_term=option_flags_other["use_f_agn_psf_2500_sigmoid_term"],
             use_f_agn_psf_2500_flux_fraction_term=option_flags_other["use_f_agn_psf_2500_flux_fraction_term"],
             use_redshift_log_f_term=option_flags_other["use_redshift_log_f_term"],
@@ -7208,7 +7238,8 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             option_flags_other = resolve_model_option_flags(
                 cosmo_model_other,
                 np.asarray(cosmo_model_samples_other).shape[1],
-                use_f_agn_psf_2500_sigmoid_term=option_flags[
+                use_redshift_mean_term=option_flags["use_redshift_mean_term"],
+            use_f_agn_psf_2500_sigmoid_term=option_flags[
                     "use_f_agn_psf_2500_sigmoid_term"
                 ],
                 use_f_agn_psf_2500_flux_fraction_term=option_flags[
@@ -7220,6 +7251,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
                 only_agn=option_flags_other["only_agn"],
                 use_alpha_lambda_term=option_flags_other["use_alpha_lambda_term"],
                 use_eta_sigma_term=option_flags_other["use_eta_sigma_term"],
+                use_redshift_mean_term=option_flags_other["use_redshift_mean_term"],
                 use_f_agn_psf_2500_sigmoid_term=option_flags_other["use_f_agn_psf_2500_sigmoid_term"],
                 use_f_agn_psf_2500_flux_fraction_term=option_flags_other["use_f_agn_psf_2500_flux_fraction_term"],
                 use_redshift_log_f_term=option_flags_other["use_redshift_log_f_term"],
@@ -7369,6 +7401,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             results,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_redshift_mean_term=option_flags["use_redshift_mean_term"],
             use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         )
@@ -7376,6 +7409,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             ds,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_redshift_mean_term=option_flags["use_redshift_mean_term"],
             use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
             pivot_context=agn_pivot_context,
@@ -7386,6 +7420,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             piv_show,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_redshift_mean_term=option_flags["use_redshift_mean_term"],
             use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         )
@@ -7396,6 +7431,7 @@ def plot_hubble(flat_samples, df_agn, df_pantheon, cosmo_model, z_pivot_agn, plo
             piv_show,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_redshift_mean_term=option_flags["use_redshift_mean_term"],
             use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         )
@@ -8139,6 +8175,7 @@ def plot_predicted_vs_actual_M2500(
     clipped_mask=None,
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
+    use_redshift_mean_term=None,
     use_f_agn_psf_2500_sigmoid_term=None,
     use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
@@ -8171,6 +8208,7 @@ def plot_predicted_vs_actual_M2500(
         np.asarray(flat_samples).shape[1],
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -8180,6 +8218,7 @@ def plot_predicted_vs_actual_M2500(
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -8239,6 +8278,7 @@ def plot_predicted_vs_actual_M2500(
         results,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
     )
@@ -8246,6 +8286,7 @@ def plot_predicted_vs_actual_M2500(
         df_agn,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         pivot_context=agn_pivot_context,
@@ -8257,6 +8298,7 @@ def plot_predicted_vs_actual_M2500(
         agn_pivot_arr,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
     )
@@ -8267,6 +8309,7 @@ def plot_predicted_vs_actual_M2500(
         agn_pivot_arr,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
     )
@@ -10620,6 +10663,7 @@ def plot_predicted_L2500_vs_sigmahat(
     plot_path='plots/hubble', show=False, debias=True, dm_interp=None,
     show_residuals=False, df_calibrators=None, z_range=(0.44, 3.16),
     use_alpha_lambda_term=None, use_eta_sigma_term=None,
+                use_redshift_mean_term=None,
     use_f_agn_psf_2500_sigmoid_term=None,
     use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
@@ -10639,6 +10683,10 @@ def plot_predicted_L2500_vs_sigmahat(
     out_of_range_error_color = mpl.colors.to_rgba(out_of_range_color, alpha=0.1)
     out_of_range_residual_error_color = mpl.colors.to_rgba(out_of_range_color, alpha=0.18)
 
+    # Reference parameters must use the same full posterior as the manuscript
+    # summaries. Thin only the draws used for the predictive band below.
+    full_posterior_medians = np.median(flat_samples, axis=0)
+
     # --- Thinning for speed ---
     n_samples = int(flat_samples.shape[0])
     thin_factor = max(1, n_samples // 500)
@@ -10650,6 +10698,7 @@ def plot_predicted_L2500_vs_sigmahat(
         np.asarray(flat_samples).shape[1],
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -10659,6 +10708,7 @@ def plot_predicted_L2500_vs_sigmahat(
         only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -10670,13 +10720,14 @@ def plot_predicted_L2500_vs_sigmahat(
         d,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         pivot_context=agn_pivot_context,
     )
 
     # Helper: posterior median dict
-    med_params = {k: np.median(flat_samples[:, param_indices[k]]) for k in model_labels}
+    med_params = {k: full_posterior_medians[param_indices[k]] for k in model_labels}
 
     # --- Cosmology from medians (only for placing the *data* on y) ---
     if cosmo_model == 'FlatwCDM':
@@ -10712,6 +10763,7 @@ def plot_predicted_L2500_vs_sigmahat(
         med_params,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
     )
@@ -10725,6 +10777,7 @@ def plot_predicted_L2500_vs_sigmahat(
             agn_pivot_arr,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_redshift_mean_term=option_flags["use_redshift_mean_term"],
             use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         ) - M0_med
@@ -10739,6 +10792,7 @@ def plot_predicted_L2500_vs_sigmahat(
         agn_pivot_arr,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
     )
@@ -10770,6 +10824,7 @@ def plot_predicted_L2500_vs_sigmahat(
             ds,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_redshift_mean_term=option_flags["use_redshift_mean_term"],
             use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
             pivot_context=agn_pivot_context,
@@ -10781,6 +10836,7 @@ def plot_predicted_L2500_vs_sigmahat(
                 agn_pivot_arr,
                 use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
                 use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+                use_redshift_mean_term=option_flags["use_redshift_mean_term"],
                 use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
             ) - M0_med
@@ -10794,6 +10850,7 @@ def plot_predicted_L2500_vs_sigmahat(
             agn_pivot_arr,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_redshift_mean_term=option_flags["use_redshift_mean_term"],
             use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         )
@@ -10852,6 +10909,7 @@ def plot_predicted_L2500_vs_sigmahat(
             sample_params,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_redshift_mean_term=option_flags["use_redshift_mean_term"],
             use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         )
@@ -10863,6 +10921,7 @@ def plot_predicted_L2500_vs_sigmahat(
                 agn_pivot_arr,
                 use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
                 use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+                use_redshift_mean_term=option_flags["use_redshift_mean_term"],
                 use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
             )
@@ -11139,6 +11198,7 @@ def plot_predicted_L2500_vs_sigmahat(
             ds,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_redshift_mean_term=option_flags["use_redshift_mean_term"],
             use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
             pivot_context=agn_pivot_context,
@@ -11150,6 +11210,7 @@ def plot_predicted_L2500_vs_sigmahat(
                 agn_pivot_arr,
                 use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
                 use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+                use_redshift_mean_term=option_flags["use_redshift_mean_term"],
                 use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
             )
@@ -11164,6 +11225,7 @@ def plot_predicted_L2500_vs_sigmahat(
             agn_pivot_arr,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_redshift_mean_term=option_flags["use_redshift_mean_term"],
             use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         )
@@ -11224,6 +11286,7 @@ def plot_predicted_L2500_vs_sigmahat(
         df_agn,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         pivot_context=agn_pivot_context,
@@ -11396,6 +11459,7 @@ def plot_L2500_vs_sigma_tau_separate(
     z_range=(0.44, 3.16),
     use_alpha_lambda_term=None,
     use_eta_sigma_term=None,
+    use_redshift_mean_term=None,
     use_f_agn_psf_2500_sigmoid_term=None,
     use_f_agn_psf_2500_flux_fraction_term=None,
     use_redshift_log_f_term=None,
@@ -11417,14 +11481,17 @@ def plot_L2500_vs_sigma_tau_separate(
         np.asarray(flat_samples).shape[1],
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
     )
     _priors, model_labels, _model_labels_latex = get_model_params(
         cosmo_model,
+        only_agn=option_flags["only_agn"],
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         use_redshift_log_f_term=option_flags["use_redshift_log_f_term"],
@@ -11463,6 +11530,7 @@ def plot_L2500_vs_sigma_tau_separate(
         d,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         pivot_context=agn_pivot_context,
@@ -11471,6 +11539,7 @@ def plot_L2500_vs_sigma_tau_separate(
         med_params,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
     )
@@ -11483,6 +11552,7 @@ def plot_L2500_vs_sigma_tau_separate(
             agn_pivot_arr,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_redshift_mean_term=option_flags["use_redshift_mean_term"],
             use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         )
@@ -11498,6 +11568,7 @@ def plot_L2500_vs_sigma_tau_separate(
         agn_pivot_arr,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
     )
@@ -12733,6 +12804,53 @@ def plot_adf_pvalue_g_diagnostic(
     )
 
 
+def _robust_panel_ylim(plotted, inverse, percentiles=(0.5, 99.5), pad=0.05):
+    """Return data-space y limits from plotted-coordinate values.
+
+    ``plotted`` are finite values already in the plotted coordinate (log10 for a
+    log axis). The limits span the given percentiles, padded by ``pad`` of that
+    span on both sides, then mapped back to data space with ``inverse``.
+    """
+    plotted = np.asarray(plotted, dtype=float)
+    plotted = plotted[np.isfinite(plotted)]
+    if plotted.size == 0:
+        low, high = 0.0, 1.0
+    else:
+        low, high = np.percentile(plotted, percentiles)
+    span = high - low
+    margin = pad * span if span > 0 else max(0.5 * abs(low), 0.5)
+    return float(inverse(low - margin)), float(inverse(high + margin))
+
+
+def plot_spectral_component_amplitudes(
+    frame, *, plot_path="plots/hubble",
+    filename="spectral_component_amplitudes_vs_redshift_postcut.pdf",
+):
+    """Plot component luminosities in styled, square panels in a 2x3 grid.
+
+    Legacy/minimal catalogs without component amplitudes cannot supply this
+    diagnostic. Preserve the input frame and all inference quantities.
+    """
+    from qvc.hubble.spectral_components import (
+        AMPLITUDE_PANELS, LUMINOSITY_INPUTS, add_component_luminosities,
+    )
+
+    if not {"z", *LUMINOSITY_INPUTS}.issubset(frame.columns):
+        return None
+    derived = frame.copy()
+    add_component_luminosities(derived)
+    style_path = os.path.join(os.path.dirname(__file__), "style.mplstyle")
+    with plt.style.context(style_path):
+        return plot_spectral_fractions_cut_sample(
+            derived, plot_path=plot_path, filename=filename,
+            panels=[(name, label) for name, label, _ in AMPLITUDE_PANELS],
+            panel_axes=[{**spec, "box_aspect": 1,
+                         "legend_fontsize": mpl.rcParams["legend.fontsize"]}
+                        for _, _, spec in AMPLITUDE_PANELS],
+            max_columns=3, figsize=(18, 12),
+        )
+
+
 def plot_spectral_fractions_cut_sample(
     frame,
     *,
@@ -12740,15 +12858,47 @@ def plot_spectral_fractions_cut_sample(
     filename="spectral_fractions_vs_redshift_precut.pdf",
     xlim=None,
     show=False,
+    panels=None,
+    max_columns=3,
+    panel_axes=None,
+    figsize=None,
 ):
-    """Plot BC, Fe II, and PSF-host fractions with enclosed-density contours."""
-    panels = (
-        ("f_bc_3000", r"$f_{\rm BC}$"),
-        ("f_fe_uv_3000", r"$f_{\rm FeII}$"),
-        ("f_host_2500_psf", r"$f_{\rm host,2500\,\AA}^{\rm PSF}$"),
-    )
+    """Plot spectral component fractions with enclosed-density contours.
+
+    ``panels`` is a sequence of ``(column, label)`` pairs. The default draws
+    the BC, Fe II and PSF-host fractions in one row. Longer sequences wrap
+    into rows of ``max_columns`` panels; unused axes are hidden. Returns ``None`` when
+    ``z`` or any requested column is missing.
+
+    ``panel_axes`` (optional) gives every panel its own y axis. It is a
+    sequence parallel to ``panels`` of mappings (or ``None``) with keys
+    ``scale`` (``"log"`` or ``"linear"``, default ``"log"``), ``ylim`` (default:
+    the 0.5-99.5 percentile range of the panel's finite values, padded by 5%
+    in the plotted coordinate) and ``ylabel`` (default ``""``). Points outside
+    ``ylim`` (or non-positive on a log axis) are drawn as arrows at the
+    corresponding axis edge, and the density contours are computed in the
+    plotted coordinate. When ``panel_axes`` is ``None`` all panels share the
+    fixed fraction axis, exactly as before.
+    """
+    if panels is None:
+        panels = (
+            ("f_bc_3000", r"$f_{\rm BC}$"),
+            ("f_fe_uv_3000", r"$f_{\rm FeII}$"),
+            ("f_host_2500_psf", r"$f_{\rm host,2500\,\AA}^{\rm PSF}$"),
+        )
+    panels = tuple(panels)
+    if not panels:
+        return None
     if not {"z", *(name for name, _ in panels)}.issubset(frame.columns):
         return None
+    custom_axes = panel_axes is not None
+    if custom_axes:
+        panel_axes = tuple(dict(spec or {}) for spec in panel_axes)
+        if len(panel_axes) != len(panels):
+            raise ValueError("panel_axes must have one entry per panel.")
+        for spec in panel_axes:
+            if spec.get("scale", "log") not in ("log", "linear"):
+                raise ValueError("panel_axes scale must be 'log' or 'linear'.")
     z = pd.to_numeric(frame["z"], errors="coerce").to_numpy(dtype=float)
     finite_z = z[np.isfinite(z)]
     if finite_z.size == 0:
@@ -12759,29 +12909,68 @@ def plot_spectral_fractions_cut_sample(
         xlim = (max(0.0, z_min - pad), z_max + pad)
 
     y_min, y_max = 2e-6, 5e1
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4), sharex=True, sharey=True)
+    n_cols = min(int(max_columns), len(panels))
+    n_rows = -(-len(panels) // n_cols)
+    fig, axes = plt.subplots(
+        n_rows, n_cols, figsize=figsize or (4 * n_cols, 4 * n_rows),
+        sharex=True, sharey=not custom_axes, squeeze=False,
+    )
+    axes = axes.ravel()
+    for ax in axes[len(panels):]:
+        ax.set_visible(False)
     for index, (ax, (column, label)) in enumerate(zip(axes, panels)):
         values = pd.to_numeric(frame[column], errors="coerce").to_numpy(dtype=float)
         finite = np.isfinite(z) & np.isfinite(values)
+        if custom_axes:
+            spec = panel_axes[index]
+            log_y = spec.get("scale", "log") == "log"
+            forward, inverse = (
+                (np.log10, lambda u: 10 ** u) if log_y else (np.asarray, np.asarray)
+            )
+            usable = finite & (values > 0) if log_y else finite
+            if spec.get("ylim") is not None:
+                y_min, y_max = (float(limit) for limit in spec["ylim"])
+            else:
+                y_min, y_max = _robust_panel_ylim(forward(values[usable]), inverse)
+            ylabel = spec.get("ylabel", "")
+            if spec.get("box_aspect") is not None:
+                ax.set_box_aspect(spec["box_aspect"])
+            # Arrow positions sit 4% inside each edge, in the plotted coordinate.
+            span = forward(y_max) - forward(y_min)
+            below_y = inverse(forward(y_min) + 0.04 * span)
+            above_y = inverse(forward(y_max) - 0.04 * span)
+        else:
+            log_y, forward, inverse = True, np.log10, (lambda u: 10 ** u)
+            ylabel = "Component fraction" if index % n_cols == 0 else ""
+            below_y = y_min * 3
         visible = finite & (values >= y_min)
         below = finite & (values < y_min)
+        if custom_axes:
+            visible &= values <= y_max
+            above = finite & (values > y_max)
         ax.plot(
             z[visible], values[visible], linestyle="None", marker="o",
             markersize=2.5, alpha=0.28, color="tab:red", rasterized=True,
         )
         if below.any():
             ax.plot(
-                z[below], np.full(np.count_nonzero(below), y_min * 3),
+                z[below], np.full(np.count_nonzero(below), below_y),
                 linestyle="None", marker=r"$\downarrow$", markersize=5,
+                alpha=0.45, color="tab:red", rasterized=True, zorder=3,
+            )
+        if custom_axes and above.any():
+            ax.plot(
+                z[above], np.full(np.count_nonzero(above), above_y),
+                linestyle="None", marker=r"$\uparrow$", markersize=5,
                 alpha=0.45, color="tab:red", rasterized=True, zorder=3,
             )
         ax.set_xlim(*xlim)
         inside = finite & (values >= y_min) & (values <= y_max)
         if np.count_nonzero(inside) >= 20:
             x_edges = np.linspace(*xlim, 91)
-            log_edges = np.linspace(np.log10(y_min), np.log10(y_max), 91)
+            log_edges = np.linspace(forward(y_min), forward(y_max), 91)
             histogram, _, _ = np.histogram2d(
-                z[inside], np.log10(values[inside]), bins=(x_edges, log_edges)
+                z[inside], forward(values[inside]), bins=(x_edges, log_edges)
             )
             density = gaussian_filter(histogram, sigma=2.5)
             ranked = np.sort(density.ravel())[::-1]
@@ -12793,13 +12982,15 @@ def plot_spectral_fractions_cut_sample(
             if 0 < outer < inner:
                 ax.contour(
                     0.5 * (x_edges[:-1] + x_edges[1:]),
-                    10 ** (0.5 * (log_edges[:-1] + log_edges[1:])),
+                    inverse(0.5 * (log_edges[:-1] + log_edges[1:])),
                     density.T, levels=[outer, inner], colors="black",
                     linestyles=["--", "-"], linewidths=1.7, zorder=4,
                 )
-        ax.set_xlabel(r"$z$")
-        ax.set_ylabel("Component fraction" if index == 0 else "")
-        ax.set_yscale("log")
+        if index + n_cols >= len(panels):
+            ax.set_xlabel(r"$z$")
+            ax.xaxis.set_tick_params(labelbottom=True)
+        ax.set_ylabel(ylabel)
+        ax.set_yscale("log" if log_y else "linear")
         ax.set_ylim(y_min, y_max)
         point_handle = Line2D(
             [], [], marker="o", linestyle="None", markersize=5,
@@ -12807,7 +12998,8 @@ def plot_spectral_fractions_cut_sample(
             alpha=1, label=label,
         )
         ax.legend(
-            handles=[point_handle], loc="upper right", fontsize=12,
+            handles=[point_handle], loc="upper right",
+            fontsize=panel_axes[index].get("legend_fontsize", 12) if custom_axes else 12,
             frameon=True, facecolor="white", framealpha=0.75,
             edgecolor="none",
         )

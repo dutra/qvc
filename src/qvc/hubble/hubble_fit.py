@@ -142,6 +142,7 @@ from qvc.hubble.hubble_plotting import (
     plot_residuals_vs_alphaOX,
     plot_sigma_uv_mpred_correction,
     plot_spectral_fractions_cut_sample,
+    plot_spectral_component_amplitudes,
 )
 from qvc.hubble.tex_utils import make_agn_csv_table, make_agn_latex_table
 from qvc.hubble.hubble_model import (
@@ -169,8 +170,16 @@ from qvc.hubble.hubble_bright_subsample import (
     BRIGHT_SUBSAMPLE_JSON_ATTR,
     BrightSubsampleCut,
     BrightSubsamplePlotData,
+    COMPLETENESS_MAP_GROUP_MODES,
+    DEFAULT_COMPLETENESS_MAP_GROUPS,
+    GroupedBrightSubsampleCut,
+    SPECTROGRAPH_GROUP_RULE,
     apply_bright_subsample_cut,
+    assign_completeness_groups,
+    build_grouped_completeness_params,
+    completeness_group_prerequisite_problem,
     derive_bright_subsample_cut,
+    normalize_completeness_map_groups,
     summarize_bright_subsample_cut,
     wrap_completeness_params,
 )
@@ -180,6 +189,7 @@ from qvc.hubble.hubble_completeness_refactored import (
     DEFAULT_COMPLETENESS_SMOOTH_SIGMA_MAG,
     DEFAULT_COMPLETENESS_SMOOTH_SIGMA_Z,
     COMPLETENESS_FHOST_COL,
+    COMPLETENESS_GROUP_COL,
     COMPLETENESS_MAG_COL,
     COMPLETENESS_MAG_ERR_COL,
     VALID_COMPLETENESS_MAGNITUDES,
@@ -319,6 +329,7 @@ def _compute_debiased_agn_table_mu(
     only_agn=False,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_redshift_mean_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
     use_redshift_log_f_term=False,
@@ -338,6 +349,7 @@ def _compute_debiased_agn_table_mu(
         only_agn=only_agn,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -348,6 +360,7 @@ def _compute_debiased_agn_table_mu(
         df_agn,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         pivot_context=agn_pivot_context,
@@ -360,6 +373,7 @@ def _compute_debiased_agn_table_mu(
             sample_params,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_redshift_mean_term=option_flags["use_redshift_mean_term"],
             use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         )
@@ -369,6 +383,7 @@ def _compute_debiased_agn_table_mu(
             agn_pivot_arr,
             use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
             use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+            use_redshift_mean_term=option_flags["use_redshift_mean_term"],
             use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
         )
@@ -389,6 +404,7 @@ def _compute_debiased_agn_table_mu(
         median_params,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
     )
@@ -399,6 +415,7 @@ def _compute_debiased_agn_table_mu(
         agn_pivot_arr,
         use_alpha_lambda_term=option_flags["use_alpha_lambda_term"],
         use_eta_sigma_term=option_flags["use_eta_sigma_term"],
+        use_redshift_mean_term=option_flags["use_redshift_mean_term"],
         use_f_agn_psf_2500_sigmoid_term=option_flags["use_f_agn_psf_2500_sigmoid_term"],
         use_f_agn_psf_2500_flux_fraction_term=option_flags["use_f_agn_psf_2500_flux_fraction_term"],
     )
@@ -415,7 +432,7 @@ def _compute_debiased_agn_table_mu(
     mu_err = np.sqrt(
         m_err**2
         + predicted_M2500_err**2
-        + sigma_mu_from_z_err(z, z_err, cosmo)**2
+        + sigma_mu_from_z_err(z, z_err, cosmo, median_params.get("gamma_mean_z", 0.0) if use_redshift_mean_term else 0.0)**2
         + sigma_lens_from_dc(z, cosmo)**2
         + np.exp(log_f_eff) ** 2
     )
@@ -428,6 +445,7 @@ def _agn_likelihood_param_labels(
     *,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_redshift_mean_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
     use_redshift_log_f_term=False,
@@ -452,6 +470,7 @@ def _agn_likelihood_param_labels(
     req_params, _, _ = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
     )
@@ -472,6 +491,7 @@ def compute_agn_likelihood_space_reduced_chi2(
     agn_pivot_context,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_redshift_mean_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
     use_redshift_log_f_term=False,
@@ -482,6 +502,7 @@ def compute_agn_likelihood_space_reduced_chi2(
         cosmo_model,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -506,6 +527,7 @@ def compute_agn_likelihood_space_reduced_chi2(
         median_params,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
     )
@@ -513,6 +535,7 @@ def compute_agn_likelihood_space_reduced_chi2(
         df_agn_fit_selection,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         pivot_context=agn_pivot_context,
@@ -523,6 +546,7 @@ def compute_agn_likelihood_space_reduced_chi2(
         agn_pivot_arr,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
     )
@@ -534,6 +558,7 @@ def compute_agn_likelihood_space_reduced_chi2(
         check_negative=True,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
     )
@@ -554,7 +579,7 @@ def compute_agn_likelihood_space_reduced_chi2(
     mu_err = np.sqrt(
         m_err**2
         + M_pred_err**2
-        + sigma_mu_from_z_err(z, z_err, cosmo)**2
+        + sigma_mu_from_z_err(z, z_err, cosmo, median_params.get("gamma_mean_z", 0.0) if use_redshift_mean_term else 0.0)**2
         + sigma_lens_from_dc(z, cosmo)**2
         + np.exp(log_f_eff)**2
     )
@@ -732,6 +757,7 @@ def make_run_tag(
     fixed_h0=None,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_redshift_mean_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
     use_redshift_log_f_term=False,
@@ -773,6 +799,7 @@ def make_run_tag(
     )
     alpha_tag = "_alphaLam" if use_alpha_lambda_term else ""
     eta_sigma_tag = "_etaSigma" if use_eta_sigma_term else ""
+    mean_z_tag = "_meanz" if use_redshift_mean_term else ""
     fagn_sigmoid_tag = (
         "_fagnPsf2500Sigmoid" if use_f_agn_psf_2500_sigmoid_term else ""
     )
@@ -805,7 +832,7 @@ def make_run_tag(
     return (
         f"{cosmo_model}_{_fit_mode_label(only_sna, only_agn)}_{speed}_{n_tag}_{z_tag}"
         f"{completeness_tag}{completeness_support_tag}{attenuation_tag}{light_curve_uncertainty_tag}"
-        f"{ceph_tag}{planck_h0_tag}{fixed_h0_tag}{planck_om_tag}{prior_profile_tag}{alpha_tag}{eta_sigma_tag}"
+        f"{ceph_tag}{planck_h0_tag}{fixed_h0_tag}{planck_om_tag}{prior_profile_tag}{alpha_tag}{eta_sigma_tag}{mean_z_tag}"
         f"{fagn_sigmoid_tag}{fagn_flux_fraction_tag}{logf_tag}{pivot_tag}"
         + ("" if bright_subsample_cut is None or only_sna else bright_subsample_cut.run_tag())
         + (completeness_map_variant_tag() if completeness and not only_sna else "")
@@ -1037,6 +1064,7 @@ def _load_agn_pivot_context_from_checkpoint(
     checkpoint_file,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_redshift_mean_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
 ):
@@ -1088,6 +1116,7 @@ def _load_agn_pivot_context_from_checkpoint(
         context.as_array(
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_mean_term=use_redshift_mean_term,
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         )
@@ -1149,6 +1178,7 @@ def _validate_agn_pivot_context_for_reference(
     z_range,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_redshift_mean_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
     require_reference_ids=True,
@@ -1167,6 +1197,7 @@ def _validate_agn_pivot_context_for_reference(
     agn_pivot_context.as_array(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
     )
@@ -1193,6 +1224,7 @@ def validate_resume_checkpoint(
     expected_z_range_semantics=None,
     expected_use_f_agn_psf_2500_sigmoid_term=False,
     expected_use_f_agn_psf_2500_flux_fraction_term=False,
+    expected_use_redshift_mean_term=False,
     expected_prior_profile=DEFAULT_PRIOR_PROFILE,
     expected_prior_bounds_json=None,
     expected_early_de_guard=False,
@@ -1309,6 +1341,9 @@ def validate_resume_checkpoint(
             f"Resume checkpoint '{checkpoint_file}' uses an incompatible "
             "f_AGN_psf_2500 sigmoid model option."
         )
+    stored_mean_z = bool(np.asarray(results.get("use_redshift_mean_term", False)).reshape(()).item())
+    if stored_mean_z != bool(expected_use_redshift_mean_term):
+        raise RuntimeError(f"Resume checkpoint {checkpoint_file!r} uses an incompatible mean-redshift evolution option.")
     stored_flux_fraction = bool(
         np.asarray(
             results.get("use_f_agn_psf_2500_flux_fraction_term", False)
@@ -1371,6 +1406,7 @@ def _validate_resume_replot_checkpoint_params(
     expected_z_range_semantics=None,
     expected_use_f_agn_psf_2500_sigmoid_term=False,
     expected_use_f_agn_psf_2500_flux_fraction_term=False,
+    expected_use_redshift_mean_term=False,
     expected_prior_profile=DEFAULT_PRIOR_PROFILE,
     expected_prior_bounds_json=None,
     expected_early_de_guard=False,
@@ -1469,6 +1505,9 @@ def _validate_resume_replot_checkpoint_params(
             f"Resume-replot checkpoint '{checkpoint_file}' uses an "
             "incompatible f_AGN_psf_2500 sigmoid model option."
         )
+    stored_mean_z = bool(np.asarray(results.get("use_redshift_mean_term", False)).reshape(()).item())
+    if stored_mean_z != bool(expected_use_redshift_mean_term):
+        raise RuntimeError(f"Resume checkpoint {checkpoint_file!r} uses an incompatible mean-redshift evolution option.")
     stored_flux_fraction = bool(
         np.asarray(
             results.get("use_f_agn_psf_2500_flux_fraction_term", False)
@@ -1496,6 +1535,7 @@ def _remap_resume_replot_checkpoint(
     expected_z_range_semantics=None,
     expected_use_f_agn_psf_2500_sigmoid_term=False,
     expected_use_f_agn_psf_2500_flux_fraction_term=False,
+    expected_use_redshift_mean_term=False,
     expected_prior_profile=DEFAULT_PRIOR_PROFILE,
     expected_prior_bounds_json=None,
     expected_early_de_guard=False,
@@ -1520,6 +1560,7 @@ def _remap_resume_replot_checkpoint(
         expected_use_f_agn_psf_2500_flux_fraction_term=(
             expected_use_f_agn_psf_2500_flux_fraction_term
         ),
+        expected_use_redshift_mean_term=expected_use_redshift_mean_term,
         expected_prior_profile=expected_prior_profile,
         expected_prior_bounds_json=expected_prior_bounds_json,
         expected_early_de_guard=expected_early_de_guard,
@@ -2423,6 +2464,7 @@ def _prepare_shared_agn_pivot_context(
     prior_profile=DEFAULT_PRIOR_PROFILE,
     use_alpha_lambda_term,
     use_eta_sigma_term,
+    use_redshift_mean_term,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
     use_redshift_log_f_term,
@@ -2482,6 +2524,7 @@ def _prepare_shared_agn_pivot_context(
             checkpoint_file=checkpoint_file,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_mean_term=use_redshift_mean_term,
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         )
@@ -2510,6 +2553,7 @@ def _prepare_shared_agn_pivot_context(
             z_range=z_range,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_mean_term=use_redshift_mean_term,
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             require_reference_ids=not resume_replot_with_cuts,
@@ -2535,6 +2579,7 @@ def _prepare_shared_agn_pivot_context(
         z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         round_pivots=round_pivots,
@@ -2555,9 +2600,30 @@ def _build_completeness_params(
     completeness_z_range=None,
     magnitude_support_mode=None,
     bright_subsample_cut=None,
+    count_scale=None,
 ):
     if not completeness:
         return None
+    if isinstance(bright_subsample_cut, GroupedBrightSubsampleCut):
+        # One map per target-selection group from the same mock; the returned
+        # model dispatches each object to its own group's map and cut.
+        if completeness_mode != "2d":
+            raise NotImplementedError("Per-group completeness maps support only completeness_mode 2d.")
+
+        def build_map(frame, *, count_scale, plot, plot_path):
+            return _build_completeness_params(
+                frame, df_agn_all, completeness=True, completeness_mode="2d",
+                completeness_sim_file=completeness_sim_file, plot_path=plot_path, plot=plot,
+                completeness_z_range=completeness_z_range,
+                magnitude_support_mode=magnitude_support_mode, count_scale=count_scale,
+            )
+
+        grouped, _, _, _ = build_grouped_completeness_params(
+            build_map, df_agn_completeness, cut=bright_subsample_cut,
+            group_mode=bright_subsample_cut.group_mode, groups=bright_subsample_cut.groups,
+            plot_path=plot_path, plot=plot,
+        )
+        return grouped
     if magnitude_support_mode is None:
         magnitude_support_mode = df_agn_completeness.attrs.get(
             "completeness_magnitude_support_mode",
@@ -2636,6 +2702,7 @@ def _build_completeness_params(
         z_range=completeness_z_range,
         magnitude_support_mode=magnitude_support_mode,
         bright_subsample_cut=bright_subsample_cut,
+        count_scale=count_scale,
     )
 
 
@@ -2758,6 +2825,7 @@ def _compute_direct_full_sample_completeness_summaries(
     only_agn=False,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_redshift_mean_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
     use_redshift_log_f_term=False,
@@ -2901,6 +2969,7 @@ def _compute_direct_full_sample_completeness_summaries(
             use_ceph_dist_calibration=not disable_ceph_dist_calibration,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_mean_term=use_redshift_mean_term,
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
@@ -3129,6 +3198,7 @@ def _run_fit_stage(
     prior_profile,
     use_alpha_lambda_term,
     use_eta_sigma_term,
+    use_redshift_mean_term,
     use_f_agn_psf_2500_sigmoid_term,
     use_f_agn_psf_2500_flux_fraction_term,
     use_redshift_log_f_term,
@@ -3189,6 +3259,7 @@ def _run_fit_stage(
         prior_profile=prior_profile,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -3206,6 +3277,7 @@ def _run_fit_stage(
         z_pivot_agn,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -3218,6 +3290,7 @@ def _run_fit_stage(
         max_eval=200,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -3415,6 +3488,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       rng_seed=None,
                       use_alpha_lambda_term=False,
                       use_eta_sigma_term=False,
+                      use_redshift_mean_term=False,
                       use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
                       use_redshift_log_f_term=False,
@@ -3439,8 +3513,10 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         completeness_params_override = None
     else:
         validate_completeness_mode(completeness_mode)
-        if bright_subsample_cut is not None and not isinstance(bright_subsample_cut, BrightSubsampleCut):
-            raise TypeError("bright_subsample_cut must be a BrightSubsampleCut or None.")
+        if bright_subsample_cut is not None and not isinstance(
+            bright_subsample_cut, (BrightSubsampleCut, GroupedBrightSubsampleCut)
+        ):
+            raise TypeError("bright_subsample_cut must be a (Grouped)BrightSubsampleCut or None.")
         completeness_magnitude = normalize_completeness_magnitude(
             df_agn.attrs.get("completeness_magnitude", completeness_magnitude)
         )
@@ -3504,6 +3580,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             z_range=z_range,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_mean_term=use_redshift_mean_term,
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             require_reference_ids=False,
@@ -3528,6 +3605,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         fixed_h0=fixed_h0,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -3553,6 +3631,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         fixed_h0=fixed_h0,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -3701,6 +3780,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     agn_model_req_params, agn_model_req_obs, agn_model_req_errs = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
     )
@@ -3708,6 +3788,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     agn_fields += ('apparent_mag_2500', 'apparent_mag_2500_err', 'z', 'z_err', 'object_id')
     if completeness:
         agn_fields += (COMPLETENESS_MAG_COL, COMPLETENESS_MAG_ERR_COL)
+        if COMPLETENESS_GROUP_COL in df_agn.columns:
+            agn_fields += (COMPLETENESS_GROUP_COL,)
     if selection_attenuation_mode == "joint-posterior":
         agn_fields += (
             JOINT_DEREDDENED_MAG_DRAWS_COL,
@@ -3763,6 +3845,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     checkpoint_file=checkpoint_file,
                     use_alpha_lambda_term=use_alpha_lambda_term,
                     use_eta_sigma_term=use_eta_sigma_term,
+                    use_redshift_mean_term=use_redshift_mean_term,
                     use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                 )
@@ -3794,6 +3877,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     expected_use_f_agn_psf_2500_flux_fraction_term=(
                         use_f_agn_psf_2500_flux_fraction_term
                     ),
+                    expected_use_redshift_mean_term=use_redshift_mean_term,
                     expected_prior_profile=prior_profile,
                     expected_prior_bounds_json=prior_bounds_json,
                     expected_early_de_guard=early_de_guard,
@@ -3828,6 +3912,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     expected_use_f_agn_psf_2500_flux_fraction_term=(
                         use_f_agn_psf_2500_flux_fraction_term
                     ),
+                    expected_use_redshift_mean_term=use_redshift_mean_term,
                     expected_prior_profile=prior_profile,
                     expected_prior_bounds_json=prior_bounds_json,
                     expected_early_de_guard=early_de_guard,
@@ -3902,6 +3987,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 use_ceph_dist_calibration=not disable_ceph_dist_calibration,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_redshift_mean_term=use_redshift_mean_term,
                 use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
@@ -3971,6 +4057,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 speed=speed,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_redshift_mean_term=use_redshift_mean_term,
                 use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
@@ -4094,6 +4181,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             use_f_agn_psf_2500_sigmoid_term=bool(
                 use_f_agn_psf_2500_sigmoid_term
             ),
+            use_redshift_mean_term=bool(use_redshift_mean_term),
             use_f_agn_psf_2500_flux_fraction_term=bool(
                 use_f_agn_psf_2500_flux_fraction_term
             ),
@@ -4124,6 +4212,20 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             checkpoint_payload.update(
                 _agn_pivot_checkpoint_payload(agn_pivot_context)
             )
+        if completeness:
+            # Provenance of the per-target-selection completeness maps.
+            grouped_cut = isinstance(bright_subsample_cut, GroupedBrightSubsampleCut)
+            checkpoint_payload["completeness_map_groups"] = (
+                bright_subsample_cut.group_mode if grouped_cut else "single"
+            )
+            if grouped_cut:
+                checkpoint_payload["completeness_map_group_names"] = np.asarray(
+                    bright_subsample_cut.groups, dtype=str
+                )
+                checkpoint_payload["completeness_map_group_rule"] = bright_subsample_cut.group_rule
+                checkpoint_payload["completeness_group_index_fit_selection"] = (
+                    df_agn[COMPLETENESS_GROUP_COL].to_numpy(dtype=np.int64)
+                )
         save_chains(checkpoint_file, **checkpoint_payload)
 
         # Bin dmi in redshift
@@ -4253,6 +4355,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                prior_profile=DEFAULT_PRIOR_PROFILE,
                use_alpha_lambda_term=False,
                use_eta_sigma_term=False,
+               use_redshift_mean_term=False,
                use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
                use_redshift_log_f_term=False,
@@ -4277,8 +4380,10 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         completeness_z_range = None
     else:
         validate_completeness_mode(completeness_mode)
-        if bright_subsample_cut is not None and not isinstance(bright_subsample_cut, BrightSubsampleCut):
-            raise TypeError("bright_subsample_cut must be a BrightSubsampleCut or None.")
+        if bright_subsample_cut is not None and not isinstance(
+            bright_subsample_cut, (BrightSubsampleCut, GroupedBrightSubsampleCut)
+        ):
+            raise TypeError("bright_subsample_cut must be a (Grouped)BrightSubsampleCut or None.")
         completeness_magnitude = normalize_completeness_magnitude(
             completeness_magnitude
         )
@@ -4508,6 +4613,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             checkpoint_file=pivot_checkpoint_file,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_mean_term=use_redshift_mean_term,
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         )
@@ -4529,6 +4635,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             z_range=z_range,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_mean_term=use_redshift_mean_term,
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             require_reference_ids=not resume_replot_with_cuts,
@@ -4540,6 +4647,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 z_range,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_redshift_mean_term=use_redshift_mean_term,
                 use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             )
@@ -4549,6 +4657,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             z_range=z_range,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_mean_term=use_redshift_mean_term,
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             require_reference_ids=True,
@@ -4570,6 +4679,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     plot_path=plot_path,
                     plot=False,
                     completeness_z_range=completeness_z_range,
+                    bright_subsample_cut=bright_subsample_cut,
                 ),
                 bright_subsample_cut,
             )
@@ -4666,6 +4776,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 prior_profile=prior_profile,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_redshift_mean_term=use_redshift_mean_term,
                 use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
@@ -4706,6 +4817,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 only_agn=only_agn,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_redshift_mean_term=use_redshift_mean_term,
                 use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
@@ -4741,6 +4853,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 z_range=z_range,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_redshift_mean_term=use_redshift_mean_term,
                 use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
@@ -4822,6 +4935,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     z_range=z_range,
                     use_alpha_lambda_term=use_alpha_lambda_term,
                     use_eta_sigma_term=use_eta_sigma_term,
+                    use_redshift_mean_term=use_redshift_mean_term,
                     use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                     use_redshift_log_f_term=use_redshift_log_f_term,
@@ -4877,6 +4991,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                         prior_profile=prior_profile,
                         use_alpha_lambda_term=use_alpha_lambda_term,
                         use_eta_sigma_term=use_eta_sigma_term,
+                        use_redshift_mean_term=use_redshift_mean_term,
                         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -4905,6 +5020,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     expected_use_f_agn_psf_2500_flux_fraction_term=(
                         use_f_agn_psf_2500_flux_fraction_term
                     ),
+                    expected_use_redshift_mean_term=use_redshift_mean_term,
                     expected_prior_profile=prior_profile,
                     expected_prior_bounds_json=canonical_prior_bounds_json(
                         expected_resume_priors
@@ -5030,6 +5146,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         prior_profile=prior_profile,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5117,6 +5234,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             only_agn=only_agn,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_mean_term=use_redshift_mean_term,
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5166,6 +5284,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             z_range=z_range,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_mean_term=use_redshift_mean_term,
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5188,6 +5307,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
             z_range=z_range,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_mean_term=use_redshift_mean_term,
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
             use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5253,6 +5373,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         only_agn=only_agn,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5280,6 +5401,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5298,6 +5420,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5319,6 +5442,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5341,6 +5465,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5362,6 +5487,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5382,6 +5508,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5402,6 +5529,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5439,6 +5567,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         show=False,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5471,6 +5600,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         agn_pivot_context=agn_pivot_context,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5502,6 +5632,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                     z_range=z_range,
                     use_alpha_lambda_term=use_alpha_lambda_term,
                     use_eta_sigma_term=use_eta_sigma_term,
+                    use_redshift_mean_term=use_redshift_mean_term,
                     use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                     use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5611,6 +5742,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 z_range=z_range,
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_redshift_mean_term=use_redshift_mean_term,
                 use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5714,6 +5846,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         z_range=z_range,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5752,6 +5885,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         plot_path=plot_path,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5770,6 +5904,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         plot_path=plot_path,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -5842,6 +5977,7 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                       only_agn=only_agn,
                       use_alpha_lambda_term=use_alpha_lambda_term,
                       use_eta_sigma_term=use_eta_sigma_term,
+                      use_redshift_mean_term=use_redshift_mean_term,
                       use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                       use_redshift_log_f_term=use_redshift_log_f_term)
@@ -5910,6 +6046,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             only_agn=False,
             use_alpha_lambda_term=False,
             use_eta_sigma_term=False,
+            use_redshift_mean_term=False,
             use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
             use_redshift_log_f_term=False,
@@ -5933,8 +6070,10 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
     if completeness_lf_model not in COMPLETENESS_LF_MODELS:
         raise ValueError(f"Unknown completeness LF model {completeness_lf_model!r}")
     selection_attenuation_mode = normalize_selection_attenuation_mode(selection_attenuation_mode)
-    if bright_subsample_cut is not None and not isinstance(bright_subsample_cut, BrightSubsampleCut):
-        raise TypeError("bright_subsample_cut must be a BrightSubsampleCut or None.")
+    if bright_subsample_cut is not None and not isinstance(
+        bright_subsample_cut, (BrightSubsampleCut, GroupedBrightSubsampleCut)
+    ):
+        raise TypeError("bright_subsample_cut must be a (Grouped)BrightSubsampleCut or None.")
     speed = normalize_speed(speed)
     prior_profile = normalize_prior_profile(prior_profile)
     if only_agn:
@@ -5966,6 +6105,8 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         compare_run_tag += "_alphaLam"
     if use_eta_sigma_term:
         compare_run_tag += "_etaSigma"
+    if use_redshift_mean_term:
+        compare_run_tag += "_meanz"
     if use_redshift_log_f_term:
         compare_run_tag += "_logfz"
     if normalize_light_curve_uncertainty_mode(
@@ -6013,6 +6154,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
         prior_profile=prior_profile,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -6059,6 +6201,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                        prior_profile=prior_profile,
                        use_alpha_lambda_term=use_alpha_lambda_term,
                        use_eta_sigma_term=use_eta_sigma_term,
+                       use_redshift_mean_term=use_redshift_mean_term,
                        use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                        use_redshift_log_f_term=use_redshift_log_f_term,
@@ -6120,6 +6263,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                            prior_profile=prior_profile,
                            use_alpha_lambda_term=use_alpha_lambda_term,
                            use_eta_sigma_term=use_eta_sigma_term,
+                           use_redshift_mean_term=use_redshift_mean_term,
                            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                            use_redshift_log_f_term=use_redshift_log_f_term,
@@ -6137,6 +6281,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                               gauss_sigma=1.5, kde_bw_scale=1.5, include_alpha_beta=False,
                               use_alpha_lambda_term=use_alpha_lambda_term,
                               use_eta_sigma_term=use_eta_sigma_term,
+                              use_redshift_mean_term=use_redshift_mean_term,
                               use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                               use_redshift_log_f_term=use_redshift_log_f_term)
@@ -6145,6 +6290,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                               gauss_sigma=1.5, kde_bw_scale=1.5, include_alpha_beta=True,
                               use_alpha_lambda_term=use_alpha_lambda_term,
                               use_eta_sigma_term=use_eta_sigma_term,
+                              use_redshift_mean_term=use_redshift_mean_term,
                               use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                               use_redshift_log_f_term=use_redshift_log_f_term)
@@ -6167,6 +6313,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                 value_fmt="{:.2f}",
                 use_alpha_lambda_term=use_alpha_lambda_term,
                 use_eta_sigma_term=use_eta_sigma_term,
+                use_redshift_mean_term=use_redshift_mean_term,
                 use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
                 use_redshift_log_f_term=use_redshift_log_f_term,
@@ -6181,6 +6328,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
             value_fmt="{:.2f}",
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_mean_term=use_redshift_mean_term,
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             use_redshift_log_f_term=use_redshift_log_f_term,
@@ -6231,6 +6379,7 @@ def run_all(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov,
                                 agn_pivot_context=agn_pivot_context,
                                 agn_xray_counts=agn_xray_counts,
                                 bright_subsample_cut=bright_subsample_cut,
+                                use_redshift_mean_term=use_redshift_mean_term,
                                 use_f_agn_psf_2500_sigmoid_term=(
                                     use_f_agn_psf_2500_sigmoid_term
                                 ),
@@ -6302,6 +6451,8 @@ def configure_completeness_run_args(args):
         args.disable_completeness = True
         args.plot_completeness = False
         args.bright_subsample_completeness_min = None
+        args.completeness_map_groups = "single"
+        args.completeness_map_groups_explicit = False
         args.completeness_mode = "2d"
         args.completeness_magnitude = "dereddened"
         args.completeness_lf_model = "shen"
@@ -6327,6 +6478,36 @@ def configure_completeness_run_args(args):
         if args.run not in {"single", "full"} or args.use_jax:
             raise NotImplementedError(
                 "--bright-subsample-completeness-min supports only the NumPy/Dynesty --run single or full pipelines."
+            )
+    requested = getattr(args, "completeness_map_groups", None)
+    args.completeness_map_groups_explicit = requested is not None
+    missing = []
+    if args.disable_completeness:
+        missing.append("completeness is disabled")
+    if args.bright_subsample_completeness_min is None:
+        missing.append("no --bright-subsample-completeness-min")
+    if args.completeness_mode != "2d":
+        missing.append(f"--completeness_mode {args.completeness_mode} (needs 2d)")
+    if getattr(args, "completeness_magnitude_support_mode", "hard-cut") == "tails":
+        missing.append("--completeness-magnitude-support-mode tails (needs hard-cut)")
+    if args.use_jax or args.run not in {"single", "full"}:
+        missing.append("only the NumPy/Dynesty --run single or full pipelines are supported")
+    if requested is None:
+        args.completeness_map_groups = DEFAULT_COMPLETENESS_MAP_GROUPS
+        if missing and args.completeness_map_groups != "single":
+            print(
+                "[NOTICE] Completeness map groups: falling back from the default "
+                f"'{args.completeness_map_groups}' to 'single' because "
+                + "; ".join(missing) + "."
+            )
+            args.completeness_map_groups = "single"
+    else:
+        args.completeness_map_groups = normalize_completeness_map_groups(requested)
+        if args.completeness_map_groups != "single" and missing:
+            raise NotImplementedError(
+                f"--completeness-map-groups {args.completeness_map_groups} requires the 2D "
+                "hard-cut completeness map with --bright-subsample-completeness-min in the "
+                "NumPy/Dynesty single/full pipeline; " + "; ".join(missing) + "."
             )
     if args.selection_attenuation_mode == "joint-posterior" and (
         args.run not in {"single", "full"} or args.use_jax
@@ -6395,6 +6576,8 @@ def render_hubble_mode_table(args):
             regressors.append("alpha_lambda")
         if args.fit_eta_sigma_term:
             regressors.append("eta_sigma")
+        if getattr(args, "fit_redshift_mean_term", False):
+            regressors.append("gamma_mean_z * log10((1+z)/(1+z_pivot))")
         if args.fit_f_agn_psf_2500_sigmoid_term:
             regressors.append("f_AGN_psf_2500 sigmoid")
         if args.fit_f_agn_psf_2500_flux_fraction_term:
@@ -6512,7 +6695,8 @@ if __name__ == "__main__":
         default=DEFAULT_PRIOR_PROFILE,
         help=(
             "Named top-hat prior profile. centered_lcdm uses "
-            "M0_agn=[-26,-18], w0=[-3,1], and wa=[-30,30] where applicable."
+            "M0_agn=[-26,-18], w0=[-3,1], and wa=[-30,30] where applicable. "
+            "centered_lcdm_om01 changes only the default Om0 prior to [0,1]."
         ),
     )
     parser.add_argument(
@@ -6794,6 +6978,11 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--fit_redshift_mean_term", "--fit-redshift-mean-term",
+        action="store_true", default=False,
+        help="Fit mean absolute-magnitude evolution gamma_mean_z * log10((1+z)/(1+z_pivot)); gamma prior [-20,20], pivot is the fitted-sample median z.",
+    )
+    parser.add_argument(
         "--fit_redshift_log_f_term",
         action="store_true",
         default=False,
@@ -6853,6 +7042,22 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--completeness-map-groups",
+        "--completeness_map_groups",
+        choices=COMPLETENESS_MAP_GROUP_MODES,
+        default=None,
+        help=(
+            "Completeness maps per target selection. 'spectrograph' (default): one "
+            f"map per spectrum source ({SPECTROGRAPH_GROUP_RULE}), each from the same "
+            "mock and that group's parent subsample, with its own bright-subsample "
+            "cut; each object uses its own group's map and cut. Needs "
+            "--bright-subsample-completeness-min, the 2D hard-cut map and spectrum "
+            "mjd; when not given explicitly and these are missing, the fit falls "
+            "back to 'single' with a notice. 'single': one map from the whole "
+            "parent sample."
+        ),
+    )
+    parser.add_argument(
         "--bright-subsample-margin",
         "--bright_subsample_margin",
         type=float,
@@ -6905,6 +7110,10 @@ if __name__ == "__main__":
             args.resume_if_exists,
             args.cosmo_models,
         )
+    if args.fit_redshift_mean_term and args.use_jax:
+        raise ValueError("Mean redshift evolution is supported by Dynesty, not the experimental JAX backend.")
+    if args.fit_redshift_mean_term and args.only_sna:
+        raise ValueError("--fit_redshift_mean_term requires an AGN likelihood.")
     if args.only_sna and args.only_agn:
         raise ValueError("--only_sna and --only_agn cannot be used together.")
     if (
@@ -6995,6 +7204,43 @@ if __name__ == "__main__":
         df_agn_completeness_parent = df_agn.copy()
     else:
         df_agn, df_agn_all, df_agn_completeness_parent = loaded_agn
+    completeness_map_groups = getattr(args, "completeness_map_groups", "single")
+    if completeness_map_groups != "single" and not getattr(
+        args, "completeness_map_groups_explicit", True
+    ):
+        problem = next(
+            (
+                completeness_group_prerequisite_problem(frame)
+                for frame in (df_agn, df_agn_completeness_parent)
+                if completeness_group_prerequisite_problem(frame)
+            ),
+            None,
+        )
+        if problem:
+            print(
+                "[NOTICE] Completeness map groups: falling back from the default "
+                f"'{completeness_map_groups}' to 'single' because {problem}."
+            )
+            completeness_map_groups = args.completeness_map_groups = "single"
+    print(f"Completeness map groups in use: {completeness_map_groups}")
+    if completeness_map_groups != "single":
+        df_agn = assign_completeness_groups(df_agn, completeness_map_groups)
+        df_agn_completeness_parent = assign_completeness_groups(
+            df_agn_completeness_parent, completeness_map_groups
+        )
+        # The pre-cut catalog only feeds plots; rows without an mjd get group -1.
+        df_agn_all = assign_completeness_groups(
+            df_agn_all, completeness_map_groups, allow_missing=True
+        )
+        loaded_agn = (df_agn,) + tuple(loaded_agn[1:])
+        print(
+            f"Completeness map groups: {completeness_map_groups} ({SPECTROGRAPH_GROUP_RULE}); "
+            "parent counts "
+            + ", ".join(
+                f"{name}={int((df_agn_completeness_parent[COMPLETENESS_GROUP_COL] == i).sum())}"
+                for i, name in enumerate(("sdss", "boss"))
+            )
+        )
     if args.minimal_plots:
         # This requested run diagnostic is retained even when the optional
         # diagnostic suite is disabled in load_agn_data.
@@ -7009,9 +7255,17 @@ if __name__ == "__main__":
             df_agn_all, plot_path=agn_plot_path,
             filename="spectral_fractions_vs_redshift_precut.pdf", xlim=spectral_xlim,
         )
+        plot_spectral_component_amplitudes(
+            df_agn_all, plot_path=agn_plot_path,
+            filename="spectral_component_amplitudes_vs_redshift_precut.pdf",
+        )
         plot_spectral_fractions_cut_sample(
             df_agn, plot_path=agn_plot_path,
             filename="spectral_fractions_vs_redshift_postcut.pdf", xlim=spectral_xlim,
+        )
+        plot_spectral_component_amplitudes(
+            df_agn, plot_path=agn_plot_path,
+            filename="spectral_component_amplitudes_vs_redshift_postcut.pdf",
         )
     bright_subsample_cut = None
     bright_subsample_plot_data = None
@@ -7038,25 +7292,50 @@ if __name__ == "__main__":
                 completeness_magnitude=args.completeness_magnitude,
                 lf_model=args.completeness_lf_model,
             )
-        bright_completeness_params = _build_completeness_params(
-            prepared_parent,
-            df_agn_all,
-            completeness=True,
-            completeness_mode="2d",
-            completeness_sim_file=args.completeness_sim_file,
-            plot_path=bright_plot_path,
-            plot=False,
-            completeness_z_range=completeness_z_range,
-            magnitude_support_mode=args.completeness_magnitude_support_mode,
-        )
-        bright_subsample_cut = derive_bright_subsample_cut(
-            bright_completeness_params[0],
-            bright_completeness_params[1],
-            bright_completeness_params[2],
-            completeness_min=args.bright_subsample_completeness_min,
-            margin=args.bright_subsample_margin,
-            relative=not args.bright_subsample_absolute,
-        )
+        completeness_map_groups = getattr(args, "completeness_map_groups", "single")
+        if completeness_map_groups == "single":
+            bright_completeness_params = _build_completeness_params(
+                prepared_parent,
+                df_agn_all,
+                completeness=True,
+                completeness_mode="2d",
+                completeness_sim_file=args.completeness_sim_file,
+                plot_path=bright_plot_path,
+                plot=False,
+                completeness_z_range=completeness_z_range,
+                magnitude_support_mode=args.completeness_magnitude_support_mode,
+            )
+            bright_subsample_cut = derive_bright_subsample_cut(
+                bright_completeness_params[0],
+                bright_completeness_params[1],
+                bright_completeness_params[2],
+                completeness_min=args.bright_subsample_completeness_min,
+                margin=args.bright_subsample_margin,
+                relative=not args.bright_subsample_absolute,
+            )
+        else:
+            def _bright_build_map(frame, *, count_scale, plot, plot_path):
+                return _build_completeness_params(
+                    frame, df_agn_all, completeness=True, completeness_mode="2d",
+                    completeness_sim_file=args.completeness_sim_file, plot_path=plot_path,
+                    plot=plot, completeness_z_range=completeness_z_range,
+                    magnitude_support_mode=args.completeness_magnitude_support_mode,
+                    count_scale=count_scale,
+                )
+
+            bright_completeness_params, bright_subsample_cut, _, _ = (
+                build_grouped_completeness_params(
+                    _bright_build_map, prepared_parent,
+                    completeness_min=args.bright_subsample_completeness_min,
+                    margin=args.bright_subsample_margin,
+                    relative=not args.bright_subsample_absolute,
+                    group_mode=completeness_map_groups,
+                    plot_path=bright_plot_path, plot=False,
+                )
+            )
+            for name, cut in zip(bright_subsample_cut.groups, bright_subsample_cut.cuts):
+                print(f"Bright-subsample cut for completeness group {name}:")
+                print(cut.summary_frame().round(3).to_string(index=False))
         n_before = len(df_agn)
         df_agn, keep_mask = apply_bright_subsample_cut(
             df_agn, bright_subsample_cut, completeness_magnitude=args.completeness_magnitude
@@ -7077,7 +7356,9 @@ if __name__ == "__main__":
         print(render_ascii_table(
             [
                 {
-                    "z_bin": str(row.z_bin),
+                    "z_bin": (
+                        f"{row.completeness_group} " if hasattr(row, "completeness_group") else ""
+                    ) + str(row.z_bin),
                     "n_before": int(row.n_before),
                     "n_kept": int(row.n_kept),
                     "cut_mag": f"{row.bright_cut_magnitude_at_center:.2f}",
@@ -7132,6 +7413,7 @@ if __name__ == "__main__":
             prior_profile=args.prior_profile,
             use_alpha_lambda_term=args.fit_alpha_lambda_term,
             use_eta_sigma_term=args.fit_eta_sigma_term,
+            use_redshift_mean_term=args.fit_redshift_mean_term,
             use_f_agn_psf_2500_sigmoid_term=args.fit_f_agn_psf_2500_sigmoid_term,
             use_f_agn_psf_2500_flux_fraction_term=args.fit_f_agn_psf_2500_flux_fraction_term,
             use_redshift_log_f_term=args.fit_redshift_log_f_term,
@@ -7170,6 +7452,7 @@ if __name__ == "__main__":
                 prior_profile=args.prior_profile,
                 use_alpha_lambda_term=args.fit_alpha_lambda_term,
                 use_eta_sigma_term=args.fit_eta_sigma_term,
+                use_redshift_mean_term=args.fit_redshift_mean_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
                 early_de_guard=args.early_de_guard,
                 agn_pivot_context=agn_pivot_context,
@@ -7196,6 +7479,7 @@ if __name__ == "__main__":
             prior_profile=args.prior_profile,
             use_alpha_lambda_term=args.fit_alpha_lambda_term,
             use_eta_sigma_term=args.fit_eta_sigma_term,
+            use_redshift_mean_term=args.fit_redshift_mean_term,
             use_f_agn_psf_2500_sigmoid_term=args.fit_f_agn_psf_2500_sigmoid_term,
             use_f_agn_psf_2500_flux_fraction_term=args.fit_f_agn_psf_2500_flux_fraction_term,
             use_redshift_log_f_term=args.fit_redshift_log_f_term,
@@ -7238,6 +7522,7 @@ if __name__ == "__main__":
                 prior_profile=args.prior_profile,
                 use_alpha_lambda_term=args.fit_alpha_lambda_term,
                 use_eta_sigma_term=args.fit_eta_sigma_term,
+                use_redshift_mean_term=args.fit_redshift_mean_term,
                 use_f_agn_psf_2500_sigmoid_term=args.fit_f_agn_psf_2500_sigmoid_term,
             use_f_agn_psf_2500_flux_fraction_term=args.fit_f_agn_psf_2500_flux_fraction_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,
@@ -7342,6 +7627,7 @@ if __name__ == "__main__":
                 only_agn=args.only_agn,
                 use_alpha_lambda_term=args.fit_alpha_lambda_term,
                 use_eta_sigma_term=args.fit_eta_sigma_term,
+                use_redshift_mean_term=args.fit_redshift_mean_term,
                 use_f_agn_psf_2500_sigmoid_term=args.fit_f_agn_psf_2500_sigmoid_term,
             use_f_agn_psf_2500_flux_fraction_term=args.fit_f_agn_psf_2500_flux_fraction_term,
                 use_redshift_log_f_term=args.fit_redshift_log_f_term,

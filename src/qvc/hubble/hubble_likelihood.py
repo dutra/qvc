@@ -17,6 +17,7 @@ from qvc.hubble.hubble_model import (
 )
 from qvc.hubble.hubble_completeness_refactored import (
     COMPLETENESS_FHOST_COL,
+    COMPLETENESS_GROUP_COL,
     COMPLETENESS_MAG_COL,
     COMPLETENESS_MAG_ERR_COL,
 )
@@ -127,6 +128,7 @@ def _agn_magnitude_posterior_draws(
     *,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_redshift_mean_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
 ):
@@ -134,6 +136,7 @@ def _agn_magnitude_posterior_draws(
     req_params, req_obs, _ = get_agn_model_spec(
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=(
             use_f_agn_psf_2500_flux_fraction_term
@@ -320,6 +323,109 @@ def _cached_magnitude_integration_grid(completeness_model, m_grid, magnitude_sup
     return cache[key]
 
 
+def completeness_group_index_for_data(agn_data, completeness_model, mask=None):
+    """Per-object completeness-group index, required by grouped models only."""
+    if not getattr(completeness_model, "requires_group_index", False):
+        return None
+    try:
+        values = agn_data[COMPLETENESS_GROUP_COL]
+    except KeyError as exc:
+        raise KeyError(
+            "The completeness model has one map per target-selection group; "
+            f"the AGN data must carry {COMPLETENESS_GROUP_COL!r}."
+        ) from exc
+    values = np.asarray(values)
+    return values if mask is None else values[mask]
+
+
+def _selection_integration_nodes(completeness_model, integration_grid, z, group_index=None):
+    """Integration nodes truncated exactly at each object's hard faint cut.
+
+    Models that carry a redshift-dependent hard cut (the bright-subsample cut)
+    expose ``selection_cut_magnitude(z, group_index=...)``.  The integrand is
+    then ``p_map(m, z) * 1[m <= cut]``.  Evaluating the trapezoid on the shared
+    map grid would ramp the integrand linearly from the last node inside the
+    cut to the first node outside it, an error of up to half a map bin that
+    depends on where the cut falls between nodes (hence on redshift).  Here
+    every node fainter than the cut is moved onto the cut itself, so the last
+    interval ends exactly at the cut (the map is linear between its centres,
+    so that interval is integrated as accurately as any other) and the
+    remaining intervals have zero width.  The number of nodes, and hence the
+    per-call cost, is unchanged.  Returns an array of shape (1, G) when the
+    model has no hard cut and (N, G) otherwise; nodes are cached per
+    (grid, redshift array, group array).
+    """
+    grid = np.asarray(integration_grid, dtype=float)
+    cut_function = getattr(completeness_model, "selection_cut_magnitude", None)
+    cache = getattr(completeness_model, "_likelihood_node_cache", None)
+    if cache is None:
+        cache = {}
+        setattr(completeness_model, "_likelihood_node_cache", cache)
+    if cut_function is None:
+        # Shared nodes; cached so the p_det cache sees a stable array.
+        key = (_array_cache_token(grid),)
+        if key not in cache:
+            cache[key] = grid[None, :]
+        return cache[key]
+    key = (_array_cache_token(grid), _array_cache_token(z), _array_cache_token(group_index))
+    if key not in cache:
+        cut = np.asarray(
+            cut_function(np.asarray(z, dtype=float), group_index=group_index), dtype=float
+        ).reshape(-1)
+        # Nudge the terminal node just inside the cut so the cut mask (m <= cut)
+        # keeps it regardless of rounding.
+        inside = np.nextafter(cut, -np.inf)
+        nodes = np.minimum(grid[None, :], inside[:, None])
+        cache[key] = np.maximum(nodes, grid[0])
+    return cache[key]
+
+
+def _piecewise_linear_gaussian_moments(nodes, p_det, mean, sigma):
+    """Exact Gaussian moments of a piecewise-linear selection function.
+
+    Returns ``(Z, M1, M2)`` with ``Mk = int N(m; mean, sigma) p(m) m^k dm``
+    integrated along the last axis, where ``p`` is linear between consecutive
+    ``nodes`` (as is the bilinearly interpolated completeness map between its
+    centres) and zero outside ``[nodes[0], nodes[-1]]``.  Each interval is
+    integrated in closed form, so the result does not depend on the node
+    spacing; zero-width intervals (nodes collapsed onto a hard cut) contribute
+    nothing.  ``nodes``/``p_det`` broadcast against ``mean[..., None]``.
+    """
+    mean = np.asarray(mean, dtype=float)
+    sigma = np.asarray(sigma, dtype=float)
+    t = (nodes - mean) / sigma
+    tail = ndtr(-np.abs(t))  # one CDF evaluation; exact in both tails
+    cdf = np.where(t < 0.0, tail, 1.0 - tail)
+    upper = np.where(t > 0.0, tail, 1.0 - tail)
+    pdf = np.exp(-0.5 * t * t) * _INV_SQRT_2PI
+    a, b = t[..., :-1], t[..., 1:]
+    pdf_a, pdf_b = pdf[..., :-1], pdf[..., 1:]
+    # J_k = int_a^b t^k phi(t) dt.  J_0 uses the upper-tail CDF where both
+    # ends are positive, so far-tail intervals keep full relative precision.
+    j0 = np.where(
+        a > 0.0, upper[..., :-1] - upper[..., 1:], cdf[..., 1:] - cdf[..., :-1]
+    )
+    j1 = pdf_a - pdf_b
+    a_pdf_a, b_pdf_b = a * pdf_a, b * pdf_b
+    j2 = j0 + a_pdf_a - b_pdf_b
+    j3 = 2.0 * j1 + a * a_pdf_a - b * b_pdf_b
+    p_det = np.broadcast_to(p_det, t.shape)
+    width = b - a
+    positive = width > 0.0
+    slope = np.where(positive, (p_det[..., 1:] - p_det[..., :-1]) / np.where(positive, width, 1.0), 0.0)
+    offset = p_det[..., :-1] - slope * a
+    t0 = np.sum(offset * j0 + slope * j1, axis=-1)
+    t1 = np.sum(offset * j1 + slope * j2, axis=-1)
+    t2 = np.sum(offset * j2 + slope * j3, axis=-1)
+    mean = mean[..., 0]
+    sigma = np.broadcast_to(sigma[..., 0], mean.shape)
+    return (
+        t0,
+        mean * t0 + sigma * t1,
+        mean * mean * t0 + 2.0 * mean * sigma * t1 + sigma * sigma * t2,
+    )
+
+
 def _normal_interval_moments(mean, sigma, lower, upper, probability=1.0):
     """Gaussian-weighted raw moments on one finite constant-probability interval."""
     mean, sigma, probability = np.broadcast_arrays(
@@ -371,6 +477,7 @@ def _selection_tail_moments(
     *,
     f_host_2500_psf=None,
     alpha_lambda=None,
+    group_index=None,
 ):
     """Return separate finite bright/faint contributions for a selection model."""
     mean = np.asarray(mean, dtype=float)
@@ -388,6 +495,7 @@ def _selection_tail_moments(
         z,
         f_host_2500_psf=f_host_2500_psf,
         alpha_lambda=alpha_lambda,
+        group_index=group_index,
     )
     edge_shape = (edge_probability.shape[0],) + (1,) * max(mean.ndim - 1, 0)
     bright_probability = edge_probability[:, 0].reshape(edge_shape)
@@ -474,8 +582,14 @@ def _cached_completeness_pdet(
     *,
     f_host_2500_psf=None,
     alpha_lambda=None,
+    group_index=None,
 ):
-    """Evaluate edge-clamped p(detect), caching across sampler calls."""
+    """Evaluate edge-clamped p(detect), caching across sampler calls.
+
+    ``m_grid`` is either a shared 1D grid or per-object nodes of shape
+    (N, G) or (1, G).  ``group_index`` selects each object's map for grouped
+    completeness models.
+    """
 
     mode = getattr(completeness_model, "mode", "2d")
     key = (
@@ -484,6 +598,7 @@ def _cached_completeness_pdet(
         _array_cache_token(z),
         _array_cache_token(f_host_2500_psf),
         _array_cache_token(alpha_lambda),
+        _array_cache_token(group_index),
     )
     cache = getattr(completeness_model, "_likelihood_pdet_cache", None)
     if cache is None:
@@ -493,22 +608,32 @@ def _cached_completeness_pdet(
         return cache[key]
 
     map_m_grid = np.asarray(m_grid, dtype=float)
+    if map_m_grid.ndim == 1:
+        map_m_grid = map_m_grid[None, :]
+    group_kwargs = (
+        {"group_index": group_index}
+        if getattr(completeness_model, "requires_group_index", False)
+        else {}
+    )
 
     if mode == "4d_fhost_alpha":
         if f_host_2500_psf is None or alpha_lambda is None:
             raise ValueError("f_host_2500_psf and alpha_lambda are required for 4D host/color completeness.")
         p_det = completeness_model(
-            map_m_grid[None, :],
+            map_m_grid,
             z[:, None],
             np.asarray(f_host_2500_psf)[:, None],
             np.asarray(alpha_lambda)[:, None],
+            **group_kwargs,
         )
     elif mode == "3d_fhost":
         if f_host_2500_psf is None:
             raise ValueError("f_host_2500_psf is required for 3D host-aware completeness.")
-        p_det = completeness_model(map_m_grid[None, :], z[:, None], np.asarray(f_host_2500_psf)[:, None])
+        p_det = completeness_model(
+            map_m_grid, z[:, None], np.asarray(f_host_2500_psf)[:, None], **group_kwargs
+        )
     else:
-        p_det = completeness_model(map_m_grid[None, :], z[:, None])
+        p_det = completeness_model(map_m_grid, z[:, None], **group_kwargs)
 
     p_det = np.asarray(p_det, dtype=float)
     cache[key] = p_det
@@ -528,6 +653,7 @@ def completeness_loglike(
     tiny=1e-300,
     f_host_2500_psf=None,
     alpha_lambda=None,
+    group_index=None,
 ):
     """
     Compute log-likelihood contribution from magnitude-limited sample selection.
@@ -539,6 +665,8 @@ def completeness_loglike(
     m_grid  : array (N_grid,) magnitude grid (e.g., the map's mag_centers)
     sigma_completeness : float, optional physical scatter in the selection variable.
         This should not be set from the completeness-map smoothing bandwidth.
+    group_index : array (N_obj,), optional per-object map index for grouped
+        completeness models.
     """
     m_grid = np.asarray(m_grid, dtype=float)
     magnitude_support = _validate_magnitude_support(magnitude_support)
@@ -553,25 +681,22 @@ def completeness_loglike(
     # shared pieces
     sig = np.sqrt(mu_err[:, None]**2 + float(sigma_completeness)**2)   # (N,1)
 
+    nodes = _selection_integration_nodes(
+        completeness_model, integration_grid, z, group_index
+    )  # (1,G) or (N,G), exact at each object's hard cut
     p_det = _cached_completeness_pdet(
         completeness_model,
-        integration_grid,
+        nodes,
         z,
         f_host_2500_psf=f_host_2500_psf,
         alpha_lambda=alpha_lambda,
+        group_index=group_index,
     )
 
-    # Model-centered selection factor: Z_i
-    dx = (integration_grid[None, :] - m_model[:, None]) / sig
-    pdf_model = np.exp(-0.5 * dx**2) * (_INV_SQRT_2PI / sig)  # (N,G)
-    wpdf_model = pdf_model * p_det
-
-    Z = np.trapezoid(wpdf_model, integration_grid, axis=1)
-    m_Z = np.trapezoid(
-        wpdf_model * integration_grid[None, :], integration_grid, axis=1
-    )
-    m2_Z = np.trapezoid(
-        wpdf_model * integration_grid[None, :] ** 2, integration_grid, axis=1
+    # Model-centered selection factor Z_i and its first two moments, exact
+    # for the piecewise-linear map (independent of the map's bin size).
+    Z, m_Z, m2_Z = _piecewise_linear_gaussian_moments(
+        nodes, p_det, m_model[:, None], sig
     )
     core = (Z.copy(), m_Z.copy(), m2_Z.copy())
 
@@ -582,6 +707,7 @@ def completeness_loglike(
         z,
         f_host_2500_psf=f_host_2500_psf,
         alpha_lambda=alpha_lambda,
+        group_index=group_index,
     )
     Z_bright, m_Z_bright, m2_Z_bright = bright
     Z_faint, m_Z_faint, m2_Z_faint = faint
@@ -629,6 +755,7 @@ def completeness_loglike_posterior_draws(
     f_host_2500_psf=None,
     alpha_lambda=None,
     draw_chunk_size=8,
+    group_index=None,
 ):
     """Selection normalization marginalized over empirical model draws."""
     del m_obs_err  # Retained for the same calling contract as completeness_loglike.
@@ -662,42 +789,38 @@ def completeness_loglike_posterior_draws(
             "Posterior-draw completeness errors must be finite and positive."
         )
 
+    nodes = _selection_integration_nodes(
+        completeness_model, integration_grid, z, group_index
+    )
     p_det = _cached_completeness_pdet(
         completeness_model,
-        integration_grid,
+        nodes,
         z,
         f_host_2500_psf=f_host_2500_psf,
         alpha_lambda=alpha_lambda,
+        group_index=group_index,
     )
     sigma = np.sqrt(mu_err**2 + float(sigma_completeness) ** 2)
-    mixture_pdf = np.zeros((n_objects, integration_grid.size), dtype=float)
+    Z_raw = np.zeros(n_objects, dtype=float)
+    m_Z = np.zeros(n_objects, dtype=float)
+    m2_Z = np.zeros(n_objects, dtype=float)
     draw_axis = np.arange(n_draws)[None, :]
     chunk_size = max(1, int(draw_chunk_size))
     for start in range(0, n_draws, chunk_size):
         stop = min(start + chunk_size, n_draws)
         valid = draw_axis[:, start:stop] < counts[:, None]
-        dx = (
-            integration_grid[None, None, :]
-            - centers[:, start:stop, None]
-        ) / sigma[:, None, None]
-        component_pdf = np.exp(-0.5 * dx**2) * (
-            _INV_SQRT_2PI / sigma[:, None, None]
+        moments = _piecewise_linear_gaussian_moments(
+            nodes[:, None, :],
+            p_det[:, None, :],
+            centers[:, start:stop, None],
+            sigma[:, None, None],
         )
-        mixture_pdf += np.sum(
-            np.where(valid[:, :, None], component_pdf, 0.0), axis=1
-        )
-    mixture_pdf /= counts[:, None]
-    weighted = mixture_pdf * p_det
-
-    Z_raw = np.trapezoid(weighted, integration_grid, axis=1)
-    m_Z = np.trapezoid(
-        weighted * integration_grid[None, :], integration_grid, axis=1
-    )
-    m2_Z = np.trapezoid(
-        weighted * integration_grid[None, :] ** 2,
-        integration_grid,
-        axis=1,
-    )
+        Z_raw += np.sum(np.where(valid, moments[0], 0.0), axis=1)
+        m_Z += np.sum(np.where(valid, moments[1], 0.0), axis=1)
+        m2_Z += np.sum(np.where(valid, moments[2], 0.0), axis=1)
+    Z_raw /= counts
+    m_Z /= counts
+    m2_Z /= counts
     core = (Z_raw.copy(), m_Z.copy(), m2_Z.copy())
     bright, faint = _selection_tail_moments(
         completeness_model,
@@ -706,6 +829,7 @@ def completeness_loglike_posterior_draws(
         z,
         f_host_2500_psf=f_host_2500_psf,
         alpha_lambda=alpha_lambda,
+        group_index=group_index,
     )
     valid_draws = draw_axis < counts[:, None]
     bright = tuple(np.sum(np.where(valid_draws, value, 0.0), axis=1) / counts for value in bright)
@@ -807,28 +931,29 @@ def joint_posterior_completeness_loglike_for_data(
     epsilon = dereddened - hubble_magnitude[:, None]
     attenuation = attenuated - dereddened
     centers = model_magnitude[:, None] + epsilon + attenuation
-    p_det = _cached_completeness_pdet(
-        model, integration_grid, np.asarray(z, dtype=float)
-    )
+    z = np.asarray(z, dtype=float)
+    group_index = completeness_group_index_for_data(agn_data, model)
+    nodes = _selection_integration_nodes(model, integration_grid, z, group_index)
+    p_det = _cached_completeness_pdet(model, nodes, z, group_index=group_index)
     sigma = external_error[:, None, None]
-    dx = (integration_grid[None, None, :] - centers[:, :, None]) / sigma
-    weighted = np.exp(-0.5 * dx**2) * (_INV_SQRT_2PI / sigma)
-    weighted *= p_det[:, None, :]
-    weighted = np.where(valid[:, :, None], weighted, 0.0)
-    component_z = np.trapezoid(weighted, integration_grid, axis=2)
-    hubble_grid = integration_grid[None, None, :] - attenuation[:, :, None]
-    component_mz = np.trapezoid(
-        weighted * hubble_grid, integration_grid, axis=2
+    selection_z, selection_mz, selection_m2z = _piecewise_linear_gaussian_moments(
+        nodes[:, None, :], p_det[:, None, :], centers[:, :, None], sigma
     )
-    component_m2z = np.trapezoid(
-        weighted * hubble_grid**2, integration_grid, axis=2
+    # Moments of the Hubble magnitude m - attenuation (attenuation fixed per draw).
+    component_z = np.where(valid, selection_z, 0.0)
+    component_mz = np.where(valid, selection_mz - attenuation * selection_z, 0.0)
+    component_m2z = np.where(
+        valid,
+        selection_m2z - 2.0 * attenuation * selection_mz + attenuation**2 * selection_z,
+        0.0,
     )
     core_components = (component_z.copy(), component_mz.copy(), component_m2z.copy())
     bright, faint = _selection_tail_moments(
         model,
         centers,
         external_error[:, None],
-        np.asarray(z, dtype=float),
+        z,
+        group_index=group_index,
     )
     tail_z = bright[0] + faint[0]
     tail_selection_mz = bright[1] + faint[1]
@@ -987,7 +1112,7 @@ def sigma_lens_from_dc(z, cosmo, amp=0.06, z_ref=1.0, power=3/2):
     return amp * ratio**power
 
 
-def sigma_mu_from_z_err(z, z_err, cosmo):
+def sigma_mu_from_z_err(z, z_err, cosmo, gamma_mean_z=0.0):
     """
     Project redshift uncertainty onto distance-modulus uncertainty with a
     central finite difference in z.
@@ -998,7 +1123,10 @@ def sigma_mu_from_z_err(z, z_err, cosmo):
     z_hi = np.maximum(z + z_err, z_lo + 1e-8)
     mu_lo = cosmo.distmod(z_lo).value
     mu_hi = cosmo.distmod(z_hi).value
-    sigma_mu = 0.5 * np.abs(mu_hi - mu_lo)
+    # Propagate the shared redshift through mu(z) + M(z), including the
+    # cross term rather than adding independent variances. The pivot cancels.
+    delta_mean = float(gamma_mean_z) * np.log10((1.0 + z_hi) / (1.0 + z_lo))
+    sigma_mu = 0.5 * np.abs(mu_hi - mu_lo + delta_mean)
     return np.where(np.isfinite(z_err) & (z_err > 0.0), sigma_mu, 0.0)
 
 def log_likelihood(theta, *, agn_data, pantheon_data, 
@@ -1014,6 +1142,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
                    use_ceph_dist_calibration=True,
                    use_alpha_lambda_term=False,
                    use_eta_sigma_term=False,
+                   use_redshift_mean_term=False,
                    use_f_agn_psf_2500_sigmoid_term=False,
                    use_f_agn_psf_2500_flux_fraction_term=False,
                    use_redshift_log_f_term=False,
@@ -1047,6 +1176,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         fixed_h0=fixed_h0,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -1110,6 +1240,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         params,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
     )
@@ -1117,6 +1248,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         agn_data,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         pivot_context=agn_pivot_context,
@@ -1128,6 +1260,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         agn_pivot_arr,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
     )
@@ -1145,6 +1278,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
             tau_draws,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_mean_term=use_redshift_mean_term,
             use_f_agn_psf_2500_sigmoid_term=(
                 use_f_agn_psf_2500_sigmoid_term
             ),
@@ -1160,6 +1294,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         check_negative=True,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         include_sigma_tau=(light_curve_uncertainty_mode == "covariance"),
@@ -1171,7 +1306,7 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         # return -np.inf, empty_blob(N_obj)
     
     sigma_lens = sigma_lens_from_dc(z, cosmo)   # vector (same shape as z)
-    sigma_mu_z = sigma_mu_from_z_err(z, z_err, cosmo)
+    sigma_mu_z = sigma_mu_from_z_err(z, z_err, cosmo, params.get("gamma_mean_z", 0.0) if use_redshift_mean_term else 0.0)
 
     log_f_eff = evaluate_log_f(
         params, z, z_pivot=z_pivot_agn, use_redshift_log_f_term=use_redshift_log_f_term
@@ -1235,6 +1370,9 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
                 sigma_completeness=0.0,
                 f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL),
                 alpha_lambda=agn_data.get("alpha_lambda"),
+                group_index=completeness_group_index_for_data(
+                    agn_data, completeness_model
+                ),
             )
             if M_pred_draws is None:
                 ll_completeness, comp_blob = completeness_loglike(
@@ -1287,6 +1425,7 @@ def log_likelihood_nearbylcs(
     use_ceph_dist_calibration=True,
     use_alpha_lambda_term=False,
     use_eta_sigma_term=False,
+    use_redshift_mean_term=False,
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
     use_redshift_log_f_term=False,
@@ -1326,6 +1465,7 @@ def log_likelihood_nearbylcs(
         fixed_h0=fixed_h0,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
@@ -1377,6 +1517,7 @@ def log_likelihood_nearbylcs(
         params,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
     )
@@ -1386,6 +1527,7 @@ def log_likelihood_nearbylcs(
         {k: v[mask_noncal] for k, v in agn_data.items()},
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         pivot_context=agn_pivot_context,
@@ -1397,6 +1539,7 @@ def log_likelihood_nearbylcs(
         agn_pivot_arr_nc,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
     )
@@ -1408,6 +1551,7 @@ def log_likelihood_nearbylcs(
         check_negative=True,
         use_alpha_lambda_term=use_alpha_lambda_term,
         use_eta_sigma_term=use_eta_sigma_term,
+        use_redshift_mean_term=use_redshift_mean_term,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
     )
@@ -1419,7 +1563,7 @@ def log_likelihood_nearbylcs(
     mu_cosmo_nc = cosmo.distmod(z_nc).value
 
     sigma_lens = sigma_lens_from_dc(z_nc, cosmo)   # vector (same shape as z)
-    sigma_mu_z_nc = sigma_mu_from_z_err(z_nc, z_err_nc, cosmo)
+    sigma_mu_z_nc = sigma_mu_from_z_err(z_nc, z_err_nc, cosmo, params.get("gamma_mean_z", 0.0) if use_redshift_mean_term else 0.0)
 
     log_f_eff_nc = evaluate_log_f(
         params, z_nc, z_pivot=z_pivot_agn, use_redshift_log_f_term=use_redshift_log_f_term
@@ -1452,6 +1596,7 @@ def log_likelihood_nearbylcs(
             {k: agn_calibrators_data[k][cal_mask_tbl] for k in agn_calibrators_data.keys()},
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_mean_term=use_redshift_mean_term,
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
             use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
             pivot_context=agn_pivot_context,
@@ -1463,6 +1608,7 @@ def log_likelihood_nearbylcs(
             agn_pivot_arr_c,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_mean_term=use_redshift_mean_term,
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
             use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         )
@@ -1474,6 +1620,7 @@ def log_likelihood_nearbylcs(
             check_negative=True,
             use_alpha_lambda_term=use_alpha_lambda_term,
             use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_mean_term=use_redshift_mean_term,
             use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
             use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         )
@@ -1544,6 +1691,9 @@ def log_likelihood_nearbylcs(
                 sigma_completeness=0.0,
                 f_host_2500_psf=agn_data.get(COMPLETENESS_FHOST_COL, None)[mask_noncal] if agn_data.get(COMPLETENESS_FHOST_COL, None) is not None else None,
                 alpha_lambda=agn_data.get("alpha_lambda", None)[mask_noncal] if agn_data.get("alpha_lambda", None) is not None else None,
+                group_index=completeness_group_index_for_data(
+                    agn_data, completeness_model, mask_noncal
+                ),
             )
         else:
             ll_completeness, comp_blob = joint_posterior_completeness_loglike_for_data(
