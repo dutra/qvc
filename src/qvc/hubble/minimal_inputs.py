@@ -103,6 +103,7 @@ SPECTRA_FIELDS = (
     "joint_reduced_chi2_ref",
     "reference_spectrum_floor",
     "frac_jitter",
+    "spectrum_snr_median",
 )
 OPTIONAL_SPECTRA_FIELDS = (
     "pl_slope",
@@ -112,6 +113,7 @@ OPTIONAL_SPECTRA_FIELDS = (
     "joint_reduced_chi2_ref",
     "reference_spectrum_floor",
     "frac_jitter",
+    "spectrum_snr_median",
 )
 REQUIRED_SPECTRA_FIELDS = tuple(
     field for field in SPECTRA_FIELDS if field not in OPTIONAL_SPECTRA_FIELDS

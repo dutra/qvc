@@ -1673,6 +1673,7 @@ def empty_joint_chi2_summary():
         for key in (name, f"{name}_err")
     }
     out.update({field: np.nan for field in REFERENCE_CHI2_FLOOR_FIELDS})
+    out["spectrum_snr_median"] = np.nan
     return out
 
 
@@ -1683,6 +1684,30 @@ def reference_chi2_provenance(config):
         field: float(getattr(likelihood, field))
         for field in REFERENCE_CHI2_FLOOR_FIELDS
     }
+
+
+def spectrum_snr_median(config):
+    """Median per-pixel flux/error of the fitted spectrum (NaN if unavailable).
+
+    Used to split chi-square comparisons by spectrum S/N. Pixels with a
+    non-positive or non-finite error, or masked out, are ignored.
+    """
+    spectroscopy = getattr(config, "spectroscopy", None)
+    if spectroscopy is None:
+        return np.nan
+    flux = np.asarray(getattr(spectroscopy, "fluxes", ()), dtype=float)
+    err = np.asarray(getattr(spectroscopy, "errors", ()), dtype=float)
+    if flux.shape != err.shape or flux.size == 0:
+        return np.nan
+    valid = np.isfinite(flux) & np.isfinite(err) & (err > 0.0)
+    mask = getattr(spectroscopy, "mask", None)
+    if mask is not None:
+        mask = np.asarray(mask, dtype=bool)
+        if mask.shape == flux.shape:
+            valid &= mask
+    if not np.any(valid):
+        return np.nan
+    return float(np.median(flux[valid] / err[valid]))
 
 
 def apply_reference_spectrum_floor(fitter, floor):
@@ -3166,6 +3191,7 @@ def run_one_fit(
         result.update(summarize_spectral_component_fractions(prediction, rec["z"]))
         result.update(summarize_joint_chi2(prediction))
         result.update(reference_chi2_provenance(config))
+        result["spectrum_snr_median"] = spectrum_snr_median(config)
         result.update(summarize_host_2500_psf(prediction))
         (
             result["_joint_posterior_draws"],
@@ -3366,6 +3392,7 @@ def _complete_resumed_fit(rec, args, source_path, fitter, *, sampled_options=Non
     )
     result.update(summarize_joint_chi2(prediction))
     result.update(reference_chi2_provenance(config))
+    result["spectrum_snr_median"] = spectrum_snr_median(config)
     result.update(summarize_host_2500_psf(prediction))
     (
         result["_joint_posterior_draws"],
