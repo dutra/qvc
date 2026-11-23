@@ -113,8 +113,14 @@ SPECTRA_FIELDS = (
     "reference_agn_floor",
     "frac_jitter",
     "spectrum_snr_median",
+    # Sub-Lyman photometry exclusion the SED chi-square was predicted with
+    # (NaN or absent = off); see qvc.hubble.cuts.check_photometry_exclusion_settings.
+    "photometry_exclusion_rest_wavelength",
+    "photometry_exclusion_max_fraction",
 )
 OPTIONAL_SPECTRA_FIELDS = (
+    "photometry_exclusion_rest_wavelength",
+    "photometry_exclusion_max_fraction",
     "pl_slope",
     "pl_slope_err",
     "sed_reduced_chi2_ref",

@@ -773,3 +773,22 @@ def test_sfitspectra_rejects_sub_lyman_parameters_without_the_flag(tmp_path):
     assert result.returncode == 2
     assert 'require --drop-sub-lyman-photometry' in result.stderr
     assert _sbatch_calls(calls_path) == []
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (("--drop-sub-lyman-photometry", "--sub-lyman-max-fraction", "1.0"), "must lie in [0, 1)"),
+        (("--drop-sub-lyman-photometry", "--sub-lyman-max-fraction", "-0.1"), "must lie in [0, 1)"),
+        (("--drop-sub-lyman-photometry", "--sub-lyman-rest-wavelength", "0"), "positive and finite"),
+        (("--drop-sub-lyman-photometry", "--sub-lyman-rest-wavelength", "nan"), "positive and finite"),
+    ],
+)
+def test_sfitspectra_validates_sub_lyman_ranges_before_submitting(tmp_path, extra, message):
+    root, script_path, csv_path, calls_path, env = _fresh_workspace(tmp_path)
+    result = _run_fresh(root, script_path, env, '--chisq-csv', str(csv_path),
+                        '--description', 'sublyman', *extra)
+    assert result.returncode == 2
+    assert message in result.stderr
+    assert _sbatch_calls(calls_path) == []
+    assert not (root / 'hpc_scripts/submit/jaxqsofit').exists()

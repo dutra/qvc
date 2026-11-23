@@ -554,6 +554,13 @@ SPECTRAL_NOISE_MODEL_COLUMN = "spectral_noise_model"
 SPECTRAL_NOISE_MODELS = ("fixed_floor", "fitted_jitter")
 ALLOW_FITTED_NOISE_CHI2_ENV = "QVC_CUT_ALLOW_FITTED_NOISE_CHI2"
 ALLOW_MISSING_REFERENCE_CHI2_ENV = "QVC_CUT_ALLOW_MISSING_REFERENCE_CHI2"
+ALLOW_MIXED_PHOTOMETRY_EXCLUSION_ENV = "QVC_CUT_ALLOW_MIXED_PHOTOMETRY_EXCLUSION"
+# Columns recording the sub-Lyman photometry exclusion of a row (NaN = off;
+# catalogues from before the option lack them, which also means off), and the
+# chi-square cuts that contain the photometric chi-square and so depend on it.
+PHOTOMETRY_EXCLUSION_WAVELENGTH_COLUMN = "photometry_exclusion_rest_wavelength"
+PHOTOMETRY_EXCLUSION_FRACTION_COLUMN = "photometry_exclusion_max_fraction"
+PHOTOMETRY_EXCLUSION_DEPENDENT_CUTS = frozenset({"sed_reduced_chi2", "joint_reduced_chi2"})
 # Reference variance floors the Tier-1 thresholds assume; the catalogue's
 # recorded floors must match them.
 REFERENCE_FLOOR_ENV = {
@@ -655,6 +662,57 @@ def check_reference_floors(frame, floors=None):
     return floors
 
 
+def photometry_exclusion_settings(frame):
+    """Return ``{setting: row count}`` of a catalogue's photometry exclusion.
+
+    A setting is ``"off"`` or ``(rest wavelength, max fraction)``. A NaN or
+    missing wavelength is off, whatever the fraction column says.
+    """
+    n_rows = len(frame)
+    if PHOTOMETRY_EXCLUSION_WAVELENGTH_COLUMN not in frame.columns:
+        return {"off": n_rows} if n_rows else {}
+    wavelength = _numeric(frame, PHOTOMETRY_EXCLUSION_WAVELENGTH_COLUMN)
+    fraction = (
+        _numeric(frame, PHOTOMETRY_EXCLUSION_FRACTION_COLUMN)
+        if PHOTOMETRY_EXCLUSION_FRACTION_COLUMN in frame.columns
+        else np.full(n_rows, np.nan)
+    )
+    counts = {}
+    for lam, frac in zip(wavelength, fraction):
+        key = "off" if not np.isfinite(lam) else (round(float(lam), 6), round(float(frac), 6))
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def check_photometry_exclusion_settings(frame, *, allow_mixed=None):
+    """Require one photometry-exclusion setting for every row of a catalogue.
+
+    The SED (and joint) chi-square of a row depends on which bands its fit left
+    out, so a cut on it across rows with different settings compares different
+    statistics. Raises unless all rows share one setting, or
+    ``allow_mixed`` / ``QVC_CUT_ALLOW_MIXED_PHOTOMETRY_EXCLUSION=1``. Returns
+    the settings with their row counts.
+    """
+    counts = photometry_exclusion_settings(frame)
+    if len(counts) <= 1:
+        return counts
+    allow = _env_flag(ALLOW_MIXED_PHOTOMETRY_EXCLUSION_ENV) if allow_mixed is None else bool(allow_mixed)
+    if allow:
+        return counts
+    detail = "; ".join(
+        f"{'off' if key == 'off' else f'{key[0]:g} A, max fraction {key[1]:g}'}: {n} row(s)"
+        for key, n in counts.items()
+    )
+    raise ValueError(
+        "The SED/joint chi-square cut is applied to a catalogue whose rows use "
+        f"different sub-Lyman photometry exclusion settings ({detail}); their "
+        "photometric chi-squares count different bands. Re-predict all rows with one "
+        "setting (the joint spectra wrapper with --resume ... --resume-only and the "
+        f"same --drop-sub-lyman-photometry options), or set "
+        f"{ALLOW_MIXED_PHOTOMETRY_EXCLUSION_ENV}=1 to cut anyway."
+    )
+
+
 def resolve_chi2_cut_columns(
     frame,
     cuts,
@@ -663,6 +721,7 @@ def resolve_chi2_cut_columns(
     allow_fitted_noise_chi2=None,
     allow_missing_reference_chi2=None,
     floors=None,
+    allow_mixed_photometry_exclusion=None,
 ):
     """Return Tier-1 cuts with each chi-square column mapped to the one to use.
 
@@ -683,6 +742,11 @@ def resolve_chi2_cut_columns(
     - ``stored``: the stored column; for spectroscopy/joint in a fitted-noise
       catalogue only with the override (``allow_fitted_noise_chi2`` or
       ``QVC_CUT_ALLOW_FITTED_NOISE_CHI2=1``).
+
+    When an SED or joint chi-square cut is present, every row must share one
+    sub-Lyman photometry exclusion setting (:func:`check_photometry_exclusion_settings`;
+    override ``allow_mixed_photometry_exclusion`` or
+    ``QVC_CUT_ALLOW_MIXED_PHOTOMETRY_EXCLUSION=1``).
 
     Returns ``(cuts, choices)``; ``choices`` maps each chi-square cut to
     ``{"statistic", "column", "reason", "missing_reference"}`` and, when any
@@ -785,6 +849,8 @@ def resolve_chi2_cut_columns(
             )
     if any(choice["column"] != cut for cut, choice in choices.items()) and has_values:
         choices["reference_floors"] = check_reference_floors(frame, floors)
+    if has_values and PHOTOMETRY_EXCLUSION_DEPENDENT_CUTS.intersection(chi2_cuts):
+        check_photometry_exclusion_settings(frame, allow_mixed=allow_mixed_photometry_exclusion)
     resolved = [
         (choices[column]["column"] if column in choices else column, lower, upper)
         for column, lower, upper in cuts

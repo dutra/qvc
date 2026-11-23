@@ -3655,3 +3655,101 @@ def test_resumed_fit_with_the_exclusion_records_bands_and_skips_chi2_comparison(
             joint.run_hybrid_fit(rec, plain_args)
     finally:
         DummyFitter.config.likelihood = _sub_lyman_likelihood()
+
+
+def test_resume_with_changed_exclusion_still_compares_the_spectroscopic_chi2(monkeypatch, tmp_path):
+    rec = _run_record()
+    filter_names = [f"{band}_sdss" for band in "ugriz"]
+    prediction = _component_prediction(filter_names)
+    prediction.update({"ebv_gal": np.full(4, 0.02), "ebv_agn": np.full(4, 0.03)})
+    DummyFitter = _dummy_resume_fitter_cls(rec, prediction, filter_names)
+    DummyFitter.config.likelihood = _sub_lyman_likelihood()
+    _stub_jaxsedfit_load(monkeypatch, {}, factory=DummyFitter)
+    monkeypatch.setattr(
+        joint,
+        "_resume_compare_rows",
+        lambda path: {rec["object_id"]: {"spectroscopy_reduced_chi2": 999.0, "sed_reduced_chi2": 999.0}},
+    )
+    args = _hybrid_args(tmp_path)
+    args.save_fig = False
+    args.save_jaxsedfit_samples = False
+    args.resume_only = True
+    args.resume_compare_catalog = str(tmp_path / "old.h5")
+    args.drop_sub_lyman_photometry = True
+    source = joint.posterior_bundle_path(args.resume, rec)
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"bundle sampled without the exclusion")
+    with pytest.raises(RuntimeError) as error:
+        joint.run_hybrid_fit(rec, args)
+    message = str(error.value)
+    assert "spectroscopy_reduced_chi2: stored 999.0" in message
+    # The SED chi-square changes by design and is not compared.
+    assert "sed_reduced_chi2" not in message
+    assert joint.EXCLUSION_DEPENDENT_COLUMNS == ("sed_reduced_chi2", "joint_reduced_chi2")
+
+
+def _resume_records(tmp_path, args, settings):
+    records = []
+    for index, setting in enumerate(settings):
+        rec = {**_run_record(), "object_id": str(index), "sdss_name": f"J{index}", "z": 2.0 + 0.1 * index}
+        path = joint.posterior_bundle_path(args.resume, rec)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if setting != "missing":
+            path.write_bytes(b"bundle")
+        records.append((rec, setting))
+    return records
+
+
+@pytest.mark.parametrize(
+    ("settings", "resume_only", "flag", "refused"),
+    [
+        ([{}, {}], False, False, False),  # all off, fallback off: fine
+        ([{}, {"exclude_photometry_below_rest_wavelength": 912.0}], True, False, True),  # mixed bundles
+        ([{"exclude_photometry_below_rest_wavelength": 912.0}] * 2, True, False, False),  # all on, no fallback
+        ([{"exclude_photometry_below_rest_wavelength": 912.0}] * 2, False, False, True),  # fallback would be off
+        ([{}, {"exclude_photometry_below_rest_wavelength": 912.0}], False, True, False),  # flag: one setting
+        ([{}, "missing"], False, False, False),  # missing bundle: fails on its own
+    ],
+)
+def test_resume_refuses_a_mixed_exclusion_catalogue(tmp_path, settings, resume_only, flag, refused):
+    args = _hybrid_args(tmp_path)
+    args.resume_only = resume_only
+    args.drop_sub_lyman_photometry = flag
+    pairs = _resume_records(tmp_path, args, settings)
+    by_path = {str(joint.posterior_bundle_path(args.resume, rec)): setting for rec, setting in pairs}
+    records = [rec for rec, _ in pairs]
+    read = lambda path: by_path[str(path)]
+    if refused:
+        with pytest.raises(SystemExit, match="mixed sub-Lyman photometry exclusion"):
+            joint.require_uniform_resume_photometry_exclusion(records, args, read=read)
+    else:
+        joint.require_uniform_resume_photometry_exclusion(records, args, read=read)
+    # Fresh runs are never checked.
+    joint.require_uniform_resume_photometry_exclusion(records, SimpleNamespace(resume=None), read=read)
+
+
+def test_bundle_photometry_exclusion_reads_the_saved_config(monkeypatch, tmp_path):
+    configs = {
+        "off": {"likelihood": {"exclude_photometry_below_rest_wavelength": None}},
+        "on": {"likelihood": {"exclude_photometry_below_rest_wavelength": 912.0, "exclude_photometry_max_fraction_below": 0.3}},
+        "old": {"likelihood": {}},
+    }
+    paths = {}
+    for name in configs:
+        paths[name] = tmp_path / f"{name}.h5"
+        with h5py.File(paths[name], "w") as handle:
+            handle.attrs["name"] = name
+
+    def read_node(handle, key):
+        assert key == "config"
+        return configs[handle.attrs["name"]]
+
+    monkeypatch.setitem(
+        sys.modules, "jaxsedfit", SimpleNamespace(JAXSEDFit=SimpleNamespace(_read_hdf5_node=read_node))
+    )
+    assert joint.bundle_photometry_exclusion(paths["off"]) == {}
+    assert joint.bundle_photometry_exclusion(paths["old"]) == {}
+    assert joint.bundle_photometry_exclusion(paths["on"]) == {
+        "exclude_photometry_below_rest_wavelength": 912.0,
+        "exclude_photometry_max_fraction_below": 0.3,
+    }

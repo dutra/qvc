@@ -176,8 +176,8 @@ def apply_agn_options(config, options):
 # the mean IGM, so those bands cannot be fitted object by object. With the
 # option on, a band is left out of the photometric likelihood and of every
 # photometric chi-square (stored and reference) when more than
-# --sub-lyman-max-fraction of its flat-f_nu response lies below
-# --sub-lyman-rest-wavelength * (1 + z). The values map to these jaxsedfit
+# --sub-lyman-max-fraction of the band flux of a flat-f_nu source comes from
+# below --sub-lyman-rest-wavelength * (1 + z). The values map to these jaxsedfit
 # LikelihoodConfig fields (None = off).
 PHOTOMETRY_EXCLUSION_WAVELENGTH_FIELD = "exclude_photometry_below_rest_wavelength"
 PHOTOMETRY_EXCLUSION_FRACTION_FIELD = "exclude_photometry_max_fraction_below"
@@ -285,6 +285,82 @@ def require_photometry_exclusion_support(args):
             "--drop-sub-lyman-photometry needs a jaxsedfit whose LikelihoodConfig has "
             f"{missing} (branch feat/drop-sub-lyman-photometry)."
         )
+
+
+def bundle_photometry_exclusion(path):
+    """Return the exclusion setting stored in a posterior bundle's config ({} = off)."""
+    from jaxsedfit import JAXSEDFit
+
+    with h5py.File(path, "r") as handle:
+        config = JAXSEDFit._read_hdf5_node(handle, "config")
+    likelihood = (
+        config.get("likelihood", {}) if isinstance(config, dict) else getattr(config, "likelihood", None)
+    )
+    if not isinstance(likelihood, dict):
+        likelihood = {
+            field: getattr(likelihood, field, None) for field in PHOTOMETRY_EXCLUSION_FIELDS
+        }
+    wavelength = likelihood.get(PHOTOMETRY_EXCLUSION_WAVELENGTH_FIELD)
+    if wavelength is None or not np.isfinite(legacy.safe_float(wavelength)):
+        return {}
+    return {
+        PHOTOMETRY_EXCLUSION_WAVELENGTH_FIELD: float(wavelength),
+        PHOTOMETRY_EXCLUSION_FRACTION_FIELD: float(
+            likelihood.get(PHOTOMETRY_EXCLUSION_FRACTION_FIELD, DEFAULT_SUB_LYMAN_MAX_FRACTION)
+        ),
+    }
+
+
+def _exclusion_label(exclusion):
+    if not exclusion:
+        return "off"
+    return (
+        f"{exclusion[PHOTOMETRY_EXCLUSION_WAVELENGTH_FIELD]:g} A, max fraction "
+        f"{exclusion.get(PHOTOMETRY_EXCLUSION_FRACTION_FIELD, DEFAULT_SUB_LYMAN_MAX_FRACTION):g}"
+    )
+
+
+def require_uniform_resume_photometry_exclusion(records, args, *, read=bundle_photometry_exclusion):
+    """Refuse a resume that would mix photometry-exclusion settings in one catalogue.
+
+    With --drop-sub-lyman-photometry every row (re-predicted or freshly fitted)
+    uses the requested setting. Without it, a resumed row keeps its bundle's
+    setting while a fresh fallback fit is off; the SED chi-squares of such a
+    catalogue would differ by object and redshift, so the run stops before any
+    object when the bundles do not all share one setting, or (when fresh
+    fallback fits are possible, i.e. without --resume-only) when that setting
+    is not off.
+    """
+    if not getattr(args, "resume", None) or requested_photometry_exclusion(args):
+        return
+    settings = {}
+    for rec in records:
+        path = posterior_bundle_path(args.resume, rec)
+        if not path.is_file():
+            continue
+        try:
+            setting = read(path)
+        except Exception:
+            # An unreadable bundle fails on its own when the object is processed.
+            continue
+        key = json.dumps(setting, sort_keys=True)
+        settings.setdefault(key, []).append(str(rec.get("object_id")))
+    if not bool(getattr(args, "resume_only", False)):
+        settings.setdefault(json.dumps({}), [])
+    if len(settings) <= 1:
+        return
+    detail = "; ".join(
+        f"{_exclusion_label(json.loads(key))}: {len(ids)} bundle(s)"
+        + (f" (e.g. {', '.join(ids[:3])})" if ids else " (fresh fallback fits)")
+        for key, ids in settings.items()
+    )
+    raise SystemExit(
+        "This resume would write a catalogue with mixed sub-Lyman photometry "
+        f"exclusion settings ({detail}). Pass --drop-sub-lyman-photometry (with the "
+        "wanted --sub-lyman-* values) to re-predict every object with one setting, "
+        "or resume bundles that share one setting (with --resume-only when that "
+        "setting is on)."
+    )
 
 
 def read_sampled_agn_options(path):
@@ -1870,6 +1946,8 @@ RESUME_COMPARE_COLUMNS = (
     "m_2500_dereddened",
     "m_2500_attenuated_model",
 )
+# Compared columns that the photometry exclusion changes by design.
+EXCLUSION_DEPENDENT_COLUMNS = ("sed_reduced_chi2", "joint_reduced_chi2")
 RESUME_COMPARE_RTOL = 1.0e-4
 RESUME_COMPARE_ATOL = 1.0e-6
 _RESUME_COMPARE_CACHE = {}
@@ -3711,12 +3789,15 @@ def _complete_resumed_fit(rec, args, source_path, fitter, *, sampled_options=Non
     result["resume_compare_catalog"] = str(compare_catalog or "")
     result["resume_prediction_mismatch"] = ""
     if compare_catalog:
-        # A changed exclusion changes the chi-squares by design; m_2500 must
-        # still match, since the draws and the model are the same.
+        # A changed exclusion changes the photometric (SED and joint)
+        # chi-squares by design; the spectroscopic chi-square and m_2500 must
+        # still match, since the draws and the spectral model are the same.
         columns = (
             RESUME_COMPARE_COLUMNS
             if exclusion == sampled_exclusion
-            else tuple(name for name in RESUME_COMPARE_COLUMNS if "chi2" not in name)
+            else tuple(
+                name for name in RESUME_COMPARE_COLUMNS if name not in EXCLUSION_DEPENDENT_COLUMNS
+            )
         )
         problems = compare_resumed_prediction(
             result,
@@ -4017,6 +4098,7 @@ def run_fit(args):
     records = build_records(args)
     if not records:
         raise RuntimeError("No records to process.")
+    require_uniform_resume_photometry_exclusion(records, args)
     worker = partial(run_object_safely, args=args)
     if args.resume:
         description = (
@@ -4294,11 +4376,13 @@ def parse_args(argv=None):
             "Leave broadband photometry below the rest-frame Lyman limit out of the "
             "photometric likelihood and of every photometric chi-square (stored and "
             "reference). A band is dropped when more than --sub-lyman-max-fraction "
-            "of its flat-f_nu response lies below --sub-lyman-rest-wavelength*(1+z): "
-            "with the defaults GALEX FUV at z > 0.67, NUV at z > 1.53 and SDSS u at "
-            "z > 2.92. The model fluxes of dropped bands are still predicted. Rows "
-            "record the setting and the dropped bands (photometry_filters_excluded). "
-            "On --resume the saved draws are re-predicted with it. Off by default."
+            "of the band flux of a flat-f_nu source would come from below "
+            "--sub-lyman-rest-wavelength*(1+z) (weight T/lambda^2): with the defaults "
+            "GALEX FUV at z > 0.665, NUV at z > 1.487 and SDSS u at z > 2.902. The "
+            "model fluxes of dropped bands are still predicted. Rows record the "
+            "setting and the dropped bands (photometry_filters_excluded). On --resume "
+            "the flag re-predicts the saved draws with the exclusion; without the "
+            "flag each bundle keeps the setting it was sampled with. Off by default."
         ),
     )
     parser.add_argument(

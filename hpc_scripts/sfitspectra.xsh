@@ -397,7 +397,8 @@ parser.add_argument(
         "Leave broadband photometry below the rest-frame Lyman limit out of the "
         "photometric likelihood and chi-squares (passed to "
         "fit_spectra_jaxsedfit_joint.py; off by default). With --resume it "
-        "re-predicts the saved draws with those bands dropped."
+        "re-predicts the saved draws with those bands dropped; without it each "
+        "resumed bundle keeps the setting it was sampled with."
     ),
 )
 parser.add_argument(
@@ -576,6 +577,14 @@ sub_lyman_options = {
     "--sub-lyman-rest-wavelength": cli_args.sub_lyman_rest_wavelength,
     "--sub-lyman-max-fraction": cli_args.sub_lyman_max_fraction,
 }
+if cli_args.sub_lyman_rest_wavelength is not None and not (
+    math.isfinite(cli_args.sub_lyman_rest_wavelength) and cli_args.sub_lyman_rest_wavelength > 0.0
+):
+    parser.error("--sub-lyman-rest-wavelength must be positive and finite")
+if cli_args.sub_lyman_max_fraction is not None and not (
+    0.0 <= cli_args.sub_lyman_max_fraction < 1.0
+):
+    parser.error("--sub-lyman-max-fraction must lie in [0, 1)")
 if cli_args.drop_sub_lyman_photometry:
     if fit_script != "fit_spectra_jaxsedfit_joint.py":
         parser.error("--drop-sub-lyman-photometry is supported only with fit_spectra_jaxsedfit_joint.py")
