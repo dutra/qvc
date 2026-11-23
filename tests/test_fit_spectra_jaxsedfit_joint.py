@@ -307,6 +307,7 @@ def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
     assert len(used_phot) == 5
     assert config.spectroscopy.resolving_power == pytest.approx(2000.0)
     assert config.spectroscopy.aperture_diameter_arcsec == pytest.approx(2.0)
+    assert config.likelihood.reference_spectrum_floor == pytest.approx(0.08)
     assert config.agn.fit_lines is True
     assert config.agn.tied_lines is True
     assert config.agn.fit_feii is False
@@ -1198,7 +1199,9 @@ def _component_prediction(filter_names):
     prediction.update(
         {
             name: np.array([float(index), float(index + 2)])
-            for index, name in enumerate(joint.JOINT_CHI2_SITES)
+            for index, name in enumerate(
+                joint.JOINT_CHI2_SITES + joint.REFERENCE_CHI2_SITES
+            )
         }
     )
     prediction.update(_spectral_fraction_prediction())
@@ -1528,7 +1531,7 @@ def test_joint_summaries_have_stable_native_schema():
     for band in "ugriz":
         assert fractions[f"f_AGN_psf_{band}"] == pytest.approx(0.7)
         assert fractions[f"f_AGN_psf_{band}_err"] == pytest.approx(0.0)
-    for name in joint.JOINT_CHI2_SITES:
+    for name in joint.JOINT_CHI2_SITES + joint.REFERENCE_CHI2_SITES:
         assert name in chi2
         assert f"{name}_err" in chi2
     assert host_2500["f_host_2500_psf"] == pytest.approx(0.35)
@@ -1692,7 +1695,12 @@ def test_resume_validation_rejects_missing_spatial_scale_capture_fractions(
     filter_names = [f"{band}_sdss" for band in "ugriz"]
     fitter = SimpleNamespace(
         config=SimpleNamespace(
-            likelihood=SimpleNamespace(use_host_capture_model=True),
+            likelihood=SimpleNamespace(
+                use_host_capture_model=True,
+                reference_spectrum_floor=0.08,
+                reference_photometry_floor=0.10,
+                reference_agn_floor=0.15,
+            ),
             photometry=SimpleNamespace(
                 filter_names=filter_names,
                 photometry_method=["psf"] * 5,
@@ -2451,7 +2459,12 @@ def _dummy_resume_fitter_cls(rec, prediction, filter_names, agn=None):
                     joint.SDSS_STATIC_PSF_FWHM_ARCSEC[band] for band in "ugriz"
                 ],
             ),
-            likelihood=SimpleNamespace(use_host_capture_model=True),
+            likelihood=SimpleNamespace(
+                use_host_capture_model=True,
+                reference_spectrum_floor=0.08,
+                reference_photometry_floor=0.10,
+                reference_agn_floor=0.15,
+            ),
             agn=SimpleNamespace(**(agn or {})),
             galaxy=SimpleNamespace(cosmology_h0=70.0, cosmology_om0=0.3),
         )
@@ -2630,6 +2643,11 @@ def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_
             return prediction
 
     config = SimpleNamespace(
+        likelihood=SimpleNamespace(
+            reference_spectrum_floor=0.08,
+            reference_photometry_floor=0.10,
+            reference_agn_floor=0.15,
+        ),
         galaxy=SimpleNamespace(cosmology_h0=70.0, cosmology_om0=0.3)
     )
     used_phot = pd.DataFrame({"filter_name": filter_names})
@@ -3219,3 +3237,76 @@ def test_unsupported_option_fails_once_at_start_up(monkeypatch, tmp_path):
         joint.run_fit(args)
     # Without options nothing is required.
     joint.require_supported_agn_options(joint.parse_args(_common_fit_argv(tmp_path)))
+
+def test_reference_chi2_schema_and_provenance():
+    empty = joint.empty_joint_chi2_summary()
+    for name in joint.JOINT_CHI2_SITES + joint.REFERENCE_CHI2_SITES:
+        assert np.isnan(empty[name]) and np.isnan(empty[f"{name}_err"])
+    for field in joint.REFERENCE_CHI2_FLOOR_FIELDS:
+        assert np.isnan(empty[field])
+    config = SimpleNamespace(
+        likelihood=SimpleNamespace(
+            reference_spectrum_floor=0.08,
+            reference_photometry_floor=0.1,
+            reference_agn_floor=0.15,
+        )
+    )
+    assert joint.reference_chi2_provenance(config) == {
+        "reference_spectrum_floor": 0.08,
+        "reference_photometry_floor": 0.1,
+        "reference_agn_floor": 0.15,
+    }
+
+
+def test_summarize_joint_chi2_requires_reference_sites():
+    prediction = {name: np.ones(3) for name in joint.JOINT_CHI2_SITES}
+    with pytest.raises(ValueError, match="reference"):
+        summarize_joint_chi2(prediction)
+    prediction.update({name: np.array([1.0, 2.0, 3.0]) for name in joint.REFERENCE_CHI2_SITES})
+    summary = summarize_joint_chi2(prediction)
+    # Posterior-predictive median over draws, as for the fitted-noise sites.
+    assert summary["spectroscopy_reduced_chi2_ref"] == pytest.approx(2.0)
+    assert summary["spectroscopy_reduced_chi2"] == pytest.approx(1.0)
+
+
+def test_require_reference_chi2_support_fails_early_on_old_jaxsedfit(monkeypatch):
+    import dataclasses
+
+    @dataclasses.dataclass
+    class OldLikelihoodConfig:
+        systematics_width: float = 0.1
+
+    monkeypatch.setitem(sys.modules, "jaxsedfit", SimpleNamespace(LikelihoodConfig=OldLikelihoodConfig))
+    with pytest.raises(SystemExit, match="reference chi-square"):
+        joint.require_reference_chi2_support()
+
+    @dataclasses.dataclass
+    class NewLikelihoodConfig:
+        reference_spectrum_floor: float = 0.08
+        reference_photometry_floor: float = 0.1
+        reference_agn_floor: float = 0.15
+
+    monkeypatch.setitem(sys.modules, "jaxsedfit", SimpleNamespace(LikelihoodConfig=NewLikelihoodConfig))
+    joint.require_reference_chi2_support()
+
+
+def test_apply_reference_spectrum_floor_updates_shared_config():
+    config = SimpleNamespace(likelihood=SimpleNamespace(reference_spectrum_floor=0.08))
+    fitter = SimpleNamespace(config=config, context=SimpleNamespace(fit_config=config), predictive="cached")
+    joint.apply_reference_spectrum_floor(fitter, 0.05)
+    assert config.likelihood.reference_spectrum_floor == 0.05
+    assert fitter.predictive is None
+    joint.apply_reference_spectrum_floor(fitter, None)
+    assert config.likelihood.reference_spectrum_floor == 0.05
+    detached = SimpleNamespace(config=config, context=SimpleNamespace(fit_config=SimpleNamespace()), predictive=None)
+    with pytest.raises(RuntimeError, match="does not share"):
+        joint.apply_reference_spectrum_floor(detached, 0.05)
+
+
+def test_reference_spectrum_floor_cli_default(tmp_path):
+    common = ["--mode", "fit", str(tmp_path / "out.h5"),
+              "--sed-photometry-path", str(tmp_path / "phot.csv"), "--filter_object_id", "1"]
+    assert joint.parse_args(common).reference_spectrum_floor == pytest.approx(0.08)
+    assert joint.parse_args(
+        [*common, "--reference-spectrum-floor", "0.05"]
+    ).reference_spectrum_floor == pytest.approx(0.05)

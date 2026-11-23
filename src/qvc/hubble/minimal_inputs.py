@@ -96,8 +96,23 @@ SPECTRA_FIELDS = (
     "joint_reduced_chi2",
     "m_2500_dereddened_rhat",
     "m_2500_attenuated_model_rhat",
+    # Reference chi-square and the fitted-noise marker used to choose the
+    # Tier-1 chi-square columns (see qvc.hubble.cuts.resolve_chi2_cut_columns).
+    "sed_reduced_chi2_ref",
+    "spectroscopy_reduced_chi2_ref",
+    "joint_reduced_chi2_ref",
+    "reference_spectrum_floor",
+    "frac_jitter",
 )
-OPTIONAL_SPECTRA_FIELDS = ("pl_slope", "pl_slope_err")
+OPTIONAL_SPECTRA_FIELDS = (
+    "pl_slope",
+    "pl_slope_err",
+    "sed_reduced_chi2_ref",
+    "spectroscopy_reduced_chi2_ref",
+    "joint_reduced_chi2_ref",
+    "reference_spectrum_floor",
+    "frac_jitter",
+)
 REQUIRED_SPECTRA_FIELDS = tuple(
     field for field in SPECTRA_FIELDS if field not in OPTIONAL_SPECTRA_FIELDS
 )
