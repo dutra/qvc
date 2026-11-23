@@ -3386,3 +3386,370 @@ def test_resume_compare_catalog_requires_resume(tmp_path):
               "--sed-photometry-path", str(tmp_path / "phot.csv"), "--filter_object_id", "1"]
     with pytest.raises(SystemExit):
         joint.parse_args([*common, "--resume-compare-catalog", "x.h5"])
+
+
+# ---------------------------------------------------------------------------
+# --drop-sub-lyman-photometry: rest-frame exclusion of sub-Lyman-limit bands
+
+
+def _sub_lyman_config_args(tmp_path, **overrides):
+    args = SimpleNamespace(
+        no_deredden=False,
+        wave_min=1250.0,
+        wave_max=8000.0,
+        dsps_ssp_fn="unused-in-config-construction.h5",
+        sed_n_wave=512,
+        fit_lines=True,
+        fit_fe=False,
+        fit_bc=True,
+        fit_bal=False,
+        line_flux_scale_mjy=0.2,
+        photometry_systematics=0.08,
+        spectrum_student_t_df=7.0,
+        spectrum_scale_prior_sigma_dex=0.12,
+        fit_method="optax",
+        optax_steps=10,
+        optax_lr=5.0e-3,
+        plot_init=False,
+        seed=3,
+        nuts_warmup=10,
+        nuts_samples=10,
+        nuts_chains=1,
+        nuts_target_accept=0.9,
+        dense_mass="blocks",
+        output_dir=tmp_path / "results",
+        fig_dir=tmp_path / "figures",
+        save_fig=False,
+        save_jaxsedfit_samples=False,
+    )
+    for key, value in overrides.items():
+        setattr(args, key, value)
+    return args
+
+
+def _sub_lyman_config(tmp_path, redshift, **overrides):
+    record = {
+        **_record_with_ugriz(),
+        "sdss_name": "000000.00+000000.0",
+        "z": redshift,
+        "ra": 0.0,
+        "dec": 0.0,
+        "mjd": 55000.0,
+    }
+    galex = pd.DataFrame(
+        [
+            {
+                "source_id": record["object_id"],
+                "filter_name": name,
+                "flux_mjy": 0.01,
+                "flux_err_mjy": 0.002,
+                "psf_fwhm_arcsec": 5.0,
+                "photometry_method": "psf",
+                "is_upper_limit": False,
+            }
+            for name in ("FUV_galex", "NUV_galex")
+        ]
+    )
+    lam = np.linspace(3800.0, 9200.0, 50)
+    config, used_phot = joint.build_joint_config(
+        record,
+        galex,
+        lam=lam,
+        flux=np.ones_like(lam),
+        err=np.full_like(lam, 0.1),
+        resolving_power=2000.0,
+        args=_sub_lyman_config_args(tmp_path, **overrides),
+        aperture_diameter_arcsec=2.0,
+    )
+    return config, used_phot
+
+
+def test_sub_lyman_cli_is_off_by_default_and_validated():
+    base = ["--mode", "fit", "out.h5", "--sed-photometry-path", "x.csv", "--filter_object_id", "1"]
+    off = joint.parse_args(base)
+    assert off.drop_sub_lyman_photometry is False
+    assert joint.requested_photometry_exclusion(off) == {}
+    on = joint.parse_args(base + ["--drop-sub-lyman-photometry"])
+    assert joint.requested_photometry_exclusion(on) == {
+        "exclude_photometry_below_rest_wavelength": 912.0,
+        "exclude_photometry_max_fraction_below": 0.5,
+    }
+    custom = joint.parse_args(
+        base + ["--drop-sub-lyman-photometry", "--sub-lyman-rest-wavelength", "1216",
+                "--sub-lyman-max-fraction", "0.25"]
+    )
+    assert joint.requested_photometry_exclusion(custom) == {
+        "exclude_photometry_below_rest_wavelength": 1216.0,
+        "exclude_photometry_max_fraction_below": 0.25,
+    }
+    for bad in (
+        ["--sub-lyman-max-fraction", "0.3"],
+        ["--drop-sub-lyman-photometry", "--sub-lyman-max-fraction", "1.0"],
+        ["--drop-sub-lyman-photometry", "--sub-lyman-rest-wavelength", "-912"],
+    ):
+        with pytest.raises(SystemExit):
+            joint.parse_args(base + bad)
+
+
+def test_sub_lyman_config_is_unchanged_when_off(tmp_path):
+    pytest.importorskip("jaxsedfit")
+    off, _ = _sub_lyman_config(tmp_path, 2.6)
+    assert off.likelihood.exclude_photometry_below_rest_wavelength is None
+    on, _ = _sub_lyman_config(tmp_path, 2.6, drop_sub_lyman_photometry=True)
+    assert on.likelihood.exclude_photometry_below_rest_wavelength == 912.0
+    assert on.likelihood.exclude_photometry_max_fraction_below == 0.5
+    off_dict, on_dict = off.to_dict(), on.to_dict()
+    changed = {key for key in off_dict["likelihood"] if off_dict["likelihood"][key] != on_dict["likelihood"][key]}
+    assert changed == {"exclude_photometry_below_rest_wavelength"}
+    off_dict.pop("likelihood"), on_dict.pop("likelihood")
+    assert json.dumps(off_dict, sort_keys=True, default=str) == json.dumps(on_dict, sort_keys=True, default=str)
+
+
+@pytest.mark.parametrize(
+    ("redshift", "max_fraction", "expected"),
+    [
+        (0.5, None, []),
+        (1.0, None, ["FUV_galex"]),
+        (2.0, None, ["FUV_galex", "NUV_galex"]),
+        (2.6, None, ["FUV_galex", "NUV_galex"]),
+        (2.8, None, ["FUV_galex", "NUV_galex"]),  # u straddles the limit, ~30% below
+        (2.8, 0.25, ["FUV_galex", "NUV_galex", "u_sdss"]),
+        (3.0, None, ["FUV_galex", "NUV_galex", "u_sdss"]),
+    ],
+)
+def test_sub_lyman_bands_dropped_by_redshift(tmp_path, redshift, max_fraction, expected):
+    pytest.importorskip("jaxsedfit")
+    from jaxsedfit.preload import rest_frame_photometry_exclusion
+
+    overrides = {"drop_sub_lyman_photometry": True}
+    if max_fraction is not None:
+        overrides["sub_lyman_max_fraction"] = max_fraction
+    config, used_phot = _sub_lyman_config(tmp_path, redshift, **overrides)
+    names = used_phot["filter_name"].astype(str).tolist()
+    assert names == ["FUV_galex", "NUV_galex", "u_sdss", "g_sdss", "r_sdss", "i_sdss", "z_sdss"]
+    curves = [
+        SimpleNamespace(wave=np.asarray(c.wave), native_transmission=np.asarray(c.transmission))
+        for c in config.filters.curves
+    ]
+    _, excluded = rest_frame_photometry_exclusion(
+        curves,
+        redshift=config.observation.redshift,
+        rest_wavelength=config.likelihood.exclude_photometry_below_rest_wavelength,
+        max_fraction_below=config.likelihood.exclude_photometry_max_fraction_below,
+    )
+    summary = joint.excluded_photometry_summary(SimpleNamespace(photometry_rest_excluded=excluded), names)
+    assert summary["photometry_filters_excluded"] == ",".join(expected)
+    assert summary["n_photometry_excluded"] == len(expected)
+
+
+def test_excluded_photometry_summary_without_the_option():
+    names = ["NUV_galex", "u_sdss"]
+    assert joint.excluded_photometry_summary(None, names) == {
+        "photometry_filters_excluded": "",
+        "n_photometry_excluded": 0,
+    }
+    assert joint.excluded_photometry_summary(
+        SimpleNamespace(photometry_rest_excluded=np.zeros(0, dtype=bool)), names
+    )["n_photometry_excluded"] == 0
+
+
+def test_base_result_records_the_sub_lyman_setting(tmp_path):
+    off = joint._base_result(_run_record(), _hybrid_args(tmp_path), execution_mode="fresh")
+    for column in (
+        "photometry_exclusion_rest_wavelength",
+        "photometry_exclusion_max_fraction",
+        "photometry_exclusion_rest_wavelength_sampled",
+        "photometry_exclusion_max_fraction_sampled",
+    ):
+        assert np.isnan(off[column])
+    args = _hybrid_args(tmp_path)
+    args.drop_sub_lyman_photometry = True
+    on = joint._base_result(_run_record(), args, execution_mode="fresh")
+    assert on["photometry_exclusion_rest_wavelength"] == 912.0
+    assert on["photometry_exclusion_max_fraction"] == 0.5
+    # A bare namespace (older callers) is off.
+    bare = joint._base_result(_run_record(), SimpleNamespace(), execution_mode="fresh")
+    assert np.isnan(bare["photometry_exclusion_rest_wavelength"])
+
+
+def _sub_lyman_likelihood(cut=None, fraction=0.5):
+    return SimpleNamespace(
+        use_host_capture_model=True,
+        reference_spectrum_floor=0.08,
+        reference_photometry_floor=0.10,
+        reference_agn_floor=0.15,
+        exclude_photometry_below_rest_wavelength=cut,
+        exclude_photometry_max_fraction_below=fraction,
+    )
+
+
+def test_load_resume_fitter_applies_the_exclusion_and_keeps_the_sampled_setting(monkeypatch, tmp_path):
+    def factory():
+        return SimpleNamespace(config=SimpleNamespace(agn=SimpleNamespace(), likelihood=_sub_lyman_likelihood()))
+
+    _stub_jaxsedfit_load(monkeypatch, {}, factory=factory)
+    args = SimpleNamespace(drop_sub_lyman_photometry=True, sub_lyman_max_fraction=0.3)
+    fitter, sampled = joint.load_resume_fitter(tmp_path / "bundle.h5", args)
+    assert fitter.config.likelihood.exclude_photometry_below_rest_wavelength == 912.0
+    assert fitter.config.likelihood.exclude_photometry_max_fraction_below == 0.3
+    assert sampled[joint.SAMPLED_PHOTOMETRY_EXCLUSION_KEY] == {}
+    # Without the flag the bundle's setting is kept and reported as sampled.
+    plain, plain_sampled = joint.load_resume_fitter(tmp_path / "bundle.h5", SimpleNamespace())
+    assert plain.config.likelihood.exclude_photometry_below_rest_wavelength is None
+    assert plain_sampled[joint.SAMPLED_PHOTOMETRY_EXCLUSION_KEY] == {}
+    # A jaxsedfit without the option fails clearly.
+    _stub_jaxsedfit_load(monkeypatch, {})
+    with pytest.raises(RuntimeError, match="does not support LikelihoodConfig"):
+        joint.load_resume_fitter(tmp_path / "bundle.h5", args)
+
+
+def test_resumed_fit_with_the_exclusion_records_bands_and_skips_chi2_comparison(monkeypatch, tmp_path):
+    rec = _run_record()
+    filter_names = [f"{band}_sdss" for band in "ugriz"]
+    prediction = _component_prediction(filter_names)
+    prediction.update({"ebv_gal": np.full(4, 0.02), "ebv_agn": np.full(4, 0.03)})
+    DummyFitter = _dummy_resume_fitter_cls(rec, prediction, filter_names)
+    DummyFitter.config.likelihood = _sub_lyman_likelihood()
+    excluded = np.array([True, False, False, False, False])
+
+    def factory():
+        fitter = DummyFitter()
+        fitter.context = SimpleNamespace(photometry_rest_excluded=excluded)
+        return fitter
+
+    _stub_jaxsedfit_load(monkeypatch, {}, factory=factory)
+    monkeypatch.setattr(joint, "save_spectrum_figure", lambda fitter, record, fig_dir: Path(fig_dir) / "s.pdf")
+    # The stored catalogue has other chi-squares; only m_2500 would be compared.
+    monkeypatch.setattr(
+        joint,
+        "_resume_compare_rows",
+        lambda path: {rec["object_id"]: {"sed_reduced_chi2": 999.0, "joint_reduced_chi2": 999.0}},
+    )
+    args = _hybrid_args(tmp_path)
+    args.save_fig = False
+    args.save_jaxsedfit_samples = False
+    args.resume_compare_catalog = str(tmp_path / "old.h5")
+    args.drop_sub_lyman_photometry = True
+    source = joint.posterior_bundle_path(args.resume, rec)
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"bundle sampled without the exclusion")
+    try:
+        row = joint.run_hybrid_fit(rec, args)
+        assert row["fit_ok"] is True, row["error_message"]
+        assert row["resume_prediction_mismatch"] == ""
+        assert row["photometry_exclusion_rest_wavelength"] == 912.0
+        assert np.isnan(row["photometry_exclusion_rest_wavelength_sampled"])
+        assert row["photometry_filters_excluded"] == "u_sdss"
+        assert row["n_photometry_excluded"] == 1
+        assert row["n_photometry"] == 5
+
+        # Same setting as the sampled one: the chi-squares are compared and differ.
+        DummyFitter.config.likelihood = _sub_lyman_likelihood()
+        plain_args = _hybrid_args(tmp_path)
+        plain_args.save_fig = False
+        plain_args.save_jaxsedfit_samples = False
+        plain_args.resume_only = True
+        plain_args.output_dir = str(tmp_path / "plain")
+        plain_args.resume_compare_catalog = str(tmp_path / "old.h5")
+        with pytest.raises(RuntimeError, match="sed_reduced_chi2: stored 999.0"):
+            joint.run_hybrid_fit(rec, plain_args)
+    finally:
+        DummyFitter.config.likelihood = _sub_lyman_likelihood()
+
+
+def test_resume_with_changed_exclusion_still_compares_the_spectroscopic_chi2(monkeypatch, tmp_path):
+    rec = _run_record()
+    filter_names = [f"{band}_sdss" for band in "ugriz"]
+    prediction = _component_prediction(filter_names)
+    prediction.update({"ebv_gal": np.full(4, 0.02), "ebv_agn": np.full(4, 0.03)})
+    DummyFitter = _dummy_resume_fitter_cls(rec, prediction, filter_names)
+    DummyFitter.config.likelihood = _sub_lyman_likelihood()
+    _stub_jaxsedfit_load(monkeypatch, {}, factory=DummyFitter)
+    monkeypatch.setattr(
+        joint,
+        "_resume_compare_rows",
+        lambda path: {rec["object_id"]: {"spectroscopy_reduced_chi2": 999.0, "sed_reduced_chi2": 999.0}},
+    )
+    args = _hybrid_args(tmp_path)
+    args.save_fig = False
+    args.save_jaxsedfit_samples = False
+    args.resume_only = True
+    args.resume_compare_catalog = str(tmp_path / "old.h5")
+    args.drop_sub_lyman_photometry = True
+    source = joint.posterior_bundle_path(args.resume, rec)
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"bundle sampled without the exclusion")
+    with pytest.raises(RuntimeError) as error:
+        joint.run_hybrid_fit(rec, args)
+    message = str(error.value)
+    assert "spectroscopy_reduced_chi2: stored 999.0" in message
+    # The SED chi-square changes by design and is not compared.
+    assert "sed_reduced_chi2" not in message
+    assert joint.EXCLUSION_DEPENDENT_COLUMNS == ("sed_reduced_chi2", "joint_reduced_chi2")
+
+
+def _resume_records(tmp_path, args, settings):
+    records = []
+    for index, setting in enumerate(settings):
+        rec = {**_run_record(), "object_id": str(index), "sdss_name": f"J{index}", "z": 2.0 + 0.1 * index}
+        path = joint.posterior_bundle_path(args.resume, rec)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if setting != "missing":
+            path.write_bytes(b"bundle")
+        records.append((rec, setting))
+    return records
+
+
+@pytest.mark.parametrize(
+    ("settings", "resume_only", "flag", "refused"),
+    [
+        ([{}, {}], False, False, False),  # all off, fallback off: fine
+        ([{}, {"exclude_photometry_below_rest_wavelength": 912.0}], True, False, True),  # mixed bundles
+        ([{"exclude_photometry_below_rest_wavelength": 912.0}] * 2, True, False, False),  # all on, no fallback
+        ([{"exclude_photometry_below_rest_wavelength": 912.0}] * 2, False, False, True),  # fallback would be off
+        ([{}, {"exclude_photometry_below_rest_wavelength": 912.0}], False, True, False),  # flag: one setting
+        ([{}, "missing"], False, False, False),  # missing bundle: fails on its own
+    ],
+)
+def test_resume_refuses_a_mixed_exclusion_catalogue(tmp_path, settings, resume_only, flag, refused):
+    args = _hybrid_args(tmp_path)
+    args.resume_only = resume_only
+    args.drop_sub_lyman_photometry = flag
+    pairs = _resume_records(tmp_path, args, settings)
+    by_path = {str(joint.posterior_bundle_path(args.resume, rec)): setting for rec, setting in pairs}
+    records = [rec for rec, _ in pairs]
+    read = lambda path: by_path[str(path)]
+    if refused:
+        with pytest.raises(SystemExit, match="mixed sub-Lyman photometry exclusion"):
+            joint.require_uniform_resume_photometry_exclusion(records, args, read=read)
+    else:
+        joint.require_uniform_resume_photometry_exclusion(records, args, read=read)
+    # Fresh runs are never checked.
+    joint.require_uniform_resume_photometry_exclusion(records, SimpleNamespace(resume=None), read=read)
+
+
+def test_bundle_photometry_exclusion_reads_the_saved_config(monkeypatch, tmp_path):
+    configs = {
+        "off": {"likelihood": {"exclude_photometry_below_rest_wavelength": None}},
+        "on": {"likelihood": {"exclude_photometry_below_rest_wavelength": 912.0, "exclude_photometry_max_fraction_below": 0.3}},
+        "old": {"likelihood": {}},
+    }
+    paths = {}
+    for name in configs:
+        paths[name] = tmp_path / f"{name}.h5"
+        with h5py.File(paths[name], "w") as handle:
+            handle.attrs["name"] = name
+
+    def read_node(handle, key):
+        assert key == "config"
+        return configs[handle.attrs["name"]]
+
+    monkeypatch.setitem(
+        sys.modules, "jaxsedfit", SimpleNamespace(JAXSEDFit=SimpleNamespace(_read_hdf5_node=read_node))
+    )
+    assert joint.bundle_photometry_exclusion(paths["off"]) == {}
+    assert joint.bundle_photometry_exclusion(paths["old"]) == {}
+    assert joint.bundle_photometry_exclusion(paths["on"]) == {
+        "exclude_photometry_below_rest_wavelength": 912.0,
+        "exclude_photometry_max_fraction_below": 0.3,
+    }
