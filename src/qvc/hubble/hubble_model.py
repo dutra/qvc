@@ -4,6 +4,13 @@ from scipy.special import expit
 from collections import OrderedDict
 from dataclasses import dataclass
 
+from qvc.hubble.hubble_eiv_lf import (
+    EIV_LATEX_LABELS,
+    EIV_LOG_F_PRIOR,
+    eiv_hyper_priors,
+    eiv_is_active,
+)
+
 AGN_ALPHA_LAMBDA_PARAM = "gamma_alpha_lambda"
 AGN_ALPHA_LAMBDA_OBS = "alpha_lambda"
 AGN_ALPHA_LAMBDA_ERR = "alpha_lambda_err"
@@ -1357,8 +1364,13 @@ def get_model_params(
     use_f_agn_psf_2500_sigmoid_term=False,
     use_f_agn_psf_2500_flux_fraction_term=False,
     prior_profile=DEFAULT_PRIOR_PROFILE,
+    eiv_mode="none",
+    eiv_free_error_scale=False,
 ):
     prior_profile = normalize_prior_profile(prior_profile)
+    eiv_active = eiv_is_active(eiv_mode)
+    if eiv_active and only_sna:
+        raise ValueError("The latent-lf errors-in-variables mode requires AGN data.")
     if only_sna and only_agn:
         raise ValueError("only_sna and only_agn cannot both be True.")
     if fixed_h0 is not None:
@@ -1478,6 +1490,14 @@ def get_model_params(
     else:
         raise ValueError("cosmo_model must be 'FlatwCDM' or 'Flatw0waCDM'")
 
+    if eiv_active:
+        # log_f becomes the luminosity scatter at fixed regressors (may vanish);
+        # the population/scatter hyperparameters are appended after all
+        # standard parameters so that dropping the trailing columns recovers
+        # the standard parameter vector.
+        priors["log_f"] = EIV_LOG_F_PRIOR
+        priors |= OrderedDict(eiv_hyper_priors(free_error_scale=eiv_free_error_scale))
+
     model_labels = list(priors.keys())
     
     # Map model_labels to LaTeX-compatible labels
@@ -1507,6 +1527,7 @@ def get_model_params(
         "wp": r"$w_p$",
         "wa": r"$w_a$"
     }
+    latex_labels.update(EIV_LATEX_LABELS)
     model_labels_latex = [latex_labels.get(label, label) for label in model_labels]
     
     return priors, model_labels, model_labels_latex

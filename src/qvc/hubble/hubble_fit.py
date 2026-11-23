@@ -92,6 +92,14 @@ from qvc.hubble.hubble_utils import (
     write_results_tex_variables,
     _wrap_text_in_purple,
 )
+from qvc.hubble.hubble_eiv_lf import (
+    EIV_DEFAULT_LF_MODEL,
+    EIV_MODE_NONE,
+    EIV_MODES,
+    build_eiv_lf_table,
+    eiv_is_active,
+    normalize_eiv_mode,
+)
 from qvc.hubble.hubble_likelihood import (
     JOINT_ATTENUATED_MAG_DRAWS_COL,
     JOINT_DEREDDENED_MAG_DRAWS_COL,
@@ -226,6 +234,13 @@ AGN_PIVOT_CHECKPOINT_KEYS = (
     "agn_pivot_reference_object_ids",
     "agn_pivot_rule",
 )
+
+
+# Latent-lf hyperparameter samples of the most recent run_mcmc_pipeline call
+# (sampled or resumed).  run_mcmc_pipeline returns the standard parameter
+# columns only; run_single reads the hyperparameters from here to build the
+# EIV Hubble-diagram products.
+_LAST_EIV_POSTERIOR = {}
 
 
 def validate_completeness_mode(completeness_mode):
@@ -2980,6 +2995,12 @@ def _compute_direct_full_sample_completeness_summaries(
             only_agn=only_agn,
             use_full_cov=use_full_cov,
         )
+        if not np.isfinite(_):
+            raise RuntimeError(
+                "Completeness replay: the likelihood is not finite for posterior row "
+                f"{int(sample_index)} (outside the prior of this likelihood configuration); "
+                "its blob would be a zero placeholder, not a debias correction."
+            )
         blob = np.asarray(blob, dtype=float)
         dmi_draws.append(blob[1])
         sigma_sel_draws.append(blob[2])
@@ -3210,6 +3231,9 @@ def _run_fit_stage(
     df_agn_completeness=None,
     completeness_z_range=None,
     bright_subsample_cut=None,
+    eiv_mode=EIV_MODE_NONE,
+    eiv_free_error_scale=False,
+    eiv_lf_model=None,
 ):
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
     (
@@ -3270,6 +3294,9 @@ def _run_fit_stage(
         df_agn_completeness=df_agn_completeness,
         completeness_z_range=completeness_z_range,
         bright_subsample_cut=bright_subsample_cut,
+        eiv_mode=eiv_mode,
+        eiv_free_error_scale=eiv_free_error_scale,
+        eiv_lf_model=eiv_lf_model,
     )
     display_results_summary(
         flat_samples,
@@ -3499,7 +3526,27 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       df_agn_completeness=None,
                       completeness_z_range=None,
                       bright_subsample_cut=None,
+                      eiv_mode=EIV_MODE_NONE,
+                      eiv_free_error_scale=False,
+                      eiv_lf_model=None,
                       ):
+    eiv_mode = normalize_eiv_mode(eiv_mode)
+    eiv_active = eiv_is_active(eiv_mode)
+    if eiv_active and (only_sna or df_calibrators is not None):
+        raise NotImplementedError(
+            "--eiv-mode latent-lf requires AGN data and does not support --agn_calibrators."
+        )
+    if eiv_active and not completeness:
+        raise ValueError(
+            "--eiv-mode latent-lf needs the attenuated selection magnitude and the completeness "
+            "setup (the parent LF is defined in that magnitude); do not combine it with "
+            "--disable_completeness."
+        )
+    if eiv_active and normalize_selection_attenuation_mode(selection_attenuation_mode) != "fixed-offset":
+        raise ValueError(
+            "--eiv-mode latent-lf supports only --selection-attenuation-mode fixed-offset."
+        )
+    _LAST_EIV_POSTERIOR.clear()
     if only_sna:
         completeness = False
         plot_completeness = False
@@ -3635,8 +3682,27 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        eiv_mode=eiv_mode,
+        eiv_free_error_scale=eiv_free_error_scale,
     )
     prior_bounds_json = canonical_prior_bounds_json(priors)
+    n_standard_params = len(
+        get_model_params(
+            cosmo_model,
+            only_sna=only_sna,
+            only_agn=only_agn,
+            use_planck_h0_prior=use_planck_h0_prior,
+            use_planck_om_prior=use_planck_om_prior,
+            prior_profile=prior_profile,
+            fixed_h0=fixed_h0,
+            use_alpha_lambda_term=use_alpha_lambda_term,
+            use_eta_sigma_term=use_eta_sigma_term,
+            use_redshift_mean_term=use_redshift_mean_term,
+            use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
+            use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
+            use_redshift_log_f_term=use_redshift_log_f_term,
+        )[1]
+    )
     ndim = len(model_labels)
     print(f"Running sampling with {ndim} parameters for cosmological model: {cosmo_model}")
     if resume_replot_with_cuts and not resume:
@@ -3809,6 +3875,13 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
     if 'eta_sigma' in df_agn.columns:
         agn_fields += ('eta_sigma',)
     agn_data = {col: df_agn[col].values for col in agn_fields if col in df_agn.columns}
+    if eiv_active:
+        lf_model_for_eiv = EIV_DEFAULT_LF_MODEL if eiv_lf_model is None else eiv_lf_model
+        print(
+            "[EIV] latent-lf mode: parent-LF population prior from "
+            f"{lf_model_for_eiv!r}; selection cancels in p(x_obs | m, z)."
+        )
+        agn_data.update(build_eiv_lf_table(agn_data["z"], lf_model=lf_model_for_eiv))
 
     pantheon_fields = ['zHD', 'zHEL', 'm_b_corr', 'IS_CALIBRATOR', 'CEPH_DIST', 'MU_SH0ES_ERR_DIAG']
     pantheon_data = {col: df_pantheon[col].values for col in pantheon_fields if col in df_pantheon.columns}
@@ -3891,7 +3964,9 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 validate_resume_checkpoint(
                     r,
                     checkpoint_file=checkpoint_file,
-                    ndim=ndim,
+                    # EIV checkpoints store only the standard columns in
+                    # flat_samples (hyperparameters are kept separately).
+                    ndim=n_standard_params if eiv_active else ndim,
                     n_agn=len(agn_data["z"]),
                     expected_selection_attenuation_mode=selection_attenuation_mode,
                     expected_light_curve_uncertainty_mode=(
@@ -3941,6 +4016,39 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                     f"Cause: {exc}"
                 ) from exc
         flat_samples = r["flat_samples"]
+        stored_eiv_mode = (
+            _checkpoint_scalar_string(r["eiv_mode"], field_name="eiv_mode", checkpoint_file=checkpoint_file)
+            if "eiv_mode" in r
+            else EIV_MODE_NONE
+        )
+        if stored_eiv_mode != eiv_mode:
+            raise RuntimeError(
+                f"Checkpoint '{checkpoint_file}' was written with eiv_mode={stored_eiv_mode!r}; "
+                f"this run uses eiv_mode={eiv_mode!r}."
+            )
+        if eiv_active:
+            stored_free = bool(np.asarray(r.get("eiv_free_error_scale", False)).reshape(()).item())
+            if stored_free != bool(eiv_free_error_scale):
+                raise RuntimeError(
+                    f"Checkpoint '{checkpoint_file}' eiv_free_error_scale={stored_free} differs from this run."
+                )
+            _LAST_EIV_POSTERIOR.update(
+                checkpoint_file=str(checkpoint_file),
+                hyper_labels=[
+                    v.decode() if isinstance(v, bytes) else str(v)
+                    for v in np.asarray(r["eiv_hyper_labels"]).reshape(-1)
+                ],
+                hyper_samples=np.asarray(r["eiv_hyper_samples"], dtype=float),
+            )
+            if _LAST_EIV_POSTERIOR["hyper_samples"].shape[0] != np.asarray(flat_samples).shape[0]:
+                raise RuntimeError(
+                    f"Checkpoint '{checkpoint_file}' EIV hyperparameter samples do not match flat_samples rows."
+                )
+            if _LAST_EIV_POSTERIOR["hyper_labels"] != list(model_labels[n_standard_params:]):
+                raise RuntimeError(
+                    f"Checkpoint '{checkpoint_file}' EIV hyperparameter labels differ from this run's."
+                )
+            model_labels = list(model_labels[:n_standard_params])
         dmi_max_w = r["dmi_max_w"]
         dmi_posterior_median = r.get("dmi_posterior_median", dmi_max_w)
         dmi_posterior_sigma = r["dmi_posterior_sigma"]
@@ -3995,6 +4103,11 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 selection_attenuation_mode=selection_attenuation_mode,
                 light_curve_uncertainty_mode=light_curve_uncertainty_mode,
             )
+            if eiv_active:
+                logl_kwargs.update(
+                    eiv_mode=eiv_mode,
+                    eiv_free_error_scale=bool(eiv_free_error_scale),
+                )
             ptform_kwargs = dict(priors=priors, model_labels=model_labels)
             loglike_func = (
                 log_likelihood_nearbylcs
@@ -4044,7 +4157,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
 
 
         results = sampler.results
-        if compare_sigma_only:
+        if compare_sigma_only or eiv_active:
             print("Skipping dynesty plot generation.")
         else:
             print("Plotting full dynesty corner...")
@@ -4085,6 +4198,22 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             )
         flat_samples = samples[flat_idx]
         flat_blobs   = blobs[flat_idx]
+        eiv_hyper_labels_run = list(model_labels[n_standard_params:])
+        eiv_hyper_samples = flat_samples[:, n_standard_params:]
+        if eiv_active:
+            # Downstream code sees the standard parameterization; the latent-lf
+            # hyperparameters are stored separately in the checkpoint.
+            print("\n[EIV] latent-lf hyperparameters (median, 16-84%):")
+            for j, label in enumerate(eiv_hyper_labels_run):
+                q16, q50, q84 = np.percentile(eiv_hyper_samples[:, j], [16, 50, 84])
+                print(f"  {label}: {q50:.4f} (+{q84 - q50:.4f} / -{q50 - q16:.4f})")
+            flat_samples = flat_samples[:, :n_standard_params]
+            model_labels = list(model_labels[:n_standard_params])
+            _LAST_EIV_POSTERIOR.update(
+                checkpoint_file=str(checkpoint_file),
+                hyper_labels=list(eiv_hyper_labels_run),
+                hyper_samples=np.asarray(eiv_hyper_samples, dtype=float),
+            )
 
         # if only_sna:
         #     return None, flat_samples, model_labels, None, logZ, logZerr
@@ -4226,6 +4355,18 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 checkpoint_payload["completeness_group_index_fit_selection"] = (
                     df_agn[COMPLETENESS_GROUP_COL].to_numpy(dtype=np.int64)
                 )
+        if eiv_active:
+            checkpoint_payload.update(
+                eiv_mode=eiv_mode,
+                eiv_free_error_scale=bool(eiv_free_error_scale),
+                eiv_hyper_labels=np.asarray(eiv_hyper_labels_run, dtype=str),
+                eiv_hyper_samples=np.asarray(eiv_hyper_samples, dtype=float),
+                eiv_full_prior_bounds_json=prior_bounds_json,
+                eiv_log_evidence_note=(
+                    "logZ is for ln p(x_obs | m, z): not comparable with "
+                    "eiv_mode=none runs"
+                ),
+            )
         save_chains(checkpoint_file, **checkpoint_payload)
 
         # Bin dmi in redshift
@@ -4329,6 +4470,87 @@ def print_debiased_fit_quality(summary, *, cosmo_model, prefix):
     console.print("Selected = selection-conditioned uncertainty.", style="dim")
 
 
+EIV_SKIPPED_FORWARD_PRODUCTS = (
+    "completeness replay of the forward-model debias (dmi, sigma_dmi, sigma_sel)",
+    "plot_completeness_diagnostics (forward-model dmi panels)",
+    "forward-model Hubble diagrams, residual CSV and error budget (plot_hubble)",
+    "L2500/M2500 predicted-vs-actual, sigma-tau and residual diagnostics built on forward-model errors and dmi",
+    "alpha_OX residual panels and debias-impact / redshift-bin summaries",
+)
+
+
+def _run_single_eiv_plots(
+    flat_samples,
+    model_labels,
+    df_plot,
+    *,
+    plot_path,
+    cosmo_model,
+    agn_pivot_context,
+    eiv_lf_model,
+    dm_interp,
+    logZ,
+    logZerr,
+    age,
+    age_err,
+    speed,
+    only_agn,
+    z_pivot_sna,
+    z_pivot_agn,
+    df_pantheon=None,
+):
+    """Hubble-diagram products of a --eiv-mode latent-lf run (EIV model only).
+
+    For joint SN + AGN fits (M0_sn in the parameter vector) the curves are drawn
+    as fitted, without shifting to the AGN median, and the SNe are overplotted.
+    """
+    from qvc.hubble.hubble_eiv_plots import eiv_posterior_hubble_products, write_eiv_hubble_products
+
+    if not _LAST_EIV_POSTERIOR:
+        raise RuntimeError("EIV plotting needs the latent-lf hyperparameter samples of this run.")
+    for item in EIV_SKIPPED_FORWARD_PRODUCTS:
+        print(f"[EIV] Skipping {item}: it has no meaning for --eiv-mode latent-lf.")
+    print(
+        "[EIV] Building Hubble-diagram products from the latent-lf model "
+        f"(hyperparameters from {_LAST_EIV_POSTERIOR['checkpoint_file']})."
+    )
+    products = eiv_posterior_hubble_products(
+        flat_samples,
+        model_labels,
+        _LAST_EIV_POSTERIOR["hyper_samples"],
+        _LAST_EIV_POSTERIOR["hyper_labels"],
+        df_plot,
+        cosmo_model=cosmo_model,
+        pivots=agn_pivot_context.values,
+        lf_model=eiv_lf_model,
+    )
+    fit_mask = df_plot["is_fit_selection"].to_numpy(dtype=bool)
+    n_params = len(model_labels) + len(_LAST_EIV_POSTERIOR["hyper_labels"])
+    joint = "M0_sn" in model_labels
+    sn_points = None
+    if joint and df_pantheon is not None and len(df_pantheon):
+        m0_sn = float(np.median(np.asarray(flat_samples)[:, list(model_labels).index("M0_sn")]))
+        sn_sel = np.asarray(df_pantheon["zHD"], dtype=float) > 0.01
+        sn_points = (
+            np.asarray(df_pantheon["zHD"], dtype=float)[sn_sel],
+            np.asarray(df_pantheon["m_b_corr"], dtype=float)[sn_sel] - m0_sn,
+            np.asarray(df_pantheon["MU_SH0ES_ERR_DIAG"], dtype=float)[sn_sel],
+        )
+    csv_path, summary, _tables = write_eiv_hubble_products(
+        products, df_plot, fit_mask, plot_path, n_params=n_params,
+        label="EIV latent-lf joint SN+AGN" if joint else "EIV latent-lf",
+        shift_to_agn_scale=not joint, sn_points=sn_points,
+    )
+    print(f"[EIV] Wrote {csv_path} and hubble_diagram_eiv_{{debiased,biased}} in {plot_path}")
+    for key, value in summary.items():
+        print(f"[EIV]   {key}: {value}")
+    plot_cosmo_corner(None, flat_samples, cosmo_model, z_pivot_sna, z_pivot_agn, show=False,
+                      plot_path=plot_path, speed=speed, gauss_sigma=1.5, kde_bw_scale=1.5,
+                      include_alpha_beta=True, only_agn=only_agn)
+    debiased_residuals = products["resid_debiased"]
+    return flat_samples, model_labels, dm_interp, logZ, logZerr, debiased_residuals, age, age_err
+
+
 def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetCov, 
                cosmo_model, completeness=True, use_full_cov=True, 
                N=None, resume=False, only_sna=False, only_agn=False, speed="production", 
@@ -4366,7 +4588,12 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                bright_subsample_cut=None,
                bright_subsample_plot_data=None,
                skip_debiased_residual_plot=False,
-               agn_xray_counts=None):
+               agn_xray_counts=None,
+               eiv_mode=EIV_MODE_NONE,
+               eiv_free_error_scale=False,
+               eiv_lf_model=None):
+    if eiv_lf_model is None:
+        eiv_lf_model = completeness_lf_model
     if only_sna:
         completeness = False
         plot_completeness = False
@@ -4786,6 +5013,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 df_agn_completeness=df_agn_completeness_parent,
                 completeness_z_range=completeness_z_range,
                 bright_subsample_cut=bright_subsample_cut,
+                eiv_mode=eiv_mode,
+                eiv_free_error_scale=eiv_free_error_scale,
+                eiv_lf_model=eiv_lf_model,
             )
             posterior_sample_indices_pass1 = (
                 _completeness_replay_sample_indices(
@@ -5157,6 +5387,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         df_agn_completeness=df_agn_completeness_parent,
         completeness_z_range=completeness_z_range,
         bright_subsample_cut=bright_subsample_cut,
+        eiv_mode=eiv_mode,
+        eiv_free_error_scale=eiv_free_error_scale,
+        eiv_lf_model=eiv_lf_model,
     )
     if apply_two_pass_sigma_clip:
         _write_stage_checkpoint(
@@ -5203,6 +5436,27 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 plot_completeness_vs_mag_at_redshifts(
                     *plot_completeness_params[:3], plot_path=plot_path
                 )
+
+    if eiv_is_active(eiv_mode):
+        return _run_single_eiv_plots(
+            flat_samples,
+            model_labels,
+            df_agn_pass2_plot_sample,
+            plot_path=plot_path,
+            cosmo_model=cosmo_model,
+            agn_pivot_context=agn_pivot_context,
+            eiv_lf_model=eiv_lf_model,
+            dm_interp=dm_interp,
+            logZ=logZ,
+            logZerr=logZerr,
+            age=age,
+            age_err=age_err,
+            speed=speed,
+            only_agn=only_agn,
+            z_pivot_sna=z_pivot_sna,
+            z_pivot_agn=z_pivot_agn,
+            df_pantheon=None if only_agn else df_pantheon,
+        )
 
     fit_quality_summary = {}
     if minimal_plots:
@@ -6948,6 +7202,29 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
+        "--eiv-mode",
+        "--eiv_mode",
+        dest="eiv_mode",
+        choices=EIV_MODES,
+        default=EIV_MODE_NONE,
+        help=(
+            "Errors-in-variables AGN likelihood. 'none' (default) keeps the "
+            "standard forward likelihood. 'latent-lf' uses latent true "
+            "regressors and luminosities with the completeness-mock parent LF "
+            "as population prior, intrinsic scatter in log sigma at fixed L "
+            "(eiv_log_eta) and in M at fixed regressors (log_f), and the "
+            "selection-free conditional likelihood p(x_obs | m, z) (see "
+            "qvc.hubble.hubble_eiv_lf). Requires --run single, NumPy/Dynesty "
+            "and covariance light-curve uncertainties."
+        ),
+    )
+    parser.add_argument(
+        "--eiv-free-error-scale",
+        action="store_true",
+        default=False,
+        help="With --eiv-mode latent-lf, sample a global scale of the light-curve covariance.",
+    )
+    parser.add_argument(
         "--fit_alpha_lambda_term",
         action="store_true",
         default=False,
@@ -7134,6 +7411,21 @@ if __name__ == "__main__":
             "--fit_f_agn_psf_2500_flux_fraction_term is currently supported "
             "only by the CPU/Dynesty Hubble model and cannot be used with "
             "--use_jax."
+        )
+    if eiv_is_active(args.eiv_mode) and (
+        args.use_jax
+        or args.run != "single"
+        or args.light_curve_uncertainty_mode != "covariance"
+        or args.only_sna
+        or args.agn_calibrators is not None
+        or args.disable_completeness
+        or args.selection_attenuation_mode != "fixed-offset"
+    ):
+        raise ValueError(
+            "--eiv-mode latent-lf requires --run single, the NumPy/Dynesty "
+            "backend, --light-curve-uncertainty-mode covariance, "
+            "--selection-attenuation-mode fixed-offset, completeness enabled "
+            "(no --disable_completeness), AGN data and no --agn_calibrators."
         )
     if args.use_jax and args.light_curve_uncertainty_mode != "covariance":
         raise NotImplementedError(
@@ -7532,7 +7824,9 @@ if __name__ == "__main__":
                 bright_subsample_plot_data=bright_subsample_plot_data,
                 skip_debiased_residual_plot=args.skip_debiased_residual_plot,
                 df_agn_completeness_parent=df_agn_completeness_parent,
-                agn_pivot_context=agn_pivot_context)
+                agn_pivot_context=agn_pivot_context,
+                eiv_mode=args.eiv_mode,
+                eiv_free_error_scale=args.eiv_free_error_scale)
             samples_joint, model_labels, dm_interp, logZ_joint, logZerr_joint, debiased_residuals, age, age_err = r
             cosmo_models_dict[cosmo_model] = summarize_single_cosmo_result(
                 samples_joint,

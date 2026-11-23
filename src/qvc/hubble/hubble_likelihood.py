@@ -21,6 +21,13 @@ from qvc.hubble.hubble_completeness_refactored import (
     COMPLETENESS_MAG_COL,
     COMPLETENESS_MAG_ERR_COL,
 )
+from qvc.hubble.hubble_eiv_lf import (
+    EIV_MODE_NONE,
+    eiv_distance_terms,
+    eiv_is_active,
+    eiv_lf_agn_loglike,
+    normalize_eiv_mode,
+)
 from qvc.light_curve.posterior_draws import (
     LIGHT_CURVE_LOG_SIGMA_DRAW_COL,
     LIGHT_CURVE_LOG_TAU_RF_DRAW_COL,
@@ -1151,13 +1158,30 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
                    only_agn=False,
                    use_full_cov=False,
                    selection_attenuation_mode="fixed-offset",
-                   light_curve_uncertainty_mode="covariance"):
+                   light_curve_uncertainty_mode="covariance",
+                   eiv_mode=EIV_MODE_NONE,
+                   eiv_free_error_scale=False):
     selection_attenuation_mode = normalize_selection_attenuation_mode(
         selection_attenuation_mode
     )
     light_curve_uncertainty_mode = normalize_light_curve_uncertainty_mode(
         light_curve_uncertainty_mode
     )
+    eiv_active = eiv_is_active(eiv_mode)
+    if eiv_active and (
+        light_curve_uncertainty_mode != "covariance"
+        or use_alpha_lambda_term
+        or use_eta_sigma_term
+        or use_redshift_mean_term
+        or use_f_agn_psf_2500_sigmoid_term
+        or use_f_agn_psf_2500_flux_fraction_term
+        or use_redshift_log_f_term
+    ):
+        raise NotImplementedError(
+            "The latent-lf errors-in-variables likelihood supports only the "
+            "two-regressor (log sigma, log tau) model with the light-curve "
+            "covariance uncertainty mode."
+        )
     if (
         light_curve_uncertainty_mode == "posterior-draws"
         and selection_attenuation_mode == "joint-posterior"
@@ -1180,6 +1204,8 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         use_f_agn_psf_2500_sigmoid_term=use_f_agn_psf_2500_sigmoid_term,
         use_f_agn_psf_2500_flux_fraction_term=use_f_agn_psf_2500_flux_fraction_term,
         use_redshift_log_f_term=use_redshift_log_f_term,
+        eiv_mode=eiv_mode,
+        eiv_free_error_scale=eiv_free_error_scale,
     )
     model_priors = {key: priors[key] for key in model_labels}
     params = dict(zip(model_labels, theta))
@@ -1223,6 +1249,26 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
     
     if only_sna:
         return ll_snia, empty_blob(N_obj)
+
+    if eiv_active:
+        # Latent-luminosity errors-in-variables likelihood: ln p(x_obs | m, z)
+        # with the parent LF as the population prior.  The selection depends
+        # on (m_att, z) only and cancels exactly (see hubble_eiv_lf).
+        z = np.asarray(agn_data['z'], dtype=float)
+        mu_eiv, sigma_lens_eiv, sigma_mu_z_eiv = eiv_distance_terms(
+            z, np.asarray(agn_data['z_err'], dtype=float), cosmo
+        )
+        ll_eiv, eiv_blob = eiv_lf_agn_loglike(
+            params,
+            agn_data,
+            mu_cosmo=mu_eiv,
+            sigma_lens=sigma_lens_eiv,
+            sigma_mu_z=sigma_mu_z_eiv,
+            pivots=agn_pivot_context.values,
+        )
+        if not np.isfinite(ll_eiv):
+            return -np.inf, empty_blob(N_obj)
+        return ll_snia + ll_eiv, eiv_blob
 
     # ------------------------
     # AGN likelihood
