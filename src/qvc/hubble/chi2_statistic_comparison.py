@@ -52,6 +52,15 @@ CUT_COMPARISON_COLUMNS = (
     ("spearman", "rank corr"),
     ("matched_reference_threshold", "ref thr @ stored pass frac"),
 )
+JOINT_DEFINITION_COLUMNS = (
+    ("definition", "joint definition"),
+    ("threshold", "threshold"),
+    ("n_finite", "N finite"),
+    ("passing", "pass"),
+    ("spearman_vs_stored", "rank corr vs stored"),
+    ("matched_threshold", "thr @ stored pass frac"),
+)
+MIXED_JOINT_INPUTS = ("sed_chi2", "sed_n_eff", "spectroscopy_chi2_ref", "spectroscopy_n_ref")
 SELECTION_COMPARISON_COLUMNS = (
     ("configuration", "Tier-1 selection"),
     ("chi2_columns", "chi-square columns"),
@@ -145,6 +154,57 @@ def compare_cut_statistics(frame, thresholds=None):
     return rows
 
 
+def mixed_joint_reduced_chi2(frame):
+    """Stored SED + reference spectrum: (sed_chi2 + spec_chi2_ref) / (n_sed + n_spec).
+
+    Built from the per-object posterior medians of each term (the catalogue
+    stores no per-draw sums), so it approximates the posterior median of the
+    ratio. NaN when an input column is missing.
+    """
+    if not all(column in frame.columns for column in MIXED_JOINT_INPUTS):
+        return None
+    sed_chi2, sed_n, spec_chi2, spec_n = (_values(frame, c) for c in MIXED_JOINT_INPUTS)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        total = sed_n + spec_n
+        return np.where(total > 0, (sed_chi2 + spec_chi2) / total, np.nan)
+
+
+def compare_joint_definitions(frame, threshold=None):
+    """Compare the stored, the reference and the mixed joint chi-square.
+
+    The reference joint value is a new statistic (unweighted, fixed-floor SED
+    part); the mixed one keeps the stored SED term and uses the reference
+    spectral term. Each row gives the pass count at ``threshold``, the rank
+    correlation with the stored joint value and the threshold that keeps the
+    stored pass fraction.
+    """
+    threshold = DEFAULT_THRESHOLDS["joint_reduced_chi2"] if threshold is None else threshold
+    if threshold is None or "joint_reduced_chi2" not in frame.columns:
+        return []
+    stored = _values(frame, "joint_reduced_chi2")
+    definitions = [("stored", stored)]
+    if "joint_reduced_chi2_ref" in frame.columns:
+        definitions.append(("reference (fixed-floor SED + reference spectrum)", _values(frame, "joint_reduced_chi2_ref")))
+    mixed = mixed_joint_reduced_chi2(frame)
+    if mixed is not None:
+        definitions.append(("stored SED + reference spectrum", mixed))
+    if len(definitions) < 2:
+        return []
+    rows = []
+    for name, values in definitions:
+        rows.append(
+            {
+                "definition": name,
+                "threshold": float(threshold),
+                "n_finite": int(np.count_nonzero(np.isfinite(values))),
+                "passing": int(np.count_nonzero(_passes(values, None, threshold))),
+                "spearman_vs_stored": spearman(stored, values),
+                "matched_threshold": matched_reference_threshold(stored, values, threshold),
+            }
+        )
+    return rows
+
+
 def _selection_mask(frame, cuts):
     mask = np.ones(len(frame), dtype=bool)
     for column, lower, upper in cuts:
@@ -201,13 +261,18 @@ def _format_rows(rows, columns):
     return render_ascii_table(formatted, columns)
 
 
-def render_comparison(cut_rows, selection_rows=None):
+def render_comparison(cut_rows, selection_rows=None, joint_rows=None):
     """Return the comparison as plain-text tables."""
     parts = []
     if cut_rows:
         parts.append(
             "Tier-1 chi-square: stored vs reference statistic at the same threshold\n"
             + _format_rows(cut_rows, CUT_COMPARISON_COLUMNS)
+        )
+    if joint_rows:
+        parts.append(
+            "Joint chi-square definitions at the joint threshold\n"
+            + _format_rows(joint_rows, JOINT_DEFINITION_COLUMNS)
         )
     if selection_rows:
         parts.append(
@@ -337,7 +402,8 @@ def main(argv=None):
         raise SystemExit(
             "The catalogue has no pair of stored and reference (*_ref) chi-square columns."
         )
-    print(render_comparison(cut_rows))
+    joint_rows = compare_joint_definitions(frame)
+    print(render_comparison(cut_rows, joint_rows=joint_rows))
     split = split_comparison(frame, z_edges=z_edges, snr_column=snr_column)
     with pd.option_context("display.width", 200, "display.max_rows", 500):
         print()
@@ -349,6 +415,7 @@ def main(argv=None):
         out.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(cut_rows).to_csv(out / "chi2_statistic_comparison.csv", index=False)
         split.to_csv(out / "chi2_statistic_comparison_by_split.csv", index=False)
+        pd.DataFrame(joint_rows).to_csv(out / "joint_chi2_definitions.csv", index=False)
         print(f"\nWrote {out / 'chi2_statistic_comparison.csv'} and the split table.")
     return cut_rows, split
 
