@@ -9,6 +9,7 @@ from qvc.hubble.minimal_inputs import (
     LIGHT_CURVE_FIELDS,
     LIGHT_CURVE_FORMAT,
     MANIFEST_ATTR,
+    NOISE_MODEL_FIELD,
     SPECTRA_FIELDS,
     SPECTRA_FORMAT,
     export_minimal_hubble_inputs,
@@ -80,8 +81,8 @@ def test_export_writes_exact_versioned_manifests_and_matched_order(tmp_path):
         validate_minimal_light_curve_hdf5(handle)
     with h5py.File(spectra_output, "r") as handle:
         assert handle.attrs[FORMAT_ATTR] == SPECTRA_FORMAT
-        assert json.loads(handle.attrs[MANIFEST_ATTR]) == list(SPECTRA_FIELDS)
-        assert set(handle["catalog"]) == set(SPECTRA_FIELDS)
+        assert json.loads(handle.attrs[MANIFEST_ATTR]) == [*SPECTRA_FIELDS, NOISE_MODEL_FIELD]
+        assert set(handle["catalog"]) == {*SPECTRA_FIELDS, NOISE_MODEL_FIELD}
         removed = {
             "fracAGN_5100_fit",
             "f_host_2500_psf",
@@ -131,3 +132,26 @@ def test_minimal_spectra_reader_rejects_extra_field(tmp_path):
         handle["catalog"].create_dataset("fracAGN_5100_fit", data=[0.8, 0.9])
     with pytest.raises(ValueError, match="manifest mismatch"):
         read_minimal_spectra_hdf5(spectra_output)
+
+
+def test_export_records_the_spectral_noise_model(tmp_path):
+    light_source, spectra_source = _write_sources(tmp_path)
+    fitted = tmp_path / "fitted.h5"
+    export_minimal_hubble_inputs(light_source, spectra_source, tmp_path / "l1.h5", fitted)
+    assert set(read_minimal_spectra_hdf5(fitted)[NOISE_MODEL_FIELD]) == {"fitted_jitter"}
+    with h5py.File(spectra_source, "r+") as handle:
+        del handle["catalog/frac_jitter"]
+    fixed = tmp_path / "fixed.h5"
+    export_minimal_hubble_inputs(light_source, spectra_source, tmp_path / "l2.h5", fixed)
+    assert set(read_minimal_spectra_hdf5(fixed)[NOISE_MODEL_FIELD]) == {"fixed_floor"}
+
+
+def test_previous_minimal_spectra_format_is_rejected(tmp_path):
+    light_source, spectra_source = _write_sources(tmp_path)
+    output = tmp_path / "minimal_spectra.h5"
+    export_minimal_hubble_inputs(light_source, spectra_source, tmp_path / "l.h5", output)
+    with h5py.File(output, "r+") as handle:
+        handle.attrs[FORMAT_ATTR] = "qvc_hubble_paper_spectra_v1"
+        del handle["catalog/" + NOISE_MODEL_FIELD]
+    with pytest.raises(ValueError, match="Re-export"):
+        read_minimal_spectra_hdf5(output)

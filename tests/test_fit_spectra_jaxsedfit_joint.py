@@ -3322,3 +3322,67 @@ def test_spectrum_snr_median_uses_valid_unmasked_pixels():
     assert joint.spectrum_snr_median(SimpleNamespace(spectroscopy=spectroscopy)) == pytest.approx(10.0)
     assert np.isnan(joint.spectrum_snr_median(SimpleNamespace()))
     assert "spectrum_snr_median" in joint.empty_joint_chi2_summary()
+
+
+def test_compare_resumed_prediction_flags_changed_values(tmp_path):
+    path = tmp_path / "old.csv"
+    pd.DataFrame(
+        {
+            "object_id": [" 7 ", "8"],
+            "spectroscopy_reduced_chi2": [1.05, 2.0],
+            "m_2500_dereddened": [20.0, np.nan],
+        }
+    ).to_csv(path, index=False)
+    joint._RESUME_COMPARE_CACHE.clear()
+    rows = joint._resume_compare_rows(path)
+    same = {"spectroscopy_reduced_chi2": 1.05 * (1 + 1e-6), "m_2500_dereddened": 20.0}
+    assert joint.compare_resumed_prediction(same, rows, object_id="7") == []
+    changed = {"spectroscopy_reduced_chi2": 1.10, "m_2500_dereddened": 20.0}
+    problems = joint.compare_resumed_prediction(changed, rows, object_id="7")
+    assert len(problems) == 1 and problems[0].startswith("spectroscopy_reduced_chi2")
+    assert joint.compare_resumed_prediction({"spectroscopy_reduced_chi2": 2.0}, rows, object_id="8") == []
+    assert "not in the comparison catalogue" in joint.compare_resumed_prediction({}, rows, object_id="9")[0]
+
+
+def test_resumed_fit_fails_when_re_prediction_differs(monkeypatch, tmp_path):
+    rec = _run_record()
+    args = _hybrid_args(tmp_path)
+    args.save_fig = False
+    args.save_jaxsedfit_samples = False
+    source = joint.posterior_bundle_path(args.resume, rec)
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"old posterior")
+    filter_names = [f"{band}_sdss" for band in "ugriz"]
+    prediction = _component_prediction(filter_names)
+    prediction.update({"ebv_gal": np.full(4, 0.02), "ebv_agn": np.full(4, 0.03)})
+    DummyFitter = _dummy_resume_fitter_cls(rec, prediction, filter_names)
+
+    baseline = joint._complete_resumed_fit(rec, args, source, DummyFitter())
+    assert baseline["reference_chi2_source"] == "re-prediction"
+    assert baseline["reference_chi2_jaxsedfit_commit"]
+    catalog = tmp_path / "old_catalog.csv"
+    row = {"object_id": rec["object_id"], **{c: baseline[c] for c in joint.RESUME_COMPARE_COLUMNS}}
+    pd.DataFrame([row]).to_csv(catalog, index=False)
+    joint._RESUME_COMPARE_CACHE.clear()
+    args.resume_compare_catalog = str(catalog)
+    matched = joint._complete_resumed_fit(rec, args, source, DummyFitter())
+    assert matched["resume_prediction_mismatch"] == ""
+    assert matched["resume_compare_catalog"] == str(catalog)
+
+    row["spectroscopy_reduced_chi2"] = baseline["spectroscopy_reduced_chi2"] * 1.5
+    pd.DataFrame([row]).to_csv(catalog, index=False)
+    joint._RESUME_COMPARE_CACHE.clear()
+    with pytest.raises(ValueError, match="differ from"):
+        joint._complete_resumed_fit(rec, args, source, DummyFitter())
+    joint._RESUME_COMPARE_CACHE.clear()
+    args.allow_resume_prediction_mismatch = True
+    recorded = joint._complete_resumed_fit(rec, args, source, DummyFitter())
+    assert recorded["resume_prediction_mismatch"].startswith("spectroscopy_reduced_chi2")
+    joint._RESUME_COMPARE_CACHE.clear()
+
+
+def test_resume_compare_catalog_requires_resume(tmp_path):
+    common = ["--mode", "fit", str(tmp_path / "out.h5"),
+              "--sed-photometry-path", str(tmp_path / "phot.csv"), "--filter_object_id", "1"]
+    with pytest.raises(SystemExit):
+        joint.parse_args([*common, "--resume-compare-catalog", "x.h5"])

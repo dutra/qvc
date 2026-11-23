@@ -146,6 +146,14 @@ cut_threshold_defaults = {
     # jitter depends on S/N: cutting on it (stored statistic, or a catalogue
     # without reference columns) stops the run unless this is 1.
     "QVC_CUT_ALLOW_FITTED_NOISE_CHI2": "0",
+    # Rows with a stored chi-square but no reference value (mixed catalogue
+    # versions) stop the run; set to 1 to let the reference cut remove them.
+    "QVC_CUT_ALLOW_MISSING_REFERENCE_CHI2": "0",
+    # Reference-chi-square floors the thresholds assume; the catalogue's
+    # recorded floors must match.
+    "QVC_CUT_REFERENCE_SPECTRUM_FLOOR": "0.08",
+    "QVC_CUT_REFERENCE_PHOTOMETRY_FLOOR": "0.10",
+    "QVC_CUT_REFERENCE_AGN_FLOOR": "0.15",
     "QVC_CUT_LOO_CHI2_EFF_MAX": "1.05",
     "QVC_CUT_SPECTRAL_RHAT_MAX": "1.05",
     "QVC_CUT_LIGHT_CURVE_RHAT_MAX": "1.05",

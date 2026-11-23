@@ -1674,6 +1674,10 @@ def empty_joint_chi2_summary():
     }
     out.update({field: np.nan for field in REFERENCE_CHI2_FLOOR_FIELDS})
     out["spectrum_snr_median"] = np.nan
+    out["reference_chi2_source"] = ""
+    out["reference_chi2_jaxsedfit_commit"] = ""
+    out["resume_compare_catalog"] = ""
+    out["resume_prediction_mismatch"] = ""
     return out
 
 
@@ -1726,6 +1730,67 @@ def apply_reference_spectrum_floor(fitter, floor):
     fitter.config.likelihood.reference_spectrum_floor = float(floor)
     fitter.predictive = None
     return fitter
+
+
+# Re-predicted values compared with the resumed run's catalogue; equal draws
+# and the same jaxsedfit give identical values, so a difference beyond the
+# tolerance means the model changed between the fit and the re-prediction.
+RESUME_COMPARE_COLUMNS = (
+    "sed_reduced_chi2",
+    "spectroscopy_reduced_chi2",
+    "joint_reduced_chi2",
+    "m_2500_dereddened",
+    "m_2500_attenuated_model",
+)
+RESUME_COMPARE_RTOL = 1.0e-4
+RESUME_COMPARE_ATOL = 1.0e-6
+_RESUME_COMPARE_CACHE = {}
+
+
+def _resume_compare_rows(path):
+    """Return {object_id: row} from a resumed run's spectral catalogue (cached)."""
+    path = str(path)
+    if path not in _RESUME_COMPARE_CACHE:
+        from qvc.hubble.chi2_statistic_comparison import read_catalog
+
+        frame = read_catalog(path)
+        if "object_id" not in frame.columns:
+            raise ValueError(f"Resume comparison catalogue {path} has no object_id column.")
+        frame["object_id"] = frame["object_id"].astype(str).str.strip()
+        _RESUME_COMPARE_CACHE[path] = {
+            row["object_id"]: row for row in frame.to_dict(orient="records")
+        }
+    return _RESUME_COMPARE_CACHE[path]
+
+
+def compare_resumed_prediction(result, rows, *, object_id):
+    """Return the differences between re-predicted and previously stored values."""
+    previous = rows.get(str(object_id).strip())
+    if previous is None:
+        return [f"object {object_id} is not in the comparison catalogue"]
+    problems = []
+    for column in RESUME_COMPARE_COLUMNS:
+        if column not in previous:
+            continue
+        old = legacy.safe_float(previous[column])
+        new = legacy.safe_float(result.get(column))
+        if not np.isfinite(old) and not np.isfinite(new):
+            continue
+        if not (np.isfinite(old) and np.isfinite(new)) or not np.isclose(
+            new, old, rtol=RESUME_COMPARE_RTOL, atol=RESUME_COMPARE_ATOL
+        ):
+            problems.append(f"{column}: stored {old!r}, re-predicted {new!r}")
+    return problems
+
+
+def reference_chi2_origin(execution_mode):
+    """Provenance of the reference chi-square columns of one row."""
+    dependency = runtime_state().get("dependencies", {}).get("JAXSEDFit", {})
+    git = dependency.get("git", {}) if isinstance(dependency, dict) else {}
+    return {
+        "reference_chi2_source": "re-prediction" if execution_mode == "resumed" else "fit",
+        "reference_chi2_jaxsedfit_commit": str(git.get("commit", "")).strip() or "unavailable",
+    }
 
 
 def require_reference_chi2_support():
@@ -3191,6 +3256,7 @@ def run_one_fit(
         result.update(summarize_spectral_component_fractions(prediction, rec["z"]))
         result.update(summarize_joint_chi2(prediction))
         result.update(reference_chi2_provenance(config))
+        result.update(reference_chi2_origin("fresh"))
         result["spectrum_snr_median"] = spectrum_snr_median(config)
         result.update(summarize_host_2500_psf(prediction))
         (
@@ -3392,6 +3458,7 @@ def _complete_resumed_fit(rec, args, source_path, fitter, *, sampled_options=Non
     )
     result.update(summarize_joint_chi2(prediction))
     result.update(reference_chi2_provenance(config))
+    result.update(reference_chi2_origin("resumed"))
     result["spectrum_snr_median"] = spectrum_snr_median(config)
     result.update(summarize_host_2500_psf(prediction))
     (
@@ -3485,6 +3552,28 @@ def _complete_resumed_fit(rec, args, source_path, fitter, *, sampled_options=Non
     result["photometry_filters"] = ",".join(
         str(name) for name in config.photometry.filter_names
     )
+
+    compare_catalog = getattr(args, "resume_compare_catalog", None)
+    result["resume_compare_catalog"] = str(compare_catalog or "")
+    result["resume_prediction_mismatch"] = ""
+    if compare_catalog:
+        problems = compare_resumed_prediction(
+            result, _resume_compare_rows(compare_catalog), object_id=rec["object_id"]
+        )
+        if problems:
+            message = (
+                f"Re-predicted values differ from {compare_catalog}: "
+                + "; ".join(problems)
+            )
+            if not getattr(args, "allow_resume_prediction_mismatch", False):
+                raise ValueError(
+                    message
+                    + ". The installed jaxsedfit probably differs from the one "
+                    "that made the fit; use --allow-resume-prediction-mismatch "
+                    "to record the new values anyway."
+                )
+            print(f"Warning: {message}", flush=True)
+            result["resume_prediction_mismatch"] = "; ".join(problems)
 
     if args.save_jaxsedfit_samples:
         result_path = fitter.save(args.output_dir)
@@ -3877,6 +3966,21 @@ def parse_args(argv=None):
         ),
     )
     parser.add_argument(
+        "--resume-compare-catalog",
+        default=None,
+        help=(
+            "Spectral catalogue of the resumed run. Each re-predicted "
+            f"{', '.join(RESUME_COMPARE_COLUMNS)} must match its stored value "
+            f"(rtol {RESUME_COMPARE_RTOL:g}); otherwise the object fails, which "
+            "catches a jaxsedfit version mismatch. Requires --resume."
+        ),
+    )
+    parser.add_argument(
+        "--allow-resume-prediction-mismatch",
+        action="store_true",
+        help="Record re-predicted values that differ from --resume-compare-catalog instead of failing.",
+    )
+    parser.add_argument(
         "--allow-unannotated-resume-bundle",
         action="store_true",
         help=(
@@ -4066,10 +4170,11 @@ def parse_args(argv=None):
         args.resume_only
         or args.allow_unannotated_resume_bundle
         or args.resume_records_path
+        or args.resume_compare_catalog
     ):
         parser.error(
-            "--resume-only, --allow-unannotated-resume-bundle, and "
-            "--resume-records-path require --resume."
+            "--resume-only, --allow-unannotated-resume-bundle, "
+            "--resume-records-path and --resume-compare-catalog require --resume."
         )
     args.dense_mass = {"true": True, "false": False}.get(args.dense_mass, args.dense_mass)
     return args

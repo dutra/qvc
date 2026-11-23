@@ -28,10 +28,15 @@ from scipy.stats import gaussian_kde
 
 from qvc.hubble.chi2_statistic_comparison import (
     compare_cut_statistics,
+    compare_joint_definitions,
     compare_selection,
     render_comparison,
 )
 from qvc.hubble.cuts import (
+    FITTED_SPECTRAL_NOISE_COLUMNS,
+    REFERENCE_CHI2_CUT_COLUMNS,
+    REFERENCE_FLOOR_ENV,
+    SPECTRAL_NOISE_MODEL_COLUMN,
     resolve_chi2_cut_columns,
     summarize_chi2_cut_choices,
     ALLOW_MISSING_SCALAR_CUT_COLUMNS,
@@ -84,6 +89,7 @@ from qvc.hubble.hubble_model import (
 from qvc.hubble.minimal_inputs import (
     FORMAT_ATTR as MINIMAL_INPUT_FORMAT_ATTR,
     LIGHT_CURVE_FORMAT as MINIMAL_LIGHT_CURVE_FORMAT,
+    PREVIOUS_SPECTRA_FORMATS as PREVIOUS_MINIMAL_SPECTRA_FORMATS,
     SPECTRA_FORMAT as MINIMAL_SPECTRA_FORMAT,
     read_minimal_spectra_hdf5,
     validate_minimal_light_curve_hdf5,
@@ -101,6 +107,17 @@ PURPLE_ANSI = "\033[95m"
 RESET_ANSI = "\033[0m"
 HUBBLE_JITTER_SURVEYS = ("sdss", "ps1", "ztf")
 STRICT_UPPER_BOUND_SCALAR_CUT_COLUMNS = frozenset({EBV_GAL_PLUS_EBV_AGN_COLUMN})
+# Columns that decide the Tier-1 chi-square statistic; only the spectra input
+# may provide them.
+SPECTRAL_DIAGNOSTIC_COLUMNS = frozenset(
+    {
+        *REFERENCE_CHI2_CUT_COLUMNS,
+        *REFERENCE_CHI2_CUT_COLUMNS.values(),
+        *FITTED_SPECTRAL_NOISE_COLUMNS,
+        *REFERENCE_FLOOR_ENV,
+        SPECTRAL_NOISE_MODEL_COLUMN,
+    }
+)
 
 AB_MAG_ZERO_POINT = 48.60
 XRAY_PHOTON_INDEX = 1.9
@@ -868,7 +885,10 @@ def populate_spectra_fit(
                 # Preserve the existing reader boundary for mocked and malformed
                 # legacy inputs; it owns their final validation/error message.
                 minimal_format = ""
-            if minimal_format == MINIMAL_SPECTRA_FORMAT:
+            if (
+                minimal_format == MINIMAL_SPECTRA_FORMAT
+                or minimal_format in PREVIOUS_MINIMAL_SPECTRA_FORMATS
+            ):
                 df_spectra = read_minimal_spectra_hdf5(input_path)
             else:
                 reader_kwargs = {"include_fraction_draws": True}
@@ -947,6 +967,22 @@ def populate_spectra_fit(
     conflicting_columns = sorted(
         (set(spectra.columns) & set(df.columns)) - {"object_id"}
     )
+    # Spectral fit-quality and noise-model columns must come from the spectra
+    # file only: a stale copy in the light-curve file (for example reference
+    # chi-square or jitter columns from an earlier fit) would otherwise steer
+    # the Tier-1 chi-square column choice.
+    stale_spectral_columns = sorted(
+        column
+        for column in df.columns
+        if column not in spectra.columns
+        and column in SPECTRAL_DIAGNOSTIC_COLUMNS
+    )
+    if stale_spectral_columns:
+        print(
+            "Dropping spectral fit-quality columns present only in the "
+            "light-curve input: " + ", ".join(stale_spectral_columns)
+        )
+        conflicting_columns = sorted({*conflicting_columns, *stale_spectral_columns})
     if conflicting_columns:
         print(
             "Keeping spectra HDF5 values and replacing overlapping light-curve "
@@ -2593,7 +2629,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
     if apply_tier1:
         tier1_start = len(df)
         tier1_cuts, tier1_chi2_choices = resolve_chi2_cut_columns(
-            df.columns, build_tier1_cuts()
+            df, build_tier1_cuts()
         )
         print(f"Tier-1 chi-square columns: {summarize_chi2_cut_choices(tier1_chi2_choices)}.")
         # Always compare with the other statistic when both are present, at
@@ -2603,14 +2639,21 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             chi2_selection_comparison = compare_selection(
                 df, build_tier1_cuts(), tier1_cuts
             )
+            chi2_joint_definitions = compare_joint_definitions(df)
             comparison_text = render_comparison(
-                chi2_cut_comparison, chi2_selection_comparison
+                chi2_cut_comparison,
+                chi2_selection_comparison,
+                chi2_joint_definitions,
             )
             print(comparison_text)
             chi2_comparison_tables.append(comparison_text)
             os.makedirs(cuts_plot_dir, exist_ok=True)
             pd.DataFrame(chi2_cut_comparison).to_csv(
                 os.path.join(cuts_plot_dir, "tier1_chi2_statistic_comparison.csv"),
+                index=False,
+            )
+            pd.DataFrame(chi2_joint_definitions).to_csv(
+                os.path.join(cuts_plot_dir, "tier1_joint_chi2_definitions.csv"),
                 index=False,
             )
             pd.DataFrame(chi2_selection_comparison).to_csv(
