@@ -3310,3 +3310,15 @@ def test_reference_spectrum_floor_cli_default(tmp_path):
     assert joint.parse_args(
         [*common, "--reference-spectrum-floor", "0.05"]
     ).reference_spectrum_floor == pytest.approx(0.05)
+
+
+def test_spectrum_snr_median_uses_valid_unmasked_pixels():
+    spectroscopy = SimpleNamespace(
+        fluxes=[10.0, 20.0, 30.0, 40.0, np.nan],
+        errors=[1.0, 2.0, 0.0, 4.0, 1.0],
+        mask=[True, True, True, False, True],
+    )
+    # Valid: pixels 0 and 1 (pixel 2 zero error, 3 masked, 4 non-finite).
+    assert joint.spectrum_snr_median(SimpleNamespace(spectroscopy=spectroscopy)) == pytest.approx(10.0)
+    assert np.isnan(joint.spectrum_snr_median(SimpleNamespace()))
+    assert "spectrum_snr_median" in joint.empty_joint_chi2_summary()

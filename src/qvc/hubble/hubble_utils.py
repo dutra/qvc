@@ -26,8 +26,14 @@ from scipy import stats
 from tqdm import tqdm
 from scipy.stats import gaussian_kde
 
+from qvc.hubble.chi2_statistic_comparison import (
+    compare_cut_statistics,
+    compare_selection,
+    render_comparison,
+)
 from qvc.hubble.cuts import (
     resolve_chi2_cut_columns,
+    summarize_chi2_cut_choices,
     ALLOW_MISSING_SCALAR_CUT_COLUMNS,
     COMPLETENESS_MAP_MAG_EDGE_MAX,
     COMPLETENESS_MAP_MAG_EDGE_MIN,
@@ -1484,6 +1490,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
     if exclude_object_ids_csv is None:
         exclude_object_ids_csv = []
     cut_rows = []
+    chi2_comparison_tables = []
 
     def _record_cut(
         step,
@@ -1522,7 +1529,10 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             return
         report_path = Path(cut_report_path)
         report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(table_text + "\n", encoding="utf-8")
+        report_path.write_text(
+            "\n\n".join([table_text, *chi2_comparison_tables]) + "\n",
+            encoding="utf-8",
+        )
         diagnostics_path = report_path.parent / "diagnostics" / "cut_diagnostics_by_z.csv"
         diagnostics_path.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame(cut_rows).to_csv(diagnostics_path, index=False)
@@ -2582,10 +2592,31 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
     # Tier 1: mandatory fit quality whenever the selected level is >= 1.
     if apply_tier1:
         tier1_start = len(df)
-        tier1_cuts, tier1_chi2_source = resolve_chi2_cut_columns(
+        tier1_cuts, tier1_chi2_choices = resolve_chi2_cut_columns(
             df.columns, build_tier1_cuts()
         )
-        print(f"Tier-1 chi-square columns: {tier1_chi2_source}.")
+        print(f"Tier-1 chi-square columns: {summarize_chi2_cut_choices(tier1_chi2_choices)}.")
+        # Always compare with the other statistic when both are present, at
+        # the same thresholds, before the cuts remove anything.
+        chi2_cut_comparison = compare_cut_statistics(df)
+        if chi2_cut_comparison:
+            chi2_selection_comparison = compare_selection(
+                df, build_tier1_cuts(), tier1_cuts
+            )
+            comparison_text = render_comparison(
+                chi2_cut_comparison, chi2_selection_comparison
+            )
+            print(comparison_text)
+            chi2_comparison_tables.append(comparison_text)
+            os.makedirs(cuts_plot_dir, exist_ok=True)
+            pd.DataFrame(chi2_cut_comparison).to_csv(
+                os.path.join(cuts_plot_dir, "tier1_chi2_statistic_comparison.csv"),
+                index=False,
+            )
+            pd.DataFrame(chi2_selection_comparison).to_csv(
+                os.path.join(cuts_plot_dir, "tier1_chi2_selection_comparison.csv"),
+                index=False,
+            )
         df = _apply_scalar_cut_group(df, tier1_cuts, tier="1")
         _append_cut_report_row(
             cut_rows,
@@ -2845,7 +2876,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         ),
         "tier0": completeness_support_cuts if apply_tier0 else [],
         "tier1": tier1_cuts if apply_tier1 else [],
-        "tier1_chi2_source": tier1_chi2_source if apply_tier1 else None,
+        "tier1_chi2_statistics": tier1_chi2_choices if apply_tier1 else None,
         "tier2": (
             build_tier2_cuts(completeness_magnitude=completeness_magnitude)
             if apply_tier2 else []
