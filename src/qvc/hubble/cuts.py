@@ -512,6 +512,89 @@ AGN_TIER2_PARAMETER_CUTS = (
 # Tier-1 convergence diagnostics are mandatory when Tier 1 is active.
 ALLOW_MISSING_SCALAR_CUT_COLUMNS = frozenset()
 
+# Fixed-definition ("reference") chi-square columns written by the joint
+# spectra wrapper. The legacy spectral and joint columns use the likelihood's
+# variance, which in jaxsedfit versions with a fitted spectral jitter depends on
+# the noise the fit chose and on the spectrum's S/N; the reference columns use
+# a fixed variance (err**2 + (0.08*model)**2 per pixel by default), the
+# definition the spectral and joint thresholds were set on.
+#
+# The SED cut keeps ``sed_reduced_chi2``: its variance model (fitted systematic
+# and AGN-mismatch widths) is the same in every jaxsedfit version the pipeline
+# has used, and its threshold was set on it. ``sed_reduced_chi2_ref`` fixes
+# those widths (0.10, 0.15), which changes the statistic per object, so it is
+# stored as a diagnostic but not cut on.
+REFERENCE_CHI2_CUT_COLUMNS = {
+    "spectroscopy_reduced_chi2": "spectroscopy_reduced_chi2_ref",
+    "joint_reduced_chi2": "joint_reduced_chi2_ref",
+}
+# Columns present only in catalogues from jaxsedfit versions that fit the
+# spectral noise (jitter); their legacy chi-square is not comparable.
+FITTED_SPECTRAL_NOISE_COLUMNS = ("frac_jitter", "add_jitter", "frac_fe_jitter")
+ALLOW_FITTED_NOISE_CHI2_ENV = "QVC_CUT_ALLOW_FITTED_NOISE_CHI2"
+
+
+def _env_flag(name):
+    value = str(os.environ.get(name, "")).strip().lower()
+    if value in {"", "0", "false", "no", "off"}:
+        return False
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    raise ValueError(f"{name} must be 0/1 (or true/false), got {value!r}")
+
+
+def resolve_chi2_cut_columns(columns, cuts, *, allow_fitted_noise_chi2=None):
+    """Return Tier-1 cuts with each chi-square column mapped to the one to use.
+
+    - Reference (``*_ref``) columns present: the cut uses them, with the same
+      threshold.
+    - No reference columns and no fitted-noise columns (catalogues from
+      jaxsedfit versions with a fixed spectral floor): the legacy columns,
+      whose definition the thresholds were set on.
+    - Fitted-noise columns without reference columns: the legacy chi-square
+      is S/N-dependent, so this raises unless explicitly allowed through
+      ``allow_fitted_noise_chi2`` or ``QVC_CUT_ALLOW_FITTED_NOISE_CHI2=1``.
+
+    Returns ``(cuts, source)`` with ``source`` one of ``"reference"``,
+    ``"legacy"`` or ``"fitted-noise"``.
+    """
+    columns = set(columns)
+    chi2_columns = [column for column, _lower, _upper in cuts if column in REFERENCE_CHI2_CUT_COLUMNS]
+    if not chi2_columns:
+        return list(cuts), "legacy"
+    reference = [REFERENCE_CHI2_CUT_COLUMNS[column] for column in chi2_columns]
+    present = [column for column in reference if column in columns]
+    if present:
+        missing = sorted(set(reference) - set(present))
+        if missing:
+            raise ValueError(
+                "Input catalogue has only some reference chi-square columns; "
+                f"missing {missing}."
+            )
+        return (
+            [
+                (REFERENCE_CHI2_CUT_COLUMNS.get(column, column), lower, upper)
+                for column, lower, upper in cuts
+            ],
+            "reference",
+        )
+    fitted_noise = [column for column in FITTED_SPECTRAL_NOISE_COLUMNS if column in columns]
+    if not fitted_noise:
+        return list(cuts), "legacy"
+    if allow_fitted_noise_chi2 is None:
+        allow_fitted_noise_chi2 = _env_flag(ALLOW_FITTED_NOISE_CHI2_ENV)
+    if allow_fitted_noise_chi2:
+        return list(cuts), "fitted-noise"
+    raise ValueError(
+        "Input catalogue comes from a fit with a fitted spectral noise model "
+        f"(columns {fitted_noise}) but has no reference chi-square columns "
+        f"({sorted(reference)}). Its {chi2_columns} use the fitted noise and "
+        "depend on S/N, so the Tier-1 thresholds do not apply. Re-predict the "
+        "saved posteriors with the joint spectra wrapper (--resume ... "
+        "--resume-only) to add the reference columns, or set "
+        f"{ALLOW_FITTED_NOISE_CHI2_ENV}=1 to cut on the fitted-noise columns."
+    )
+
 
 def light_curve_point_count_series(df, *, exclude_bands=None):
     """Return total per-object light-curve point counts and the columns used."""

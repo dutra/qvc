@@ -315,6 +315,16 @@ def retry_unsuccessful_tasks(job_name):
 # ==========================================
 # 2. Command-line overrides and job name
 # ==========================================
+def positive_int(value):
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from None
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
+    return parsed
+
+
 parser = argparse.ArgumentParser(description="Submit spectrum-fitting SLURM jobs.")
 parser.add_argument(
     "--chisq-csv",
@@ -365,6 +375,27 @@ parser.add_argument(
     help="Lines anchored by continuum_ew (passed through; absent: not passed).",
 )
 parser.add_argument(
+    "--nuts-warmup",
+    type=positive_int,
+    default=500,
+    help="NUTS warmup steps per chain passed to the fitter (default: 500).",
+)
+parser.add_argument(
+    "--nuts-samples",
+    type=positive_int,
+    default=500,
+    help="NUTS posterior draws per chain passed to the fitter (default: 500).",
+)
+parser.add_argument(
+    "--nuts-chains",
+    type=positive_int,
+    default=1,
+    help=(
+        "Number of NUTS chains passed to the fitter (default: 1). The SLURM "
+        "CPU request is set in the settings block above and is not changed."
+    ),
+)
+parser.add_argument(
     "--resume",
     metavar="OLD_RUN_NAME",
     default="",
@@ -398,6 +429,9 @@ fresh_run_options = (
     "--line-extrapolation-anchor",
     "--line-extrapolation-ew-scope",
     "--narrow-line-extrapolation",
+    "--nuts-warmup",
+    "--nuts-samples",
+    "--nuts-chains",
     "--resume",
     "--resume-only",
 )
@@ -666,6 +700,11 @@ submission = submission_record(
             "chunk_size": chunk_size,
             "python_bin": python_bin,
         },
+        "nuts": {
+            "warmup": cli_args.nuts_warmup,
+            "samples": cli_args.nuts_samples,
+            "chains": cli_args.nuts_chains,
+        },
         "object_count": len(submit_object_ids),
     },
 )
@@ -694,6 +733,9 @@ export SED_PHOTOMETRY_PATH="{sed_photometry_path}"
 export OUTPUT_DIR="{output_dir}"
 export OBJECT_IDS_FILE="{object_ids_file}"
 export CHUNK_SIZE={chunk_size}
+export NUTS_WARMUP="{cli_args.nuts_warmup}"
+export NUTS_SAMPLES="{cli_args.nuts_samples}"
+export NUTS_CHAINS="{cli_args.nuts_chains}"
 export NPROC={nproc}
 export CPUS_PER_TASK={cpus_per_task}
 export PYTHON_BIN="{python_bin}"
@@ -724,6 +766,7 @@ echo "FIT_SCRIPT=$FIT_SCRIPT"
 echo "FIT_MODULE=$FIT_MODULE"
 echo "FIT_BAL=$FIT_BAL"
 echo "JOINT_PREDICTION_ARGS=$JOINT_PREDICTION_ARGS"
+echo "NUTS_WARMUP=$NUTS_WARMUP NUTS_SAMPLES=$NUTS_SAMPLES NUTS_CHAINS=$NUTS_CHAINS"
 echo "SED_PHOTOMETRY_PATH=$SED_PHOTOMETRY_PATH"
 echo "OBJECT_IDS_FILE=$OBJECT_IDS_FILE"
 echo "OUTPUT_DIR=$OUTPUT_DIR"
@@ -747,6 +790,9 @@ sed_photometry_path = os.environ["SED_PHOTOMETRY_PATH"]
 output_dir = os.environ["OUTPUT_DIR"]
 object_ids_file = os.environ["OBJECT_IDS_FILE"]
 chunk_size = int(os.environ["CHUNK_SIZE"])
+nuts_warmup = int(os.environ["NUTS_WARMUP"])
+nuts_samples = int(os.environ["NUTS_SAMPLES"])
+nuts_chains = int(os.environ["NUTS_CHAINS"])
 nproc = int(os.environ["NPROC"])
 cpus_per_task = int(os.environ["CPUS_PER_TASK"])
 python_bin = os.environ["PYTHON_BIN"]
@@ -785,9 +831,9 @@ cmd = [
     "--verbose",
     "--optax-steps", "5000",
     "--optax-lr", "0.005",
-    "--nuts-warmup", "500",
-    "--nuts-samples", "500",
-    "--nuts-chains", "1",
+    "--nuts-warmup", str(nuts_warmup),
+    "--nuts-samples", str(nuts_samples),
+    "--nuts-chains", str(nuts_chains),
     "--output-dir", real_output_dir,
     "--fig-dir", fig_dir,
     "--filter_object_id", *ids_this_task,

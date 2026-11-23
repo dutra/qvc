@@ -319,6 +319,28 @@ JOINT_CHI2_SITES = (
     "joint_n_eff",
     "joint_reduced_chi2",
 )
+# Fixed-definition chi-square sites (jaxsedfit ``*_chi2_ref``). Their variance
+# does not depend on any fitted noise parameter, so a threshold on them keeps
+# one meaning across noise models and signal-to-noise; the Hubble Tier-1 cuts
+# use them when present.
+REFERENCE_CHI2_SITES = (
+    "sed_chi2_ref",
+    "sed_reduced_chi2_ref",
+    "spectroscopy_chi2_ref",
+    "spectroscopy_n_ref",
+    "spectroscopy_reduced_chi2_ref",
+    "joint_chi2_ref",
+    "joint_n_ref",
+    "joint_reduced_chi2_ref",
+)
+# LikelihoodConfig fields holding the reference variance floors, recorded on
+# every row as provenance.
+REFERENCE_CHI2_FLOOR_FIELDS = (
+    "reference_spectrum_floor",
+    "reference_photometry_floor",
+    "reference_agn_floor",
+)
+DEFAULT_REFERENCE_SPECTRUM_FLOOR = 0.08
 # Scalar deterministic sites that the legacy CSV writer received in-memory
 # from JAXSEDFit, but compact v2 posterior bundles intentionally do not retain.
 # Requesting them during prediction lets resume jobs reproduce the same flat
@@ -1344,6 +1366,9 @@ def build_joint_config(
             use_host_capture_model=True,
             systematics_width=args.photometry_systematics,
             spectrum_student_t_df=args.spectrum_student_t_df,
+            reference_spectrum_floor=float(
+                getattr(args, "reference_spectrum_floor", DEFAULT_REFERENCE_SPECTRUM_FLOOR)
+            ),
             fit_spectrum_scale=True,
             spectrum_scale_prior_sigma_dex=args.spectrum_scale_prior_sigma_dex,
         ),
@@ -1624,23 +1649,75 @@ def summarize_spectral_component_fractions(prediction, redshift):
 
 
 def summarize_joint_chi2(prediction):
-    """Summarize the required joint-fit chi-square diagnostic sites."""
-    missing = [name for name in JOINT_CHI2_SITES if name not in prediction]
+    """Summarize the required chi-square sites, fitted-noise and reference.
+
+    Each column is the posterior-predictive median over draws (``_err`` its
+    symmetric percentile half-width), the same convention for both families.
+    """
+    sites = JOINT_CHI2_SITES + REFERENCE_CHI2_SITES
+    missing = [name for name in sites if name not in prediction]
     if missing:
         raise ValueError(
             "JAXSEDFit prediction lacks required chi-square sites: "
-            f"{missing}"
+            f"{missing}. The reference (*_ref) sites need a jaxsedfit with "
+            "LikelihoodConfig.reference_spectrum_floor."
         )
-    return summarize_samples({name: prediction[name] for name in JOINT_CHI2_SITES})
+    return summarize_samples({name: prediction[name] for name in sites})
 
 
 def empty_joint_chi2_summary():
     """Return a stable value/error schema for joint-fit chi-square fields."""
-    return {
+    out = {
         key: np.nan
-        for name in JOINT_CHI2_SITES
+        for name in JOINT_CHI2_SITES + REFERENCE_CHI2_SITES
         for key in (name, f"{name}_err")
     }
+    out.update({field: np.nan for field in REFERENCE_CHI2_FLOOR_FIELDS})
+    return out
+
+
+def reference_chi2_provenance(config):
+    """Return the reference-chi-square variance floors a prediction used."""
+    likelihood = config.likelihood
+    return {
+        field: float(getattr(likelihood, field))
+        for field in REFERENCE_CHI2_FLOOR_FIELDS
+    }
+
+
+def apply_reference_spectrum_floor(fitter, floor):
+    """Set the spectral reference floor of a loaded posterior before prediction.
+
+    The floor enters only the ``*_chi2_ref`` deterministic sites, never the
+    likelihood, so saved draws can be re-predicted with any value.
+    """
+    if floor is None:
+        return fitter
+    if fitter.context.fit_config is not fitter.config:
+        raise RuntimeError(
+            "Cannot change reference_spectrum_floor of a loaded posterior: the "
+            "model context does not share the fitter config."
+        )
+    fitter.config.likelihood.reference_spectrum_floor = float(floor)
+    fitter.predictive = None
+    return fitter
+
+
+def require_reference_chi2_support():
+    """Fail once, before any object, if jaxsedfit cannot report reference chi2."""
+    import dataclasses
+
+    from jaxsedfit import LikelihoodConfig
+
+    fields = {field.name for field in dataclasses.fields(LikelihoodConfig)}
+    missing = [name for name in REFERENCE_CHI2_FLOOR_FIELDS if name not in fields]
+    if missing:
+        raise SystemExit(
+            "The installed jaxsedfit does not report the fixed-definition "
+            "reference chi-square (*_chi2_ref) used by the Hubble quality cuts "
+            f"(LikelihoodConfig lacks {missing}). Install a jaxsedfit with the "
+            "reference chi-square diagnostics."
+        )
 
 
 def empty_psf_agn_fraction_summary(bands=PSF_AGN_FRACTION_BANDS):
@@ -3088,6 +3165,7 @@ def run_one_fit(
         result.update(summarize_catalog_posterior(fit_result.samples, prediction))
         result.update(summarize_spectral_component_fractions(prediction, rec["z"]))
         result.update(summarize_joint_chi2(prediction))
+        result.update(reference_chi2_provenance(config))
         result.update(summarize_host_2500_psf(prediction))
         (
             result["_joint_posterior_draws"],
@@ -3245,6 +3323,7 @@ def _complete_resumed_fit(rec, args, source_path, fitter, *, sampled_options=Non
             result[field] = current_options[field]
             result[f"{field}_sampled"] = sampled_options[field]
     fitter.predictive = None
+    apply_reference_spectrum_floor(fitter, getattr(args, "reference_spectrum_floor", None))
     validate_resume_host_capture_fitter(fitter, source_path)
     validate_resume_bal_fitter(
         fitter,
@@ -3286,6 +3365,7 @@ def _complete_resumed_fit(rec, args, source_path, fitter, *, sampled_options=Non
         summarize_spectral_component_fractions(prediction, config.observation.redshift)
     )
     result.update(summarize_joint_chi2(prediction))
+    result.update(reference_chi2_provenance(config))
     result.update(summarize_host_2500_psf(prediction))
     (
         result["_joint_posterior_draws"],
@@ -3652,6 +3732,7 @@ def require_supported_agn_options(args):
 
 def run_fit(args):
     require_supported_agn_options(args)
+    require_reference_chi2_support()
     records = build_records(args)
     if not records:
         raise RuntimeError("No records to process.")
@@ -3797,6 +3878,18 @@ def parse_args(argv=None):
     parser.add_argument("--sed-n-wave", type=int, default=512)
     parser.add_argument("--photometry-systematics", type=float, default=0.08)
     parser.add_argument("--spectrum-student-t-df", type=float, default=5.0)
+    parser.add_argument(
+        "--reference-spectrum-floor",
+        type=float,
+        default=DEFAULT_REFERENCE_SPECTRUM_FLOOR,
+        help=(
+            "Fractional model floor w of the fixed-definition spectral chi-square "
+            "(spectroscopy_reduced_chi2_ref, variance err**2 + (w*model)**2) "
+            "that the Hubble Tier-1 cuts use. Diagnostic only: it does not enter "
+            "the likelihood. On --resume the saved draws are re-predicted with it "
+            "(default: %(default)s)."
+        ),
+    )
     parser.add_argument("--spectrum-scale-prior-sigma-dex", type=float, default=0.1)
     parser.add_argument("--line-flux-scale-mjy", type=float, default=0.1)
     parser.add_argument("--optax-steps", type=int, default=4000)

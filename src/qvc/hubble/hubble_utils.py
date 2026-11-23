@@ -27,6 +27,7 @@ from tqdm import tqdm
 from scipy.stats import gaussian_kde
 
 from qvc.hubble.cuts import (
+    resolve_chi2_cut_columns,
     ALLOW_MISSING_SCALAR_CUT_COLUMNS,
     COMPLETENESS_MAP_MAG_EDGE_MAX,
     COMPLETENESS_MAP_MAG_EDGE_MIN,
@@ -2581,7 +2582,11 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
     # Tier 1: mandatory fit quality whenever the selected level is >= 1.
     if apply_tier1:
         tier1_start = len(df)
-        df = _apply_scalar_cut_group(df, build_tier1_cuts(), tier="1")
+        tier1_cuts, tier1_chi2_source = resolve_chi2_cut_columns(
+            df.columns, build_tier1_cuts()
+        )
+        print(f"Tier-1 chi-square columns: {tier1_chi2_source}.")
+        df = _apply_scalar_cut_group(df, tier1_cuts, tier="1")
         _append_cut_report_row(
             cut_rows,
             step="tier1:summary",
@@ -2839,7 +2844,8 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             else None
         ),
         "tier0": completeness_support_cuts if apply_tier0 else [],
-        "tier1": build_tier1_cuts() if apply_tier1 else [],
+        "tier1": tier1_cuts if apply_tier1 else [],
+        "tier1_chi2_source": tier1_chi2_source if apply_tier1 else None,
         "tier2": (
             build_tier2_cuts(completeness_magnitude=completeness_magnitude)
             if apply_tier2 else []

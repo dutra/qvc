@@ -135,6 +135,13 @@ cut_threshold_defaults = {
     "QVC_CUT_SPECTROSCOPY_REDUCED_CHI2_MAX": "1.1",
     "QVC_CUT_SED_REDUCED_CHI2_MAX": "1.3",
     "QVC_CUT_JAXSEDFIT_JOINT_REDUCED_CHI2_MAX": "1.2", # they all pass
+    # The spectroscopy and joint chi-square cuts apply to the fixed-definition
+    # reference columns (*_reduced_chi2_ref) when the spectra catalogue has
+    # them, else to the legacy columns for catalogues without a fitted
+    # spectral jitter; the SED cut always uses sed_reduced_chi2. A catalogue
+    # with fitted jitter but no reference columns stops the run; set this to 1
+    # to cut on its fitted-noise chi-square instead.
+    "QVC_CUT_ALLOW_FITTED_NOISE_CHI2": "0",
     "QVC_CUT_LOO_CHI2_EFF_MAX": "1.05",
     "QVC_CUT_SPECTRAL_RHAT_MAX": "1.05",
     "QVC_CUT_LIGHT_CURVE_RHAT_MAX": "1.05",
