@@ -534,6 +534,8 @@ def test_sfitspectra_retry_requires_original_artifacts_and_sufficient_cpus(tmp_p
         ("--line-extrapolation-anchor", "continuum_ew"),
         ("--line-extrapolation-ew-scope", "all"),
         ("--narrow-line-extrapolation", "optical_only"),
+        ("--nuts-chains", "4"),
+        ("--nuts-warmup=800",),
     ],
 )
 def test_sfitspectra_retry_rejects_fresh_run_options(tmp_path, fresh_args):
@@ -641,3 +643,96 @@ def test_sfitspectra_rejects_line_extrapolation_anchor_with_standalone_backend(t
 
     assert result.returncode != 0
     assert "--line-extrapolation-anchor is supported only" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "extra, expected",
+    [
+        ((), ("500", "500", "1")),
+        (("--nuts-warmup", "800", "--nuts-samples", "300", "--nuts-chains", "4"), ("800", "300", "4")),
+    ],
+)
+def test_sfitspectra_forwards_nuts_settings(tmp_path, monkeypatch, extra, expected):
+    root, script_path, csv_path, _, env = _fresh_workspace(tmp_path)
+    result = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path),
+                        "--description", "nuts", *extra)
+    assert result.returncode == 0, result.stderr
+    generated = next((root / "hpc_scripts/submit/jaxqsofit").glob("submit_*.sbatch")).read_text()
+    for key, value in zip(("NUTS_WARMUP", "NUTS_SAMPLES", "NUTS_CHAINS"), expected):
+        assert f'export {key}="{value}"\n' in generated
+    command = _generated_fit_command(root, script_path, generated, monkeypatch)
+    for option, value in zip(("--nuts-warmup", "--nuts-samples", "--nuts-chains"), expected):
+        assert command.count(option) == 1
+        assert command[command.index(option) + 1] == value
+
+
+@pytest.mark.parametrize("bad", [("--nuts-chains", "0"), ("--nuts-warmup", "-1"), ("--nuts-samples", "x")])
+def test_sfitspectra_rejects_invalid_nuts_settings(tmp_path, bad):
+    root, script_path, csv_path, calls_path, env = _fresh_workspace(tmp_path)
+    result = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path),
+                        "--description", "nuts", *bad)
+    assert result.returncode == 2
+    assert "expected a positive integer" in result.stderr
+    assert _sbatch_calls(calls_path) == []
+
+
+def test_sfitspectra_settings_block_is_unchanged():
+    """Local edits to the settings block (memory, time) must keep applying cleanly."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    block = source.split("# 1. Define your job settings here", 1)[1].split("# Retry helpers", 1)[0]
+    assert 'time_limit = "3:00:00"' in block
+    assert 'mem = "40G"' in block
+    assert "nuts" not in block.lower()
+
+
+def test_sfitspectra_resource_options_reach_sbatch_and_warn_on_sequential_chains(tmp_path):
+    root, script_path, csv_path, _, env = _fresh_workspace(tmp_path)
+    result = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path),
+                        "--description", "res", "--nuts-chains", "4", "--cpus-per-task", "2",
+                        "--mem", "64G", "--time-limit", "6:00:00")
+    assert result.returncode == 0, result.stderr
+    assert "chains will run one after another" in result.stderr
+    generated = next((root / "hpc_scripts/submit/jaxqsofit").glob("submit_*.sbatch")).read_text()
+    assert "#SBATCH --cpus-per-task=2" in generated
+    assert "#SBATCH --mem=64G" in generated
+    assert "#SBATCH --time=6:00:00" in generated
+    assert "export CPUS_PER_TASK=2" in generated
+    quiet = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path),
+                       "--description", "res2", "--nuts-chains", "2", "--cpus-per-task", "2")
+    assert quiet.returncode == 0, quiet.stderr
+    assert "one after another" not in quiet.stderr
+
+
+@pytest.mark.parametrize("bad", [("--mem", "lots"), ("--time-limit", "3h"), ("--cpus-per-task", "0")])
+def test_sfitspectra_rejects_invalid_resources(tmp_path, bad):
+    root, script_path, csv_path, calls_path, env = _fresh_workspace(tmp_path)
+    result = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path), "--description", "r", *bad)
+    assert result.returncode == 2
+    assert _sbatch_calls(calls_path) == []
+
+
+def test_sfitspectra_resume_only_passes_the_resumed_catalogue_for_comparison(tmp_path, monkeypatch):
+    root, script_path, csv_path, _, env = _fresh_workspace(tmp_path)
+    (root / "results/data/jaxqsofit/old/all").mkdir(parents=True)
+    result = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path),
+                        "--description", "up", "--resume", "old", "--resume-only")
+    assert result.returncode == 0, result.stderr
+    assert "will not be compared" in result.stderr
+    (root / "results/data/jaxqsofit/old.h5").write_bytes(b"")
+    result = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path),
+                        "--description", "up2", "--resume", "old", "--resume-only")
+    assert result.returncode == 0, result.stderr
+    generated = sorted((root / "hpc_scripts/submit/jaxqsofit").glob("submit_*up2*.sbatch"))[-1].read_text()
+    command = _generated_fit_command(root, script_path, generated, monkeypatch)
+    assert command[command.index("--resume-compare-catalog") + 1] == "results/data/jaxqsofit/old.h5"
+
+
+def test_sfitspectra_retry_accepts_memory_and_time_overrides(tmp_path):
+    rows = [f"100_1|{RETRY_JOB_NAME}|OUT_OF_MEMORY"]
+    root, script_path, _saved, _ids, calls_path, env = _retry_workspace(tmp_path, rows)
+    result = _run_retry(root, script_path, env, "--mem", "80G", "--time-limit", "8:00:00")
+    assert result.returncode == 0, result.stderr
+    call = _sbatch_calls(calls_path)[0]
+    assert "--mem=80G" in call and "--time=8:00:00" in call and "--cpus-per-task=1" in call
+    rejected = _run_retry(root, script_path, env, "--cpus-per-task", "4")
+    assert rejected.returncode == 2

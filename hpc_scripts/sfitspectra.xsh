@@ -315,6 +315,32 @@ def retry_unsuccessful_tasks(job_name):
 # ==========================================
 # 2. Command-line overrides and job name
 # ==========================================
+def positive_int(value):
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}") from None
+    if parsed < 1:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {value!r}")
+    return parsed
+
+
+def slurm_memory(value):
+    text = str(value).strip()
+    if not re.fullmatch(r"\d+[KMGT]?", text):
+        raise argparse.ArgumentTypeError(f"expected SLURM memory such as 40G, got {value!r}")
+    return text
+
+
+def slurm_time(value):
+    text = str(value).strip()
+    if not re.fullmatch(r"(\d+-)?\d{1,2}(:\d{2}){0,2}", text):
+        raise argparse.ArgumentTypeError(
+            f"expected a SLURM time such as 3:00:00 or 1-00:00:00, got {value!r}"
+        )
+    return text
+
+
 parser = argparse.ArgumentParser(description="Submit spectrum-fitting SLURM jobs.")
 parser.add_argument(
     "--chisq-csv",
@@ -365,6 +391,54 @@ parser.add_argument(
     help="Lines anchored by continuum_ew (passed through; absent: not passed).",
 )
 parser.add_argument(
+    "--cpus-per-task",
+    type=positive_int,
+    default=cpus_per_task,
+    help=(
+        f"SLURM CPUs per task (default from the settings block: {cpus_per_task}). "
+        "The fitter gets one XLA CPU device per CPU, so NUTS chains run in "
+        "parallel only up to this number; with fewer CPUs than chains they run "
+        "one after another, about chains/CPUs times the wall time."
+    ),
+)
+parser.add_argument(
+    "--mem",
+    type=slurm_memory,
+    default=mem,
+    help=(
+        f"SLURM memory per task (default from the settings block: {mem}). "
+        "Parallel chains hold one sampler state each and need more memory."
+    ),
+)
+parser.add_argument(
+    "--time-limit",
+    type=slurm_time,
+    default=time_limit,
+    help=f"SLURM time limit (default from the settings block: {time_limit}).",
+)
+parser.add_argument(
+    "--nuts-warmup",
+    type=positive_int,
+    default=500,
+    help="NUTS warmup steps per chain passed to the fitter (default: 500).",
+)
+parser.add_argument(
+    "--nuts-samples",
+    type=positive_int,
+    default=500,
+    help="NUTS posterior draws per chain passed to the fitter (default: 500).",
+)
+parser.add_argument(
+    "--nuts-chains",
+    type=positive_int,
+    default=1,
+    help=(
+        "Number of NUTS chains passed to the fitter (default: 1). Chains run in "
+        "parallel only up to --cpus-per-task; set --cpus-per-task (and --mem) "
+        "to the number of chains to run them in parallel."
+    ),
+)
+parser.add_argument(
     "--resume",
     metavar="OLD_RUN_NAME",
     default="",
@@ -379,6 +453,17 @@ parser.add_argument(
     help="Reconstruct saved posteriors only; record object failures without fresh fitting. Requires --resume.",
 )
 parser.add_argument(
+    "--resume-compare-catalog",
+    metavar="PATH",
+    default=None,
+    help=(
+        "Spectral catalogue of the resumed run. Re-predicted values (chi-square, "
+        "m_2500) are compared with it and an object fails when they differ, which "
+        "catches a jaxsedfit version mismatch. Default with --resume-only: "
+        "results/data/jaxqsofit/OLD_RUN_NAME.h5 when it exists."
+    ),
+)
+parser.add_argument(
     "--retry",
     metavar="FULL_JOB_NAME",
     default="",
@@ -389,6 +474,20 @@ parser.add_argument(
 )
 cli_args = parser.parse_args()
 
+# Resource overrides. --mem and --time-limit also apply to --retry; the CPU
+# count of a retried task is fixed by its saved script (NUM_CORES).
+mem = cli_args.mem
+time_limit = cli_args.time_limit
+cpus_per_task = cli_args.cpus_per_task
+if cli_args.nuts_chains > cpus_per_task:
+    print(
+        f"Warning: --nuts-chains {cli_args.nuts_chains} > --cpus-per-task "
+        f"{cpus_per_task}: chains will run one after another, about "
+        f"{math.ceil(cli_args.nuts_chains / cpus_per_task)}x the sampling wall "
+        f"time, within --time-limit {time_limit}.",
+        file=sys.stderr,
+    )
+
 retry_job_name = cli_args.retry.strip()
 fresh_run_options = (
     "--chisq-csv",
@@ -398,8 +497,13 @@ fresh_run_options = (
     "--line-extrapolation-anchor",
     "--line-extrapolation-ew-scope",
     "--narrow-line-extrapolation",
+    "--nuts-warmup",
+    "--nuts-samples",
+    "--nuts-chains",
+    "--cpus-per-task",
     "--resume",
     "--resume-only",
+    "--resume-compare-catalog",
 )
 fresh_run_option_was_explicit = any(
     arg == option or arg.startswith(f"{option}=")
@@ -476,6 +580,24 @@ resume_dir = (
     if resume_run_name
     else ""
 )
+
+if cli_args.resume_compare_catalog and not resume_run_name:
+    parser.error("--resume-compare-catalog requires --resume")
+resume_compare_catalog = cli_args.resume_compare_catalog
+if resume_compare_catalog is None and cli_args.resume_only:
+    candidate = f"results/data/jaxqsofit/{resume_run_name}.h5"
+    if (REPO_ROOT / candidate).is_file():
+        resume_compare_catalog = candidate
+    else:
+        print(
+            f"Warning: no {candidate}; re-predicted values will not be compared "
+            "with the resumed run (pass --resume-compare-catalog).",
+            file=sys.stderr,
+        )
+if resume_compare_catalog:
+    if not (REPO_ROOT / resume_compare_catalog).is_file() and not Path(resume_compare_catalog).is_file():
+        parser.error(f"--resume-compare-catalog not found: {resume_compare_catalog}")
+    joint_prediction_args.extend(["--resume-compare-catalog", resume_compare_catalog])
 
 if resume_dir:
     resume_path = REPO_ROOT / resume_dir
@@ -666,6 +788,11 @@ submission = submission_record(
             "chunk_size": chunk_size,
             "python_bin": python_bin,
         },
+        "nuts": {
+            "warmup": cli_args.nuts_warmup,
+            "samples": cli_args.nuts_samples,
+            "chains": cli_args.nuts_chains,
+        },
         "object_count": len(submit_object_ids),
     },
 )
@@ -694,6 +821,9 @@ export SED_PHOTOMETRY_PATH="{sed_photometry_path}"
 export OUTPUT_DIR="{output_dir}"
 export OBJECT_IDS_FILE="{object_ids_file}"
 export CHUNK_SIZE={chunk_size}
+export NUTS_WARMUP="{cli_args.nuts_warmup}"
+export NUTS_SAMPLES="{cli_args.nuts_samples}"
+export NUTS_CHAINS="{cli_args.nuts_chains}"
 export NPROC={nproc}
 export CPUS_PER_TASK={cpus_per_task}
 export PYTHON_BIN="{python_bin}"
@@ -724,6 +854,7 @@ echo "FIT_SCRIPT=$FIT_SCRIPT"
 echo "FIT_MODULE=$FIT_MODULE"
 echo "FIT_BAL=$FIT_BAL"
 echo "JOINT_PREDICTION_ARGS=$JOINT_PREDICTION_ARGS"
+echo "NUTS_WARMUP=$NUTS_WARMUP NUTS_SAMPLES=$NUTS_SAMPLES NUTS_CHAINS=$NUTS_CHAINS"
 echo "SED_PHOTOMETRY_PATH=$SED_PHOTOMETRY_PATH"
 echo "OBJECT_IDS_FILE=$OBJECT_IDS_FILE"
 echo "OUTPUT_DIR=$OUTPUT_DIR"
@@ -747,6 +878,9 @@ sed_photometry_path = os.environ["SED_PHOTOMETRY_PATH"]
 output_dir = os.environ["OUTPUT_DIR"]
 object_ids_file = os.environ["OBJECT_IDS_FILE"]
 chunk_size = int(os.environ["CHUNK_SIZE"])
+nuts_warmup = int(os.environ["NUTS_WARMUP"])
+nuts_samples = int(os.environ["NUTS_SAMPLES"])
+nuts_chains = int(os.environ["NUTS_CHAINS"])
 nproc = int(os.environ["NPROC"])
 cpus_per_task = int(os.environ["CPUS_PER_TASK"])
 python_bin = os.environ["PYTHON_BIN"]
@@ -785,9 +919,9 @@ cmd = [
     "--verbose",
     "--optax-steps", "5000",
     "--optax-lr", "0.005",
-    "--nuts-warmup", "500",
-    "--nuts-samples", "500",
-    "--nuts-chains", "1",
+    "--nuts-warmup", str(nuts_warmup),
+    "--nuts-samples", str(nuts_samples),
+    "--nuts-chains", str(nuts_chains),
     "--output-dir", real_output_dir,
     "--fig-dir", fig_dir,
     "--filter_object_id", *ids_this_task,

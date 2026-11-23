@@ -319,6 +319,28 @@ JOINT_CHI2_SITES = (
     "joint_n_eff",
     "joint_reduced_chi2",
 )
+# Fixed-definition chi-square sites (jaxsedfit ``*_chi2_ref``). Their variance
+# does not depend on any fitted noise parameter, so a threshold on them keeps
+# one meaning across noise models and signal-to-noise; the Hubble Tier-1 cuts
+# use them when present.
+REFERENCE_CHI2_SITES = (
+    "sed_chi2_ref",
+    "sed_reduced_chi2_ref",
+    "spectroscopy_chi2_ref",
+    "spectroscopy_n_ref",
+    "spectroscopy_reduced_chi2_ref",
+    "joint_chi2_ref",
+    "joint_n_ref",
+    "joint_reduced_chi2_ref",
+)
+# LikelihoodConfig fields holding the reference variance floors, recorded on
+# every row as provenance.
+REFERENCE_CHI2_FLOOR_FIELDS = (
+    "reference_spectrum_floor",
+    "reference_photometry_floor",
+    "reference_agn_floor",
+)
+DEFAULT_REFERENCE_SPECTRUM_FLOOR = 0.08
 # Scalar deterministic sites that the legacy CSV writer received in-memory
 # from JAXSEDFit, but compact v2 posterior bundles intentionally do not retain.
 # Requesting them during prediction lets resume jobs reproduce the same flat
@@ -1344,6 +1366,9 @@ def build_joint_config(
             use_host_capture_model=True,
             systematics_width=args.photometry_systematics,
             spectrum_student_t_df=args.spectrum_student_t_df,
+            reference_spectrum_floor=float(
+                getattr(args, "reference_spectrum_floor", DEFAULT_REFERENCE_SPECTRUM_FLOOR)
+            ),
             fit_spectrum_scale=True,
             spectrum_scale_prior_sigma_dex=args.spectrum_scale_prior_sigma_dex,
         ),
@@ -1624,23 +1649,165 @@ def summarize_spectral_component_fractions(prediction, redshift):
 
 
 def summarize_joint_chi2(prediction):
-    """Summarize the required joint-fit chi-square diagnostic sites."""
-    missing = [name for name in JOINT_CHI2_SITES if name not in prediction]
+    """Summarize the required chi-square sites, fitted-noise and reference.
+
+    Each column is the posterior-predictive median over draws (``_err`` its
+    symmetric percentile half-width), the same convention for both families.
+    """
+    sites = JOINT_CHI2_SITES + REFERENCE_CHI2_SITES
+    missing = [name for name in sites if name not in prediction]
     if missing:
         raise ValueError(
             "JAXSEDFit prediction lacks required chi-square sites: "
-            f"{missing}"
+            f"{missing}. The reference (*_ref) sites need a jaxsedfit with "
+            "LikelihoodConfig.reference_spectrum_floor."
         )
-    return summarize_samples({name: prediction[name] for name in JOINT_CHI2_SITES})
+    return summarize_samples({name: prediction[name] for name in sites})
 
 
 def empty_joint_chi2_summary():
     """Return a stable value/error schema for joint-fit chi-square fields."""
-    return {
+    out = {
         key: np.nan
-        for name in JOINT_CHI2_SITES
+        for name in JOINT_CHI2_SITES + REFERENCE_CHI2_SITES
         for key in (name, f"{name}_err")
     }
+    out.update({field: np.nan for field in REFERENCE_CHI2_FLOOR_FIELDS})
+    out["spectrum_snr_median"] = np.nan
+    out["reference_chi2_source"] = ""
+    out["reference_chi2_jaxsedfit_commit"] = ""
+    out["resume_compare_catalog"] = ""
+    out["resume_prediction_mismatch"] = ""
+    return out
+
+
+def reference_chi2_provenance(config):
+    """Return the reference-chi-square variance floors a prediction used."""
+    likelihood = config.likelihood
+    return {
+        field: float(getattr(likelihood, field))
+        for field in REFERENCE_CHI2_FLOOR_FIELDS
+    }
+
+
+def spectrum_snr_median(config):
+    """Median per-pixel flux/error of the fitted spectrum (NaN if unavailable).
+
+    Used to split chi-square comparisons by spectrum S/N. Pixels with a
+    non-positive or non-finite error, or masked out, are ignored.
+    """
+    spectroscopy = getattr(config, "spectroscopy", None)
+    if spectroscopy is None:
+        return np.nan
+    flux = np.asarray(getattr(spectroscopy, "fluxes", ()), dtype=float)
+    err = np.asarray(getattr(spectroscopy, "errors", ()), dtype=float)
+    if flux.shape != err.shape or flux.size == 0:
+        return np.nan
+    valid = np.isfinite(flux) & np.isfinite(err) & (err > 0.0)
+    mask = getattr(spectroscopy, "mask", None)
+    if mask is not None:
+        mask = np.asarray(mask, dtype=bool)
+        if mask.shape == flux.shape:
+            valid &= mask
+    if not np.any(valid):
+        return np.nan
+    return float(np.median(flux[valid] / err[valid]))
+
+
+def apply_reference_spectrum_floor(fitter, floor):
+    """Set the spectral reference floor of a loaded posterior before prediction.
+
+    The floor enters only the ``*_chi2_ref`` deterministic sites, never the
+    likelihood, so saved draws can be re-predicted with any value.
+    """
+    if floor is None:
+        return fitter
+    if fitter.context.fit_config is not fitter.config:
+        raise RuntimeError(
+            "Cannot change reference_spectrum_floor of a loaded posterior: the "
+            "model context does not share the fitter config."
+        )
+    fitter.config.likelihood.reference_spectrum_floor = float(floor)
+    fitter.predictive = None
+    return fitter
+
+
+# Re-predicted values compared with the resumed run's catalogue; equal draws
+# and the same jaxsedfit give identical values, so a difference beyond the
+# tolerance means the model changed between the fit and the re-prediction.
+RESUME_COMPARE_COLUMNS = (
+    "sed_reduced_chi2",
+    "spectroscopy_reduced_chi2",
+    "joint_reduced_chi2",
+    "m_2500_dereddened",
+    "m_2500_attenuated_model",
+)
+RESUME_COMPARE_RTOL = 1.0e-4
+RESUME_COMPARE_ATOL = 1.0e-6
+_RESUME_COMPARE_CACHE = {}
+
+
+def _resume_compare_rows(path):
+    """Return {object_id: row} from a resumed run's spectral catalogue (cached)."""
+    path = str(path)
+    if path not in _RESUME_COMPARE_CACHE:
+        from qvc.hubble.chi2_statistic_comparison import read_catalog
+
+        frame = read_catalog(path)
+        if "object_id" not in frame.columns:
+            raise ValueError(f"Resume comparison catalogue {path} has no object_id column.")
+        frame["object_id"] = frame["object_id"].astype(str).str.strip()
+        _RESUME_COMPARE_CACHE[path] = {
+            row["object_id"]: row for row in frame.to_dict(orient="records")
+        }
+    return _RESUME_COMPARE_CACHE[path]
+
+
+def compare_resumed_prediction(result, rows, *, object_id):
+    """Return the differences between re-predicted and previously stored values."""
+    previous = rows.get(str(object_id).strip())
+    if previous is None:
+        return [f"object {object_id} is not in the comparison catalogue"]
+    problems = []
+    for column in RESUME_COMPARE_COLUMNS:
+        if column not in previous:
+            continue
+        old = legacy.safe_float(previous[column])
+        new = legacy.safe_float(result.get(column))
+        if not np.isfinite(old) and not np.isfinite(new):
+            continue
+        if not (np.isfinite(old) and np.isfinite(new)) or not np.isclose(
+            new, old, rtol=RESUME_COMPARE_RTOL, atol=RESUME_COMPARE_ATOL
+        ):
+            problems.append(f"{column}: stored {old!r}, re-predicted {new!r}")
+    return problems
+
+
+def reference_chi2_origin(execution_mode):
+    """Provenance of the reference chi-square columns of one row."""
+    dependency = runtime_state().get("dependencies", {}).get("JAXSEDFit", {})
+    git = dependency.get("git", {}) if isinstance(dependency, dict) else {}
+    return {
+        "reference_chi2_source": "re-prediction" if execution_mode == "resumed" else "fit",
+        "reference_chi2_jaxsedfit_commit": str(git.get("commit", "")).strip() or "unavailable",
+    }
+
+
+def require_reference_chi2_support():
+    """Fail once, before any object, if jaxsedfit cannot report reference chi2."""
+    import dataclasses
+
+    from jaxsedfit import LikelihoodConfig
+
+    fields = {field.name for field in dataclasses.fields(LikelihoodConfig)}
+    missing = [name for name in REFERENCE_CHI2_FLOOR_FIELDS if name not in fields]
+    if missing:
+        raise SystemExit(
+            "The installed jaxsedfit does not report the fixed-definition "
+            "reference chi-square (*_chi2_ref) used by the Hubble quality cuts "
+            f"(LikelihoodConfig lacks {missing}). Install a jaxsedfit with the "
+            "reference chi-square diagnostics."
+        )
 
 
 def empty_psf_agn_fraction_summary(bands=PSF_AGN_FRACTION_BANDS):
@@ -3088,6 +3255,9 @@ def run_one_fit(
         result.update(summarize_catalog_posterior(fit_result.samples, prediction))
         result.update(summarize_spectral_component_fractions(prediction, rec["z"]))
         result.update(summarize_joint_chi2(prediction))
+        result.update(reference_chi2_provenance(config))
+        result.update(reference_chi2_origin("fresh"))
+        result["spectrum_snr_median"] = spectrum_snr_median(config)
         result.update(summarize_host_2500_psf(prediction))
         (
             result["_joint_posterior_draws"],
@@ -3245,6 +3415,7 @@ def _complete_resumed_fit(rec, args, source_path, fitter, *, sampled_options=Non
             result[field] = current_options[field]
             result[f"{field}_sampled"] = sampled_options[field]
     fitter.predictive = None
+    apply_reference_spectrum_floor(fitter, getattr(args, "reference_spectrum_floor", None))
     validate_resume_host_capture_fitter(fitter, source_path)
     validate_resume_bal_fitter(
         fitter,
@@ -3286,6 +3457,9 @@ def _complete_resumed_fit(rec, args, source_path, fitter, *, sampled_options=Non
         summarize_spectral_component_fractions(prediction, config.observation.redshift)
     )
     result.update(summarize_joint_chi2(prediction))
+    result.update(reference_chi2_provenance(config))
+    result.update(reference_chi2_origin("resumed"))
+    result["spectrum_snr_median"] = spectrum_snr_median(config)
     result.update(summarize_host_2500_psf(prediction))
     (
         result["_joint_posterior_draws"],
@@ -3378,6 +3552,28 @@ def _complete_resumed_fit(rec, args, source_path, fitter, *, sampled_options=Non
     result["photometry_filters"] = ",".join(
         str(name) for name in config.photometry.filter_names
     )
+
+    compare_catalog = getattr(args, "resume_compare_catalog", None)
+    result["resume_compare_catalog"] = str(compare_catalog or "")
+    result["resume_prediction_mismatch"] = ""
+    if compare_catalog:
+        problems = compare_resumed_prediction(
+            result, _resume_compare_rows(compare_catalog), object_id=rec["object_id"]
+        )
+        if problems:
+            message = (
+                f"Re-predicted values differ from {compare_catalog}: "
+                + "; ".join(problems)
+            )
+            if not getattr(args, "allow_resume_prediction_mismatch", False):
+                raise ValueError(
+                    message
+                    + ". The installed jaxsedfit probably differs from the one "
+                    "that made the fit; use --allow-resume-prediction-mismatch "
+                    "to record the new values anyway."
+                )
+            print(f"Warning: {message}", flush=True)
+            result["resume_prediction_mismatch"] = "; ".join(problems)
 
     if args.save_jaxsedfit_samples:
         result_path = fitter.save(args.output_dir)
@@ -3652,6 +3848,7 @@ def require_supported_agn_options(args):
 
 def run_fit(args):
     require_supported_agn_options(args)
+    require_reference_chi2_support()
     records = build_records(args)
     if not records:
         raise RuntimeError("No records to process.")
@@ -3769,6 +3966,21 @@ def parse_args(argv=None):
         ),
     )
     parser.add_argument(
+        "--resume-compare-catalog",
+        default=None,
+        help=(
+            "Spectral catalogue of the resumed run. Each re-predicted "
+            f"{', '.join(RESUME_COMPARE_COLUMNS)} must match its stored value "
+            f"(rtol {RESUME_COMPARE_RTOL:g}); otherwise the object fails, which "
+            "catches a jaxsedfit version mismatch. Requires --resume."
+        ),
+    )
+    parser.add_argument(
+        "--allow-resume-prediction-mismatch",
+        action="store_true",
+        help="Record re-predicted values that differ from --resume-compare-catalog instead of failing.",
+    )
+    parser.add_argument(
         "--allow-unannotated-resume-bundle",
         action="store_true",
         help=(
@@ -3797,6 +4009,18 @@ def parse_args(argv=None):
     parser.add_argument("--sed-n-wave", type=int, default=512)
     parser.add_argument("--photometry-systematics", type=float, default=0.08)
     parser.add_argument("--spectrum-student-t-df", type=float, default=5.0)
+    parser.add_argument(
+        "--reference-spectrum-floor",
+        type=float,
+        default=DEFAULT_REFERENCE_SPECTRUM_FLOOR,
+        help=(
+            "Fractional model floor w of the fixed-definition spectral chi-square "
+            "(spectroscopy_reduced_chi2_ref, variance err**2 + (w*model)**2) "
+            "that the Hubble Tier-1 cuts use. Diagnostic only: it does not enter "
+            "the likelihood. On --resume the saved draws are re-predicted with it "
+            "(default: %(default)s)."
+        ),
+    )
     parser.add_argument("--spectrum-scale-prior-sigma-dex", type=float, default=0.1)
     parser.add_argument("--line-flux-scale-mjy", type=float, default=0.1)
     parser.add_argument("--optax-steps", type=int, default=4000)
@@ -3946,10 +4170,11 @@ def parse_args(argv=None):
         args.resume_only
         or args.allow_unannotated_resume_bundle
         or args.resume_records_path
+        or args.resume_compare_catalog
     ):
         parser.error(
-            "--resume-only, --allow-unannotated-resume-bundle, and "
-            "--resume-records-path require --resume."
+            "--resume-only, --allow-unannotated-resume-bundle, "
+            "--resume-records-path and --resume-compare-catalog require --resume."
         )
     args.dense_mass = {"true": True, "false": False}.get(args.dense_mass, args.dense_mass)
     return args

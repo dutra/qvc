@@ -60,6 +60,8 @@ from qvc.hubble.hubble_model import (
 from qvc.hubble.hubble_likelihood import sigma_lens_from_dc, sigma_mu_from_z_err
 from qvc.hubble.cuts import (
     AGN_TIER1_FIT_QUALITY_CUTS,
+    REFERENCE_CHI2_CUT_COLUMNS,
+    chi2_cut_statistics,
     LIGHT_CURVE_N_POINTS_EXCLUDED_BANDS,
     light_curve_point_count_series,
 )
@@ -1406,6 +1408,16 @@ def plot_tier1_cuts_vs_redshift(
 
     def _plot_panel(axis, column, title, color):
         threshold = thresholds.get(column)
+        # Plot the column the Tier-1 cut applies to: the reference
+        # chi-square when it is selected for this cut and present.
+        reference_column = REFERENCE_CHI2_CUT_COLUMNS.get(column)
+        if (
+            reference_column is not None
+            and reference_column in df.columns
+            and chi2_cut_statistics()[column] == "reference"
+        ):
+            column = reference_column
+            title = f"{title} (ref)"
         axis.set_title(title, fontsize=12, pad=7)
         axis.set_xlabel("Redshift", fontsize=11)
         axis.set_xlim(0.0, 5.0)

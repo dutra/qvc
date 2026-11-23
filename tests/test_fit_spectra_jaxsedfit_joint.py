@@ -307,6 +307,7 @@ def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
     assert len(used_phot) == 5
     assert config.spectroscopy.resolving_power == pytest.approx(2000.0)
     assert config.spectroscopy.aperture_diameter_arcsec == pytest.approx(2.0)
+    assert config.likelihood.reference_spectrum_floor == pytest.approx(0.08)
     assert config.agn.fit_lines is True
     assert config.agn.tied_lines is True
     assert config.agn.fit_feii is False
@@ -1198,7 +1199,9 @@ def _component_prediction(filter_names):
     prediction.update(
         {
             name: np.array([float(index), float(index + 2)])
-            for index, name in enumerate(joint.JOINT_CHI2_SITES)
+            for index, name in enumerate(
+                joint.JOINT_CHI2_SITES + joint.REFERENCE_CHI2_SITES
+            )
         }
     )
     prediction.update(_spectral_fraction_prediction())
@@ -1528,7 +1531,7 @@ def test_joint_summaries_have_stable_native_schema():
     for band in "ugriz":
         assert fractions[f"f_AGN_psf_{band}"] == pytest.approx(0.7)
         assert fractions[f"f_AGN_psf_{band}_err"] == pytest.approx(0.0)
-    for name in joint.JOINT_CHI2_SITES:
+    for name in joint.JOINT_CHI2_SITES + joint.REFERENCE_CHI2_SITES:
         assert name in chi2
         assert f"{name}_err" in chi2
     assert host_2500["f_host_2500_psf"] == pytest.approx(0.35)
@@ -1692,7 +1695,12 @@ def test_resume_validation_rejects_missing_spatial_scale_capture_fractions(
     filter_names = [f"{band}_sdss" for band in "ugriz"]
     fitter = SimpleNamespace(
         config=SimpleNamespace(
-            likelihood=SimpleNamespace(use_host_capture_model=True),
+            likelihood=SimpleNamespace(
+                use_host_capture_model=True,
+                reference_spectrum_floor=0.08,
+                reference_photometry_floor=0.10,
+                reference_agn_floor=0.15,
+            ),
             photometry=SimpleNamespace(
                 filter_names=filter_names,
                 photometry_method=["psf"] * 5,
@@ -2451,7 +2459,12 @@ def _dummy_resume_fitter_cls(rec, prediction, filter_names, agn=None):
                     joint.SDSS_STATIC_PSF_FWHM_ARCSEC[band] for band in "ugriz"
                 ],
             ),
-            likelihood=SimpleNamespace(use_host_capture_model=True),
+            likelihood=SimpleNamespace(
+                use_host_capture_model=True,
+                reference_spectrum_floor=0.08,
+                reference_photometry_floor=0.10,
+                reference_agn_floor=0.15,
+            ),
             agn=SimpleNamespace(**(agn or {})),
             galaxy=SimpleNamespace(cosmology_h0=70.0, cosmology_om0=0.3),
         )
@@ -2630,6 +2643,11 @@ def test_fresh_fit_writes_same_diagnostic_schema_and_v2_bundle(monkeypatch, tmp_
             return prediction
 
     config = SimpleNamespace(
+        likelihood=SimpleNamespace(
+            reference_spectrum_floor=0.08,
+            reference_photometry_floor=0.10,
+            reference_agn_floor=0.15,
+        ),
         galaxy=SimpleNamespace(cosmology_h0=70.0, cosmology_om0=0.3)
     )
     used_phot = pd.DataFrame({"filter_name": filter_names})
@@ -3219,3 +3237,152 @@ def test_unsupported_option_fails_once_at_start_up(monkeypatch, tmp_path):
         joint.run_fit(args)
     # Without options nothing is required.
     joint.require_supported_agn_options(joint.parse_args(_common_fit_argv(tmp_path)))
+
+def test_reference_chi2_schema_and_provenance():
+    empty = joint.empty_joint_chi2_summary()
+    for name in joint.JOINT_CHI2_SITES + joint.REFERENCE_CHI2_SITES:
+        assert np.isnan(empty[name]) and np.isnan(empty[f"{name}_err"])
+    for field in joint.REFERENCE_CHI2_FLOOR_FIELDS:
+        assert np.isnan(empty[field])
+    config = SimpleNamespace(
+        likelihood=SimpleNamespace(
+            reference_spectrum_floor=0.08,
+            reference_photometry_floor=0.1,
+            reference_agn_floor=0.15,
+        )
+    )
+    assert joint.reference_chi2_provenance(config) == {
+        "reference_spectrum_floor": 0.08,
+        "reference_photometry_floor": 0.1,
+        "reference_agn_floor": 0.15,
+    }
+
+
+def test_summarize_joint_chi2_requires_reference_sites():
+    prediction = {name: np.ones(3) for name in joint.JOINT_CHI2_SITES}
+    with pytest.raises(ValueError, match="reference"):
+        summarize_joint_chi2(prediction)
+    prediction.update({name: np.array([1.0, 2.0, 3.0]) for name in joint.REFERENCE_CHI2_SITES})
+    summary = summarize_joint_chi2(prediction)
+    # Posterior-predictive median over draws, as for the fitted-noise sites.
+    assert summary["spectroscopy_reduced_chi2_ref"] == pytest.approx(2.0)
+    assert summary["spectroscopy_reduced_chi2"] == pytest.approx(1.0)
+
+
+def test_require_reference_chi2_support_fails_early_on_old_jaxsedfit(monkeypatch):
+    import dataclasses
+
+    @dataclasses.dataclass
+    class OldLikelihoodConfig:
+        systematics_width: float = 0.1
+
+    monkeypatch.setitem(sys.modules, "jaxsedfit", SimpleNamespace(LikelihoodConfig=OldLikelihoodConfig))
+    with pytest.raises(SystemExit, match="reference chi-square"):
+        joint.require_reference_chi2_support()
+
+    @dataclasses.dataclass
+    class NewLikelihoodConfig:
+        reference_spectrum_floor: float = 0.08
+        reference_photometry_floor: float = 0.1
+        reference_agn_floor: float = 0.15
+
+    monkeypatch.setitem(sys.modules, "jaxsedfit", SimpleNamespace(LikelihoodConfig=NewLikelihoodConfig))
+    joint.require_reference_chi2_support()
+
+
+def test_apply_reference_spectrum_floor_updates_shared_config():
+    config = SimpleNamespace(likelihood=SimpleNamespace(reference_spectrum_floor=0.08))
+    fitter = SimpleNamespace(config=config, context=SimpleNamespace(fit_config=config), predictive="cached")
+    joint.apply_reference_spectrum_floor(fitter, 0.05)
+    assert config.likelihood.reference_spectrum_floor == 0.05
+    assert fitter.predictive is None
+    joint.apply_reference_spectrum_floor(fitter, None)
+    assert config.likelihood.reference_spectrum_floor == 0.05
+    detached = SimpleNamespace(config=config, context=SimpleNamespace(fit_config=SimpleNamespace()), predictive=None)
+    with pytest.raises(RuntimeError, match="does not share"):
+        joint.apply_reference_spectrum_floor(detached, 0.05)
+
+
+def test_reference_spectrum_floor_cli_default(tmp_path):
+    common = ["--mode", "fit", str(tmp_path / "out.h5"),
+              "--sed-photometry-path", str(tmp_path / "phot.csv"), "--filter_object_id", "1"]
+    assert joint.parse_args(common).reference_spectrum_floor == pytest.approx(0.08)
+    assert joint.parse_args(
+        [*common, "--reference-spectrum-floor", "0.05"]
+    ).reference_spectrum_floor == pytest.approx(0.05)
+
+
+def test_spectrum_snr_median_uses_valid_unmasked_pixels():
+    spectroscopy = SimpleNamespace(
+        fluxes=[10.0, 20.0, 30.0, 40.0, np.nan],
+        errors=[1.0, 2.0, 0.0, 4.0, 1.0],
+        mask=[True, True, True, False, True],
+    )
+    # Valid: pixels 0 and 1 (pixel 2 zero error, 3 masked, 4 non-finite).
+    assert joint.spectrum_snr_median(SimpleNamespace(spectroscopy=spectroscopy)) == pytest.approx(10.0)
+    assert np.isnan(joint.spectrum_snr_median(SimpleNamespace()))
+    assert "spectrum_snr_median" in joint.empty_joint_chi2_summary()
+
+
+def test_compare_resumed_prediction_flags_changed_values(tmp_path):
+    path = tmp_path / "old.csv"
+    pd.DataFrame(
+        {
+            "object_id": [" 7 ", "8"],
+            "spectroscopy_reduced_chi2": [1.05, 2.0],
+            "m_2500_dereddened": [20.0, np.nan],
+        }
+    ).to_csv(path, index=False)
+    joint._RESUME_COMPARE_CACHE.clear()
+    rows = joint._resume_compare_rows(path)
+    same = {"spectroscopy_reduced_chi2": 1.05 * (1 + 1e-6), "m_2500_dereddened": 20.0}
+    assert joint.compare_resumed_prediction(same, rows, object_id="7") == []
+    changed = {"spectroscopy_reduced_chi2": 1.10, "m_2500_dereddened": 20.0}
+    problems = joint.compare_resumed_prediction(changed, rows, object_id="7")
+    assert len(problems) == 1 and problems[0].startswith("spectroscopy_reduced_chi2")
+    assert joint.compare_resumed_prediction({"spectroscopy_reduced_chi2": 2.0}, rows, object_id="8") == []
+    assert "not in the comparison catalogue" in joint.compare_resumed_prediction({}, rows, object_id="9")[0]
+
+
+def test_resumed_fit_fails_when_re_prediction_differs(monkeypatch, tmp_path):
+    rec = _run_record()
+    args = _hybrid_args(tmp_path)
+    args.save_fig = False
+    args.save_jaxsedfit_samples = False
+    source = joint.posterior_bundle_path(args.resume, rec)
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"old posterior")
+    filter_names = [f"{band}_sdss" for band in "ugriz"]
+    prediction = _component_prediction(filter_names)
+    prediction.update({"ebv_gal": np.full(4, 0.02), "ebv_agn": np.full(4, 0.03)})
+    DummyFitter = _dummy_resume_fitter_cls(rec, prediction, filter_names)
+
+    baseline = joint._complete_resumed_fit(rec, args, source, DummyFitter())
+    assert baseline["reference_chi2_source"] == "re-prediction"
+    assert baseline["reference_chi2_jaxsedfit_commit"]
+    catalog = tmp_path / "old_catalog.csv"
+    row = {"object_id": rec["object_id"], **{c: baseline[c] for c in joint.RESUME_COMPARE_COLUMNS}}
+    pd.DataFrame([row]).to_csv(catalog, index=False)
+    joint._RESUME_COMPARE_CACHE.clear()
+    args.resume_compare_catalog = str(catalog)
+    matched = joint._complete_resumed_fit(rec, args, source, DummyFitter())
+    assert matched["resume_prediction_mismatch"] == ""
+    assert matched["resume_compare_catalog"] == str(catalog)
+
+    row["spectroscopy_reduced_chi2"] = baseline["spectroscopy_reduced_chi2"] * 1.5
+    pd.DataFrame([row]).to_csv(catalog, index=False)
+    joint._RESUME_COMPARE_CACHE.clear()
+    with pytest.raises(ValueError, match="differ from"):
+        joint._complete_resumed_fit(rec, args, source, DummyFitter())
+    joint._RESUME_COMPARE_CACHE.clear()
+    args.allow_resume_prediction_mismatch = True
+    recorded = joint._complete_resumed_fit(rec, args, source, DummyFitter())
+    assert recorded["resume_prediction_mismatch"].startswith("spectroscopy_reduced_chi2")
+    joint._RESUME_COMPARE_CACHE.clear()
+
+
+def test_resume_compare_catalog_requires_resume(tmp_path):
+    common = ["--mode", "fit", str(tmp_path / "out.h5"),
+              "--sed-photometry-path", str(tmp_path / "phot.csv"), "--filter_object_id", "1"]
+    with pytest.raises(SystemExit):
+        joint.parse_args([*common, "--resume-compare-catalog", "x.h5"])

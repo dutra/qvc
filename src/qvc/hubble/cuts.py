@@ -512,6 +512,299 @@ AGN_TIER2_PARAMETER_CUTS = (
 # Tier-1 convergence diagnostics are mandatory when Tier 1 is active.
 ALLOW_MISSING_SCALAR_CUT_COLUMNS = frozenset()
 
+# Fixed-definition ("reference") chi-square columns written by the joint
+# spectra wrapper (jaxsedfit ``*_chi2_ref`` sites). The stored columns use the
+# likelihood's variance, which includes fitted noise terms; the reference
+# columns use a fixed variance that does not depend on any fitted parameter:
+# spectra err**2 + (0.08*model)**2 per pixel; photometry the likelihood's
+# variance with the systematic and AGN-mismatch widths fixed to 0.10 (times
+# the model band flux) and 0.15 (times the AGN band flux); joint the unweighted
+# sum of the two over the summed counts.
+#
+# Only the spectral reference has the definition of an earlier statistic (the
+# fixed 8% floor the spectroscopic threshold was set on). The SED reference is
+# a new statistic (earlier fits used fitted widths, as the stored column does),
+# and so is the joint reference (earlier joint values weighted the spectrum
+# and used the fitted-width SED term). Their thresholds are inherited and have
+# to be assessed on data: the per-cut statistic switches and the stored-versus-
+# reference comparison in the cut report exist for that.
+REFERENCE_CHI2_CUT_COLUMNS = {
+    "sed_reduced_chi2": "sed_reduced_chi2_ref",
+    "spectroscopy_reduced_chi2": "spectroscopy_reduced_chi2_ref",
+    "joint_reduced_chi2": "joint_reduced_chi2_ref",
+}
+# Per-cut choice of statistic: "reference" (default; falls back to the stored
+# column for catalogues that have no reference columns) or "stored".
+CHI2_CUT_STATISTIC_ENV = {
+    "sed_reduced_chi2": "QVC_CUT_SED_CHI2_STATISTIC",
+    "spectroscopy_reduced_chi2": "QVC_CUT_SPECTROSCOPY_CHI2_STATISTIC",
+    "joint_reduced_chi2": "QVC_CUT_JOINT_CHI2_STATISTIC",
+}
+CHI2_STATISTIC_CHOICES = ("reference", "stored")
+# Stored statistics whose definition changed when jaxsedfit started fitting
+# the spectral jitter: they depend on S/N, so cutting on them in a fitted-noise
+# catalogue needs the explicit override. The stored SED definition (fitted
+# systematic and AGN widths) did not change.
+SNR_DEPENDENT_STORED_CHI2 = frozenset({"spectroscopy_reduced_chi2", "joint_reduced_chi2"})
+# Columns present only in catalogues from jaxsedfit versions that fit the
+# spectral noise (jitter).
+FITTED_SPECTRAL_NOISE_COLUMNS = ("frac_jitter", "add_jitter", "frac_fe_jitter")
+# Explicit per-row noise-model marker (minimal Hubble inputs carry it).
+SPECTRAL_NOISE_MODEL_COLUMN = "spectral_noise_model"
+SPECTRAL_NOISE_MODELS = ("fixed_floor", "fitted_jitter")
+ALLOW_FITTED_NOISE_CHI2_ENV = "QVC_CUT_ALLOW_FITTED_NOISE_CHI2"
+ALLOW_MISSING_REFERENCE_CHI2_ENV = "QVC_CUT_ALLOW_MISSING_REFERENCE_CHI2"
+# Reference variance floors the Tier-1 thresholds assume; the catalogue's
+# recorded floors must match them.
+REFERENCE_FLOOR_ENV = {
+    "reference_spectrum_floor": ("QVC_CUT_REFERENCE_SPECTRUM_FLOOR", 0.08),
+    "reference_photometry_floor": ("QVC_CUT_REFERENCE_PHOTOMETRY_FLOOR", 0.10),
+    "reference_agn_floor": ("QVC_CUT_REFERENCE_AGN_FLOOR", 0.15),
+}
+
+
+def _env_flag(name):
+    value = str(os.environ.get(name, "")).strip().lower()
+    if value in {"", "0", "false", "no", "off"}:
+        return False
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    raise ValueError(f"{name} must be 0/1 (or true/false), got {value!r}")
+
+
+def expected_reference_floors():
+    """Return the reference floors the thresholds assume (env-overridable)."""
+    floors = {}
+    for field, (env_name, default) in REFERENCE_FLOOR_ENV.items():
+        value = _cut_env_float(env_name, default)
+        if value is None or not np.isfinite(value) or value < 0.0:
+            raise ValueError(f"{env_name} must be a finite non-negative number, got {value!r}")
+        floors[field] = float(value)
+    return floors
+
+
+def chi2_cut_statistics(statistics=None):
+    """Return the requested statistic per chi-square cut, validated.
+
+    ``statistics`` overrides the ``QVC_CUT_*_CHI2_STATISTIC`` environment
+    variables per cut; unset cuts default to ``"reference"``.
+    """
+    statistics = dict(statistics or {})
+    unknown_cuts = sorted(set(statistics) - set(CHI2_CUT_STATISTIC_ENV))
+    if unknown_cuts:
+        raise ValueError(f"Unknown chi-square cut(s): {unknown_cuts}")
+    resolved = {}
+    for column, env_name in CHI2_CUT_STATISTIC_ENV.items():
+        value = statistics.get(column, os.environ.get(env_name))
+        value = "reference" if value is None or not str(value).strip() else str(value).strip().lower()
+        if value not in CHI2_STATISTIC_CHOICES:
+            raise ValueError(
+                f"{env_name} must be one of {CHI2_STATISTIC_CHOICES}, got {value!r}"
+            )
+        resolved[column] = value
+    return resolved
+
+
+def _numeric(frame, column):
+    return pd.to_numeric(frame[column], errors="coerce").to_numpy(dtype=float)
+
+
+def fitted_noise_markers(frame_or_columns):
+    """Return the evidence that a catalogue comes from a fitted-noise fit."""
+    columns = set(getattr(frame_or_columns, "columns", frame_or_columns))
+    markers = [column for column in FITTED_SPECTRAL_NOISE_COLUMNS if column in columns]
+    if SPECTRAL_NOISE_MODEL_COLUMN in columns and hasattr(frame_or_columns, "columns"):
+        values = set(frame_or_columns[SPECTRAL_NOISE_MODEL_COLUMN].astype(str).str.strip())
+        unknown = sorted(values - set(SPECTRAL_NOISE_MODELS))
+        if unknown:
+            raise ValueError(
+                f"Unknown {SPECTRAL_NOISE_MODEL_COLUMN} value(s) {unknown}; "
+                f"expected {SPECTRAL_NOISE_MODELS}."
+            )
+        if "fitted_jitter" in values:
+            markers.append(f"{SPECTRAL_NOISE_MODEL_COLUMN}=fitted_jitter")
+    return markers
+
+
+def check_reference_floors(frame, floors=None):
+    """Require every recorded, finite reference floor to equal the expected one.
+
+    Returns the expected floors. Raises when a floor column is missing or a
+    recorded value differs, since the thresholds assume these floors.
+    """
+    floors = expected_reference_floors() if floors is None else dict(floors)
+    problems = []
+    for field, expected in floors.items():
+        if field not in frame.columns:
+            problems.append(f"{field} column missing")
+            continue
+        values = _numeric(frame, field)
+        finite = values[np.isfinite(values)]
+        bad = finite[~np.isclose(finite, expected, rtol=1e-9, atol=1e-12)]
+        if bad.size:
+            problems.append(
+                f"{field}: {bad.size} row(s) with {sorted(set(np.round(bad, 6)))[:5]}, expected {expected:g}"
+            )
+    if problems:
+        raise ValueError(
+            "Reference chi-square floors do not match the floors the Tier-1 thresholds "
+            "assume (" + "; ".join(problems) + "). Re-predict with the expected floors, "
+            "or set QVC_CUT_REFERENCE_*_FLOOR to the catalogue's floors and re-assess "
+            "the thresholds."
+        )
+    return floors
+
+
+def resolve_chi2_cut_columns(
+    frame,
+    cuts,
+    *,
+    statistics=None,
+    allow_fitted_noise_chi2=None,
+    allow_missing_reference_chi2=None,
+    floors=None,
+):
+    """Return Tier-1 cuts with each chi-square column mapped to the one to use.
+
+    ``frame`` is the catalogue (a DataFrame; a plain list of column names is
+    accepted, then the value checks below are skipped). Per chi-square cut,
+    with the requested statistic from :func:`chi2_cut_statistics`:
+
+    - ``reference`` and the ``*_ref`` column present: cut on it, same threshold.
+      Rows whose stored value is finite but reference value is not would be
+      dropped silently (for example when spectra files of different versions
+      are combined), so they raise unless ``allow_missing_reference_chi2`` or
+      ``QVC_CUT_ALLOW_MISSING_REFERENCE_CHI2=1``; their count is always
+      reported. The recorded reference floors must equal the expected ones.
+    - ``reference`` without reference columns: a catalogue without fitted-noise
+      markers (fixed spectral floor) uses the stored column, whose definition
+      the thresholds were set on; a fitted-noise catalogue uses the stored SED
+      column, and for spectroscopy/joint raises unless the override is set.
+    - ``stored``: the stored column; for spectroscopy/joint in a fitted-noise
+      catalogue only with the override (``allow_fitted_noise_chi2`` or
+      ``QVC_CUT_ALLOW_FITTED_NOISE_CHI2=1``).
+
+    Returns ``(cuts, choices)``; ``choices`` maps each chi-square cut to
+    ``{"statistic", "column", "reason", "missing_reference"}`` and, when any
+    reference column is used, ``choices["reference_floors"]`` holds the floors.
+    """
+    has_values = hasattr(frame, "columns")
+    columns = set(frame.columns if has_values else frame)
+    requested = chi2_cut_statistics(statistics)
+    chi2_cuts = [column for column, _lower, _upper in cuts if column in REFERENCE_CHI2_CUT_COLUMNS]
+    reference_present = [
+        REFERENCE_CHI2_CUT_COLUMNS[column]
+        for column in chi2_cuts
+        if REFERENCE_CHI2_CUT_COLUMNS[column] in columns
+    ]
+    if reference_present and len(reference_present) != len(chi2_cuts):
+        missing = sorted(
+            {REFERENCE_CHI2_CUT_COLUMNS[c] for c in chi2_cuts} - set(reference_present)
+        )
+        raise ValueError(
+            f"Input catalogue has only some reference chi-square columns; missing {missing}."
+        )
+    fitted_noise = fitted_noise_markers(frame)
+    allow = None
+    choices = {}
+    blocked = []
+    missing_reference = {}
+    for column in chi2_cuts:
+        reference = REFERENCE_CHI2_CUT_COLUMNS[column]
+        statistic = requested[column]
+        if statistic == "reference" and reference in columns:
+            n_missing = 0
+            if has_values and column in columns:
+                stored_values = _numeric(frame, column)
+                reference_values = _numeric(frame, reference)
+                n_missing = int(
+                    np.count_nonzero(np.isfinite(stored_values) & ~np.isfinite(reference_values))
+                )
+            if n_missing:
+                missing_reference[column] = n_missing
+            choices[column] = {
+                "statistic": statistic,
+                "column": reference,
+                "reason": "reference column",
+                "missing_reference": n_missing,
+            }
+            continue
+        if not fitted_noise:
+            reason = (
+                "stored column (requested)"
+                if statistic == "stored"
+                else "no reference column; fixed-floor catalogue"
+            )
+        elif column not in SNR_DEPENDENT_STORED_CHI2:
+            reason = (
+                "stored column (requested); stored SED definition unchanged"
+                if statistic == "stored"
+                else "no reference column; stored SED definition unchanged"
+            )
+        else:
+            if allow is None:
+                allow = (
+                    _env_flag(ALLOW_FITTED_NOISE_CHI2_ENV)
+                    if allow_fitted_noise_chi2 is None
+                    else bool(allow_fitted_noise_chi2)
+                )
+            if not allow:
+                blocked.append((column, statistic))
+                continue
+            reason = f"stored fitted-noise column ({ALLOW_FITTED_NOISE_CHI2_ENV}=1)"
+        choices[column] = {
+            "statistic": statistic,
+            "column": column,
+            "reason": reason,
+            "missing_reference": 0,
+        }
+    if blocked:
+        detail = ", ".join(f"{column} ({statistic})" for column, statistic in blocked)
+        raise ValueError(
+            "Input catalogue comes from a fit with a fitted spectral noise model "
+            f"({fitted_noise}); its stored {[c for c, _ in blocked]} use the "
+            "fitted noise and depend on S/N, so the Tier-1 thresholds do not apply "
+            f"to them. Blocked cuts: {detail}. Use the reference statistic (re-predict "
+            "the saved posteriors with the joint spectra wrapper, --resume ... "
+            "--resume-only, to add the *_ref columns), or set "
+            f"{ALLOW_FITTED_NOISE_CHI2_ENV}=1 to cut on the fitted-noise columns."
+        )
+    if missing_reference:
+        allow_missing = (
+            _env_flag(ALLOW_MISSING_REFERENCE_CHI2_ENV)
+            if allow_missing_reference_chi2 is None
+            else bool(allow_missing_reference_chi2)
+        )
+        if not allow_missing:
+            raise ValueError(
+                "Rows with a finite stored chi-square but no reference value would be "
+                f"removed by the reference cut: {missing_reference}. This happens when "
+                "spectra catalogues with and without reference columns are combined. "
+                "Re-predict the older catalogue, or set "
+                f"{ALLOW_MISSING_REFERENCE_CHI2_ENV}=1 to remove those rows."
+            )
+    if any(choice["column"] != cut for cut, choice in choices.items()) and has_values:
+        choices["reference_floors"] = check_reference_floors(frame, floors)
+    resolved = [
+        (choices[column]["column"] if column in choices else column, lower, upper)
+        for column, lower, upper in cuts
+    ]
+    return resolved, choices
+
+
+def summarize_chi2_cut_choices(choices):
+    """Return a one-line description of the chi-square columns a cut used."""
+    parts = []
+    for column, choice in choices.items():
+        if column == "reference_floors":
+            parts.append("reference floors " + ", ".join(f"{k}={v:g}" for k, v in choice.items()))
+            continue
+        text = f"{column}: {choice['column']} [{choice['statistic']}: {choice['reason']}]"
+        if choice.get("missing_reference"):
+            text += f" ({choice['missing_reference']} row(s) without a reference value)"
+        parts.append(text)
+    return "; ".join(parts)
+
 
 def light_curve_point_count_series(df, *, exclude_bands=None):
     """Return total per-object light-curve point counts and the columns used."""

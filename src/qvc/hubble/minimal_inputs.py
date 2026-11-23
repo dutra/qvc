@@ -14,7 +14,14 @@ import pandas as pd
 
 
 LIGHT_CURVE_FORMAT = "qvc_hubble_paper_light_curve_v1"
-SPECTRA_FORMAT = "qvc_hubble_paper_spectra_v1"
+# v2: carries the reference chi-square columns and the explicit per-row
+# ``spectral_noise_model`` marker. v1 files are rejected: written before the
+# marker existed, they cannot tell a fitted-noise catalogue from a fixed-floor
+# one, so the Tier-1 chi-square cuts could silently use the wrong statistic.
+SPECTRA_FORMAT = "qvc_hubble_paper_spectra_v2"
+PREVIOUS_SPECTRA_FORMATS = ("qvc_hubble_paper_spectra_v1",)
+NOISE_MODEL_FIELD = "spectral_noise_model"
+FITTED_NOISE_SOURCE_FIELDS = ("frac_jitter", "add_jitter", "frac_fe_jitter")
 FORMAT_ATTR = "qvc_hubble_paper_input_format"
 MANIFEST_ATTR = "field_manifest_json"
 
@@ -96,8 +103,29 @@ SPECTRA_FIELDS = (
     "joint_reduced_chi2",
     "m_2500_dereddened_rhat",
     "m_2500_attenuated_model_rhat",
+    # Reference chi-square and the fitted-noise marker used to choose the
+    # Tier-1 chi-square columns (see qvc.hubble.cuts.resolve_chi2_cut_columns).
+    "sed_reduced_chi2_ref",
+    "spectroscopy_reduced_chi2_ref",
+    "joint_reduced_chi2_ref",
+    "reference_spectrum_floor",
+    "reference_photometry_floor",
+    "reference_agn_floor",
+    "frac_jitter",
+    "spectrum_snr_median",
 )
-OPTIONAL_SPECTRA_FIELDS = ("pl_slope", "pl_slope_err")
+OPTIONAL_SPECTRA_FIELDS = (
+    "pl_slope",
+    "pl_slope_err",
+    "sed_reduced_chi2_ref",
+    "spectroscopy_reduced_chi2_ref",
+    "joint_reduced_chi2_ref",
+    "reference_spectrum_floor",
+    "reference_photometry_floor",
+    "reference_agn_floor",
+    "frac_jitter",
+    "spectrum_snr_median",
+)
 REQUIRED_SPECTRA_FIELDS = tuple(
     field for field in SPECTRA_FIELDS if field not in OPTIONAL_SPECTRA_FIELDS
 )
@@ -285,10 +313,20 @@ def export_minimal_hubble_inputs(
                     field,
                     _read_rows(spectra_catalog[field], spectra_indices),
                 )
+            noise_model = (
+                "fitted_jitter"
+                if any(field in spectra_catalog for field in FITTED_NOISE_SOURCE_FIELDS)
+                else "fixed_floor"
+            )
+            _write_dataset(
+                catalog,
+                NOISE_MODEL_FIELD,
+                np.asarray([noise_model] * len(spectra_indices), dtype=object),
+            )
             _set_provenance(
                 output,
                 catalog_format=SPECTRA_FORMAT,
-                fields=spectra_fields,
+                fields=(*spectra_fields, NOISE_MODEL_FIELD),
                 source_path=spectra_source,
                 source_rows=len(spectra_ids),
             )
@@ -301,6 +339,13 @@ def read_minimal_spectra_hdf5(path):
 
     with h5py.File(path, "r") as handle:
         actual_format = str(handle.attrs.get(FORMAT_ATTR, ""))
+        if actual_format in PREVIOUS_SPECTRA_FORMATS:
+            raise ValueError(
+                f"Minimal spectra file {path} uses {actual_format!r}, written before "
+                "the spectral noise-model marker; it cannot tell whether its "
+                "chi-square uses a fitted spectral jitter. Re-export it from the "
+                f"spectra catalogue ({SPECTRA_FORMAT!r})."
+            )
         if actual_format != SPECTRA_FORMAT:
             raise ValueError(
                 f"Unsupported minimal spectra format {actual_format!r}; "
@@ -310,14 +355,18 @@ def read_minimal_spectra_hdf5(path):
             raise ValueError("Minimal spectra HDF5 has no /catalog group.")
         catalog = handle["catalog"]
         actual_fields = tuple(catalog.keys())
-        if not set(REQUIRED_SPECTRA_FIELDS).issubset(actual_fields) or not set(actual_fields).issubset(SPECTRA_FIELDS):
-            missing = sorted(set(REQUIRED_SPECTRA_FIELDS) - set(actual_fields))
-            extra = sorted(set(actual_fields) - set(SPECTRA_FIELDS))
+        required = (*REQUIRED_SPECTRA_FIELDS, NOISE_MODEL_FIELD)
+        allowed = (*SPECTRA_FIELDS, NOISE_MODEL_FIELD)
+        if not set(required).issubset(actual_fields) or not set(actual_fields).issubset(allowed):
+            missing = sorted(set(required) - set(actual_fields))
+            extra = sorted(set(actual_fields) - set(allowed))
             raise ValueError(
                 f"Minimal spectra field manifest mismatch; missing={missing}, extra={extra}."
             )
         encoded_manifest = json.loads(str(handle.attrs.get(MANIFEST_ATTR, "[]")))
-        expected_manifest = [field for field in SPECTRA_FIELDS if field in catalog]
+        expected_manifest = [field for field in SPECTRA_FIELDS if field in catalog] + [
+            NOISE_MODEL_FIELD
+        ]
         if encoded_manifest != expected_manifest:
             raise ValueError("Minimal spectra manifest attribute is invalid.")
         values = {name: _decode(catalog[name][...]) for name in expected_manifest}
