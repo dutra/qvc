@@ -728,11 +728,17 @@ def normalize_photometry_coverage_min(value=None):
 
 
 def _filter_list(value):
+    """Filter names of one row; ``None`` for a missing or empty value (unknown)."""
     if isinstance(value, (bytes, np.bytes_)):
         value = value.decode("utf-8", errors="replace")
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return None
-    return [name.strip() for name in str(value).split(",") if name.strip()]
+    if isinstance(value, (list, tuple, np.ndarray)):
+        names = [str(name).strip() for name in value]
+    else:
+        if value is None or pd.isna(value):
+            return None
+        names = [name.strip() for name in str(value).split(",")]
+    names = [name for name in names if name]
+    return names or None
 
 
 def photometry_coverage_columns(frame):

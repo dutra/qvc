@@ -92,6 +92,25 @@ def test_missing_filter_list_is_unknown_and_blocks_the_cut():
 
 
 @pytest.mark.parametrize(
+    "missing",
+    [None, np.nan, pd.NA, "", " , ", b"", []],
+    ids=["None", "nan", "pd.NA", "empty", "commas", "empty-bytes", "empty-list"],
+)
+def test_missing_or_empty_filter_lists_are_unknown(missing):
+    frame = pd.DataFrame({"photometry_filters": pd.Series([ROWS["wise_only"], missing], dtype=object)})
+    coverage = add_photometry_coverage_columns(frame)
+    assert coverage[PHOTOMETRY_COVERAGE_CLASS_COLUMN].tolist() == ["wise_only", None]
+    with pytest.raises(ValueError, match="have no 'photometry_filters'"):
+        photometry_coverage_mask(coverage, "beyond_ugriz")
+
+
+def test_string_dtype_missing_values_are_unknown():
+    frame = pd.DataFrame({"photometry_filters": pd.array([ROWS["full"], pd.NA], dtype="string")})
+    coverage = photometry_coverage_columns(frame)
+    assert coverage[PHOTOMETRY_COVERAGE_CLASS_COLUMN].tolist() == ["full", None]
+
+
+@pytest.mark.parametrize(
     ("level", "kept"),
     [
         ("none", list(ROWS)),
@@ -233,3 +252,30 @@ def test_load_agn_data_cut_is_tier1(tmp_path, monkeypatch, capsys):
     assert len(selected) == 4
     assert "not applied with --cut-tier 0" in capsys.readouterr().out
     assert "photometry_coverage" not in selected.attrs["cut_configuration_json"]
+
+
+def test_load_agn_data_cut_refuses_mixed_photometry_exclusion(tmp_path, monkeypatch):
+    from qvc.hubble.cuts import ALLOW_MIXED_PHOTOMETRY_EXCLUSION_ENV
+
+    monkeypatch.delenv(ALLOW_MIXED_PHOTOMETRY_EXCLUSION_ENV, raising=False)
+    frame = _coverage_frame()
+    frame["photometry_exclusion_rest_wavelength"] = [912.0, np.nan, 912.0, 912.0]
+    frame["photometry_exclusion_max_fraction"] = [0.5, np.nan, 0.5, 0.5]
+    calls = []
+    original = hubble_utils.check_photometry_exclusion_settings
+    monkeypatch.setattr(
+        hubble_utils, "check_photometry_exclusion_settings",
+        lambda df, **kw: calls.append(len(df)) or original(df, **kw),
+    )
+    monkeypatch.setenv(PHOTOMETRY_COVERAGE_MIN_ENV, "galex")
+    with pytest.raises(ValueError, match="different sub-Lyman photometry exclusion settings"):
+        _load(tmp_path, monkeypatch, frame)
+    monkeypatch.setenv(ALLOW_MIXED_PHOTOMETRY_EXCLUSION_ENV, "1")
+    selected, _ = _load(tmp_path, monkeypatch, frame)
+    assert selected["object_id"].tolist() == ["obj0", "obj2"]
+    assert calls == [4]  # the coverage cut called the guard on the rows it cuts
+    # Off: the coverage path does not call it.
+    calls.clear()
+    monkeypatch.delenv(PHOTOMETRY_COVERAGE_MIN_ENV)
+    _load(tmp_path, monkeypatch, frame)
+    assert calls == []

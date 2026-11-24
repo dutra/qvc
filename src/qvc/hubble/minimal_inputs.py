@@ -119,6 +119,10 @@ SPECTRA_FIELDS = (
     "photometry_exclusion_max_fraction",
     # Filters the SED fit was given and left out (comma-separated); they define
     # the photometric coverage class (qvc.hubble.cuts.photometry_coverage_columns).
+    # Exports written since these two optional datasets were added carry them
+    # whenever the source catalogue has them, and readers from before that
+    # change reject such files (their field manifest check allows no extra
+    # datasets); re-export, or read them with this version.
     "photometry_filters",
     "photometry_filters_excluded",
 )

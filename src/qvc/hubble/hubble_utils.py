@@ -72,6 +72,7 @@ from qvc.hubble.cuts import (
     add_magnitude_error_extra,
     magnitude_error_extra_settings,
     add_photometry_coverage_columns,
+    check_photometry_exclusion_settings,
     normalize_photometry_coverage_min,
     photometry_coverage_mask,
     add_light_curve_point_count_column,
@@ -2718,6 +2719,11 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             )
         df = _apply_scalar_cut_group(df, tier1_cuts, tier="1")
         if coverage_requested:
+            # The class is defined from the filters each fit actually used, so
+            # rows with different sub-Lyman exclusion settings would be classed
+            # on different footing (override:
+            # QVC_CUT_ALLOW_MIXED_PHOTOMETRY_EXCLUSION=1).
+            check_photometry_exclusion_settings(df)
             coverage_mask = photometry_coverage_mask(df, photometry_coverage_min)
             df = _record_cut(
                 "tier1:photometry_coverage",
