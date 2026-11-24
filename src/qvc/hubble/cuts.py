@@ -279,6 +279,93 @@ EBV_GAL_PLUS_EBV_AGN_MAX = _cut_env_float(
 )
 SPECTRAL_RHAT_MAX = _cut_env_float("QVC_CUT_SPECTRAL_RHAT_MAX", 1.1)
 LIGHT_CURVE_RHAT_MAX = _cut_env_float("QVC_CUT_LIGHT_CURVE_RHAT_MAX", 1.05)
+
+# Extra m_2500 uncertainty for the single-chain spectral fits (off by default).
+# Each object is sampled with one chain, and at z >~ 2 the m_2500 posterior is
+# multimodal, so the quoted posterior width misses the scatter between chains
+# (plots/diagnostics/gold_sample/spectral_rhat_cut/README.md, Part B). When
+# set, a constant per redshift range is added in quadrature to the per-object
+# error of each magnitude when the Hubble inputs are loaded:
+#   QVC_HUBBLE_M2500_DEREDDENED_ERR_EXTRA_LOW_Z / _HIGH_Z   (m_2500_dereddened_err)
+#   QVC_HUBBLE_M2500_ATTENUATED_ERR_EXTRA_LOW_Z / _HIGH_Z   (m_2500_attenuated_model_err)
+# in mag (default 0 = off; proposed 0.03 / 0.10 and 0.02 / 0.04), with "high"
+# for z >= QVC_HUBBLE_M2500_ERR_EXTRA_Z_BREAK (default 2.0). The intended use
+# is together with a relaxed spectral R-hat threshold
+# (QVC_CUT_SPECTRAL_RHAT_MAX, whose default is unchanged): the term replaces
+# the convergence cut on m_2500, it does not add to it. Every consumer of the
+# two error columns sees the inflated value (see add_magnitude_error_extra).
+MAGNITUDE_ERROR_EXTRA_ENV = {
+    "m_2500_dereddened_err": (
+        "QVC_HUBBLE_M2500_DEREDDENED_ERR_EXTRA_LOW_Z",
+        "QVC_HUBBLE_M2500_DEREDDENED_ERR_EXTRA_HIGH_Z",
+    ),
+    "m_2500_attenuated_model_err": (
+        "QVC_HUBBLE_M2500_ATTENUATED_ERR_EXTRA_LOW_Z",
+        "QVC_HUBBLE_M2500_ATTENUATED_ERR_EXTRA_HIGH_Z",
+    ),
+}
+MAGNITUDE_ERROR_EXTRA_Z_BREAK_ENV = "QVC_HUBBLE_M2500_ERR_EXTRA_Z_BREAK"
+DEFAULT_MAGNITUDE_ERROR_EXTRA_Z_BREAK = 2.0
+MAGNITUDE_ERROR_EXTRA_SUFFIX = "_extra"
+
+
+def magnitude_error_extra_settings():
+    """Return the extra-error setting, or ``None`` when every term is zero.
+
+    The setting is ``{"z_break": z, "<error column>": [low_z, high_z], ...}``
+    with one entry per error column that has a nonzero term.
+    """
+    terms = {}
+    for column, names in MAGNITUDE_ERROR_EXTRA_ENV.items():
+        values = []
+        for name in names:
+            value = _cut_env_float(name, 0.0)
+            value = 0.0 if value is None else float(value)
+            if not np.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be a finite non-negative magnitude, got {value!r}")
+            values.append(value)
+        if any(values):
+            terms[column] = values
+    z_break = _cut_env_float(MAGNITUDE_ERROR_EXTRA_Z_BREAK_ENV, DEFAULT_MAGNITUDE_ERROR_EXTRA_Z_BREAK)
+    if z_break is None or not np.isfinite(z_break):
+        raise ValueError(f"{MAGNITUDE_ERROR_EXTRA_Z_BREAK_ENV} must be a finite redshift, got {z_break!r}")
+    if not terms:
+        return None
+    return {"z_break": float(z_break), **terms}
+
+
+def add_magnitude_error_extra(frame, settings):
+    """Add the extra m_2500 error terms in quadrature (no-op for ``None``).
+
+    Replaces each configured error column by sqrt(err^2 + extra(z)^2), with
+    extra = low_z below ``z_break`` and high_z at and above it, and stores the
+    added term per object in ``<error column>_extra``. Raises when ``z`` or a
+    configured error column is missing or ``z`` is not finite.
+    """
+    if not settings:
+        return frame
+    columns = [column for column in settings if column != "z_break"]
+    missing = [column for column in ("z", *columns) if column not in frame.columns]
+    if missing:
+        raise ValueError(
+            f"The extra m_2500 error terms ({', '.join(columns)}) need the "
+            f"input column(s) {missing}."
+        )
+    z = pd.to_numeric(frame["z"], errors="coerce").to_numpy(dtype=float)
+    if not np.all(np.isfinite(z)):
+        raise ValueError(
+            f"The extra m_2500 error needs a finite redshift for every row; "
+            f"{int(np.count_nonzero(~np.isfinite(z)))} row(s) have none."
+        )
+    high = z >= settings["z_break"]
+    frame = frame.copy()
+    for column in columns:
+        low_term, high_term = settings[column]
+        extra = np.where(high, high_term, low_term)
+        error = pd.to_numeric(frame[column], errors="raise").to_numpy(dtype=float)
+        frame[column] = np.hypot(error, extra)
+        frame[column + MAGNITUDE_ERROR_EXTRA_SUFFIX] = extra
+    return frame
 NUM_DIVERGENCES_MAX = _cut_env_float("QVC_CUT_NUM_DIVERGENCES_MAX", 0.0)
 
 # The completeness map is tabulated at histogram-bin centers on a deliberately

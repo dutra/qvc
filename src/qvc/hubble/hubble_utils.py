@@ -68,6 +68,9 @@ from qvc.hubble.cuts import (
     PHOTOMETRY_COVERAGE_CLASSES,
     PHOTOMETRY_COVERAGE_MIN_ENV,
     PHOTOMETRY_FILTERS_COLUMN,
+    SPECTRAL_RHAT_MAX,
+    add_magnitude_error_extra,
+    magnitude_error_extra_settings,
     add_photometry_coverage_columns,
     normalize_photometry_coverage_min,
     photometry_coverage_mask,
@@ -1773,6 +1776,22 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
 
     df = derive_f_agn_psf_2500_columns(df)
 
+    # Optional extra m_2500 uncertainty (QVC_HUBBLE_M2500_*_ERR_EXTRA_*), added
+    # in quadrature to the canonical error columns before anything reads them.
+    magnitude_error_extra = magnitude_error_extra_settings()
+    if magnitude_error_extra is not None:
+        df = add_magnitude_error_extra(df, magnitude_error_extra)
+        print(
+            "Added the extra m_2500 error in quadrature "
+            f"(z < {magnitude_error_extra['z_break']:g} / z >= {magnitude_error_extra['z_break']:g}): "
+            + ", ".join(
+                f"{column} {terms[0]:g} / {terms[1]:g} mag"
+                for column, terms in magnitude_error_extra.items()
+                if column != "z_break"
+            )
+            + f". Spectral R-hat threshold in use: {SPECTRAL_RHAT_MAX}."
+        )
+
     # Photometric coverage of the SED fit (columns photometry_has_galex/_nir/
     # _wise and photometry_coverage_class) whenever the spectra catalogue
     # records its filters; the optional minimum-coverage cut is applied in
@@ -3005,6 +3024,8 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
     # the runs before they existed.
     if coverage_requested and apply_tier1:
         resolved_cut_configuration["tier1_photometry_coverage_min"] = photometry_coverage_min
+    if magnitude_error_extra is not None:
+        resolved_cut_configuration["magnitude_error_extra"] = magnitude_error_extra
     cut_configuration_json = json.dumps(
         resolved_cut_configuration, sort_keys=True, separators=(",", ":")
     )
