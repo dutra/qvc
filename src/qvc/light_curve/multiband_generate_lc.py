@@ -14,6 +14,7 @@ from collections import OrderedDict
 from qvc.hubble.hubble_utils import resolve_qvc_data_path
 from qvc.light_curve.zero_point_flags import (
     DEFAULT_ZERO_POINT_FLAG_THRESHOLD,
+    ZERO_POINT_UNCOVERED_WARN_FRACTION,
     flag_zero_point_epochs,
     validate_zero_point_cells,
 )
@@ -748,20 +749,49 @@ def concat_light_curves(
         is_sdss = (obs["survey"] == "sdss").to_numpy()
         sdss_epochs = obs.loc[is_sdss]
         flagged = np.zeros(len(obs), dtype=bool)
-        flagged[is_sdss] = flag_zero_point_epochs(
+        uncovered = np.zeros(len(obs), dtype=bool)
+        flagged[is_sdss], uncovered[is_sdss] = flag_zero_point_epochs(
             sdss_epochs,
             dict(zip(cat["objectId"], cat["RA"])),
             zero_point_cells,
             zero_point_flag_threshold,
+            return_uncovered=True,
         )
         zero_point_dropped = (
             obs.loc[flagged].groupby(["object_id", "band"], sort=False).size().to_dict()
         )
+        zero_point_uncovered = obs.loc[uncovered].groupby("object_id", sort=False).size().to_dict()
+        n_sdss_by_object = obs.loc[is_sdss].groupby("object_id", sort=False).size().to_dict()
         print(
             f"Dropped {int(flagged.sum())} of {int(is_sdss.sum())} SDSS epochs on object-nights "
-            f"with a g/r/i zero-point offset above {float(zero_point_flag_threshold):g} mag."
+            f"with a g/r/i zero-point offset above {float(zero_point_flag_threshold):g} mag; "
+            f"{int(uncovered.sum())} SDSS epoch(s) have no cell in the table."
         )
+        for object_id, n_uncovered in zero_point_uncovered.items():
+            fraction = n_uncovered / n_sdss_by_object[object_id]
+            if fraction > ZERO_POINT_UNCOVERED_WARN_FRACTION:
+                print(
+                    f"[WARNING] Object {object_id}: {n_uncovered} of {n_sdss_by_object[object_id]} "
+                    f"SDSS epochs ({fraction:.1%}) have no cell in the --zero_point_flag_table "
+                    "table; was it built with another binning or on other nights?",
+                    flush=True,
+                )
+        n_before = obs.groupby(["object_id", "band"], sort=False).size()
         obs = obs.loc[~flagged].copy()
+        n_after = obs.groupby(["object_id", "band"], sort=False).size().reindex(n_before.index, fill_value=0)
+        for object_id, band in n_before.index[(n_after == 0).to_numpy()]:
+            print(
+                f"[WARNING] Object {object_id}: --zero_point_flag_table removed all "
+                f"{int(n_before[(object_id, band)])} epochs of band {band}; it is handled "
+                "as any band without epochs.",
+                flush=True,
+            )
+        for object_id in sorted(set(n_before.index.get_level_values(0)) - set(obs["object_id"]), key=str):
+            print(
+                f"Object {object_id}: --zero_point_flag_table removed all its epochs; it is "
+                "skipped as an object without data.",
+                flush=True,
+            )
     obs = obs.sort_values(["object_id", "band_idx", "time"], kind="mergesort")
 
     rejected = pd.Series(False, index=obs.index)
@@ -873,6 +903,9 @@ def concat_light_curves(
                     )
                     for band in bands
                 }
+            )
+            s82_objs[-1]["zero_point_epochs_without_cell"] = int(
+                zero_point_uncovered.get(object_id, 0)
             )
 
     print(f"Found {len(s82_objs)} objects in concat_light_curves_jax")

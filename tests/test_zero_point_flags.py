@@ -295,3 +295,225 @@ def test_merge_reloads_with_the_fits_table(tmp_path):
         _zero_point_reload_kwargs([dict(row, object_id="A"), {"object_id": "B"}])
     with pytest.raises(ValueError, match="sha256 differs"):
         _zero_point_reload_kwargs([dict(row, zero_point_flag_table_sha256="0" * 64)])
+
+
+# --- review additions ------------------------------------------------------------
+
+
+def _install(monkeypatch, sdss_rows, *, ps1_rows=(), ztf_rows=()):
+    """Fake S82 inputs: sdss_rows / ps1_rows / ztf_rows are (object, band, time, mag)."""
+    objects = sorted({row[0] for row in (*sdss_rows, *ps1_rows, *ztf_rows)})
+    ps1_ids = {obj: 1000 + i for i, obj in enumerate(objects)}
+    cat = pd.DataFrame({"idx": range(len(objects)), "objectId": objects, "RA": [RA.get(o, 10.5) for o in objects],
+                        "DEC": 0.0, "ps1objID": [float(ps1_ids[o]) for o in objects]})
+    for band in "griz":
+        cat[f"sdss_{band}_qg"] = 0.0
+        cat[f"ps1_{band}_qg"] = 0.0
+
+    def frame(rows, columns):
+        return pd.DataFrame(rows, columns=columns)
+
+    sdss = frame([(o, multiband_generate_lc.filters[b], t, m, 0.03) for o, b, t, m in sdss_rows],
+                 ["objectId", "filterID", "mjd", "psMag", "psMagErr_p3"])
+    ps1 = frame([(ps1_ids[o], multiband_generate_lc.filters[b], t, m, 0.03) for o, b, t, m in ps1_rows],
+                ["ps1objID", "filterID", "obsTime", "psfMag", "psfMagErr_p3"])
+    ztf = frame([(ps1_ids[o], multiband_generate_lc.filters[b], t, m, 0.03) for o, b, t, m in ztf_rows],
+                ["ps1objID", "filterID", "mjd", "mag", "magerr_p3"])
+    frames = {"Catalog.parquet": cat, "dr16s82_sdssLCRaw.parquet": sdss,
+              "dr16s82_ps1LCRaw.parquet": ps1, "dr16s82_ZuberLCRaw.parquet": ztf}
+
+    def fake_resolve(path):
+        if path in multiband_generate_lc.SEEING_SIDECARS.values():
+            raise FileNotFoundError(path)
+        return path
+
+    monkeypatch.setattr(multiband_generate_lc, "resolve_qvc_data_path", fake_resolve)
+    monkeypatch.setattr(multiband_generate_lc.pd, "read_parquet", lambda path: frames[str(path).rsplit("/", 1)[-1]].copy())
+
+
+CLOUDY_NIGHT = 51001
+CLOUD_CELL = pd.DataFrame({"band": ["g"], "night": [CLOUDY_NIGHT], "rab": [5], "cell_off": [0.3], "cell_n": [20]})
+
+
+def _clip_order_rows(*, drop_cloudy=False):
+    # Eight g epochs on nights 51001-51008 and an outlier X on 51009: X has
+    # exactly the eight neighbours the clip needs within 30 days, one of them
+    # on the cloudy night 51001.
+    rows = [("A", "g", night + 0.2, 20.0 + 0.01 * (-1) ** night) for night in range(51001, 51009)]
+    rows.append(("A", "g", 51009.2, 25.0))
+    if drop_cloudy:
+        rows = [row for row in rows if int(row[2]) != CLOUDY_NIGHT]
+    return rows
+
+
+def test_flagged_epochs_are_dropped_before_the_outlier_clip(monkeypatch):
+    _install(monkeypatch, _clip_order_rows())
+    (off,) = multiband_generate_lc.concat_light_curves()
+    assert 51009.2 not in off["times"]["g"]  # off: the clip removes X
+    (on,) = multiband_generate_lc.concat_light_curves(zero_point_cells=CLOUD_CELL)
+    # On: the cloudy epoch goes first, X then has 7 neighbours and is kept by the
+    # clip -- exactly what the analysis's hand-filtered input gives.
+    assert 51009.2 in on["times"]["g"] and CLOUDY_NIGHT + 0.2 not in on["times"]["g"]
+    _install(monkeypatch, _clip_order_rows(drop_cloudy=True))
+    (hand,) = multiband_generate_lc.concat_light_curves()
+    _assert_same({k: v for k, v in on.items() if not k.startswith("zero_point")}, hand)
+
+
+def test_only_sdss_epochs_are_flagged(monkeypatch):
+    sdss = [("A", "g", night + 0.2, 20.0) for night in range(51000, 51004)]
+    ps1 = [("A", "g", CLOUDY_NIGHT + 0.3, 20.1)]
+    ztf = [("A", "g", CLOUDY_NIGHT + 0.4, 20.2)]
+    _install(monkeypatch, sdss, ps1_rows=ps1, ztf_rows=ztf)
+    (on,) = multiband_generate_lc.concat_light_curves(zero_point_cells=CLOUD_CELL)
+    kept = dict(zip(on["times"]["g"], on["surveys"]["g"]))
+    assert kept[CLOUDY_NIGHT + 0.3] == "ps1" and kept[CLOUDY_NIGHT + 0.4] == "ztf"
+    assert CLOUDY_NIGHT + 0.2 not in kept
+    assert on["zero_point_flagged_epochs_dropped_g"] == 1
+
+
+def test_epochs_without_a_cell_are_counted_and_band_losses_reported(monkeypatch, capsys):
+    rows = [("A", "g", night + 0.2, 20.0) for night in range(51000, 51010)]
+    rows += [("A", "r", CLOUDY_NIGHT + 0.25, 20.0)]  # r only on the cloudy night
+    _install(monkeypatch, rows)
+    cells = pd.concat([CLOUD_CELL, pd.DataFrame({"band": ["g"] * 3, "night": [51000, 51002, 51003],
+                                                 "rab": [5] * 3, "cell_off": [0.0] * 3, "cell_n": [20] * 3})])
+    (on,) = multiband_generate_lc.concat_light_curves(zero_point_cells=cells)
+    out = capsys.readouterr().out
+    # g on 51004-51009 and r on 51001 have no cell of their own.
+    assert on["zero_point_epochs_without_cell"] == 7
+    assert "7 of 11 SDSS epochs (63.6%) have no cell" in out
+    assert on["zero_point_flagged_epochs_dropped_r"] == 1 and len(on["times"]["r"]) == 0
+    assert "--zero_point_flag_table removed all 1 epochs of band r" in out
+    # The same table covering every epoch: no warning.
+    full = pd.concat([cells, pd.DataFrame({"band": ["g"] * 6 + ["r"], "night": [*range(51004, 51010), CLOUDY_NIGHT],
+                                           "rab": 5, "cell_off": 0.0, "cell_n": 20})])
+    (on,) = multiband_generate_lc.concat_light_curves(zero_point_cells=full)
+    assert on["zero_point_epochs_without_cell"] == 0 and "have no cell" not in capsys.readouterr().out.split("SDSS epochs on")[0]
+
+
+def test_object_losing_every_epoch_is_skipped_with_a_message(monkeypatch, capsys):
+    _install(monkeypatch, [("A", "g", CLOUDY_NIGHT + 0.2, 20.0), ("B", "g", 51005.2, 20.0)])
+    objs = multiband_generate_lc.concat_light_curves(zero_point_cells=CLOUD_CELL)
+    assert [o["object_id"] for o in objs] == ["B"]
+    assert "Object A: --zero_point_flag_table removed all its epochs" in capsys.readouterr().out
+
+
+def test_merge_variability_reload_uses_the_fits_table(monkeypatch, tmp_path):
+    from qvc.light_curve import fit_light_curves, merge_results
+
+    path = tmp_path / "cells.parquet"
+    _cells().to_parquet(path)
+    calls = []
+
+    def fake_concat(**kwargs):
+        calls.append(kwargs)
+        return [{"object_id": "A", "times": {}}]
+
+    monkeypatch.setattr(multiband_generate_lc, "concat_light_curves", fake_concat)
+    monkeypatch.setattr(fit_light_curves, "make_lc", lambda *a, **k: {"variability_x": 1.0})
+    rows = [{"object_id": "A", "z": 1.0, "zero_point_flag_table": str(path), "zero_point_flag_threshold": 0.2,
+             "zero_point_flag_table_sha256": file_sha256(path)}]
+    merge_results.attach_variability_metrics(rows)
+    pd.testing.assert_frame_equal(calls[-1]["zero_point_cells"], validate_zero_point_cells(_cells()))
+    assert calls[-1]["zero_point_flag_threshold"] == 0.2
+    merge_results.attach_variability_metrics([{"object_id": "A", "z": 1.0}])
+    assert "zero_point_cells" not in calls[-1]
+
+
+def test_launcher_makes_the_table_path_absolute(monkeypatch, tmp_path):
+    import hpc_scripts.sfitlc as sfitlc
+
+    _cells().to_parquet(tmp_path / "cells.parquet")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["sfitlc.py", "--fit", "stone", "--zero-point-flag-table", "cells.parquet"])
+    args = sfitlc.parse_args()
+    assert Path(args.zero_point_flag_table).is_absolute()
+    assert args.zero_point_flag_table == str((tmp_path / "cells.parquet").resolve())
+
+
+@pytest.mark.parametrize("extra", [["--sdss_source", "macleod"], ["--sdss_source=macleod"],
+                                   ["--load_nearby_lc_csv", "x"]])
+def test_launcher_refuses_sources_the_fitter_refuses(monkeypatch, tmp_path, capsys, extra):
+    import hpc_scripts.sfitlc as sfitlc
+
+    _cells().to_parquet(tmp_path / "cells.parquet")
+    monkeypatch.setattr(sys, "argv", ["sfitlc.py", "--fit", "stone", "--zero-point-flag-table",
+                                      str(tmp_path / "cells.parquet"), *extra])
+    with pytest.raises(SystemExit):
+        sfitlc.parse_args()
+    assert "dr16s82 SDSS epochs" in capsys.readouterr().err
+
+
+def test_launcher_resume_carries_the_setting(monkeypatch, tmp_path):
+    path = tmp_path / "cells.parquet"
+    _cells().to_parquet(path)
+    script = _script(_launcher_args(resume="prefix", zero_point_flag_table=str(path), zero_point_flag_threshold=None),
+                     monkeypatch)
+    # The resumed fits get the same table, so the fitter's resume guard applies to them.
+    assert "--resume" in script and "--zero_point_flag_table" in script
+
+
+def test_fitter_records_the_setting_per_row(monkeypatch, tmp_path):
+    from qvc.light_curve import fit_light_curves
+
+    path = tmp_path / "cells.parquet"
+    _cells().to_parquet(path)
+    captured = {}
+
+    def fake_populate(objs, **kwargs):
+        captured["objs"] = objs
+        raise _Stop
+
+    monkeypatch.setattr(fit_light_curves, "concat_light_curves", lambda **kw: [{"object_id": "A"}])
+    monkeypatch.setattr(fit_light_curves, "populate_sdss_fields", fake_populate)
+    monkeypatch.setattr(sys, "argv", ["fit_light_curves", "--filter_object_id", "A",
+                                      "--zero_point_flag_table", str(path), "--zero_point_flag_threshold", "0.2"])
+    with pytest.raises(_Stop):
+        fit_light_curves.main()
+    (obj,) = captured["objs"]
+    assert obj["zero_point_flag_table_sha256"] == file_sha256(path)
+    assert obj["zero_point_flag_threshold"] == 0.2
+    assert obj["zero_point_flag_table"] == str(path.resolve())
+
+
+def test_saved_samples_record_the_setting_and_resume_checks_it(monkeypatch, tmp_path):
+    import h5py
+
+    from qvc.light_curve import multiband_fit_utils
+    from qvc.light_curve.zero_point_flags import (
+        ZERO_POINT_OFF, ZeroPointResumeMismatch, check_zero_point_resume, zero_point_setting,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(multiband_fit_utils, "prefix", "p", raising=False)
+    monkeypatch.setattr(multiband_fit_utils, "suffix", "s", raising=False)
+    on = zero_point_setting("a" * 64, 0.1)
+    multiband_fit_utils.save_obj_samples_to_hdf5({"x": np.zeros(3)}, "A", zero_point_flags=on)
+    multiband_fit_utils.save_obj_samples_to_hdf5({"x": np.zeros(3)}, "B")
+    with h5py.File(tmp_path / "results/samples/p/B_s.h5", "r") as handle:
+        assert not any(key.startswith("zero_point") for key in handle.attrs)  # off: file as before
+    _, meta_on = multiband_fit_utils.load_obj_samples_from_hdf5("A", return_metadata=True)
+    _, meta_off = multiband_fit_utils.load_obj_samples_from_hdf5("B", return_metadata=True)
+    check_zero_point_resume(meta_on, on, "A")
+    check_zero_point_resume(meta_off, ZERO_POINT_OFF, "B")  # existing off runs keep resuming
+    for meta, current in ((meta_off, on), (meta_on, ZERO_POINT_OFF), (meta_on, zero_point_setting("a" * 64, 0.2)),
+                          (meta_on, zero_point_setting("b" * 64, 0.1))):
+        with pytest.raises(ZeroPointResumeMismatch, match="--resume of object"):
+            check_zero_point_resume(meta, current, "A")
+
+
+def test_fitter_resume_refuses_a_changed_setting(monkeypatch, tmp_path):
+    """The guard runs in the fitter's --resume path and is not swallowed by the per-object handler."""
+    from qvc.light_curve import fit_light_curves
+    from qvc.light_curve.zero_point_flags import ZeroPointResumeMismatch
+
+    _install(monkeypatch, [("A", band, 51000.2 + 3 * k, 20.0 + 0.05 * np.sin(k)) for band in "ugriz" for k in range(40)])
+    monkeypatch.setattr(fit_light_curves, "populate_sdss_fields", lambda objs, **kw: [dict(o, z=1.0) for o in objs])
+    monkeypatch.setattr(fit_light_curves, "load_obj_samples_from_hdf5", lambda oid, return_metadata=False: ({}, {}))
+    path = tmp_path / "cells.csv"  # read_parquet is faked for the S82 inputs
+    _cells().to_csv(path, index=False)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["fit_light_curves", "--filter_object_id", "A", "--resume",
+                                      "--zero_point_flag_table", str(path)])
+    with pytest.raises(ZeroPointResumeMismatch):
+        fit_light_curves.main()

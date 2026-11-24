@@ -147,6 +147,19 @@ def parse_args():
             parser.error(f"--zero-point-flag-table not found: {table}")
         if args.load_stone_lcs:
             parser.error("--zero-point-flag-table applies to the dr16s82 SDSS epochs, not to --load_stone_lcs")
+        # The fitter refuses the option for other light-curve sources; refuse
+        # them here, before anything is submitted.
+        extra = list(args.extra_fit_flags)
+        for index, value in enumerate(extra):
+            source = None
+            if value == "--sdss_source" and index + 1 < len(extra):
+                source = extra[index + 1]
+            elif value.startswith("--sdss_source="):
+                source = value.split("=", 1)[1]
+            if source is not None and source != "dr16s82":
+                parser.error(f"--zero-point-flag-table applies to the dr16s82 SDSS epochs, not to --sdss_source {source}")
+            if value == "--load_nearby_lc_csv" or value.startswith("--load_nearby_lc_csv="):
+                parser.error("--zero-point-flag-table applies to the dr16s82 SDSS epochs, not to --load_nearby_lc_csv")
         if args.zero_point_flag_threshold is not None and not (
             math.isfinite(args.zero_point_flag_threshold) and args.zero_point_flag_threshold > 0
         ):

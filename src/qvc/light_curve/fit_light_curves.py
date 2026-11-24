@@ -84,8 +84,12 @@ from qvc.light_curve.multiband_fit_utils import *
 from qvc.light_curve.multiband_generate_lc import *
 from qvc.light_curve.zero_point_flags import (
     DEFAULT_ZERO_POINT_FLAG_THRESHOLD,
+    ZERO_POINT_OFF,
+    ZeroPointResumeMismatch,
+    check_zero_point_resume,
     file_sha256,
     load_zero_point_cells,
+    zero_point_setting,
 )
 from qvc.light_curve.multiband_dho_core import (
     mag_residual_to_relative_flux,
@@ -5739,6 +5743,7 @@ def main():
     ):
         parser.error("--outlier_half_window_days must be positive")
     zero_point_cells = None
+    zero_point_table_sha256 = None
     if args.zero_point_flag_table is None:
         if args.zero_point_flag_threshold is not None:
             parser.error("--zero_point_flag_threshold requires --zero_point_flag_table")
@@ -5758,6 +5763,10 @@ def main():
             parser.error(str(exc))
         zero_point_table_sha256 = file_sha256(args.zero_point_flag_table)
     args = apply_resume_sample_save_policy(args)
+    # "off" or (table sha256, threshold); saved with the samples and checked on --resume.
+    current_zero_point_setting = zero_point_setting(
+        zero_point_table_sha256, args.zero_point_flag_threshold
+    )
     print("Args:", args)
 
     if args.load_stone_lcs:
@@ -6001,6 +6010,7 @@ def main():
             if args.resume:
                 logging.warning("[DEBUG] Loading saved samples (flat) — developer mode.")
                 obj_flat_samples, saved_sample_metadata = load_obj_samples_from_hdf5(oid, return_metadata=True)
+                check_zero_point_resume(saved_sample_metadata, current_zero_point_setting, oid)
                 samples_per_chain = None
             else:
                 key = random.PRNGKey(0)
@@ -6307,6 +6317,11 @@ def main():
                         else None
                     ),
                     fitted_bands=bands,
+                    zero_point_flags=(
+                        None
+                        if current_zero_point_setting == ZERO_POINT_OFF
+                        else current_zero_point_setting
+                    ),
                     scalar_diagnostics={
                         "loo_chi2_eff": loo_residual_result["loo_chi2_eff"],
                         "loo_rms": loo_residual_result["loo_rms"],
@@ -6494,6 +6509,8 @@ def main():
             )
             results.append(final_result)
 
+        except ZeroPointResumeMismatch:
+            raise
         except Exception as e:
             logging.error(f"[{oid}] Error during fit: {e}")
             logging.error(traceback.format_exc())

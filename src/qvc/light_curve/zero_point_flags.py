@@ -110,17 +110,22 @@ def build_zero_point_cells(epochs, ra_by_object):
     return validate_zero_point_cells(cells)
 
 
-def flag_zero_point_epochs(epochs, ra_by_object, cells, threshold=DEFAULT_ZERO_POINT_FLAG_THRESHOLD):
+def flag_zero_point_epochs(
+    epochs, ra_by_object, cells, threshold=DEFAULT_ZERO_POINT_FLAG_THRESHOLD, *, return_uncovered=False
+):
     """Boolean mask of SDSS epochs on flagged object-nights.
 
     ``epochs`` has columns object_id, band and time (MJD); ``cells`` is a
-    validated cell table.
+    validated cell table. With ``return_uncovered``, also return the mask of
+    epochs whose own (band, night, rab) cell is not in the table at all (a
+    table built with another binning or on other nights leaves many).
     """
     threshold = float(threshold)
     if not np.isfinite(threshold) or threshold <= 0.0:
         raise ValueError(f"The zero-point flag threshold must be a positive magnitude, got {threshold!r}.")
     if len(epochs) == 0:
-        return np.zeros(0, dtype=bool)
+        empty = np.zeros(0, dtype=bool)
+        return (empty, empty) if return_uncovered else empty
     ra = epochs["object_id"].map(ra_by_object)
     if ra.isna().any():
         raise ValueError(f"No RA for {int(ra.isna().sum())} SDSS epoch(s) to flag.")
@@ -146,9 +151,57 @@ def flag_zero_point_epochs(epochs, ra_by_object, cells, threshold=DEFAULT_ZERO_P
         .to_numpy()
     )
     bad_nights = keys.loc[in_flagged_cell, ["object_id", "night"]].drop_duplicates()
-    return (
+    flagged_epochs = (
         keys[["object_id", "night"]]
         .merge(bad_nights.assign(_bad=1), on=["object_id", "night"], how="left")["_bad"]
         .notna()
         .to_numpy()
     )
+    if not return_uncovered:
+        return flagged_epochs
+    uncovered = (
+        keys.merge(cells[list(ZERO_POINT_CELL_KEYS)].assign(_cell=1), on=list(ZERO_POINT_CELL_KEYS), how="left")[
+            "_cell"
+        ]
+        .isna()
+        .to_numpy()
+    )
+    return flagged_epochs, uncovered
+
+
+# Warn when more than this fraction of an object's SDSS epochs have no cell
+# in the table (none should for a table built from the same epochs).
+ZERO_POINT_UNCOVERED_WARN_FRACTION = 0.01
+ZERO_POINT_OFF = "off"
+
+
+class ZeroPointResumeMismatch(RuntimeError):
+    """A --resume whose saved samples were fitted with another zero-point setting."""
+
+
+def zero_point_setting(sha256=None, threshold=None):
+    """``"off"`` or (table sha256, threshold) of a run."""
+    if sha256 is None:
+        return ZERO_POINT_OFF
+    return (str(sha256), float(threshold))
+
+
+def stored_zero_point_setting(metadata):
+    """Setting recorded in a saved-sample file's attributes; absent = off."""
+    sha256 = metadata.get("zero_point_flag_table_sha256")
+    if sha256 is None:
+        return ZERO_POINT_OFF
+    if isinstance(sha256, (bytes, np.bytes_)):
+        sha256 = sha256.decode("utf-8")
+    return zero_point_setting(sha256, metadata.get("zero_point_flag_threshold"))
+
+
+def check_zero_point_resume(metadata, current, object_id):
+    """Raise when saved samples were fitted with a different zero-point setting."""
+    stored = stored_zero_point_setting(metadata)
+    if stored != current:
+        raise ZeroPointResumeMismatch(
+            f"--resume of object {object_id}: its saved samples were fitted with zero-point "
+            f"epoch flags {stored}, this run uses {current} (--zero_point_flag_table / "
+            "--zero_point_flag_threshold). Resume with the same setting or refit."
+        )
