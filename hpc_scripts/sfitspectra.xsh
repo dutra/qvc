@@ -120,6 +120,14 @@ def parse_saved_export(script_content, name):
     return match.group(1) if match.group(1) is not None else match.group(2)
 
 
+def repo_relative_path(value):
+    """Resolve a path as the jobs see it: relative paths are under REPO_ROOT."""
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    return path.resolve()
+
+
 def saved_submission_inputs(script_content):
     """Return resolved.inputs of the record embedded in a saved script, or None."""
     try:
@@ -128,6 +136,31 @@ def saved_submission_inputs(script_content):
         return None
     inputs = ((record or {}).get("resolved") or {}).get("inputs")
     return inputs if isinstance(inputs, dict) else None
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def recorded_photometry_problem(inputs):
+    """Return why a recorded --sed-photometry-path file is unusable, or None."""
+    recorded = (inputs or {}).get("sed_photometry_sha256")
+    if not recorded:
+        return None
+    path = repo_relative_path(inputs.get("sed_photometry_path") or "")
+    if not path.is_file():
+        return f"its SED photometry file {path} is missing"
+    actual = file_sha256(path)
+    if actual != recorded:
+        return (
+            f"its SED photometry file {path} changed after submission "
+            f"(sha256 {actual}, recorded {recorded})"
+        )
+    return None
 
 
 def frozen_selection_problem(inputs):
@@ -282,13 +315,12 @@ def format_array_spec(task_ids):
 
 def retry_unsuccessful_tasks(job_name):
     saved_script, num_tasks = load_retry_artifacts(job_name)
-    problem = frozen_selection_problem(
-        saved_submission_inputs(saved_script.read_text(encoding="utf-8"))
-    )
+    saved_inputs = saved_submission_inputs(saved_script.read_text(encoding="utf-8"))
+    problem = frozen_selection_problem(saved_inputs) or recorded_photometry_problem(saved_inputs)
     if problem:
         raise ValueError(
             f"Refusing to retry {job_name}: {problem}; the retried tasks would fit "
-            "other spectra than the original run."
+            "other inputs than the original run."
         )
     attempts = latest_task_attempts(get_retry_accounting_rows(job_name))
     invalid_task_ids = sorted(
@@ -476,6 +508,18 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--sed-photometry-path",
+    metavar="PATH",
+    default=None,
+    help=(
+        "Long-form SED photometry table for fit_spectra_jaxsedfit_joint.py "
+        f"(default from the settings block: {sed_photometry_path}). Checked "
+        "before submission: every submitted object needs usable non-SDSS rows. "
+        "With --resume (without --resume-only) the resumed run must have used "
+        "the same file content."
+    ),
+)
+parser.add_argument(
     "--cpus-per-task",
     type=positive_int,
     default=cpus_per_task,
@@ -598,6 +642,7 @@ fresh_run_options = (
     "--sub-lyman-max-fraction",
     "--sdss-spectrum-selection-path",
     "--cache-dir",
+    "--sed-photometry-path",
     "--nuts-warmup",
     "--nuts-samples",
     "--nuts-chains",
@@ -675,12 +720,22 @@ elif any(value is not None for value in sub_lyman_options.values()):
     )
 
 
-def repo_relative_path(value):
-    """Resolve a path as the jobs see it: relative paths are under REPO_ROOT."""
-    path = Path(value).expanduser()
-    if not path.is_absolute():
-        path = REPO_ROOT / path
-    return path.resolve()
+def import_fitter(option):
+    """Import the fitter modules for a pre-submission check (they load JAX)."""
+    saved_environ = dict(os.environ)
+    try:
+        from qvc.spectra import fit_spectra as legacy_fitter
+        from qvc.spectra import fit_spectra_jaxsedfit_joint as joint_fitter
+    except ImportError as exc:
+        parser.error(
+            f"{option} is checked with the fitter's loader, which this Python "
+            f"cannot import ({exc}); run the launcher from the fitter's environment"
+        )
+    finally:
+        # fit_spectra sets XLA/JAX variables at import; keep them out of sbatch.
+        os.environ.clear()
+        os.environ.update(saved_environ)
+    return legacy_fitter, joint_fitter
 
 
 # The job script passes these through shell exports and a whitespace split.
@@ -700,25 +755,13 @@ if cli_args.sdss_spectrum_selection_path is not None:
         parser.error("--sdss-spectrum-selection-path must be a .csv, .txt or .ecsv file")
     if UNSAFE_JOB_PATH_CHARS.search(str(selection_file)):
         parser.error(f"--sdss-spectrum-selection-path contains whitespace or shell characters: {selection_file}")
-    # Check with the fitter's own loader (imported only here: it loads JAX)
-    # so that a file every task would reject is refused before submission.
-    saved_environ = dict(os.environ)
-    try:
-        from qvc.spectra.fit_spectra import sdss_cache_file_path
-        from qvc.spectra.fit_spectra_jaxsedfit_joint import load_sdss_spectrum_selection_overrides
-    except ImportError as exc:
-        parser.error(
-            "--sdss-spectrum-selection-path is checked with the fitter's loader, "
-            f"which this Python cannot import ({exc}); run the launcher from the "
-            "fitter's environment"
-        )
-    finally:
-        # fit_spectra sets XLA/JAX variables at import; keep them out of sbatch.
-        os.environ.clear()
-        os.environ.update(saved_environ)
+    # Check with the fitter's own loader so that a file every task would
+    # reject is refused before submission.
+    legacy_fitter, joint_fitter = import_fitter("--sdss-spectrum-selection-path")
+    sdss_cache_file_path = legacy_fitter.sdss_cache_file_path
     sdss_spectrum_selection_bytes = selection_file.read_bytes()
     try:
-        sdss_spectrum_selection_frame = load_sdss_spectrum_selection_overrides(selection_file)
+        sdss_spectrum_selection_frame = joint_fitter.load_sdss_spectrum_selection_overrides(selection_file)
     except Exception as exc:
         parser.error(f"--sdss-spectrum-selection-path is rejected by the fitter: {exc}")
     sdss_spectrum_selection_path = str(selection_file)
@@ -730,6 +773,17 @@ if cli_args.cache_dir is not None:
     if UNSAFE_JOB_PATH_CHARS.search(str(cache_dir_path)):
         parser.error(f"--cache-dir contains whitespace or shell characters: {cache_dir_path}")
     cache_dir = str(cache_dir_path)
+sed_photometry_sha256 = None
+if cli_args.sed_photometry_path is not None:
+    if fit_script != "fit_spectra_jaxsedfit_joint.py":
+        parser.error("--sed-photometry-path is supported only with fit_spectra_jaxsedfit_joint.py")
+    photometry_file = repo_relative_path(cli_args.sed_photometry_path)
+    if not photometry_file.is_file() or not os.access(photometry_file, os.R_OK):
+        parser.error(f"--sed-photometry-path not found or not readable: {photometry_file}")
+    if UNSAFE_JOB_PATH_CHARS.search(str(photometry_file)):
+        parser.error(f"--sed-photometry-path contains whitespace or shell characters: {photometry_file}")
+    sed_photometry_path = str(photometry_file)
+    sed_photometry_sha256 = file_sha256(photometry_file)
 if resume_run_name and fit_script != "fit_spectra_jaxsedfit_joint.py":
     parser.error("--resume is supported only with fit_spectra_jaxsedfit_joint.py")
 if resume_run_name:
@@ -813,12 +867,14 @@ if resume_dir:
         else None
     )
     spectrum_options_given = (
-        cli_args.sdss_spectrum_selection_path is not None or cli_args.cache_dir is not None
+        cli_args.sdss_spectrum_selection_path is not None
+        or cli_args.cache_dir is not None
+        or (cli_args.sed_photometry_path is not None and not cli_args.resume_only)
     )
     if not isinstance(resumed_inputs, dict):
         if spectrum_options_given:
             parser.error(
-                "--sdss-spectrum-selection-path/--cache-dir with --resume need the "
+                "--sdss-spectrum-selection-path/--cache-dir/--sed-photometry-path with --resume need the "
                 f"resumed run's submission record ({resumed_script}) to confirm it "
                 "used the same spectra; none was readable"
             )
@@ -869,6 +925,27 @@ if resume_dir:
                 "another cache. Pass --cache-dir with the resumed run's directory, "
                 "or --resume-only."
             )
+        # Only fresh fallback fits read the photometry file; --resume-only
+        # re-predicts from the photometry stored in each bundle.
+        resumed_photometry_sha256 = resumed_inputs.get("sed_photometry_sha256")
+        if not cli_args.resume_only and (
+            cli_args.sed_photometry_path is not None or resumed_photometry_sha256
+        ):
+            resumed_photometry = resumed_inputs.get("sed_photometry_path")
+            if not resumed_photometry_sha256 and resumed_photometry:
+                resumed_file = repo_relative_path(resumed_photometry)
+                resumed_photometry_sha256 = file_sha256(resumed_file) if resumed_file.is_file() else None
+            current_photometry_sha256 = sed_photometry_sha256 or file_sha256(
+                repo_relative_path(sed_photometry_path)
+            )
+            if resumed_photometry_sha256 != current_photometry_sha256:
+                parser.error(
+                    f"--resume {resume_run_name} used SED photometry {resumed_photometry} "
+                    f"(sha256 {resumed_photometry_sha256}), this run {sed_photometry_path} "
+                    f"(sha256 {current_photometry_sha256}); fresh fallback fits would use "
+                    "other photometry than the resumed bundles. Pass --sed-photometry-path "
+                    "with the resumed run's file (same content), or --resume-only."
+                )
 
 # ==========================================
 # 3. Helpers
@@ -1012,6 +1089,30 @@ print(f"Loaded {len(submit_object_ids)} schedulable object_ids from {chisq_csv}"
 print(f"Chunk size: {chunk_size}")
 print(f"Number of array tasks: {num_tasks}")
 
+# A joint fit of an object without rows in the photometry table does not fail:
+# it silently runs on the light-curve ugriz only (the table's *_sdss rows are
+# replaced by those), so require usable non-SDSS rows for every object.
+if cli_args.sed_photometry_path is not None and not cli_args.resume_only:
+    legacy_fitter, joint_fitter = import_fitter("--sed-photometry-path")
+    try:
+        photometry = joint_fitter.load_saved_sed_photometry(sed_photometry_path)
+    except Exception as exc:
+        parser.error(f"--sed-photometry-path is rejected by the fitter: {exc}")
+    sdss_filters = {f"{band}_sdss" for band in legacy_fitter.SDSS_BANDS}
+    photometry_ids = set(
+        photometry.loc[~photometry["filter_name"].isin(sdss_filters), "source_id"]
+    )
+    unphotometered_ids = []
+    for obj in submit_object_ids:
+        if obj not in photometry_ids:
+            unphotometered_ids.append(obj)
+    if unphotometered_ids:
+        parser.error(
+            f"--sed-photometry-path {sed_photometry_path} has no usable non-SDSS "
+            f"photometry for {len(unphotometered_ids)} submitted object ID(s): "
+            f"{unphotometered_ids[:50]}"
+        )
+
 # ==========================================
 # 5. Directory setup
 # ==========================================
@@ -1073,6 +1174,7 @@ submission = submission_record(
             "chisq_csv": chisq_csv,
             "exclude_csv": exclude_csv,
             "sed_photometry_path": sed_photometry_path,
+            "sed_photometry_sha256": sed_photometry_sha256,
             "dr16q_fits": "data/dr16q_prop_May01_2024.fits",
             "cache_dir": cache_dir,
             "sdss_spectrum_selection_path": sdss_spectrum_selection_path,
