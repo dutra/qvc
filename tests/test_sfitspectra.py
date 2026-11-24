@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import os
 import re
@@ -536,6 +537,8 @@ def test_sfitspectra_retry_requires_original_artifacts_and_sufficient_cpus(tmp_p
         ("--narrow-line-extrapolation", "optical_only"),
         ("--nuts-chains", "4"),
         ("--nuts-warmup=800",),
+        ("--sdss-spectrum-selection-path", "data/selection.csv"),
+        ("--cache-dir=data",),
     ],
 )
 def test_sfitspectra_retry_rejects_fresh_run_options(tmp_path, fresh_args):
@@ -792,3 +795,157 @@ def test_sfitspectra_validates_sub_lyman_ranges_before_submitting(tmp_path, extr
     assert message in result.stderr
     assert _sbatch_calls(calls_path) == []
     assert not (root / 'hpc_scripts/submit/jaxqsofit').exists()
+
+
+SELECTION_CSV = "object_id,plate,mjd,fiber,z\n1,1000,52000,10,2.1\n2,1001,52001,11,1.3\n"
+
+
+def _submission_inputs(generated):
+    encoded = re.search(r'^export QVC_SUBMISSION_PROVENANCE_B64="([^"]*)"$', generated, re.M).group(1)
+    return json.loads(base64.b64decode(encoded))["resolved"]["inputs"]
+
+
+def _only_sbatch(root, pattern="submit_*.sbatch"):
+    (path,) = sorted((root / "hpc_scripts/submit/jaxqsofit").glob(pattern))
+    return path
+
+
+def test_sfitspectra_spectrum_selection_and_cache_dir_default_unchanged(tmp_path, monkeypatch):
+    root, script_path, csv_path, _, env = _fresh_workspace(tmp_path)
+    result = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path), "--description", "plain")
+    assert result.returncode == 0, result.stderr
+    generated = _only_sbatch(root).read_text()
+    assert 'export CACHE_DIR="data/spectra_cache_all"' in generated
+    command = _generated_fit_command(root, script_path, generated, monkeypatch)
+    assert command[command.index("--cache-dir") + 1] == "data/spectra_cache_all"
+    assert "--sdss-spectrum-selection-path" not in command
+    inputs = _submission_inputs(generated)
+    assert inputs["cache_dir"] == "data/spectra_cache_all"
+    assert inputs["sdss_spectrum_selection_path"] is None
+    assert inputs["sdss_spectrum_selection_sha256"] is None
+
+
+def test_sfitspectra_forwards_spectrum_selection_and_cache_dir(tmp_path, monkeypatch):
+    root, script_path, csv_path, calls_path, env = _fresh_workspace(tmp_path)
+    selection = root / "data" / "selection.csv"
+    selection.write_text(SELECTION_CSV, encoding="utf-8")
+    (root / "data" / "other_cache").mkdir()
+    result = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path), "--description", "sel",
+                        "--sdss-spectrum-selection-path", "data/selection.csv",
+                        "--cache-dir", "data/other_cache")
+    assert result.returncode == 0, result.stderr
+    assert len(_sbatch_calls(calls_path)) == 1
+    generated = _only_sbatch(root).read_text()
+    resolved_selection = str(selection.resolve())
+    resolved_cache = str((root / "data" / "other_cache").resolve())
+    assert f'export CACHE_DIR="{resolved_cache}"' in generated
+    command = _generated_fit_command(root, script_path, generated, monkeypatch)
+    assert command[command.index("--sdss-spectrum-selection-path") + 1] == resolved_selection
+    assert command[command.index("--cache-dir") + 1] == resolved_cache
+    inputs = _submission_inputs(generated)
+    assert inputs["cache_dir"] == resolved_cache
+    assert inputs["sdss_spectrum_selection_path"] == resolved_selection
+    assert inputs["sdss_spectrum_selection_sha256"] == hashlib.sha256(selection.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (("--sdss-spectrum-selection-path", "data/missing.csv"), "not found or not readable"),
+        (("--sdss-spectrum-selection-path", "data/selection.fits"), "must be a .csv, .txt or .ecsv"),
+        (("--sdss-spectrum-selection-path", "data/partial.csv"), "lacks 1 submitted object ID(s), e.g. ['2']"),
+        (("--sdss-spectrum-selection-path", "data/selection.csv", "--fit-script", "fit_spectra.py"),
+         "supported only with fit_spectra_jaxsedfit_joint.py"),
+        (("--cache-dir", "data/missing_cache"), "--cache-dir not found or not a directory"),
+        (("--cache-dir", "data/objects.csv"), "--cache-dir not found or not a directory"),
+        (("--cache-dir", "data/has space"), "whitespace or shell characters"),
+    ],
+)
+def test_sfitspectra_validates_spectrum_options_before_submitting(tmp_path, extra, message):
+    root, script_path, csv_path, calls_path, env = _fresh_workspace(tmp_path)
+    (root / "data" / "selection.csv").write_text(SELECTION_CSV, encoding="utf-8")
+    (root / "data" / "selection.fits").write_text(SELECTION_CSV, encoding="utf-8")
+    (root / "data" / "partial.csv").write_text(SELECTION_CSV.rsplit("2,", 1)[0], encoding="utf-8")
+    (root / "data" / "has space").mkdir()
+    result = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path),
+                        "--description", "bad", *extra)
+    assert result.returncode == 2
+    assert message in result.stderr
+    assert _sbatch_calls(calls_path) == []
+    assert not (root / "hpc_scripts/submit/jaxqsofit").exists()
+
+
+def _original_run(root, script_path, csv_path, env, description, *extra):
+    result = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path),
+                        "--description", description, *extra)
+    assert result.returncode == 0, result.stderr
+    run_name = _only_sbatch(root, f"submit_*{description}.sbatch").name[len("submit_"):-len(".sbatch")]
+    (root / "results/data/jaxqsofit" / run_name / "all").mkdir(parents=True)
+    return run_name
+
+
+def test_sfitspectra_resume_requires_the_original_spectrum_selection(tmp_path):
+    root, script_path, csv_path, calls_path, env = _fresh_workspace(tmp_path)
+    selection = root / "data" / "selection.csv"
+    selection.write_text(SELECTION_CSV, encoding="utf-8")
+    old = _original_run(root, script_path, csv_path, env, "orig",
+                        "--sdss-spectrum-selection-path", "data/selection.csv")
+    plain = _original_run(root, script_path, csv_path, env, "origplain")
+
+    def resume(description, run_name, *extra):
+        return _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path),
+                          "--description", description, "--resume", run_name, *extra)
+
+    same = resume("same", old, "--resume-only", "--sdss-spectrum-selection-path", str(selection))
+    assert same.returncode == 0, same.stderr
+    hybrid = resume("hybrid", old, "--sdss-spectrum-selection-path", "data/selection.csv")
+    assert hybrid.returncode == 0, hybrid.stderr
+    calls_before = len(_sbatch_calls(calls_path))
+
+    dropped = resume("dropped", old, "--resume-only")
+    assert dropped.returncode == 2
+    assert "must not mix spectra" in dropped.stderr
+    added = resume("added", plain, "--resume-only", "--sdss-spectrum-selection-path", "data/selection.csv")
+    assert added.returncode == 2
+    assert "none (DR16Q primary spectra)" in added.stderr
+    selection.write_text(SELECTION_CSV.replace("2.1", "2.2"), encoding="utf-8")
+    edited = resume("edited", old, "--resume-only", "--sdss-spectrum-selection-path", "data/selection.csv")
+    assert edited.returncode == 2
+    assert "same content" in edited.stderr
+    assert len(_sbatch_calls(calls_path)) == calls_before
+
+
+def test_sfitspectra_resume_requires_the_original_cache_dir_for_fresh_fallbacks(tmp_path):
+    root, script_path, csv_path, calls_path, env = _fresh_workspace(tmp_path)
+    (root / "data" / "other_cache").mkdir()
+    (root / "data" / "spectra_cache_all").mkdir()
+    old = _original_run(root, script_path, csv_path, env, "orig")
+
+    def resume(description, *extra):
+        return _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path),
+                          "--description", description, "--resume", old, *extra)
+
+    assert resume("default").returncode == 0
+    assert resume("explicitsame", "--cache-dir", "data/spectra_cache_all").returncode == 0
+    assert resume("only", "--resume-only", "--cache-dir", "data/other_cache").returncode == 0
+    calls_before = len(_sbatch_calls(calls_path))
+    changed = resume("changed", "--cache-dir", "data/other_cache")
+    assert changed.returncode == 2
+    assert "fresh fallback fits would read spectra from another cache" in changed.stderr
+    assert len(_sbatch_calls(calls_path)) == calls_before
+
+
+def test_sfitspectra_resume_without_record_refuses_spectrum_options(tmp_path):
+    root, script_path, csv_path, calls_path, env = _fresh_workspace(tmp_path)
+    (root / "data" / "selection.csv").write_text(SELECTION_CSV, encoding="utf-8")
+    (root / "results/data/jaxqsofit/old/all").mkdir(parents=True)
+    result = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path), "--description", "norec",
+                        "--resume", "old", "--resume-only",
+                        "--sdss-spectrum-selection-path", "data/selection.csv")
+    assert result.returncode == 2
+    assert "need the resumed run's submission record" in result.stderr
+    assert _sbatch_calls(calls_path) == []
+    plain = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path), "--description", "norec2",
+                       "--resume", "old", "--resume-only")
+    assert plain.returncode == 0, plain.stderr
+    assert "cannot check that the resumed run used the same SDSS spectrum selection" in plain.stderr

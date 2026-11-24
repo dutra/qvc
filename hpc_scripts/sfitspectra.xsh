@@ -1,6 +1,7 @@
 #!/usr/bin/env xonsh
 
 import argparse
+import hashlib
 import math
 import os
 import re
@@ -19,6 +20,7 @@ if str(SRC_ROOT) not in sys.path:
 from qvc.provenance import (
     PROVENANCE_ENV,
     RETRY_ENV,
+    decode_record,
     encode_record,
     submission_record,
 )
@@ -414,6 +416,28 @@ parser.add_argument(
     help="Largest band response fraction below the cut that keeps a band (backend default 0.5).",
 )
 parser.add_argument(
+    "--sdss-spectrum-selection-path",
+    metavar="PATH",
+    default=None,
+    help=(
+        "CSV/ECSV with object_id, plate, mjd, fiber and z for every submitted "
+        "object, passed to fit_spectra_jaxsedfit_joint.py: each object is fitted "
+        "with spec-<plate>-<mjd>-<fiber>.fits and that redshift instead of the "
+        "DR16Q match. Absent: not passed. With --resume the resumed run must "
+        "have used the same file content."
+    ),
+)
+parser.add_argument(
+    "--cache-dir",
+    metavar="DIR",
+    default=None,
+    help=(
+        f"Spectrum cache directory passed to the fitter (default from the "
+        f"settings block: {cache_dir}). With --resume (without --resume-only) "
+        "the resumed run must have used the same directory."
+    ),
+)
+parser.add_argument(
     "--cpus-per-task",
     type=positive_int,
     default=cpus_per_task,
@@ -523,6 +547,8 @@ fresh_run_options = (
     "--drop-sub-lyman-photometry",
     "--sub-lyman-rest-wavelength",
     "--sub-lyman-max-fraction",
+    "--sdss-spectrum-selection-path",
+    "--cache-dir",
     "--nuts-warmup",
     "--nuts-samples",
     "--nuts-chains",
@@ -597,6 +623,40 @@ elif any(value is not None for value in sub_lyman_options.values()):
         "--sub-lyman-rest-wavelength and --sub-lyman-max-fraction require "
         "--drop-sub-lyman-photometry"
     )
+
+
+def repo_relative_path(value):
+    """Resolve a path as the jobs see it: relative paths are under REPO_ROOT."""
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    return path.resolve()
+
+
+# The job script passes these through shell exports and a whitespace split.
+UNSAFE_JOB_PATH_CHARS = re.compile(r'[\s"$`\\]')
+sdss_spectrum_selection_path = None
+sdss_spectrum_selection_sha256 = None
+if cli_args.sdss_spectrum_selection_path is not None:
+    if fit_script != "fit_spectra_jaxsedfit_joint.py":
+        parser.error("--sdss-spectrum-selection-path is supported only with fit_spectra_jaxsedfit_joint.py")
+    selection_file = repo_relative_path(cli_args.sdss_spectrum_selection_path)
+    if not selection_file.is_file() or not os.access(selection_file, os.R_OK):
+        parser.error(f"--sdss-spectrum-selection-path not found or not readable: {selection_file}")
+    if selection_file.suffix.lower() not in {".csv", ".txt", ".ecsv"}:
+        parser.error("--sdss-spectrum-selection-path must be a .csv, .txt or .ecsv file")
+    if UNSAFE_JOB_PATH_CHARS.search(str(selection_file)):
+        parser.error(f"--sdss-spectrum-selection-path contains whitespace or shell characters: {selection_file}")
+    sdss_spectrum_selection_path = str(selection_file)
+    sdss_spectrum_selection_sha256 = hashlib.sha256(selection_file.read_bytes()).hexdigest()
+    joint_prediction_args.extend(["--sdss-spectrum-selection-path", sdss_spectrum_selection_path])
+if cli_args.cache_dir is not None:
+    cache_dir_path = repo_relative_path(cli_args.cache_dir)
+    if not cache_dir_path.is_dir():
+        parser.error(f"--cache-dir not found or not a directory: {cache_dir_path}")
+    if UNSAFE_JOB_PATH_CHARS.search(str(cache_dir_path)):
+        parser.error(f"--cache-dir contains whitespace or shell characters: {cache_dir_path}")
+    cache_dir = str(cache_dir_path)
 if resume_run_name and fit_script != "fit_spectra_jaxsedfit_joint.py":
     parser.error("--resume is supported only with fit_spectra_jaxsedfit_joint.py")
 if resume_run_name:
@@ -656,6 +716,61 @@ if resume_dir:
         raise FileNotFoundError(f"Resume run sample directory not found: {resume_path}")
     if resume_path.resolve() == (output_path / "all").resolve():
         raise ValueError("Resume source and new sample destination must differ.")
+
+    # A resume must not mix spectra: resumed rows keep the spectrum their bundle
+    # was sampled on, while the fitter labels every row with the plate/MJD/fiber
+    # of the current selection and fresh fallback fits read the current cache.
+    resumed_script = REPO_ROOT / "hpc_scripts" / "submit" / "jaxqsofit" / f"submit_{resume_run_name}.sbatch"
+    resumed_inputs = None
+    if resumed_script.is_file():
+        try:
+            resumed_record = decode_record(
+                parse_saved_export(resumed_script.read_text(encoding="utf-8"), PROVENANCE_ENV)
+            )
+        except ValueError:
+            resumed_record = None
+        resumed_inputs = ((resumed_record or {}).get("resolved") or {}).get("inputs")
+    spectrum_options_given = (
+        cli_args.sdss_spectrum_selection_path is not None or cli_args.cache_dir is not None
+    )
+    if not isinstance(resumed_inputs, dict):
+        if spectrum_options_given:
+            parser.error(
+                "--sdss-spectrum-selection-path/--cache-dir with --resume need the "
+                f"resumed run's submission record ({resumed_script}) to confirm it "
+                "used the same spectra; none was readable"
+            )
+        print(
+            f"Warning: no readable submission record {resumed_script}; cannot check "
+            "that the resumed run used the same SDSS spectrum selection and cache "
+            "directory.",
+            file=sys.stderr,
+        )
+    else:
+        resumed_selection = resumed_inputs.get("sdss_spectrum_selection_path")
+        resumed_selection_sha256 = resumed_inputs.get("sdss_spectrum_selection_sha256")
+        if (resumed_selection_sha256 or None) != sdss_spectrum_selection_sha256:
+            parser.error(
+                f"--resume {resume_run_name} used SDSS spectrum selection "
+                f"{resumed_selection or 'none (DR16Q primary spectra)'}"
+                + (f" (sha256 {resumed_selection_sha256})" if resumed_selection_sha256 else "")
+                + f", this run {sdss_spectrum_selection_path or 'none (DR16Q primary spectra)'}"
+                + (f" (sha256 {sdss_spectrum_selection_sha256})" if sdss_spectrum_selection_sha256 else "")
+                + "; one run must not mix spectra. Pass the same "
+                "--sdss-spectrum-selection-path (same content) as the resumed run, "
+                "or start a fresh run."
+            )
+        resumed_cache_dir = resumed_inputs.get("cache_dir")
+        if not cli_args.resume_only and (
+            not resumed_cache_dir
+            or repo_relative_path(resumed_cache_dir) != repo_relative_path(cache_dir)
+        ):
+            parser.error(
+                f"--resume {resume_run_name} used cache directory {resumed_cache_dir}, "
+                f"this run {cache_dir}; fresh fallback fits would read spectra from "
+                "another cache. Pass --cache-dir with the resumed run's directory, "
+                "or --resume-only."
+            )
 
 # ==========================================
 # 3. Helpers
@@ -763,6 +878,24 @@ if len(submit_object_ids) == 0:
         f"No valid object_id values remain after normalization and exclusions: {chisq_path}"
     )
 
+# The fitter requires a selection row for every object it fits; check the CSV
+# form here so a gap fails before submission rather than in every task.
+if sdss_spectrum_selection_path and Path(sdss_spectrum_selection_path).suffix.lower() != ".ecsv":
+    selection_frame = pd.read_csv(sdss_spectrum_selection_path, dtype=str)
+    id_column = next((c for c in ("object_id", "source_id") if c in selection_frame.columns), None)
+    if id_column is None:
+        parser.error(
+            f"--sdss-spectrum-selection-path {sdss_spectrum_selection_path} lacks an "
+            "object_id column"
+        )
+    selected_ids = set(selection_frame[id_column].dropna().map(normalize_object_id))
+    unselected_ids = [obj for obj in submit_object_ids if obj not in selected_ids]
+    if unselected_ids:
+        parser.error(
+            f"--sdss-spectrum-selection-path {sdss_spectrum_selection_path} lacks "
+            f"{len(unselected_ids)} submitted object ID(s), e.g. {unselected_ids[:10]}"
+        )
+
 num_tasks = math.ceil(len(submit_object_ids) / chunk_size)
 max_array_id = num_tasks - 1
 
@@ -826,6 +959,8 @@ submission = submission_record(
             "sed_photometry_path": sed_photometry_path,
             "dr16q_fits": "data/dr16q_prop_May01_2024.fits",
             "cache_dir": cache_dir,
+            "sdss_spectrum_selection_path": sdss_spectrum_selection_path,
+            "sdss_spectrum_selection_sha256": sdss_spectrum_selection_sha256,
         },
         "outputs": {"output_dir": output_dir, "fig_dir": fig_dir},
         "resume": {"directory": resume_dir, "run_name": resume_run_name, "only": cli_args.resume_only},
