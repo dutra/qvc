@@ -240,7 +240,7 @@ def test_sfitspectra_accepts_cli_overrides_and_builds_timestamped_spectrafit_job
     assert 'parser.add_argument(\n    "--fit-script",' in source
     assert 'parser.add_argument(\n    "--fit-bal",' in source
     assert "fit_script = cli_args.fit_script" in source
-    assert 'parser.add_argument(\n    "--sed-photometry-path",' not in source
+    assert 'parser.add_argument(\n    "--sed-photometry-path",' in source
     assert 'datetime.now().strftime("%b%d_%I%M%p").lower()' in source
     assert '["git", "rev-parse", "--short", "HEAD"]' in source
     assert 'r"[^A-Za-z0-9.-]+", "_", cli_args.description' in source
@@ -541,6 +541,8 @@ def test_sfitspectra_retry_requires_original_artifacts_and_sufficient_cpus(tmp_p
         ("--sdss-spectrum-selection-path", "data/selection.csv"),
         ("--cache-dir=data",),
         ("--allow-resume-without-submission-record",),
+        ("--sed-photometry-path", "data/phot.csv"),
+        ("--require-sed-photometry",),
     ],
 )
 def test_sfitspectra_retry_rejects_fresh_run_options(tmp_path, fresh_args):
@@ -1140,3 +1142,225 @@ def test_sfitspectra_resume_without_record_needs_the_explicit_flag(tmp_path):
     assert allowed.returncode == 0, allowed.stderr
     assert "cannot check that the resumed run used the same SDSS spectrum selection" in allowed.stderr
     assert len(_sbatch_calls(calls_path)) == 1
+
+
+PHOTOMETRY_CSV = (
+    "object_id,filter_name,flux_mjy,flux_err_mjy\n"
+    "1,galex_fuv,0.1,0.01\n1,u_sdss,0.2,0.02\n"
+    "2,wise_w1,0.3,0.03\n"
+)
+
+
+def _photometry_workspace(tmp_path):
+    root, script_path, csv_path, calls_path, env = _fresh_workspace(tmp_path)
+    _use_full_qvc_package(root)
+    (root / "data" / "phot.csv").write_text(PHOTOMETRY_CSV, encoding="utf-8")
+    return root, script_path, csv_path, calls_path, env
+
+
+def test_sfitspectra_default_sed_photometry_is_unchanged(tmp_path, monkeypatch):
+    root, script_path, csv_path, _, env = _fresh_workspace(tmp_path)
+    result = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path), "--description", "plain")
+    assert result.returncode == 0, result.stderr
+    generated = _only_sbatch(root).read_text()
+    default = "data/jul14_master_input_file_chisqgt20_bandwagon_photometry.csv"
+    assert f'export SED_PHOTOMETRY_PATH="{default}"' in generated
+    command = _generated_fit_command(root, script_path, generated, monkeypatch)
+    assert command[command.index("--sed-photometry-path") + 1] == default
+    inputs = _submission_inputs(generated)
+    assert inputs["sed_photometry_path"] == default
+    assert inputs["sed_photometry_sha256"] is None
+
+
+def test_sfitspectra_forwards_and_records_sed_photometry_path(tmp_path, monkeypatch):
+    root, script_path, csv_path, calls_path, env = _photometry_workspace(tmp_path)
+    photometry = root / "data" / "phot.csv"
+    result = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path), "--description", "phot",
+                        "--sed-photometry-path", "data/phot.csv")
+    assert result.returncode == 0, result.stderr
+    assert len(_sbatch_calls(calls_path)) == 1
+    generated = _only_sbatch(root).read_text()
+    resolved = str(photometry.resolve())
+    assert f'export SED_PHOTOMETRY_PATH="{resolved}"' in generated
+    command = _generated_fit_command(root, script_path, generated, monkeypatch)
+    assert command[command.index("--sed-photometry-path") + 1] == resolved
+    inputs = _submission_inputs(generated)
+    assert inputs["sed_photometry_path"] == resolved
+    assert inputs["sed_photometry_sha256"] == hashlib.sha256(photometry.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("extra", "content", "message"),
+    [
+        (("--sed-photometry-path", "data/missing.csv"), None, "not found or not readable"),
+        (("--sed-photometry-path", "data/phot.csv", "--fit-script", "fit_spectra.py"), None,
+         "supported only with fit_spectra_jaxsedfit_joint.py"),
+        (("--sed-photometry-path", "data/phot.csv", "--require-sed-photometry"),
+         PHOTOMETRY_CSV.replace("2,wise_w1,0.3,0.03\n", ""),
+         "no usable non-SDSS photometry for 1 submitted object ID(s), e.g. ['2']"),
+        (("--sed-photometry-path", "data/phot.csv", "--require-sed-photometry"),
+         PHOTOMETRY_CSV.replace("1,galex_fuv,0.1,0.01\n", ""),
+         "no usable non-SDSS photometry for 1 submitted object ID(s), e.g. ['1']"),
+        (("--sed-photometry-path", "data/phot.csv", "--require-sed-photometry"),
+         PHOTOMETRY_CSV.replace("0.3,0.03", "0.3,0"), "submitted object ID(s), e.g. ['2']"),
+        (("--require-sed-photometry",), None, "submitted object ID(s), e.g. ['1', '2']"),
+        (("--require-sed-photometry", "--fit-script", "fit_spectra.py"), None,
+         "supported only with fit_spectra_jaxsedfit_joint.py"),
+        (("--sed-photometry-path", "data/phot.csv"), "object_id,filter_name,flux_mjy\n1,galex_fuv,0.1\n",
+         "lacks saved-SED columns"),
+        (("--sed-photometry-path", "data/phot.json"), None, "Unsupported saved SED format"),
+    ],
+)
+def test_sfitspectra_validates_sed_photometry_before_submitting(tmp_path, extra, content, message):
+    root, script_path, csv_path, calls_path, env = _photometry_workspace(tmp_path)
+    if content is not None:
+        (root / "data" / "phot.csv").write_text(content, encoding="utf-8")
+    (root / "data" / "phot.json").write_text("{}", encoding="utf-8")
+    (root / "data/jul14_master_input_file_chisqgt20_bandwagon_photometry.csv").write_text(
+        "object_id,filter_name,flux_mjy,flux_err_mjy\n", encoding="utf-8")
+    result = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path), "--description", "bad", *extra)
+    assert result.returncode == 2, result.stderr
+    assert message in result.stderr
+    assert _sbatch_calls(calls_path) == []
+    assert not (root / "hpc_scripts/submit/jaxqsofit").exists()
+
+
+def test_sfitspectra_resume_with_sed_photometry_compares_content_for_fresh_fallbacks(tmp_path):
+    root, script_path, csv_path, calls_path, env = _photometry_workspace(tmp_path)
+    old = _original_run(root, script_path, csv_path, env, "orig", "--sed-photometry-path", "data/phot.csv")
+    plain = _original_run(root, script_path, csv_path, env, "origplain")
+
+    def resume(description, run_name, *extra):
+        return _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path),
+                          "--description", description, "--resume", run_name, *extra)
+
+    (root / "data" / "copy.csv").write_text(PHOTOMETRY_CSV, encoding="utf-8")
+    assert resume("same", old, "--sed-photometry-path", "data/copy.csv").returncode == 0
+    # --resume-only reads the photometry stored in the bundles.
+    assert resume("only", old, "--resume-only").returncode == 0
+    (root / "data" / "partial.csv").write_text(PHOTOMETRY_CSV.replace("2,wise_w1,0.3,0.03\n", ""))
+    assert resume("onlypartial", old, "--resume-only", "--sed-photometry-path", "data/partial.csv").returncode == 0
+    # A plain run's default file, passed explicitly, is the same content.
+    default = "data/jul14_master_input_file_chisqgt20_bandwagon_photometry.csv"
+    (root / default).write_text(PHOTOMETRY_CSV, encoding="utf-8")
+    assert resume("plainsame", plain, "--sed-photometry-path", "data/copy.csv").returncode == 0
+    (root / default).write_text("object_id\n", encoding="utf-8")
+    calls_before = len(_sbatch_calls(calls_path))
+
+    dropped = resume("dropped", old)
+    assert dropped.returncode == 2
+    assert "fresh fallback fits would use other photometry" in dropped.stderr
+    changed = resume("changed", plain, "--sed-photometry-path", "data/phot.csv")
+    assert changed.returncode == 2
+    assert "fresh fallback fits would use other photometry" in changed.stderr
+    (root / "data" / "copy.csv").write_text(PHOTOMETRY_CSV + "1,wise_w2,0.4,0.04\n", encoding="utf-8")
+    edited = resume("edited", old, "--sed-photometry-path", "data/copy.csv")
+    assert edited.returncode == 2
+    assert len(_sbatch_calls(calls_path)) == calls_before
+
+
+def test_sfitspectra_retry_rechecks_the_sed_photometry_hash(tmp_path):
+    root, script_path, csv_path, calls_path, env = _photometry_workspace(tmp_path)
+    old = _original_run(root, script_path, csv_path, env, "orig", "--sed-photometry-path", "data/phot.csv")
+    _write_fake_sacct(root, old)
+    photometry = root / "data" / "phot.csv"
+    retried = _run_fresh(root, script_path, env, "--retry", old)
+    assert retried.returncode == 0, retried.stderr
+    photometry.write_text(PHOTOMETRY_CSV + "1,wise_w2,0.4,0.04\n", encoding="utf-8")
+    altered = _run_fresh(root, script_path, env, "--retry", old)
+    assert altered.returncode != 0
+    assert "SED photometry file" in altered.stderr and "changed after submission" in altered.stderr
+    photometry.unlink()
+    missing = _run_fresh(root, script_path, env, "--retry", old)
+    assert missing.returncode != 0
+    assert "is missing" in missing.stderr
+    assert len(_sbatch_calls(calls_path)) == 2
+
+
+def test_sfitspectra_sed_photometry_warns_lists_and_records_objects_without_rows(tmp_path):
+    root, script_path, csv_path, calls_path, env = _photometry_workspace(tmp_path)
+    (root / "data" / "phot.csv").write_text(PHOTOMETRY_CSV.replace("2,wise_w1,0.3,0.03\n", ""), encoding="utf-8")
+    result = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path), "--description", "warn",
+                        "--sed-photometry-path", "data/phot.csv")
+    assert result.returncode == 0, result.stderr
+    assert "WARNING: 1 of 2 submitted object(s) have no usable non-SDSS photometry" in result.stderr
+    assert len(_sbatch_calls(calls_path)) == 1
+    saved = _only_sbatch(root)
+    prefix = saved.name[len("submit_"):-len(".sbatch")]
+    listed = f"hpc_scripts/submit/jaxqsofit/{prefix}_objects_without_sed_photometry.txt"
+    assert (root / listed).read_text() == "2\n"
+    assert listed in result.stderr
+    check = json.loads(base64.b64decode(re.search(
+        r'^export QVC_SUBMISSION_PROVENANCE_B64="([^"]*)"$', saved.read_text(), re.M).group(1)
+    ))["resolved"]["sed_photometry_check"]
+    assert check == {"required": False, "objects_without_photometry": 1,
+                     "objects_without_photometry_file": listed}
+
+
+def test_sfitspectra_require_sed_photometry_checks_the_default_table(tmp_path):
+    root, script_path, csv_path, calls_path, env = _photometry_workspace(tmp_path)
+    default = root / "data/jul14_master_input_file_chisqgt20_bandwagon_photometry.csv"
+    default.write_text(PHOTOMETRY_CSV, encoding="utf-8")
+    result = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path), "--description", "req",
+                        "--require-sed-photometry")
+    assert result.returncode == 0, result.stderr
+    assert "WARNING" not in result.stderr
+    saved = _only_sbatch(root)
+    generated = saved.read_text()
+    assert 'export SED_PHOTOMETRY_PATH="data/jul14_master_input_file_chisqgt20_bandwagon_photometry.csv"' in generated
+    record = json.loads(base64.b64decode(re.search(
+        r'^export QVC_SUBMISSION_PROVENANCE_B64="([^"]*)"$', generated, re.M).group(1)))["resolved"]
+    assert record["sed_photometry_check"] == {"required": True, "objects_without_photometry": 0,
+                                              "objects_without_photometry_file": None}
+    assert record["inputs"]["sed_photometry_sha256"] is None
+    (root / "results/data/jaxqsofit/x/all").mkdir(parents=True)
+    only = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path), "--description", "req2",
+                      "--require-sed-photometry", "--resume", "x", "--resume-only")
+    assert only.returncode == 2
+    assert "no effect with --resume-only" in only.stderr
+
+
+def test_sfitspectra_default_run_does_not_check_or_record_sed_photometry(tmp_path):
+    root, script_path, csv_path, calls_path, env = _fresh_workspace(tmp_path)
+    result = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path), "--description", "plain")
+    assert result.returncode == 0, result.stderr
+    assert "WARNING" not in result.stderr
+    generated = _only_sbatch(root).read_text()
+    record = json.loads(base64.b64decode(re.search(
+        r'^export QVC_SUBMISSION_PROVENANCE_B64="([^"]*)"$', generated, re.M).group(1)))["resolved"]
+    assert record["sed_photometry_check"] is None
+    assert not list((root / "hpc_scripts/submit/jaxqsofit").glob("*_objects_without_sed_photometry.txt"))
+
+
+def test_sfitspectra_resume_warns_when_the_photometry_content_cannot_be_verified(tmp_path):
+    root, script_path, csv_path, calls_path, env = _photometry_workspace(tmp_path)
+    old = _original_run(root, script_path, csv_path, env, "orig")
+    saved = _only_sbatch(root, f"submit_{old}.sbatch")
+    text = saved.read_text()
+    encoded = re.search(r'^export QVC_SUBMISSION_PROVENANCE_B64="([^"]*)"$', text, re.M).group(1)
+    record = json.loads(base64.b64decode(encoded))
+    del record["resolved"]["inputs"]["sed_photometry_sha256"]
+    saved.write_text(text.replace(encoded, base64.b64encode(json.dumps(record).encode()).decode()))
+    default = "data/jul14_master_input_file_chisqgt20_bandwagon_photometry.csv"
+    (root / default).write_text(PHOTOMETRY_CSV, encoding="utf-8")
+    result = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path), "--description", "again",
+                        "--resume", old, "--sed-photometry-path", default)
+    assert result.returncode == 0, result.stderr
+    assert "photometry content that run used cannot be verified" in result.stderr
+
+
+def test_sfitspectra_fitter_import_leaves_the_sbatch_environment_unchanged(tmp_path):
+    root, script_path, csv_path, calls_path, env = _photometry_workspace(tmp_path)
+    for key in ("XLA_FLAGS", "JAX_PLATFORM_NAME", "NUM_CORES"):
+        env.pop(key, None)
+    env_dump = root / "sbatch-env.json"
+    _write_executable(
+        root / "fake-bin" / "sbatch",
+        "#!/usr/bin/env python3\nimport json, os\n"
+        f"open({str(env_dump)!r}, 'w').write(json.dumps("
+        "{k: os.environ.get(k) for k in ('XLA_FLAGS', 'JAX_PLATFORM_NAME', 'NUM_CORES')}))\n",
+    )
+    result = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path), "--description", "env",
+                        "--sed-photometry-path", "data/phot.csv")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(env_dump.read_text()) == {"XLA_FLAGS": None, "JAX_PLATFORM_NAME": None, "NUM_CORES": None}
