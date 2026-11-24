@@ -64,6 +64,13 @@ from qvc.hubble.cuts import (
     LOW_L2500_FHOST_LOG_L_MAX,
     LOW_L2500_FHOST_PSF_MAX,
     REL_APPARENT_MAG_2500_ERR_MAX,
+    PHOTOMETRY_COVERAGE_CLASS_COLUMN,
+    PHOTOMETRY_COVERAGE_CLASSES,
+    PHOTOMETRY_COVERAGE_MIN_ENV,
+    PHOTOMETRY_FILTERS_COLUMN,
+    add_photometry_coverage_columns,
+    normalize_photometry_coverage_min,
+    photometry_coverage_mask,
     add_light_curve_point_count_column,
     add_t_rf_over_tau_uv_rf_column,
     build_sdss_target_selection_mask,
@@ -1766,6 +1773,30 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
 
     df = derive_f_agn_psf_2500_columns(df)
 
+    # Photometric coverage of the SED fit (columns photometry_has_galex/_nir/
+    # _wise and photometry_coverage_class) whenever the spectra catalogue
+    # records its filters; the optional minimum-coverage cut is applied in
+    # Tier 1 below.
+    photometry_coverage_min = normalize_photometry_coverage_min()
+    coverage_requested = photometry_coverage_min != "none"
+    if coverage_requested or PHOTOMETRY_FILTERS_COLUMN in df.columns:
+        try:
+            df = add_photometry_coverage_columns(df, required=coverage_requested)
+        except ValueError as exc:
+            if coverage_requested:
+                raise
+            print(f"[WARNING] Photometric coverage columns not added: {exc}")
+        else:
+            class_counts = df[PHOTOMETRY_COVERAGE_CLASS_COLUMN].value_counts(dropna=False)
+            print(
+                "Photometric coverage classes: "
+                + ", ".join(
+                    f"{label}={int(class_counts.get(label, 0))}"
+                    for label in PHOTOMETRY_COVERAGE_CLASSES
+                )
+                + f", unknown={int(df[PHOTOMETRY_COVERAGE_CLASS_COLUMN].isna().sum())}"
+            )
+
     # Targeting provenance is read from the spectra v3 catalog frame.
 
     sdss_target_selection = normalize_sdss_target_selection(sdss_target_selection)
@@ -2667,6 +2698,15 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
                 index=False,
             )
         df = _apply_scalar_cut_group(df, tier1_cuts, tier="1")
+        if coverage_requested:
+            coverage_mask = photometry_coverage_mask(df, photometry_coverage_min)
+            df = _record_cut(
+                "tier1:photometry_coverage",
+                f"{PHOTOMETRY_COVERAGE_MIN_ENV}={photometry_coverage_min}",
+                df,
+                coverage_mask,
+                tier="1",
+            )
         _append_cut_report_row(
             cut_rows,
             step="tier1:summary",
@@ -2677,6 +2717,11 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             tier="1",
         )
     else:
+        if coverage_requested:
+            print(
+                f"[WARNING] {PHOTOMETRY_COVERAGE_MIN_ENV}={photometry_coverage_min} is a "
+                f"Tier-1 cut and is not applied with --cut-tier {cut_tier}."
+            )
         _append_cut_report_row(
             cut_rows,
             step="tier1:summary",
@@ -2955,6 +3000,11 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         "exclude_object_ids_csv": [str(value) for value in exclude_object_ids_csv],
         "residuals_sigma_clip": residuals_sigma_clip,
     }
+    # Optional settings are recorded only when on, so that a run with them
+    # off keeps the configuration fingerprint (and resumable checkpoints) of
+    # the runs before they existed.
+    if coverage_requested and apply_tier1:
+        resolved_cut_configuration["tier1_photometry_coverage_min"] = photometry_coverage_min
     cut_configuration_json = json.dumps(
         resolved_cut_configuration, sort_keys=True, separators=(",", ":")
     )

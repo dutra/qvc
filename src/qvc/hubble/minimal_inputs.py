@@ -117,10 +117,16 @@ SPECTRA_FIELDS = (
     # (NaN or absent = off); see qvc.hubble.cuts.check_photometry_exclusion_settings.
     "photometry_exclusion_rest_wavelength",
     "photometry_exclusion_max_fraction",
+    # Filters the SED fit was given and left out (comma-separated); they define
+    # the photometric coverage class (qvc.hubble.cuts.photometry_coverage_columns).
+    "photometry_filters",
+    "photometry_filters_excluded",
 )
 OPTIONAL_SPECTRA_FIELDS = (
     "photometry_exclusion_rest_wavelength",
     "photometry_exclusion_max_fraction",
+    "photometry_filters",
+    "photometry_filters_excluded",
     "pl_slope",
     "pl_slope_err",
     "sed_reduced_chi2_ref",
