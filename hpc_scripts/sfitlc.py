@@ -367,6 +367,15 @@ def build_flag_lines(flags: list[str]) -> str:
     return " \\\n ".join(shlex.quote(flag) for flag in flags)
 
 
+def build_pythonpath_line() -> str:
+    """Put this repository's src first on the job's import path.
+
+    The conda environment may hold an editable install of qvc that points at
+    another checkout; PYTHONPATH entries precede site-packages .pth entries.
+    """
+    return f'export PYTHONPATH="{SRC_ROOT}${{PYTHONPATH:+:$PYTHONPATH}}"'
+
+
 def build_mail_lines() -> str:
     return "#SBATCH --mail-type=ALL\n"
 
@@ -547,6 +556,7 @@ export {PROVENANCE_ENV}="{encoded_submission}"
 
 module load miniconda
 conda activate {args.env}
+{build_pythonpath_line()}
 
 cd "{REPO_ROOT}"
 
@@ -677,6 +687,7 @@ set -euo pipefail
 
 module load miniconda
 conda activate {args.env}
+{build_pythonpath_line()}
 
 export {PROVENANCE_ENV}="{encoded_submission}"
 
@@ -730,6 +741,7 @@ set -euo pipefail
 
 module load miniconda
 conda activate {args.env}
+{build_pythonpath_line()}
 
 cd "{REPO_ROOT}"
 

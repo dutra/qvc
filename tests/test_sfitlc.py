@@ -419,6 +419,33 @@ def test_regular_merge_keeps_variability_recomputation():
     assert "#SBATCH --mem=40G" in script
 
 
+def test_job_scripts_put_the_generating_repository_src_first_on_pythonpath():
+    expected = (
+        f'export PYTHONPATH="{Path(sfitlc.__file__).resolve().parents[1] / "src"}'
+        '${PYTHONPATH:+:$PYTHONPATH}"'
+    )
+    fit = build_sbatch_script(
+        "probe_chisq",
+        JobConfig(description="chisq", object_ids=["1"], use_psf_constant_flux=True),
+        _args(),
+        "data/input.csv",
+        "results/data/spectra.h5",
+        object_ids_path=Path("/tmp/probe_chisq_object_ids.txt"),
+    )
+    merge = build_merge_sbatch_script("chisq_prefix", "chisq", _args(fit="chisq"))
+    comparison = sfitlc.build_samelength_comparison_sbatch_script("probe", _args(fit="samelength"))
+    for script, runner in (
+        (fit, "python -m qvc.light_curve.fit_light_curves"),
+        (merge, "python -m qvc.light_curve.merge_results"),
+        (comparison, "python -m qvc.light_curve.merge_results"),
+    ):
+        lines = script.splitlines()
+        assert lines.count(expected) == 1
+        export_at = lines.index(expected)
+        assert lines.index("conda activate jaxcpu2") < export_at
+        assert export_at < next(i for i, line in enumerate(lines) if runner in line)
+
+
 @pytest.mark.parametrize('enabled', [False, True])
 def test_stone_photometry_flag_forwarded(monkeypatch, enabled):
     monkeypatch.setattr(sys, 'argv', ['sfitlc.py', '--fit', 'stone'] + (['--load_stone_lcs'] if enabled else []))

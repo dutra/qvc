@@ -1306,6 +1306,7 @@ export {PROVENANCE_ENV}="{encoded_submission}"
 
 export TASK_ID="${{SLURM_ARRAY_TASK_ID:-0}}"
 
+export PYTHONPATH="{SRC_ROOT}${{PYTHONPATH:+:$PYTHONPATH}}"
 export JAX_ENABLE_X64="True"
 export QT_QPA_PLATFORM="offscreen"
 export NUM_CORES="${{CPUS_PER_TASK}}"

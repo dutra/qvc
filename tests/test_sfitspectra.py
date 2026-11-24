@@ -854,6 +854,16 @@ def test_sfitspectra_spectrum_selection_and_cache_dir_default_unchanged(tmp_path
     assert not list((root / "hpc_scripts/submit/jaxqsofit").glob("*_sdss_spectrum_selection*"))
 
 
+def test_sfitspectra_job_puts_the_generating_repository_src_first_on_pythonpath(tmp_path):
+    root, script_path, csv_path, _, env = _fresh_workspace(tmp_path)
+    result = _run_fresh(root, script_path, env, "--chisq-csv", str(csv_path), "--description", "pp")
+    assert result.returncode == 0, result.stderr
+    lines = _only_sbatch(root).read_text().splitlines()
+    expected = f'export PYTHONPATH="{root.resolve() / "src"}${{PYTHONPATH:+:$PYTHONPATH}}"'
+    assert lines.count(expected) == 1
+    assert lines.index(expected) < lines.index('"$PYTHON_BIN" - <<\'PY\'')
+
+
 def test_sfitspectra_forwards_a_frozen_spectrum_selection_and_cache_dir(tmp_path, monkeypatch):
     root, script_path, csv_path, calls_path, env = _selection_workspace(tmp_path, cache="data/other_cache")
     selection = root / "data" / "selection.csv"
