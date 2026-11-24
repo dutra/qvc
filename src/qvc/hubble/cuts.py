@@ -279,6 +279,106 @@ EBV_GAL_PLUS_EBV_AGN_MAX = _cut_env_float(
 )
 SPECTRAL_RHAT_MAX = _cut_env_float("QVC_CUT_SPECTRAL_RHAT_MAX", 1.1)
 LIGHT_CURVE_RHAT_MAX = _cut_env_float("QVC_CUT_LIGHT_CURVE_RHAT_MAX", 1.05)
+
+# Extra m_2500 uncertainty for the single-chain spectral fits (off by default).
+# Each object is sampled with one chain, and at z >~ 2 the m_2500 posterior is
+# multimodal, so the quoted posterior width misses the scatter between chains
+# (plots/diagnostics/gold_sample/spectral_rhat_cut/README.md, Part B). When
+# set, a constant per redshift range is added in quadrature to the per-object
+# error of each magnitude when the Hubble inputs are loaded:
+#   QVC_HUBBLE_M2500_DEREDDENED_ERR_EXTRA_LOW_Z / _HIGH_Z   (m_2500_dereddened_err)
+#   QVC_HUBBLE_M2500_ATTENUATED_ERR_EXTRA_LOW_Z / _HIGH_Z   (m_2500_attenuated_model_err)
+# in mag (default 0 = off; proposed 0.03 / 0.10 and 0.02 / 0.04), with "high"
+# for z >= QVC_HUBBLE_M2500_ERR_EXTRA_Z_BREAK (default 2.0). The intended use
+# is together with a relaxed spectral R-hat threshold
+# (QVC_CUT_SPECTRAL_RHAT_MAX, whose default is unchanged): the term replaces
+# the convergence cut on m_2500, it does not add to it. Every consumer of the
+# two error columns sees the inflated value (see add_magnitude_error_extra).
+MAGNITUDE_ERROR_EXTRA_ENV = {
+    "m_2500_dereddened_err": (
+        "QVC_HUBBLE_M2500_DEREDDENED_ERR_EXTRA_LOW_Z",
+        "QVC_HUBBLE_M2500_DEREDDENED_ERR_EXTRA_HIGH_Z",
+    ),
+    "m_2500_attenuated_model_err": (
+        "QVC_HUBBLE_M2500_ATTENUATED_ERR_EXTRA_LOW_Z",
+        "QVC_HUBBLE_M2500_ATTENUATED_ERR_EXTRA_HIGH_Z",
+    ),
+}
+MAGNITUDE_ERROR_EXTRA_Z_BREAK_ENV = "QVC_HUBBLE_M2500_ERR_EXTRA_Z_BREAK"
+DEFAULT_MAGNITUDE_ERROR_EXTRA_Z_BREAK = 2.0
+MAGNITUDE_ERROR_EXTRA_SUFFIX = "_extra"
+# With the term on, the original error columns are kept with this suffix; the
+# optional error cuts (QVC_CUT_APPARENT_MAG_2500_ERR_MAX, the relative-error
+# cut) act on them, so the term does not change which objects those cuts keep.
+MAGNITUDE_ERROR_RAW_SUFFIX = "_raw"
+
+
+def magnitude_error_extra_settings():
+    """Return the extra-error setting, or ``None`` when every term is zero.
+
+    The setting is ``{"z_break": z, "<error column>": [low_z, high_z], ...}``
+    with one entry per error column that has a nonzero term.
+    """
+    terms = {}
+    for column, names in MAGNITUDE_ERROR_EXTRA_ENV.items():
+        values = []
+        for name in names:
+            value = _cut_env_float(name, 0.0)
+            value = 0.0 if value is None else float(value)
+            if not np.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be a finite non-negative magnitude, got {value!r}")
+            values.append(value)
+        if any(values):
+            terms[column] = values
+    z_break = _cut_env_float(MAGNITUDE_ERROR_EXTRA_Z_BREAK_ENV, DEFAULT_MAGNITUDE_ERROR_EXTRA_Z_BREAK)
+    if z_break is None or not np.isfinite(z_break):
+        raise ValueError(f"{MAGNITUDE_ERROR_EXTRA_Z_BREAK_ENV} must be a finite redshift, got {z_break!r}")
+    if not terms:
+        return None
+    return {"z_break": float(z_break), **terms}
+
+
+def add_magnitude_error_extra(frame, settings):
+    """Add the extra m_2500 error terms in quadrature (no-op for ``None``).
+
+    Replaces each configured error column by sqrt(err^2 + extra(z)^2), with
+    extra = low_z below ``z_break`` and high_z at and above it, keeps the
+    original values in ``<error column>_raw`` and stores the added term in
+    ``<error column>_extra``. Rows without a finite redshift get no term
+    (``_extra`` NaN): they cannot enter a Hubble fit, which needs z, and the
+    Tier-0 redshift cut removes them. Raises when ``z`` or a configured error
+    column is missing or an error column is not numeric.
+    """
+    if not settings:
+        return frame
+    columns = [column for column in settings if column != "z_break"]
+    missing = [column for column in ("z", *columns) if column not in frame.columns]
+    if missing:
+        raise ValueError(
+            f"The extra m_2500 error terms ({', '.join(columns)}) need the "
+            f"input column(s) {missing}."
+        )
+    for column in columns:
+        dtype = frame[column].dtype
+        if not pd.api.types.is_numeric_dtype(dtype) or pd.api.types.is_bool_dtype(dtype):
+            raise ValueError(
+                f"Column {column!r} must contain numeric values without coercion; "
+                f"got dtype {dtype!r}."
+            )
+    z = pd.to_numeric(frame["z"], errors="coerce").to_numpy(dtype=float)
+    finite_z = np.isfinite(z)
+    high = finite_z & (z >= settings["z_break"])
+    frame = frame.copy()
+    for column in columns:
+        low_term, high_term = settings[column]
+        extra = np.where(finite_z, np.where(high, high_term, low_term), 0.0)
+        error = frame[column].to_numpy(dtype=float)
+        frame[column + MAGNITUDE_ERROR_RAW_SUFFIX] = error
+        frame[column] = np.hypot(error, extra)
+        frame[column + MAGNITUDE_ERROR_EXTRA_SUFFIX] = np.where(finite_z, extra, np.nan)
+    return frame
+
+
 NUM_DIVERGENCES_MAX = _cut_env_float("QVC_CUT_NUM_DIVERGENCES_MAX", 0.0)
 
 # The completeness map is tabulated at histogram-bin centers on a deliberately
@@ -568,6 +668,206 @@ REFERENCE_FLOOR_ENV = {
     "reference_photometry_floor": ("QVC_CUT_REFERENCE_PHOTOMETRY_FLOOR", 0.10),
     "reference_agn_floor": ("QVC_CUT_REFERENCE_AGN_FLOOR", 0.15),
 }
+
+
+# Photometric coverage of the spectral/SED fit. The fit rows record the
+# filters they were given (``photometry_filters``, comma-separated) and, with
+# the sub-Lyman exclusion, the ones left out of the likelihood
+# (``photometry_filters_excluded``); the filters actually used are the first
+# minus the second. ugriz (from the light curves) are always present. Every
+# filter name that occurs in the photometry table
+# (data/jul14_master_input_file_chisqgt20_bandwagon_photometry.csv) and in the
+# fit rows is listed here; any other name raises, so a new survey cannot be
+# silently counted as "no coverage".
+PHOTOMETRY_FILTER_GROUPS = {
+    **{f"{band}_sdss": "ugriz" for band in "ugriz"},
+    "FUV_galex": "galex",
+    "NUV_galex": "galex",
+    **{f"{band}_ukidss": "nir" for band in ("Y", "J", "H", "K")},
+    **{f"{band}_vhs": "nir" for band in ("J", "H", "Ks")},
+    **{f"{band}_2mass": "nir" for band in ("J", "H", "Ks")},
+    **{f"W{index}": "wise" for index in range(1, 5)},
+    # Mid/far-infrared points of a handful of objects; they count as "beyond
+    # ugriz" but not as near-infrared or WISE.
+    "L18W_akari": "akari_iras",
+    "WIDE-S_akari": "akari_iras",
+    "F25_iras": "akari_iras",
+    "F60_iras": "akari_iras",
+    "F100_iras": "akari_iras",
+}
+PHOTOMETRY_FILTERS_COLUMN = "photometry_filters"
+PHOTOMETRY_FILTERS_EXCLUDED_COLUMN = "photometry_filters_excluded"
+PHOTOMETRY_COVERAGE_FLAG_COLUMNS = {
+    "galex": "photometry_has_galex",
+    "nir": "photometry_has_nir",
+    "wise": "photometry_has_wise",
+}
+PHOTOMETRY_COVERAGE_CLASS_COLUMN = "photometry_coverage_class"
+# Class of the (GALEX, near-IR, WISE) presence pattern. ``akari_iras_only``
+# is an object whose only non-ugriz points are AKARI/IRAS (none in the
+# 5,194-object reference sample).
+PHOTOMETRY_COVERAGE_CLASSES = (
+    "full",
+    "no_galex",
+    "no_nir",
+    "no_wise",
+    "nir_only",
+    "wise_only",
+    "galex_only",
+    "ugriz_only",
+    "akari_iras_only",
+)
+# Optional minimum-coverage cut (off by default), QVC_CUT_PHOTOMETRY_COVERAGE_MIN:
+#   none          no cut (default)
+#   beyond_ugriz  at least one band beyond ugriz (GALEX, near-IR, WISE, AKARI/IRAS)
+#   infrared      at least one near-infrared or WISE band
+#   galex         at least one GALEX band
+PHOTOMETRY_COVERAGE_MIN_ENV = "QVC_CUT_PHOTOMETRY_COVERAGE_MIN"
+PHOTOMETRY_COVERAGE_MIN_CHOICES = ("none", "beyond_ugriz", "infrared", "galex")
+
+
+def normalize_photometry_coverage_min(value=None):
+    """Return the requested coverage level (``QVC_CUT_PHOTOMETRY_COVERAGE_MIN``)."""
+    if value is None:
+        value = os.environ.get(PHOTOMETRY_COVERAGE_MIN_ENV)
+    text = "none" if value is None or not str(value).strip() else str(value).strip().lower()
+    text = text.replace("-", "_")
+    if text not in PHOTOMETRY_COVERAGE_MIN_CHOICES:
+        raise ValueError(
+            f"{PHOTOMETRY_COVERAGE_MIN_ENV} must be one of "
+            f"{PHOTOMETRY_COVERAGE_MIN_CHOICES}, got {value!r}"
+        )
+    return text
+
+
+def _filter_list(value):
+    """Filter names of one row; ``None`` for a missing or empty value (unknown)."""
+    if isinstance(value, (bytes, np.bytes_)):
+        value = value.decode("utf-8", errors="replace")
+    if isinstance(value, (list, tuple, np.ndarray)):
+        names = [str(name).strip() for name in value]
+    else:
+        if value is None or pd.isna(value):
+            return None
+        names = [name.strip() for name in str(value).split(",")]
+    names = [name for name in names if name]
+    return names or None
+
+
+def photometry_coverage_columns(frame):
+    """Return the per-object coverage description of the SED-fit photometry.
+
+    Columns: ``photometry_has_galex``, ``photometry_has_nir``,
+    ``photometry_has_wise`` (booleans) and ``photometry_coverage_class``
+    (one of :data:`PHOTOMETRY_COVERAGE_CLASSES`), from the filters the fit
+    used (``photometry_filters`` minus ``photometry_filters_excluded``).
+    Rows without a filter list get ``False`` flags and class ``None``.
+    Raises when the filter column is absent or a filter name is unknown.
+    """
+    if PHOTOMETRY_FILTERS_COLUMN not in frame.columns:
+        raise ValueError(
+            f"Photometric coverage needs the spectral-fit column "
+            f"{PHOTOMETRY_FILTERS_COLUMN!r}, which the input catalogue does not have."
+        )
+    used = frame[PHOTOMETRY_FILTERS_COLUMN].map(_filter_list)
+    if PHOTOMETRY_FILTERS_EXCLUDED_COLUMN in frame.columns:
+        excluded = frame[PHOTOMETRY_FILTERS_EXCLUDED_COLUMN].map(_filter_list)
+        used = pd.Series(
+            [
+                None if names is None else [n for n in names if n not in set(drop or ())]
+                for names, drop in zip(used, excluded)
+            ],
+            index=frame.index,
+            dtype=object,
+        )
+    unknown = sorted(
+        {name for names in used if names is not None for name in names}
+        - set(PHOTOMETRY_FILTER_GROUPS)
+    )
+    if unknown:
+        raise ValueError(
+            f"Unknown photometric filter name(s) {unknown} in {PHOTOMETRY_FILTERS_COLUMN!r}; "
+            "add them to qvc.hubble.cuts.PHOTOMETRY_FILTER_GROUPS with their group."
+        )
+    groups = [
+        None if names is None else {PHOTOMETRY_FILTER_GROUPS[n] for n in names}
+        for names in used
+    ]
+    known = np.asarray([g is not None for g in groups], dtype=bool)
+    has = {
+        group: np.asarray([g is not None and group in g for g in groups], dtype=bool)
+        for group in (*PHOTOMETRY_COVERAGE_FLAG_COLUMNS, "akari_iras")
+    }
+    galex, nir, wise = has["galex"], has["nir"], has["wise"]
+    labels = np.select(
+        [
+            galex & nir & wise,
+            ~galex & nir & wise,
+            galex & ~nir & wise,
+            galex & nir & ~wise,
+            ~galex & nir & ~wise,
+            ~galex & ~nir & wise,
+            galex & ~nir & ~wise,
+            has["akari_iras"],
+        ],
+        list(PHOTOMETRY_COVERAGE_CLASSES[:7]) + ["akari_iras_only"],
+        default="ugriz_only",
+    ).astype(object)
+    labels[~known] = None
+    out = pd.DataFrame(index=frame.index)
+    for group, column in PHOTOMETRY_COVERAGE_FLAG_COLUMNS.items():
+        out[column] = has[group]
+    out[PHOTOMETRY_COVERAGE_CLASS_COLUMN] = labels
+    return out
+
+
+def add_photometry_coverage_columns(frame, *, required=False):
+    """Add the coverage columns of :func:`photometry_coverage_columns`.
+
+    Without the filter column the frame is returned unchanged, unless
+    ``required`` (the coverage cut is requested), which raises.
+    """
+    if PHOTOMETRY_FILTERS_COLUMN not in frame.columns and not required:
+        return frame
+    coverage = photometry_coverage_columns(frame)
+    frame = frame.copy()
+    for column in coverage.columns:
+        frame[column] = coverage[column]
+    return frame
+
+
+def photometry_coverage_mask(frame, level):
+    """Boolean mask of the rows that meet coverage ``level``.
+
+    Needs the columns of :func:`add_photometry_coverage_columns`; raises when
+    they are missing or a row has no filter list.
+    """
+    level = normalize_photometry_coverage_min(level)
+    if level == "none":
+        return np.ones(len(frame), dtype=bool)
+    required = [*PHOTOMETRY_COVERAGE_FLAG_COLUMNS.values(), PHOTOMETRY_COVERAGE_CLASS_COLUMN]
+    missing = [column for column in required if column not in frame.columns]
+    if missing:
+        raise ValueError(
+            f"{PHOTOMETRY_COVERAGE_MIN_ENV}={level} needs the photometric coverage columns "
+            f"{missing}; the spectra catalogue must carry {PHOTOMETRY_FILTERS_COLUMN!r}."
+        )
+    labels = frame[PHOTOMETRY_COVERAGE_CLASS_COLUMN]
+    unknown = int(labels.isna().sum())
+    if unknown:
+        raise ValueError(
+            f"{PHOTOMETRY_COVERAGE_MIN_ENV}={level}: {unknown} row(s) have no "
+            f"{PHOTOMETRY_FILTERS_COLUMN!r} value, so their coverage is unknown."
+        )
+    flags = {
+        group: frame[column].to_numpy(dtype=bool)
+        for group, column in PHOTOMETRY_COVERAGE_FLAG_COLUMNS.items()
+    }
+    if level == "galex":
+        return flags["galex"]
+    if level == "infrared":
+        return flags["nir"] | flags["wise"]
+    return labels.to_numpy(dtype=object) != "ugriz_only"
 
 
 def _env_flag(name):

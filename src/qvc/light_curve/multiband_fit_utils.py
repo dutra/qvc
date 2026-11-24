@@ -536,9 +536,14 @@ def save_obj_samples_to_hdf5(
     model_variant=None,
     disk_order=None,
     fitted_bands=None,
+    zero_point_flags=None,
 ):
     """
     Save all samples to an HDF5 file, one file per object_id.
+
+    ``zero_point_flags`` (optional): (table sha256, threshold) of the
+    zero-point epoch flags the fit used, written as attributes so that
+    ``--resume`` can check it; nothing is written when it is ``None`` (off).
 
     Args:
         samples (dict): Dictionary containing MCMC samples.
@@ -559,6 +564,9 @@ def save_obj_samples_to_hdf5(
             hdf.attrs["disk_order"] = int(disk_order)
         if fitted_bands is not None:
             hdf.attrs["bands"] = ",".join(map(str, fitted_bands))
+        if zero_point_flags is not None:
+            hdf.attrs["zero_point_flag_table_sha256"] = str(zero_point_flags[0])
+            hdf.attrs["zero_point_flag_threshold"] = float(zero_point_flags[1])
         if "tau_fast_driver" in samples and "tau_slow_driver" in samples:
             hdf.attrs["log_tau_uv_definition"] = (
                 "continuum_only_disk_convolved_integral_timescale_at_rest_"

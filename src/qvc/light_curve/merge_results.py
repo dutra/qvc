@@ -681,6 +681,48 @@ def load_and_merge_h5(file_list, expected_n, load_n, workers=1):
     return all_quasars
 
 
+def _zero_point_reload_kwargs(rows):
+    """concat_light_curves keywords that reproduce the fits' zero-point epoch flags.
+
+    Rows fitted with ``--zero_point_flag_table`` record the table path,
+    threshold and sha256; the epochs are then reloaded with the same table so
+    the recomputed variability metrics use the epochs the fit used. Rows
+    without the record were fitted without it. Mixed or changed settings raise.
+    """
+    from qvc.light_curve.zero_point_flags import file_sha256, load_zero_point_cells
+
+    def text(value):
+        if isinstance(value, (bytes, np.bytes_)):
+            value = value.decode("utf-8", errors="replace")
+        if value is None or (isinstance(value, float) and np.isnan(value)):
+            return ""
+        return str(value).strip()
+
+    settings = set()
+    for row in rows:
+        path = text(row.get("zero_point_flag_table"))
+        if not path:
+            settings.add(None)
+            continue
+        settings.add(
+            (path, float(row.get("zero_point_flag_threshold")), text(row.get("zero_point_flag_table_sha256")))
+        )
+    if settings <= {None}:
+        return {}
+    if len(settings) > 1:
+        raise ValueError(
+            "Cannot recompute variability: the merged rows were fitted with different "
+            f"zero-point epoch flag settings {sorted(map(str, settings))}."
+        )
+    path, threshold, sha256 = settings.pop()
+    if file_sha256(path) != sha256:
+        raise ValueError(
+            f"Cannot recompute variability: the zero-point flag table {path} changed since "
+            "the fits (sha256 differs)."
+        )
+    return {"zero_point_cells": load_zero_point_cells(path), "zero_point_flag_threshold": threshold}
+
+
 def attach_variability_metrics(rows):
     """Reload raw light curves and attach authoritative corrected variability metrics."""
 
@@ -689,7 +731,11 @@ def attach_variability_metrics(rows):
 
     object_ids = [str(row["object_id"]) for row in rows if row.get("object_id") not in (None, "")]
     unique_object_ids = list(dict.fromkeys(object_ids))
-    reloaded = concat_light_curves(filter_object_ids=unique_object_ids, progress_bar=False)
+    reloaded = concat_light_curves(
+        filter_object_ids=unique_object_ids,
+        progress_bar=False,
+        **_zero_point_reload_kwargs(rows),
+    )
     reloaded_by_object_id = {str(obj["object_id"]): obj for obj in reloaded}
 
     missing_object_ids = [oid for oid in unique_object_ids if oid not in reloaded_by_object_id]

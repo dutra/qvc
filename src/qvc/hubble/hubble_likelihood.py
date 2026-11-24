@@ -1160,7 +1160,9 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
                    selection_attenuation_mode="fixed-offset",
                    light_curve_uncertainty_mode="covariance",
                    eiv_mode=EIV_MODE_NONE,
-                   eiv_free_error_scale=False):
+                   eiv_free_error_scale=False,
+                   eiv_sigma_m_fixed=None,
+                   eiv_sigma_m_max=None):
     selection_attenuation_mode = normalize_selection_attenuation_mode(
         selection_attenuation_mode
     )
@@ -1206,6 +1208,8 @@ def log_likelihood(theta, *, agn_data, pantheon_data,
         use_redshift_log_f_term=use_redshift_log_f_term,
         eiv_mode=eiv_mode,
         eiv_free_error_scale=eiv_free_error_scale,
+        eiv_sigma_m_fixed=eiv_sigma_m_fixed,
+        eiv_sigma_m_max=eiv_sigma_m_max,
     )
     model_priors = {key: priors[key] for key in model_labels}
     params = dict(zip(model_labels, theta))

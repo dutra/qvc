@@ -12,7 +12,10 @@ outlier rejection and SDSS source), ``populate_sdss_fields``, the optional
 rest-frame window cut, and ``reference_total_flux_from_band`` on each band,
 so a table built from the full light curve reproduces the default
 subtraction of the full light curve exactly. Pass the same loader options
-here as to the fit. The epoch tables are read through ``QVC_DATA_DIR`` as in
+here as to the fit, including ``--zero_point_flag_table`` /
+``--zero_point_flag_threshold``: the reference is the full light curve as the
+standard fit sees it, so when the fit drops the epochs of non-photometric
+nights, the reference must be built without them too. The epoch tables are read through ``QVC_DATA_DIR`` as in
 the fitter, so point it at the full tables when building the reference.
 
 Usage::
@@ -33,6 +36,11 @@ from qvc.light_curve.multiband_generate_lc import (
     concat_light_curves,
     cut_light_curve_restframe_window,
     populate_sdss_fields,
+)
+from qvc.light_curve.zero_point_flags import (
+    DEFAULT_ZERO_POINT_FLAG_THRESHOLD,
+    file_sha256,
+    load_zero_point_cells,
 )
 from qvc.light_curve.psf_constant_flux_correction import (
     normalize_object_id,
@@ -76,14 +84,27 @@ def build_constant_flux_reference_table(
     rf_length_cut: int = -1,
     exact_same_length: bool = False,
     progress_bar: bool = False,
+    zero_point_cells=None,
+    zero_point_flag_threshold: float = DEFAULT_ZERO_POINT_FLAG_THRESHOLD,
 ) -> pd.DataFrame:
-    """Load objects exactly as the fitter does and return their reference table."""
+    """Load objects exactly as the fitter does and return their reference table.
 
+    ``zero_point_cells`` / ``zero_point_flag_threshold``: the fitter's
+    non-photometric-night exclusion (off when ``None``), passed to
+    ``concat_light_curves`` as the fitter passes them.
+    """
+
+    zero_point_kwargs = (
+        {}
+        if zero_point_cells is None
+        else dict(zero_point_cells=zero_point_cells, zero_point_flag_threshold=zero_point_flag_threshold)
+    )
     objs = concat_light_curves(
         filter_object_ids=list(object_ids),
         progress_bar=progress_bar,
         outlier_half_window_days=outlier_half_window_days,
         sdss_source=sdss_source,
+        **zero_point_kwargs,
     )
     objs = populate_sdss_fields(objs, progress_bar=progress_bar)
     if rf_length_cut > 0:
@@ -118,8 +139,30 @@ def main(argv=None):
                         help="Same as the fitter's option (default: -1, no cut).")
     parser.add_argument("--exact_same_length", action="store_true",
                         help="Same as the fitter's option.")
+    parser.add_argument("--zero_point_flag_table", default=None,
+                        help="Same as the fitter's option (default: off).")
+    parser.add_argument("--zero_point_flag_threshold", type=float, default=None,
+                        help="Same as the fitter's option (default 0.1; requires --zero_point_flag_table).")
     parser.add_argument("--progress", action="store_true", help="Show progress bars.")
     args = parser.parse_args(argv)
+    zero_point_cells = None
+    if args.zero_point_flag_table is None:
+        if args.zero_point_flag_threshold is not None:
+            parser.error("--zero_point_flag_threshold requires --zero_point_flag_table")
+    else:
+        if args.zero_point_flag_threshold is None:
+            args.zero_point_flag_threshold = DEFAULT_ZERO_POINT_FLAG_THRESHOLD
+        if not np.isfinite(args.zero_point_flag_threshold) or args.zero_point_flag_threshold <= 0:
+            parser.error("--zero_point_flag_threshold must be a positive magnitude")
+        try:
+            zero_point_cells = load_zero_point_cells(args.zero_point_flag_table)
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+        print(
+            f"Zero-point epoch flags from {args.zero_point_flag_table} "
+            f"(sha256 {file_sha256(args.zero_point_flag_table)}, "
+            f"threshold {args.zero_point_flag_threshold:g} mag)."
+        )
 
     object_ids = list(args.filter_object_id or [])
     if args.filter_file:
@@ -135,6 +178,12 @@ def main(argv=None):
         rf_length_cut=args.rf_length_cut,
         exact_same_length=args.exact_same_length,
         progress_bar=args.progress,
+        **(
+            {}
+            if zero_point_cells is None
+            else dict(zero_point_cells=zero_point_cells,
+                      zero_point_flag_threshold=args.zero_point_flag_threshold)
+        ),
     )
     path = write_constant_flux_reference_table(table, args.output)
     print(f"Wrote {len(table)} rows for {table['object_id'].nunique()} objects to {path}")

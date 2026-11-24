@@ -82,6 +82,15 @@ from qvc.light_curve.multiband_fit_plotting import (
 )
 from qvc.light_curve.multiband_fit_utils import *
 from qvc.light_curve.multiband_generate_lc import *
+from qvc.light_curve.zero_point_flags import (
+    DEFAULT_ZERO_POINT_FLAG_THRESHOLD,
+    ZERO_POINT_OFF,
+    ZeroPointResumeMismatch,
+    check_zero_point_resume,
+    file_sha256,
+    load_zero_point_cells,
+    zero_point_setting,
+)
 from qvc.light_curve.multiband_dho_core import (
     mag_residual_to_relative_flux,
     magerr_residual_to_relative_fluxerr,
@@ -5586,6 +5595,30 @@ def main():
             "under data/MacLeod2010 and keeps only MacLeod quasars."
         ),
     )
+    parser.add_argument(
+        "--zero_point_flag_table",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Zero-point cell table (parquet or CSV; columns band, night, rab, "
+            "cell_off, cell_n; see qvc.light_curve.zero_point_flags). When given, "
+            "the SDSS epochs of every object-night whose g, r or i cell (band x "
+            "night x 2 deg of RA, >= 8 objects) has |offset| above "
+            "--zero_point_flag_threshold are dropped at load time, before the "
+            "outlier clip. Off by default. The table's sha256 is recorded in the "
+            "provenance and the per-band counts of dropped epochs in each row."
+        ),
+    )
+    parser.add_argument(
+        "--zero_point_flag_threshold",
+        type=float,
+        default=None,
+        metavar="MAG",
+        help=(
+            "Zero-point offset above which a cell is flagged (mag; default "
+            f"{DEFAULT_ZERO_POINT_FLAG_THRESHOLD:g}). Requires --zero_point_flag_table."
+        ),
+    )
     parser.add_argument("--disable_trace_plot", action="store_true", default=False, help="Disable MCMC trace plot.")
     parser.add_argument("--disable_combined_plot", action="store_true", default=False, help="Disable combined light-curve fit plot.")
     parser.add_argument("--disable_color_magnitude_plot", action="store_true", default=False, help="Disable color-magnitude plot.")
@@ -5814,7 +5847,31 @@ def main():
             "--constant_flux_reference_path requires --subtract_psf_constant_flux "
             "and --psf-fraction-mode median."
         )
+    zero_point_cells = None
+    zero_point_table_sha256 = None
+    if args.zero_point_flag_table is None:
+        if args.zero_point_flag_threshold is not None:
+            parser.error("--zero_point_flag_threshold requires --zero_point_flag_table")
+    else:
+        if args.load_stone_lcs or args.load_nearby_lc_csv is not None or args.sdss_source != "dr16s82":
+            parser.error(
+                "--zero_point_flag_table applies to the dr16s82 SDSS epochs only "
+                "(not with --load_stone_lcs, --load_nearby_lc_csv or --sdss_source macleod)"
+            )
+        if args.zero_point_flag_threshold is None:
+            args.zero_point_flag_threshold = DEFAULT_ZERO_POINT_FLAG_THRESHOLD
+        if not np.isfinite(args.zero_point_flag_threshold) or args.zero_point_flag_threshold <= 0:
+            parser.error("--zero_point_flag_threshold must be a positive magnitude")
+        try:
+            zero_point_cells = load_zero_point_cells(args.zero_point_flag_table)
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+        zero_point_table_sha256 = file_sha256(args.zero_point_flag_table)
     args = apply_resume_sample_save_policy(args)
+    # "off" or (table sha256, threshold); saved with the samples and checked on --resume.
+    current_zero_point_setting = zero_point_setting(
+        zero_point_table_sha256, args.zero_point_flag_threshold
+    )
     print("Args:", args)
 
     if args.load_stone_lcs:
@@ -5824,6 +5881,14 @@ def main():
         objs = load_nearby_lcs(args.load_nearby_lc_csv)
         print(f"Loaded {len(objs)} nearby light curves from {args.load_nearby_lc_csv}.")
     else:
+        zero_point_kwargs = (
+            {}
+            if zero_point_cells is None
+            else dict(
+                zero_point_cells=zero_point_cells,
+                zero_point_flag_threshold=args.zero_point_flag_threshold,
+            )
+        )
         objs = concat_light_curves(
             filter_object_ids=args.filter_object_id,
             progress_bar=args.progress,
@@ -5831,7 +5896,15 @@ def main():
             skip=args.skip,
             outlier_half_window_days=args.outlier_half_window_days,
             sdss_source=args.sdss_source,
+            **zero_point_kwargs,
         )
+        if zero_point_cells is not None:
+            # Per-row record of the setting; merge_results --compute-variability
+            # reloads the epochs with the same table from it.
+            for obj in objs:
+                obj["zero_point_flag_table"] = os.path.abspath(args.zero_point_flag_table)
+                obj["zero_point_flag_threshold"] = float(args.zero_point_flag_threshold)
+                obj["zero_point_flag_table_sha256"] = zero_point_table_sha256
     print(f"Loaded {len(objs)} objects.")
 
     objs = populate_sdss_fields(
@@ -6070,6 +6143,7 @@ def main():
             if args.resume:
                 logging.warning("[DEBUG] Loading saved samples (flat) — developer mode.")
                 obj_flat_samples, saved_sample_metadata = load_obj_samples_from_hdf5(oid, return_metadata=True)
+                check_zero_point_resume(saved_sample_metadata, current_zero_point_setting, oid)
                 samples_per_chain = None
             else:
                 key = random.PRNGKey(0)
@@ -6376,6 +6450,11 @@ def main():
                         else None
                     ),
                     fitted_bands=bands,
+                    zero_point_flags=(
+                        None
+                        if current_zero_point_setting == ZERO_POINT_OFF
+                        else current_zero_point_setting
+                    ),
                     scalar_diagnostics={
                         "loo_chi2_eff": loo_residual_result["loo_chi2_eff"],
                         "loo_rms": loo_residual_result["loo_rms"],
@@ -6563,6 +6642,8 @@ def main():
             )
             results.append(final_result)
 
+        except ZeroPointResumeMismatch:
+            raise
         except Exception as e:
             logging.error(f"[{oid}] Error during fit: {e}")
             logging.error(traceback.format_exc())
@@ -6576,6 +6657,8 @@ def main():
         provenance_inputs[f"spectra_fit_h5_{index}"] = path
     if args.constant_flux_reference_path is not None:
         provenance_inputs["constant_flux_reference_path"] = args.constant_flux_reference_path
+    if args.zero_point_flag_table is not None:
+        provenance_inputs["zero_point_flag_table"] = args.zero_point_flag_table
     provenance_object_id = (
         str(results[0]["object_id"])
         if len(results) == 1 and "object_id" in results[0]

@@ -12,6 +12,12 @@ from astropy import units as u
 from tqdm import tqdm
 from collections import OrderedDict
 from qvc.hubble.hubble_utils import resolve_qvc_data_path
+from qvc.light_curve.zero_point_flags import (
+    DEFAULT_ZERO_POINT_FLAG_THRESHOLD,
+    ZERO_POINT_UNCOVERED_WARN_FRACTION,
+    flag_zero_point_epochs,
+    validate_zero_point_cells,
+)
 
 
 lambda_pivot = {
@@ -496,6 +502,8 @@ def concat_light_curves(
     load_seeing=True,
     outlier_half_window_days=30.0,
     sdss_source="dr16s82",
+    zero_point_cells=None,
+    zero_point_flag_threshold=DEFAULT_ZERO_POINT_FLAG_THRESHOLD,
 ):
     """Vectorized light-curve concatenation.
 
@@ -507,9 +515,22 @@ def concat_light_curves(
     et al. (2012) S82 light curves instead (see ``load_macleod_sdss_lcs``), which
     restricts the sample to the about 9,200 quasars in the MacLeod catalog and
     carries no SDSS seeing values.
+
+    ``zero_point_cells`` (off by default): a zero-point cell table
+    (``qvc.light_curve.zero_point_flags``). The SDSS epochs of every
+    object-night whose g, r or i cell has ``|offset| > zero_point_flag_threshold``
+    are dropped after the finite-value mask and before the outlier clip; each
+    object then carries ``zero_point_flagged_epochs_dropped_<band>``.
     """
     if sdss_source not in SDSS_SOURCES:
         raise ValueError(f"sdss_source must be one of {SDSS_SOURCES}, got {sdss_source!r}")
+    if zero_point_cells is not None:
+        if sdss_source != "dr16s82":
+            raise ValueError(
+                "zero_point_cells are measured on the dr16s82 SDSS photometry; they do not "
+                f"apply to sdss_source={sdss_source!r} (recalibrated zero points)."
+            )
+        zero_point_cells = validate_zero_point_cells(zero_point_cells)
     if (
         not np.isfinite(outlier_half_window_days)
         or outlier_half_window_days <= 0
@@ -723,6 +744,55 @@ def concat_light_curves(
         & (obs["magerr"] > 0)
     )
     obs = obs.loc[finite_mask].copy()
+    zero_point_dropped = None
+    if zero_point_cells is not None:
+        is_sdss = (obs["survey"] == "sdss").to_numpy()
+        sdss_epochs = obs.loc[is_sdss]
+        flagged = np.zeros(len(obs), dtype=bool)
+        uncovered = np.zeros(len(obs), dtype=bool)
+        flagged[is_sdss], uncovered[is_sdss] = flag_zero_point_epochs(
+            sdss_epochs,
+            dict(zip(cat["objectId"], cat["RA"])),
+            zero_point_cells,
+            zero_point_flag_threshold,
+            return_uncovered=True,
+        )
+        zero_point_dropped = (
+            obs.loc[flagged].groupby(["object_id", "band"], sort=False).size().to_dict()
+        )
+        zero_point_uncovered = obs.loc[uncovered].groupby("object_id", sort=False).size().to_dict()
+        n_sdss_by_object = obs.loc[is_sdss].groupby("object_id", sort=False).size().to_dict()
+        print(
+            f"Dropped {int(flagged.sum())} of {int(is_sdss.sum())} SDSS epochs on object-nights "
+            f"with a g/r/i zero-point offset above {float(zero_point_flag_threshold):g} mag; "
+            f"{int(uncovered.sum())} SDSS epoch(s) have no cell in the table."
+        )
+        for object_id, n_uncovered in zero_point_uncovered.items():
+            fraction = n_uncovered / n_sdss_by_object[object_id]
+            if fraction > ZERO_POINT_UNCOVERED_WARN_FRACTION:
+                print(
+                    f"[WARNING] Object {object_id}: {n_uncovered} of {n_sdss_by_object[object_id]} "
+                    f"SDSS epochs ({fraction:.1%}) have no cell in the --zero_point_flag_table "
+                    "table; was it built with another binning or on other nights?",
+                    flush=True,
+                )
+        n_before = obs.groupby(["object_id", "band"], sort=False).size()
+        obs = obs.loc[~flagged].copy()
+        n_after = obs.groupby(["object_id", "band"], sort=False).size().reindex(n_before.index, fill_value=0)
+        for object_id, band in n_before.index[(n_after == 0).to_numpy()]:
+            print(
+                f"[WARNING] Object {object_id}: --zero_point_flag_table removed all "
+                f"{int(n_before[(object_id, band)])} epochs of band {band}; it is handled "
+                "as any band without epochs (dropped from the fit with --drop_empty_bands, "
+                "otherwise the object's fit fails as for any empty band).",
+                flush=True,
+            )
+        for object_id in sorted(set(n_before.index.get_level_values(0)) - set(obs["object_id"]), key=str):
+            print(
+                f"Object {object_id}: --zero_point_flag_table removed all its epochs; it is "
+                "skipped as an object without data.",
+                flush=True,
+            )
     obs = obs.sort_values(["object_id", "band_idx", "time"], kind="mergesort")
 
     rejected = pd.Series(False, index=obs.index)
@@ -826,6 +896,18 @@ def concat_light_curves(
                 "number_points": number_points,
             }
         )
+        if zero_point_dropped is not None:
+            s82_objs[-1].update(
+                {
+                    f"zero_point_flagged_epochs_dropped_{band}": int(
+                        zero_point_dropped.get((object_id, band), 0)
+                    )
+                    for band in bands
+                }
+            )
+            s82_objs[-1]["zero_point_epochs_without_cell"] = int(
+                zero_point_uncovered.get(object_id, 0)
+            )
 
     print(f"Found {len(s82_objs)} objects in concat_light_curves_jax")
     return s82_objs
