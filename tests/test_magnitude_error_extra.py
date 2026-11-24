@@ -73,11 +73,20 @@ def test_off_is_a_no_op_and_requested_columns_must_exist(monkeypatch):
     monkeypatch.setenv(ATT_HIGH, "0.04")
     with pytest.raises(ValueError, match="m_2500_attenuated_model_err"):
         add_magnitude_error_extra(frame, magnitude_error_extra_settings())
-    with pytest.raises(ValueError, match="finite redshift"):
+    # A non-numeric error column is not coerced (the later magnitude check's rule).
+    with pytest.raises(ValueError, match="numeric values without coercion"):
         add_magnitude_error_extra(
-            pd.DataFrame({"z": [np.nan], "m_2500_attenuated_model_err": [0.1]}),
+            pd.DataFrame({"z": [1.0], "m_2500_attenuated_model_err": ["0.1"]}),
             magnitude_error_extra_settings(),
         )
+    # Rows without a finite redshift get no term (the Tier-0 z cut removes them).
+    out = add_magnitude_error_extra(
+        pd.DataFrame({"z": [np.nan, 2.5], "m_2500_attenuated_model_err": [0.1, 0.1]}),
+        magnitude_error_extra_settings(),
+    )
+    np.testing.assert_allclose(out["m_2500_attenuated_model_err"], [0.1, np.hypot(0.1, 0.04)])
+    assert np.isnan(out["m_2500_attenuated_model_err_extra"][0])
+    np.testing.assert_array_equal(out["m_2500_attenuated_model_err_raw"], [0.1, 0.1])
 
 
 # --- load_agn_data ------------------------------------------------------------
@@ -138,7 +147,48 @@ def test_load_agn_data_inflates_every_consumer(tmp_path, monkeypatch, convention
         "z_break": 2.0,
         "m_2500_dereddened_err": [0.03, 0.1],
         "m_2500_attenuated_model_err": [0.02, 0.04],
+        "error_cuts_column": "apparent_mag_2500_err_raw",
     }
+    # The relative-error column (for its optional cut) uses the uninflated error.
+    np.testing.assert_allclose(
+        selected["rel_apparent_mag_2500_err"],
+        selected["apparent_mag_2500_err_raw"] / selected["apparent_mag_2500"].abs(),
+    )
+    # The originals are kept.
+    np.testing.assert_array_equal(selected["m_2500_dereddened_err_raw"], [0.04, 0.05, 0.06, 0.07])
+    np.testing.assert_array_equal(
+        selected["apparent_mag_2500_err_raw"],
+        [0.04, 0.05, 0.06, 0.07] if convention == "dereddened" else [0.03] * 4,
+    )
+
+
+def test_error_cut_acts_on_the_uninflated_error(tmp_path, monkeypatch):
+    """QVC_CUT_APPARENT_MAG_2500_ERR_MAX=0.1 keeps the same objects with the term on (0.10 at z >= 2)."""
+    from qvc.hubble import hubble_cut_config
+
+    monkeypatch.setattr(hubble_cut_config, "AGN_TIER2_PARAMETER_CUTS", (("apparent_mag_2500_err", None, 0.1),))
+
+    def load():
+        source_path = tmp_path / "agn.h5"
+        source_path.touch()
+        monkeypatch.setattr(hubble_utils, "read_quasars_from_hdf5_flat", lambda *_a, **_k: _frame())
+        monkeypatch.setattr(hubble_utils, "populate_xray", lambda value: value)
+        _patch_load_agn_plotters(monkeypatch)
+        return hubble_utils.load_agn_data(
+            source_path, magnitude_convention="dereddened", spectra_fit_h5=None, cut_tier="2",
+            plot_diagnostics=False, plot_path=str(tmp_path / "plots"), cut_report_path=None,
+        )[0]
+
+    off = load()
+    monkeypatch.setenv(DERED_HIGH, "0.10")
+    on = load()
+    assert len(off) == 4
+    assert on["object_id"].tolist() == off["object_id"].tolist()
+    # Inflated errors at z >= 2 exceed the threshold; the cut did not see them.
+    assert (on.loc[on["z"] >= 2.0, "apparent_mag_2500_err"] > 0.1).all()
+    tier2 = json.loads(on.attrs["cut_configuration_json"])["tier2"]
+    assert ["apparent_mag_2500_err_raw", None, 0.1] in tier2
+    assert ["apparent_mag_2500_err", None, 0.1] in json.loads(off.attrs["cut_configuration_json"])["tier2"]
 
 
 def test_eiv_likelihood_variance_contains_the_term(tmp_path, monkeypatch):

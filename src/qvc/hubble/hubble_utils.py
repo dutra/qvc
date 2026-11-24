@@ -69,6 +69,7 @@ from qvc.hubble.cuts import (
     PHOTOMETRY_COVERAGE_MIN_ENV,
     PHOTOMETRY_FILTERS_COLUMN,
     SPECTRAL_RHAT_MAX,
+    MAGNITUDE_ERROR_RAW_SUFFIX,
     add_magnitude_error_extra,
     magnitude_error_extra_settings,
     add_photometry_coverage_columns,
@@ -1917,6 +1918,13 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
     )
     df["apparent_mag_2500"] = selected_magnitude
     df["apparent_mag_2500_err"] = selected_magnitude_error
+    if magnitude_error_extra is not None:
+        # The uninflated error of the selected convention, for the optional
+        # error cuts (see MAGNITUDE_ERROR_RAW_SUFFIX).
+        raw_column = magnitude_columns[magnitude_convention][1] + MAGNITUDE_ERROR_RAW_SUFFIX
+        df["apparent_mag_2500_err" + MAGNITUDE_ERROR_RAW_SUFFIX] = (
+            df[raw_column].astype(float) if raw_column in df.columns else selected_magnitude_error
+        )
     print(
         f"Using {magnitude_columns[magnitude_convention][0]} and "
         f"{magnitude_columns[magnitude_convention][1]} as the Hubble-workflow "
@@ -1954,6 +1962,9 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
             intrinsic_mag_2500 = other_magnitude
             intrinsic_mag_2500_err = other_magnitude_error
         df["dm_red"] = observed_mag_2500 - intrinsic_mag_2500
+        # With the extra m_2500 error on, both errors carry their extra term and
+        # they are added in quadrature here although the two terms are probably
+        # correlated (same chains). No fit uses dm_red_err.
         df["dm_red_err"] = np.sqrt(
             observed_mag_2500_err**2 + intrinsic_mag_2500_err**2
         )
@@ -2478,7 +2489,12 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
 
     if {"apparent_mag_2500", "apparent_mag_2500_err"}.issubset(df.columns):
         mag_2500 = pd.to_numeric(df["apparent_mag_2500"], errors="coerce").to_numpy(dtype=float)
-        mag_2500_err = pd.to_numeric(df["apparent_mag_2500_err"], errors="coerce").to_numpy(dtype=float)
+        error_column = (
+            "apparent_mag_2500_err" + MAGNITUDE_ERROR_RAW_SUFFIX
+            if magnitude_error_extra is not None
+            else "apparent_mag_2500_err"
+        )
+        mag_2500_err = pd.to_numeric(df[error_column], errors="coerce").to_numpy(dtype=float)
         df["rel_apparent_mag_2500_err"] = np.divide(
             mag_2500_err,
             np.maximum(np.abs(mag_2500), 1e-8),
@@ -2488,6 +2504,17 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
 
     df = df.reset_index(drop=True)
     
+    def _tier2_cuts():
+        # With the extra m_2500 error on, the optional error cut reads the
+        # uninflated error, so the term does not change which objects it keeps.
+        cuts = build_tier2_cuts(completeness_magnitude=completeness_magnitude)
+        if magnitude_error_extra is None:
+            return cuts
+        return [
+            (column + MAGNITUDE_ERROR_RAW_SUFFIX if column == "apparent_mag_2500_err" else column, lower, upper)
+            for column, lower, upper in cuts
+        ]
+
     def _apply_scalar_cut_group(frame, cuts, *, tier):
         for col, lower, upper in cuts:
             upper_inclusive = _scalar_cut_has_inclusive_upper(col)
@@ -2762,7 +2789,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         tier2_start = len(df)
         df = _apply_scalar_cut_group(
             df,
-            build_tier2_cuts(completeness_magnitude=completeness_magnitude),
+            _tier2_cuts(),
             tier="2",
         )
 
@@ -2997,7 +3024,7 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
         "tier1": tier1_cuts if apply_tier1 else [],
         "tier1_chi2_statistics": tier1_chi2_choices if apply_tier1 else None,
         "tier2": (
-            build_tier2_cuts(completeness_magnitude=completeness_magnitude)
+            _tier2_cuts()
             if apply_tier2 else []
         ),
         "tier2_spectral_component_fraction_max": (
@@ -3031,7 +3058,10 @@ def load_agn_data(file_path, populate_sdss=False, cut_tier="2",
     if coverage_requested and apply_tier1:
         resolved_cut_configuration["tier1_photometry_coverage_min"] = photometry_coverage_min
     if magnitude_error_extra is not None:
-        resolved_cut_configuration["magnitude_error_extra"] = magnitude_error_extra
+        resolved_cut_configuration["magnitude_error_extra"] = dict(
+            magnitude_error_extra,
+            error_cuts_column="apparent_mag_2500_err" + MAGNITUDE_ERROR_RAW_SUFFIX,
+        )
     cut_configuration_json = json.dumps(
         resolved_cut_configuration, sort_keys=True, separators=(",", ":")
     )

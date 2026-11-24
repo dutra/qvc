@@ -307,6 +307,10 @@ MAGNITUDE_ERROR_EXTRA_ENV = {
 MAGNITUDE_ERROR_EXTRA_Z_BREAK_ENV = "QVC_HUBBLE_M2500_ERR_EXTRA_Z_BREAK"
 DEFAULT_MAGNITUDE_ERROR_EXTRA_Z_BREAK = 2.0
 MAGNITUDE_ERROR_EXTRA_SUFFIX = "_extra"
+# With the term on, the original error columns are kept with this suffix; the
+# optional error cuts (QVC_CUT_APPARENT_MAG_2500_ERR_MAX, the relative-error
+# cut) act on them, so the term does not change which objects those cuts keep.
+MAGNITUDE_ERROR_RAW_SUFFIX = "_raw"
 
 
 def magnitude_error_extra_settings():
@@ -338,9 +342,12 @@ def add_magnitude_error_extra(frame, settings):
     """Add the extra m_2500 error terms in quadrature (no-op for ``None``).
 
     Replaces each configured error column by sqrt(err^2 + extra(z)^2), with
-    extra = low_z below ``z_break`` and high_z at and above it, and stores the
-    added term per object in ``<error column>_extra``. Raises when ``z`` or a
-    configured error column is missing or ``z`` is not finite.
+    extra = low_z below ``z_break`` and high_z at and above it, keeps the
+    original values in ``<error column>_raw`` and stores the added term in
+    ``<error column>_extra``. Rows without a finite redshift get no term
+    (``_extra`` NaN): they cannot enter a Hubble fit, which needs z, and the
+    Tier-0 redshift cut removes them. Raises when ``z`` or a configured error
+    column is missing or an error column is not numeric.
     """
     if not settings:
         return frame
@@ -351,21 +358,27 @@ def add_magnitude_error_extra(frame, settings):
             f"The extra m_2500 error terms ({', '.join(columns)}) need the "
             f"input column(s) {missing}."
         )
+    for column in columns:
+        dtype = frame[column].dtype
+        if not pd.api.types.is_numeric_dtype(dtype) or pd.api.types.is_bool_dtype(dtype):
+            raise ValueError(
+                f"Column {column!r} must contain numeric values without coercion; "
+                f"got dtype {dtype!r}."
+            )
     z = pd.to_numeric(frame["z"], errors="coerce").to_numpy(dtype=float)
-    if not np.all(np.isfinite(z)):
-        raise ValueError(
-            f"The extra m_2500 error needs a finite redshift for every row; "
-            f"{int(np.count_nonzero(~np.isfinite(z)))} row(s) have none."
-        )
-    high = z >= settings["z_break"]
+    finite_z = np.isfinite(z)
+    high = finite_z & (z >= settings["z_break"])
     frame = frame.copy()
     for column in columns:
         low_term, high_term = settings[column]
-        extra = np.where(high, high_term, low_term)
-        error = pd.to_numeric(frame[column], errors="raise").to_numpy(dtype=float)
+        extra = np.where(finite_z, np.where(high, high_term, low_term), 0.0)
+        error = frame[column].to_numpy(dtype=float)
+        frame[column + MAGNITUDE_ERROR_RAW_SUFFIX] = error
         frame[column] = np.hypot(error, extra)
-        frame[column + MAGNITUDE_ERROR_EXTRA_SUFFIX] = extra
+        frame[column + MAGNITUDE_ERROR_EXTRA_SUFFIX] = np.where(finite_z, extra, np.nan)
     return frame
+
+
 NUM_DIVERGENCES_MAX = _cut_env_float("QVC_CUT_NUM_DIVERGENCES_MAX", 0.0)
 
 # The completeness map is tabulated at histogram-bin centers on a deliberately
