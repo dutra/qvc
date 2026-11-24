@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -32,9 +33,12 @@ def test_log_f_prior_settings():
     for bad in (0.01, 0.005, 2.0, np.nan):
         with pytest.raises(ValueError, match="upper bound"):
             E.eiv_log_f_prior(sigma_m_max=bad)
-    for bad in (0.0, -0.1, np.inf):
-        with pytest.raises(ValueError, match="fixed sigma_M"):
+    for bad in (0.0, -0.1, np.inf, np.nan, 0.009, 1.6):
+        with pytest.raises(ValueError, match=r"fixed sigma_M must lie in \[0.01, 1.5\]"):
             E.eiv_log_f_prior(sigma_m_fixed=bad)
+    # The box edges are allowed.
+    for edge in (0.01, 1.5):
+        assert E.eiv_log_f_prior(sigma_m_fixed=edge) == (float(np.log(edge)),) * 2
 
 
 def test_model_params_default_unchanged_and_settings_applied():
@@ -160,6 +164,91 @@ def test_run_mcmc_pipeline_passes_the_settings_to_the_sampler(monkeypatch, tmp_p
         else:
             # Off: the likelihood keyword arguments are those of the base commit.
             assert key not in logl
+
+
+def _pipeline(monkeypatch, tmp_path, settings, *, resume=False):
+    """Run run_mcmc_pipeline in latent-lf mode with a sampler that returns fixed draws."""
+    df_fit = _make_fake_agn_sample(n_agn=6)
+
+    class FakeSampler:
+        def __init__(self, loglike, ptform, ndim, logl_kwargs=None, ptform_kwargs=None, **kwargs):
+            priors, labels = ptform_kwargs["priors"], ptform_kwargs["model_labels"]
+            theta = np.array([0.5 * (priors[k][0] + priors[k][1]) for k in labels])
+            n = len(df_fit)
+            self.results = SimpleNamespace(
+                samples=np.tile(theta, (6, 1)), logl=np.full(6, -1.0), logwt=np.zeros(6),
+                logz=np.array([-3.0]), logzerr=np.array([0.1]), blob=np.zeros((6, 3, n)),
+            )
+            self.results.blobs = self.results.blob
+
+        def run_nested(self, *args, **kwargs):
+            pass
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(hubble_fit, "get_qvc_result_dir", lambda: tmp_path / "results")
+    monkeypatch.setattr(hubble_fit, "DynamicNestedSampler", FakeSampler)
+    monkeypatch.setattr(hubble_fit, "plot_dynesty", lambda *a, **k: None)
+    monkeypatch.setattr(
+        hubble_fit,
+        "build_eiv_lf_table",
+        lambda z, **kwargs: {E.EIV_LNPSI_COL: np.zeros((2, 3), np.float32), E.EIV_Z0_COL: 0.0,
+                             E.EIV_DZ_COL: 5.0, E.EIV_U0_COL: 10.0, E.EIV_DU_COL: 10.0},
+    )
+    monkeypatch.setattr(
+        hubble_fit,
+        "get_completeness_function_2d",
+        lambda *args, **kwargs: (
+            lambda m, z: np.ones(np.broadcast_shapes(np.shape(m), np.shape(z))),
+            np.array([19.0, 20.0]), np.array([0.5, 1.0]), 0.5, 0.1, 0.0,
+        ),
+    )
+    return hubble_fit.run_mcmc_pipeline(
+        df_agn=df_fit, df_agn_all=df_fit.copy(), df_pantheon=_make_fake_pantheon_sample(),
+        _sna_L=None, _sna_Lower=True, _sna_LogdetCov=None,
+        agn_pivot_context=_agn_pivot_context(df_fit, (0.44, 3.16)), cosmo_model="FlatLambdaCDM",
+        only_agn=True, completeness=True, use_full_cov=False, speed="fastest", prefix="unit",
+        prior_profile="centered_lcdm_om01", completeness_sim_file="dummy_completeness.h5",
+        df_agn_completeness=df_fit, eiv_mode="latent-lf", resume=resume, **settings,
+    )
+
+
+def test_checkpoint_stores_the_settings_and_refuses_other_settings(monkeypatch, tmp_path):
+    import h5py
+
+    _pipeline(monkeypatch, tmp_path, {"eiv_sigma_m_max": 0.1})
+    (checkpoint,) = (tmp_path / "results" / "hubble_posteriors" / "unit").glob("*.h5")
+    with h5py.File(checkpoint, "r") as handle:
+        assert float(handle["eiv_sigma_m_max"][()]) == 0.1
+        assert "eiv_sigma_m_fixed" not in handle
+    stored = hubble_fit._stored_eiv_sigma_m_settings(hubble_fit.load_chains(checkpoint))
+    assert stored == {"eiv_sigma_m_max": 0.1}
+    # A fresh run with another setting (or none) under the same prefix would
+    # overwrite it: refused. The same setting may rerun.
+    for other in ({}, {"eiv_sigma_m_max": 0.2}, {"eiv_sigma_m_fixed": 0.05}):
+        with pytest.raises(RuntimeError, match="would overwrite it"):
+            _pipeline(monkeypatch, tmp_path, other)
+    _pipeline(monkeypatch, tmp_path, {"eiv_sigma_m_max": 0.1})
+
+
+def test_resume_checks_the_stored_settings(monkeypatch, tmp_path):
+    from qvc.hubble.hubble_utils import load_chains, save_chains
+
+    _pipeline(monkeypatch, tmp_path, {"eiv_sigma_m_fixed": 0.05})
+    (checkpoint,) = (tmp_path / "results" / "hubble_posteriors" / "unit").glob("*.h5")
+    # The explicit check, independent of the prior-bounds check: strip the keys
+    # from an otherwise unchanged checkpoint and resume with the setting.
+    results = load_chains(checkpoint)
+    results.pop("eiv_sigma_m_fixed")
+    save_chains(checkpoint, **results)
+    with pytest.raises(RuntimeError, match="sigma_M settings"):
+        _pipeline(monkeypatch, tmp_path, {"eiv_sigma_m_fixed": 0.05}, resume=True)
+
+
+def test_runs_without_settings_over_old_checkpoints_are_unchanged(monkeypatch, tmp_path):
+    # Checkpoints written without the options carry no keys: an off run may
+    # replace them, as before.
+    _pipeline(monkeypatch, tmp_path, {})
+    _pipeline(monkeypatch, tmp_path, {})
 
 
 def _cli(*args):

@@ -3923,6 +3923,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         else _build_checkpoint_paths(prefix, cosmo_model, only_sna=only_sna, only_agn=only_agn)["single"]
     )
     print(f"Checkpoint file: {checkpoint_file}")
+    if not resume:
+        _refuse_eiv_sigma_m_overwrite(checkpoint_file, eiv_sigma_m_settings)
     n_sne = len(pantheon_data["zHD"]) if "zHD" in pantheon_data else 0
     if only_agn:
         print(f"Starting AGN-only Hubble Fit with {len(agn_data['z'])} AGNs; SN likelihood disabled.")
@@ -4056,6 +4058,13 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             if stored_free != bool(eiv_free_error_scale):
                 raise RuntimeError(
                     f"Checkpoint '{checkpoint_file}' eiv_free_error_scale={stored_free} differs from this run."
+                )
+            stored_sigma_m = _stored_eiv_sigma_m_settings(r)
+            if stored_sigma_m != eiv_sigma_m_settings:
+                raise RuntimeError(
+                    f"Checkpoint '{checkpoint_file}' was written with sigma_M settings "
+                    f"{stored_sigma_m or 'none (free)'}; this run uses "
+                    f"{eiv_sigma_m_settings or 'none (free)'}."
                 )
             _LAST_EIV_POSTERIOR.update(
                 checkpoint_file=str(checkpoint_file),
@@ -4504,6 +4513,43 @@ EIV_SKIPPED_FORWARD_PRODUCTS = (
     "L2500/M2500 predicted-vs-actual, sigma-tau and residual diagnostics built on forward-model errors and dmi",
     "alpha_OX residual panels and debias-impact / redshift-bin summaries",
 )
+
+
+EIV_SIGMA_M_CHECKPOINT_KEYS = ("eiv_sigma_m_fixed", "eiv_sigma_m_max")
+
+
+def _stored_eiv_sigma_m_settings(results):
+    """The latent-lf sigma_M settings a checkpoint was written with ({} = free)."""
+    return {
+        key: float(np.asarray(results[key]).reshape(()))
+        for key in EIV_SIGMA_M_CHECKPOINT_KEYS
+        if key in results
+    }
+
+
+def _refuse_eiv_sigma_m_overwrite(checkpoint_file, eiv_sigma_m_settings):
+    """Refuse a fresh run that would overwrite a checkpoint of another sigma_M setting.
+
+    The checkpoint path depends only on --prefix and the model, so a run
+    without --resume replaces whatever is there. Checkpoints written without
+    the sigma_M options (all earlier ones) never hold the keys, so runs with
+    the options off behave as before over them.
+    """
+    if not os.path.exists(checkpoint_file):
+        return
+    try:
+        with h5py.File(checkpoint_file, "r") as handle:
+            stored = _stored_eiv_sigma_m_settings(
+                {key: handle[key][()] for key in EIV_SIGMA_M_CHECKPOINT_KEYS if key in handle}
+            )
+    except OSError:
+        return
+    if stored != dict(eiv_sigma_m_settings):
+        raise RuntimeError(
+            f"Checkpoint '{checkpoint_file}' holds a completed run with sigma_M settings "
+            f"{stored or 'none (free)'}; this run uses {dict(eiv_sigma_m_settings) or 'none (free)'} "
+            "and would overwrite it. Use a different --prefix, or remove that checkpoint."
+        )
 
 
 def _run_single_eiv_plots(
@@ -7272,7 +7318,9 @@ if __name__ == "__main__":
             "vector with a point prior at ln MAG, as H0 does with --fixed_h0, so "
             "every sample and optimiser step has that value. Default: free in "
             "[0.01, 1.5] mag. The data cannot separate sigma_M from the regressor "
-            "scatter eta, so this fixes the split."
+            "scatter eta, so this fixes the split. MAG must lie in [0.01, 1.5]. "
+            "A run without --resume refuses to overwrite a checkpoint written "
+            "with other sigma_M settings under the same --prefix."
         ),
     )
     parser.add_argument(

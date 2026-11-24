@@ -86,8 +86,15 @@ def eiv_log_f_prior(*, sigma_m_fixed=None, sigma_m_max=None):
             )
     if sigma_m_fixed is not None:
         sigma_m_fixed = float(sigma_m_fixed)
-        if not np.isfinite(sigma_m_fixed) or sigma_m_fixed <= 0.0:
-            raise ValueError(f"The fixed sigma_M must be a finite positive magnitude, got {sigma_m_fixed!r}.")
+        if not (
+            np.isfinite(sigma_m_fixed)
+            and sigma_m_fixed > 0.0
+            and low - 1e-12 <= np.log(sigma_m_fixed) <= high + 1e-12
+        ):
+            raise ValueError(
+                f"The fixed sigma_M must lie in [{np.exp(low):g}, {np.exp(high):g}] mag "
+                f"(the default latent-lf bounds), got {sigma_m_fixed!r}."
+            )
         if sigma_m_max is not None and sigma_m_fixed > sigma_m_max:
             raise ValueError(
                 f"Inconsistent sigma_M settings: fixed value {sigma_m_fixed:g} mag exceeds the "
