@@ -9,6 +9,7 @@ from qvc.hubble.hubble_eiv_lf import (
     EIV_LOG_F_PRIOR,
     eiv_hyper_priors,
     eiv_is_active,
+    eiv_log_f_prior,
 )
 
 AGN_ALPHA_LAMBDA_PARAM = "gamma_alpha_lambda"
@@ -1366,9 +1367,16 @@ def get_model_params(
     prior_profile=DEFAULT_PRIOR_PROFILE,
     eiv_mode="none",
     eiv_free_error_scale=False,
+    eiv_sigma_m_fixed=None,
+    eiv_sigma_m_max=None,
 ):
     prior_profile = normalize_prior_profile(prior_profile)
     eiv_active = eiv_is_active(eiv_mode)
+    if not eiv_active and (eiv_sigma_m_fixed is not None or eiv_sigma_m_max is not None):
+        raise ValueError(
+            "eiv_sigma_m_fixed / eiv_sigma_m_max set the latent-lf magnitude scatter and "
+            "require eiv_mode='latent-lf'."
+        )
     if eiv_active and only_sna:
         raise ValueError("The latent-lf errors-in-variables mode requires AGN data.")
     if only_sna and only_agn:
@@ -1495,7 +1503,9 @@ def get_model_params(
         # the population/scatter hyperparameters are appended after all
         # standard parameters so that dropping the trailing columns recovers
         # the standard parameter vector.
-        priors["log_f"] = EIV_LOG_F_PRIOR
+        priors["log_f"] = eiv_log_f_prior(
+            sigma_m_fixed=eiv_sigma_m_fixed, sigma_m_max=eiv_sigma_m_max
+        )
         priors |= OrderedDict(eiv_hyper_priors(free_error_scale=eiv_free_error_scale))
 
     model_labels = list(priors.keys())

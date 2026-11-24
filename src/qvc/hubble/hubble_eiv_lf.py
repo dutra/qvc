@@ -64,6 +64,40 @@ EIV_HYPER_PRIORS = (
 EIV_ERR_SCALE_PRIOR = (EIV_LOG_ERR_SCALE_PARAM, (float(np.log(0.25)), float(np.log(4.0))))
 # In latent-lf mode log_f is the luminosity scatter at fixed x, which may vanish.
 EIV_LOG_F_PRIOR = (float(np.log(0.01)), float(np.log(1.5)))
+
+
+def eiv_log_f_prior(*, sigma_m_fixed=None, sigma_m_max=None):
+    """Bounds of log_f (sigma_M = exp(log_f)) in latent-lf mode.
+
+    Default: :data:`EIV_LOG_F_PRIOR`. ``sigma_m_max`` lowers the upper bound
+    to ln(sigma_m_max), the bound the diagnostic MAP fits imposed from outside
+    (``HI[log_f] = ln 0.1``). ``sigma_m_fixed`` fixes sigma_M: the bounds
+    collapse to (ln v, ln v), so the prior transform is constant and the
+    likelihood rejects any other value (the convention of ``fixed_h0``).
+    Both given: the fixed value must not exceed the bound.
+    """
+    low, high = EIV_LOG_F_PRIOR
+    if sigma_m_max is not None:
+        sigma_m_max = float(sigma_m_max)
+        if not np.isfinite(sigma_m_max) or not np.exp(low) < sigma_m_max <= np.exp(high):
+            raise ValueError(
+                f"The sigma_M upper bound must lie in ({np.exp(low):g}, {np.exp(high):g}] mag "
+                f"(the default latent-lf bounds), got {sigma_m_max!r}."
+            )
+    if sigma_m_fixed is not None:
+        sigma_m_fixed = float(sigma_m_fixed)
+        if not np.isfinite(sigma_m_fixed) or sigma_m_fixed <= 0.0:
+            raise ValueError(f"The fixed sigma_M must be a finite positive magnitude, got {sigma_m_fixed!r}.")
+        if sigma_m_max is not None and sigma_m_fixed > sigma_m_max:
+            raise ValueError(
+                f"Inconsistent sigma_M settings: fixed value {sigma_m_fixed:g} mag exceeds the "
+                f"upper bound {sigma_m_max:g} mag."
+            )
+        value = float(np.log(sigma_m_fixed))
+        return (value, value)
+    if sigma_m_max is not None:
+        return (low, float(np.log(sigma_m_max)))
+    return EIV_LOG_F_PRIOR
 EIV_LATEX_LABELS = {
     EIV_LOG_ETA_PARAM: r"$\ln\eta_\sigma$",
     EIV_TAU0_PARAM: r"$\tau_0$",

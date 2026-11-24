@@ -98,6 +98,7 @@ from qvc.hubble.hubble_eiv_lf import (
     EIV_MODES,
     build_eiv_lf_table,
     eiv_is_active,
+    eiv_log_f_prior,
     normalize_eiv_mode,
 )
 from qvc.hubble.hubble_likelihood import (
@@ -3234,6 +3235,8 @@ def _run_fit_stage(
     eiv_mode=EIV_MODE_NONE,
     eiv_free_error_scale=False,
     eiv_lf_model=None,
+    eiv_sigma_m_fixed=None,
+    eiv_sigma_m_max=None,
 ):
     use_planck_h0_prior = use_planck_h0_prior or disable_ceph_dist_calibration
     (
@@ -3297,6 +3300,8 @@ def _run_fit_stage(
         eiv_mode=eiv_mode,
         eiv_free_error_scale=eiv_free_error_scale,
         eiv_lf_model=eiv_lf_model,
+        eiv_sigma_m_fixed=eiv_sigma_m_fixed,
+        eiv_sigma_m_max=eiv_sigma_m_max,
     )
     display_results_summary(
         flat_samples,
@@ -3529,6 +3534,8 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                       eiv_mode=EIV_MODE_NONE,
                       eiv_free_error_scale=False,
                       eiv_lf_model=None,
+                      eiv_sigma_m_fixed=None,
+                      eiv_sigma_m_max=None,
                       ):
     eiv_mode = normalize_eiv_mode(eiv_mode)
     eiv_active = eiv_is_active(eiv_mode)
@@ -3684,7 +3691,25 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
         use_redshift_log_f_term=use_redshift_log_f_term,
         eiv_mode=eiv_mode,
         eiv_free_error_scale=eiv_free_error_scale,
+        eiv_sigma_m_fixed=eiv_sigma_m_fixed,
+        eiv_sigma_m_max=eiv_sigma_m_max,
     )
+    # Optional latent-lf sigma_M settings, passed on (and recorded) only when
+    # set; their bounds are part of prior_bounds_json, which a resume checks.
+    eiv_sigma_m_settings = {
+        key: float(value)
+        for key, value in (
+            ("eiv_sigma_m_fixed", eiv_sigma_m_fixed),
+            ("eiv_sigma_m_max", eiv_sigma_m_max),
+        )
+        if value is not None
+    }
+    if eiv_sigma_m_settings:
+        print(
+            "[EIV] sigma_M = exp(log_f): "
+            + ", ".join(f"{key}={value:g} mag" for key, value in eiv_sigma_m_settings.items())
+            + f"; log_f bounds {tuple(priors['log_f'])}."
+        )
     prior_bounds_json = canonical_prior_bounds_json(priors)
     n_standard_params = len(
         get_model_params(
@@ -4107,6 +4132,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
                 logl_kwargs.update(
                     eiv_mode=eiv_mode,
                     eiv_free_error_scale=bool(eiv_free_error_scale),
+                    **eiv_sigma_m_settings,
                 )
             ptform_kwargs = dict(priors=priors, model_labels=model_labels)
             loglike_func = (
@@ -4359,6 +4385,7 @@ def run_mcmc_pipeline(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_
             checkpoint_payload.update(
                 eiv_mode=eiv_mode,
                 eiv_free_error_scale=bool(eiv_free_error_scale),
+                **eiv_sigma_m_settings,
                 eiv_hyper_labels=np.asarray(eiv_hyper_labels_run, dtype=str),
                 eiv_hyper_samples=np.asarray(eiv_hyper_samples, dtype=float),
                 eiv_full_prior_bounds_json=prior_bounds_json,
@@ -4591,7 +4618,9 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                agn_xray_counts=None,
                eiv_mode=EIV_MODE_NONE,
                eiv_free_error_scale=False,
-               eiv_lf_model=None):
+               eiv_lf_model=None,
+               eiv_sigma_m_fixed=None,
+               eiv_sigma_m_max=None):
     if eiv_lf_model is None:
         eiv_lf_model = completeness_lf_model
     if only_sna:
@@ -5016,6 +5045,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
                 eiv_mode=eiv_mode,
                 eiv_free_error_scale=eiv_free_error_scale,
                 eiv_lf_model=eiv_lf_model,
+                eiv_sigma_m_fixed=eiv_sigma_m_fixed,
+                eiv_sigma_m_max=eiv_sigma_m_max,
             )
             posterior_sample_indices_pass1 = (
                 _completeness_replay_sample_indices(
@@ -5390,6 +5421,8 @@ def run_single(df_agn, df_agn_all, df_pantheon, _sna_L, _sna_Lower, _sna_LogdetC
         eiv_mode=eiv_mode,
         eiv_free_error_scale=eiv_free_error_scale,
         eiv_lf_model=eiv_lf_model,
+        eiv_sigma_m_fixed=eiv_sigma_m_fixed,
+        eiv_sigma_m_max=eiv_sigma_m_max,
     )
     if apply_two_pass_sigma_clip:
         _write_stage_checkpoint(
@@ -6842,6 +6875,10 @@ def render_hubble_mode_table(args):
             if args.fit_redshift_log_f_term
             else "constant log_f"
         )
+        if getattr(args, "eiv_sigma_m_fixed", None) is not None:
+            intrinsic_scatter += f"; latent-lf sigma_M fixed at {args.eiv_sigma_m_fixed:g} mag"
+        elif getattr(args, "eiv_sigma_m_max", None) is not None:
+            intrinsic_scatter += f"; latent-lf sigma_M <= {args.eiv_sigma_m_max:g} mag"
         pivot_rule = (
             "exact log-space medians"
             if getattr(args, "disable_pivot_rounding", False)
@@ -7225,6 +7262,32 @@ if __name__ == "__main__":
         help="With --eiv-mode latent-lf, sample a global scale of the light-curve covariance.",
     )
     parser.add_argument(
+        "--eiv-sigma-m-fixed",
+        type=float,
+        default=None,
+        metavar="MAG",
+        help=(
+            "With --eiv-mode latent-lf, fix the magnitude scatter at fixed regressors "
+            "sigma_M = exp(log_f) at this value (mag): log_f stays in the parameter "
+            "vector with a point prior at ln MAG, as H0 does with --fixed_h0, so "
+            "every sample and optimiser step has that value. Default: free in "
+            "[0.01, 1.5] mag. The data cannot separate sigma_M from the regressor "
+            "scatter eta, so this fixes the split."
+        ),
+    )
+    parser.add_argument(
+        "--eiv-sigma-m-max",
+        type=float,
+        default=None,
+        metavar="MAG",
+        help=(
+            "With --eiv-mode latent-lf, upper bound on sigma_M (mag): log_f is sampled "
+            "in [ln 0.01, ln MAG] instead of [ln 0.01, ln 1.5]. MAG must lie in "
+            "(0.01, 1.5]. Combined with --eiv-sigma-m-fixed, the fixed value must "
+            "not exceed it."
+        ),
+    )
+    parser.add_argument(
         "--fit_alpha_lambda_term",
         action="store_true",
         default=False,
@@ -7426,6 +7489,15 @@ if __name__ == "__main__":
             "backend, --light-curve-uncertainty-mode covariance, "
             "--selection-attenuation-mode fixed-offset, completeness enabled "
             "(no --disable_completeness), AGN data and no --agn_calibrators."
+        )
+    if args.eiv_sigma_m_fixed is not None or args.eiv_sigma_m_max is not None:
+        if not eiv_is_active(args.eiv_mode):
+            raise ValueError(
+                "--eiv-sigma-m-fixed / --eiv-sigma-m-max require --eiv-mode latent-lf."
+            )
+        # Validates the values and their consistency before any data is loaded.
+        eiv_log_f_prior(
+            sigma_m_fixed=args.eiv_sigma_m_fixed, sigma_m_max=args.eiv_sigma_m_max
         )
     if args.use_jax and args.light_curve_uncertainty_mode != "covariance":
         raise NotImplementedError(
@@ -7826,7 +7898,9 @@ if __name__ == "__main__":
                 df_agn_completeness_parent=df_agn_completeness_parent,
                 agn_pivot_context=agn_pivot_context,
                 eiv_mode=args.eiv_mode,
-                eiv_free_error_scale=args.eiv_free_error_scale)
+                eiv_free_error_scale=args.eiv_free_error_scale,
+                eiv_sigma_m_fixed=args.eiv_sigma_m_fixed,
+                eiv_sigma_m_max=args.eiv_sigma_m_max)
             samples_joint, model_labels, dm_interp, logZ_joint, logZerr_joint, debiased_residuals, age, age_err = r
             cosmo_models_dict[cosmo_model] = summarize_single_cosmo_result(
                 samples_joint,
