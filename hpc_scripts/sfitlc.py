@@ -19,6 +19,7 @@ if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 from qvc.light_curve.multiband_generate_lc import resolve_macleod_object_ids, resolve_stone_object_ids
+from qvc.light_curve.zero_point_flags import file_sha256
 from qvc.provenance import PROVENANCE_ENV, encode_record, submission_record
 
 SCRIPT_DIR = REPO_ROOT / "hpc_scripts" / "jobs" / "multibandfit"
@@ -70,6 +71,23 @@ def parse_args():
             "excluded from every submitted sample."
         ),
     )
+    parser.add_argument(
+        "--zero-point-flag-table",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Zero-point cell table passed to the fitter as --zero_point_flag_table "
+            "(absolute path; off by default): SDSS epochs on object-nights with a g/r/i "
+            "zero-point offset above the threshold are dropped at load time."
+        ),
+    )
+    parser.add_argument(
+        "--zero-point-flag-threshold",
+        type=float,
+        default=None,
+        metavar="MAG",
+        help="Offset threshold for --zero-point-flag-table (mag; fitter default 0.1).",
+    )
     parser.add_argument("--num-jobs", type=int, default=-1, help="-1 means submit all chunks after skip.")
     parser.add_argument("--skip", type=int, default=0, help="Number of chunks to skip.")
     parser.add_argument("--N", type=int, default=10, help="Objects per array task.")
@@ -117,6 +135,23 @@ def parse_args():
         args.description = normalize_run_description(args.description)
     except ValueError as exc:
         parser.error(str(exc))
+    for flag in ("--zero_point_flag_table", "--zero_point_flag_threshold"):
+        if any(value == flag or value.startswith(flag + "=") for value in args.extra_fit_flags):
+            parser.error(f"use the launcher's {flag.replace('_', '-')} instead of passing {flag} through")
+    if args.zero_point_flag_table is None:
+        if args.zero_point_flag_threshold is not None:
+            parser.error("--zero-point-flag-threshold requires --zero-point-flag-table")
+    else:
+        table = Path(args.zero_point_flag_table).expanduser().resolve()
+        if not table.is_file():
+            parser.error(f"--zero-point-flag-table not found: {table}")
+        if args.load_stone_lcs:
+            parser.error("--zero-point-flag-table applies to the dr16s82 SDSS epochs, not to --load_stone_lcs")
+        if args.zero_point_flag_threshold is not None and not (
+            math.isfinite(args.zero_point_flag_threshold) and args.zero_point_flag_threshold > 0
+        ):
+            parser.error("--zero-point-flag-threshold must be a positive magnitude")
+        args.zero_point_flag_table = str(table)
     return args
 
 
@@ -429,6 +464,19 @@ def build_fit_job_name(prefix: str) -> str:
     )
 
 
+def _wrapper_args(args) -> dict:
+    """Launcher arguments for the submission record.
+
+    The optional zero-point settings enter it only when set, so a submission
+    without them is recorded exactly as before they existed.
+    """
+    return {
+        key: value
+        for key, value in vars(args).items()
+        if not (key in ("zero_point_flag_table", "zero_point_flag_threshold") and value is None)
+    }
+
+
 def build_sbatch_script(
     prefix: str,
     job: JobConfig,
@@ -487,15 +535,29 @@ def build_sbatch_script(
         )
     if getattr(args, "load_stone_lcs", False):
         base_flags.append("--load_stone_lcs")
+    zero_point_table = getattr(args, "zero_point_flag_table", None)
+    if zero_point_table is not None:
+        base_flags.extend(["--zero_point_flag_table", str(zero_point_table)])
+        if getattr(args, "zero_point_flag_threshold", None) is not None:
+            base_flags.extend(["--zero_point_flag_threshold", str(args.zero_point_flag_threshold)])
     base_flags.extend(job.extra_flags)
     if getattr(args, "only_light_curve_plot", False):
         base_flags.append("--only-light-curve-plot")
     base_flags.extend(getattr(args, "extra_fit_flags", ()))
+    inputs = {
+        "chisq_csv": chisq_csv,
+        "spectra_fit_h5": spectra_fit_h5,
+        "object_ids_path": object_id_file,
+        "exclude_object_ids": [str(path) for path in exclusion_paths],
+    }
+    if zero_point_table is not None:
+        inputs["zero_point_flag_table"] = str(zero_point_table)
+        inputs["zero_point_flag_table_sha256"] = file_sha256(zero_point_table)
     submission = submission_record(
         "hpc_scripts/sfitlc.py",
         sys.argv,
         {
-            "wrapper_args": vars(args),
+            "wrapper_args": _wrapper_args(args),
             "job": {
                 "description": job.description,
                 "prefix": prefix,
@@ -505,12 +567,7 @@ def build_sbatch_script(
                 "extra_flags": job.extra_flags,
                 "use_psf_constant_flux": job.use_psf_constant_flux,
             },
-            "inputs": {
-                "chisq_csv": chisq_csv,
-                "spectra_fit_h5": spectra_fit_h5,
-                "object_ids_path": object_id_file,
-                "exclude_object_ids": [str(path) for path in exclusion_paths],
-            },
+            "inputs": inputs,
             "resources": {
                 "cpus_per_task": args.ncores,
                 "memory": args.mem,
@@ -650,7 +707,7 @@ def build_merge_sbatch_script(
         "hpc_scripts/sfitlc.py",
         sys.argv,
         {
-            "wrapper_args": vars(args),
+            "wrapper_args": _wrapper_args(args),
             "merge_prefix": prefix,
             "job_description": job_description,
             "merge_command": merge_cmd,
