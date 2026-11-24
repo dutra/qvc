@@ -402,6 +402,24 @@ def compute_lambda_center_rf(lam_rf):
     return jnp.exp(jnp.mean(jnp.log(lam_rf)))
 
 
+# --drop_empty_bands: the continuum amplitude is a power law in rest
+# wavelength, sigma(lambda) = sigma_center * (lambda / lambda_center)^eta_sigma,
+# so eta_sigma is constrained by the data only with two or more bands that
+# each carry variability (two or more epochs); with one band it is set by its
+# prior alone.
+DROP_EMPTY_BANDS_MIN_BANDS = 2
+DROP_EMPTY_BANDS_MIN_POINTS_PER_BAND = 2
+
+
+def count_valid_band_epochs(data, band):
+    """Count one band's epochs that make_lc keeps (finite time, mag, magerr > 0)."""
+
+    times = np.asarray(data["times"].get(band, ()), dtype=float)
+    mags = np.asarray(data["mags"].get(band, ()), dtype=float)
+    magerrs = np.asarray(data["magerrs"].get(band, ()), dtype=float)
+    return int(np.sum(np.isfinite(mags) & np.isfinite(magerrs) & (magerrs > 0) & np.isfinite(times)))
+
+
 def reference_flux_from_mean_magnitudes(mags_means):
     """Convert per-band mean magnitudes into reference fluxes."""
 
@@ -3723,9 +3741,19 @@ def make_lc(
     alpha_sigma=-0.5,
     beta_tau=0.2,
     drop_band_lyman_alpha=False,
-    verbose=True
+    verbose=True,
+    drop_empty_bands=False,
 ):
-    """Prepare one object's multiband time series into model-ready arrays."""
+    """Prepare one object's multiband time series into model-ready arrays.
+
+    With ``drop_empty_bands`` a band without any valid epoch (finite time,
+    magnitude and positive magnitude error) is removed from the fit, in the
+    same way as ``z`` and the Ly-alpha-affected bands, and listed in
+    ``dropped_empty_bands``. The object must then keep at least
+    ``DROP_EMPTY_BANDS_MIN_BANDS`` bands, at least that many of them with
+    ``DROP_EMPTY_BANDS_MIN_POINTS_PER_BAND`` valid epochs; otherwise a
+    ``ValueError`` is raised.
+    """
 
     if drop_band_lyman_alpha:
         dropped_bands = sdss_bands_affected_by_lya(data["z"]) + ["z"]
@@ -3745,6 +3773,29 @@ def make_lc(
     times = data["times"]
     mags = data["mags"]
     magerrs = data["magerrs"]
+    if drop_empty_bands:
+        n_valid = {b: count_valid_band_epochs(data, b) for b in bands}
+        empty_bands = [b for b in bands if n_valid[b] == 0]
+        bands = [b for b in bands if n_valid[b] > 0]
+        dropped_bands = dropped_bands + empty_bands
+        if verbose and empty_bands:
+            logging.info(
+                f"Excluding bands without valid epochs {empty_bands} for object {data['object_id']}"
+            )
+        n_bands_with_points = sum(
+            n_valid[b] >= DROP_EMPTY_BANDS_MIN_POINTS_PER_BAND for b in bands
+        )
+        if (
+            len(bands) < DROP_EMPTY_BANDS_MIN_BANDS
+            or n_bands_with_points < DROP_EMPTY_BANDS_MIN_BANDS
+        ):
+            raise ValueError(
+                f"--drop_empty_bands: object {data['object_id']} keeps bands {bands} "
+                f"with valid epoch counts {[n_valid[b] for b in bands]} after dropping "
+                f"{dropped_bands}; at least {DROP_EMPTY_BANDS_MIN_BANDS} bands with "
+                f"{DROP_EMPTY_BANDS_MIN_POINTS_PER_BAND} or more valid epochs each are "
+                "needed to constrain the wavelength exponent eta_sigma."
+            )
     surveys = data.get("surveys", {})
     survey_names = tuple(data.get("survey_names", LC_SURVEY_NAMES))
     seeing_by_band = data.get("psf_fwhm_arcsec", {})
@@ -3921,6 +3972,11 @@ def make_lc(
         "number_points": data["number_points"],
     }
     out.update(compute_variability_metrics_for_cleaned_lc(out))
+    if drop_empty_bands:
+        # One comma-separated string, so the flat HDF5 writer stores a single
+        # column regardless of how many bands were dropped.
+        out["drop_empty_bands"] = True
+        out["dropped_empty_bands"] = ",".join(empty_bands)
 
     if inject_fake:
         out["log_tau_fake"] = float(np.log(10 ** float(log_tau0_rf) * (1 + data["z"])))
@@ -5565,6 +5621,27 @@ def main():
         default=False,
         help="Drop bands blueward of Ly-alpha instead of keeping them with smooth attenuation.",
     )
+    parser.add_argument(
+        "--drop_empty_bands",
+        action="store_true",
+        default=False,
+        help=(
+            "Drop from an object's fit every band with no valid epoch after "
+            "loading and filtering (for example u for a light curve without "
+            "SDSS epochs), in the same way as z, and record them in "
+            "dropped_empty_bands. The object fails unless at least "
+            f"{DROP_EMPTY_BANDS_MIN_BANDS} bands with "
+            f"{DROP_EMPTY_BANDS_MIN_POINTS_PER_BAND}+ valid epochs remain. "
+            "Default off: a band with no data stops the fit as before. "
+            "Caution: the pivot lambda_center_rf is the geometric mean of the "
+            "kept bands' rest wavelengths, and log_sigma_uv is the pivot "
+            "amplitude moved to 2500 A with the fitted eta_sigma. Dropping u "
+            "moves the pivot redward, which lengthens the lever arm of that "
+            "conversion and gives the eta_sigma prior more weight, so 2500 A "
+            "amplitudes from fits with different band sets are not on the "
+            "same footing."
+        ),
+    )
     parser.add_argument("--load_nearby_lc_csv", type=str, default=None, help="CSV listing nearby LCs to load.")
     parser.add_argument("--tau_fast_truncated", action="store_true", default=False, help="Truncated prior for tau_fast0.")
     parser.add_argument("--n_blr_terms", type=int, choices=(1, 2), default=1, help="Number of BLR lag terms to fit.")
@@ -5868,6 +5945,7 @@ def main():
                 alpha_sigma=alpha_sigma,
                 beta_tau=beta_tau,
                 drop_band_lyman_alpha=args.drop_band_lyman_alpha,
+                drop_empty_bands=args.drop_empty_bands,
             )
             if lc is None:
                 continue
