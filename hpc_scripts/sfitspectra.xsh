@@ -513,10 +513,20 @@ parser.add_argument(
     default=None,
     help=(
         "Long-form SED photometry table for fit_spectra_jaxsedfit_joint.py "
-        f"(default from the settings block: {sed_photometry_path}). Checked "
-        "before submission: every submitted object needs usable non-SDSS rows. "
-        "With --resume (without --resume-only) the resumed run must have used "
-        "the same file content."
+        f"(default from the settings block: {sed_photometry_path}). Before "
+        "submission, objects without usable non-SDSS rows are reported (see "
+        "--require-sed-photometry). With --resume (without --resume-only) the "
+        "resumed run must have used the same file content."
+    ),
+)
+parser.add_argument(
+    "--require-sed-photometry",
+    action="store_true",
+    help=(
+        "Refuse to submit when any submitted object has no usable non-SDSS row "
+        "in the photometry table (--sed-photometry-path or the default); the "
+        "fitter would fit such objects on the light-curve ugriz alone. Without "
+        "it, --sed-photometry-path only warns and lists them."
     ),
 )
 parser.add_argument(
@@ -643,6 +653,7 @@ fresh_run_options = (
     "--sdss-spectrum-selection-path",
     "--cache-dir",
     "--sed-photometry-path",
+    "--require-sed-photometry",
     "--nuts-warmup",
     "--nuts-samples",
     "--nuts-chains",
@@ -723,6 +734,8 @@ elif any(value is not None for value in sub_lyman_options.values()):
 def import_fitter(option):
     """Import the fitter modules for a pre-submission check (they load JAX)."""
     saved_environ = dict(os.environ)
+    # fit_spectra sizes its JAX host devices from NUM_CORES at import.
+    os.environ["NUM_CORES"] = "1"
     try:
         from qvc.spectra import fit_spectra as legacy_fitter
         from qvc.spectra import fit_spectra_jaxsedfit_joint as joint_fitter
@@ -732,7 +745,8 @@ def import_fitter(option):
             f"cannot import ({exc}); run the launcher from the fitter's environment"
         )
     finally:
-        # fit_spectra sets XLA/JAX variables at import; keep them out of sbatch.
+        # fit_spectra sets XLA/JAX variables at import; keep them (and the
+        # NUM_CORES set above) out of the sbatch environment.
         os.environ.clear()
         os.environ.update(saved_environ)
     return legacy_fitter, joint_fitter
@@ -784,6 +798,13 @@ if cli_args.sed_photometry_path is not None:
         parser.error(f"--sed-photometry-path contains whitespace or shell characters: {photometry_file}")
     sed_photometry_path = str(photometry_file)
     sed_photometry_sha256 = file_sha256(photometry_file)
+if cli_args.require_sed_photometry and fit_script != "fit_spectra_jaxsedfit_joint.py":
+    parser.error("--require-sed-photometry is supported only with fit_spectra_jaxsedfit_joint.py")
+if cli_args.require_sed_photometry and cli_args.resume_only:
+    parser.error(
+        "--require-sed-photometry has no effect with --resume-only, which uses the "
+        "photometry stored in the bundles"
+    )
 if resume_run_name and fit_script != "fit_spectra_jaxsedfit_joint.py":
     parser.error("--resume is supported only with fit_spectra_jaxsedfit_joint.py")
 if resume_run_name:
@@ -933,8 +954,16 @@ if resume_dir:
         ):
             resumed_photometry = resumed_inputs.get("sed_photometry_path")
             if not resumed_photometry_sha256 and resumed_photometry:
+                # The record predates the hash: only the file as it is now can
+                # be compared, not the content the resumed run used.
                 resumed_file = repo_relative_path(resumed_photometry)
                 resumed_photometry_sha256 = file_sha256(resumed_file) if resumed_file.is_file() else None
+                print(
+                    f"Warning: the submission record of --resume {resume_run_name} has no "
+                    f"SED photometry hash, so the photometry content that run used cannot "
+                    f"be verified; {resumed_photometry} is compared only as it is now.",
+                    file=sys.stderr,
+                )
             current_photometry_sha256 = sed_photometry_sha256 or file_sha256(
                 repo_relative_path(sed_photometry_path)
             )
@@ -1091,13 +1120,22 @@ print(f"Number of array tasks: {num_tasks}")
 
 # A joint fit of an object without rows in the photometry table does not fail:
 # it silently runs on the light-curve ugriz only (the table's *_sdss rows are
-# replaced by those), so require usable non-SDSS rows for every object.
-if cli_args.sed_photometry_path is not None and not cli_args.resume_only:
-    legacy_fitter, joint_fitter = import_fitter("--sed-photometry-path")
+# replaced by those). Report such objects; refuse with --require-sed-photometry.
+unphotometered_ids = None
+unphotometered_ids_file = None
+if (
+    cli_args.sed_photometry_path is not None or cli_args.require_sed_photometry
+) and not cli_args.resume_only:
+    photometry_option = (
+        "--require-sed-photometry"
+        if cli_args.sed_photometry_path is None
+        else "--sed-photometry-path"
+    )
+    legacy_fitter, joint_fitter = import_fitter(photometry_option)
     try:
-        photometry = joint_fitter.load_saved_sed_photometry(sed_photometry_path)
+        photometry = joint_fitter.load_saved_sed_photometry(repo_relative_path(sed_photometry_path))
     except Exception as exc:
-        parser.error(f"--sed-photometry-path is rejected by the fitter: {exc}")
+        parser.error(f"SED photometry {sed_photometry_path} is rejected by the fitter: {exc}")
     sdss_filters = {f"{band}_sdss" for band in legacy_fitter.SDSS_BANDS}
     photometry_ids = set(
         photometry.loc[~photometry["filter_name"].isin(sdss_filters), "source_id"]
@@ -1106,11 +1144,23 @@ if cli_args.sed_photometry_path is not None and not cli_args.resume_only:
     for obj in submit_object_ids:
         if obj not in photometry_ids:
             unphotometered_ids.append(obj)
-    if unphotometered_ids:
+    if unphotometered_ids and cli_args.require_sed_photometry:
         parser.error(
-            f"--sed-photometry-path {sed_photometry_path} has no usable non-SDSS "
-            f"photometry for {len(unphotometered_ids)} submitted object ID(s): "
-            f"{unphotometered_ids[:50]}"
+            f"SED photometry {sed_photometry_path} has no usable non-SDSS "
+            f"photometry for {len(unphotometered_ids)} submitted object ID(s), "
+            f"e.g. {unphotometered_ids[:50]} (--require-sed-photometry)"
+        )
+    if unphotometered_ids:
+        unphotometered_ids_file = (
+            f"hpc_scripts/submit/jaxqsofit/{prefix}_objects_without_sed_photometry.txt"
+        )
+        print(
+            f"WARNING: {len(unphotometered_ids)} of {len(submit_object_ids)} submitted "
+            f"object(s) have no usable non-SDSS photometry in {sed_photometry_path}; "
+            "the fitter fits them on the light-curve ugriz alone. List: "
+            f"{unphotometered_ids_file} (e.g. {unphotometered_ids[:20]}). Pass "
+            "--require-sed-photometry to refuse instead.",
+            file=sys.stderr,
         )
 
 # ==========================================
@@ -1126,6 +1176,8 @@ existing_run_paths = [
 ]
 if sdss_spectrum_selection_frozen_path:
     existing_run_paths.append(Path(sdss_spectrum_selection_frozen_path))
+if unphotometered_ids_file:
+    existing_run_paths.append(REPO_ROOT / unphotometered_ids_file)
 already_exist = [str(path) for path in existing_run_paths if path.exists()]
 if already_exist:
     raise FileExistsError(
@@ -1152,6 +1204,11 @@ if sdss_spectrum_selection_frozen_path:
     frozen_selection.write_bytes(sdss_spectrum_selection_bytes)
     frozen_selection.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
     print(f"Froze SDSS spectrum selection: {frozen_selection}")
+if unphotometered_ids_file:
+    with open(unphotometered_ids_file, "w", encoding="utf-8") as f:
+        for obj_id in unphotometered_ids:
+            f.write(f"{obj_id}\n")
+    print(f"Wrote objects without SED photometry: {unphotometered_ids_file}")
 
 # ==========================================
 # 6. Generate the SLURM bash script
@@ -1181,6 +1238,15 @@ submission = submission_record(
             "sdss_spectrum_selection_sha256": sdss_spectrum_selection_sha256,
             "sdss_spectrum_selection_frozen_path": sdss_spectrum_selection_frozen_path,
         },
+        "sed_photometry_check": (
+            None
+            if unphotometered_ids is None
+            else {
+                "required": cli_args.require_sed_photometry,
+                "objects_without_photometry": len(unphotometered_ids),
+                "objects_without_photometry_file": unphotometered_ids_file,
+            }
+        ),
         "outputs": {"output_dir": output_dir, "fig_dir": fig_dir},
         "resume": {"directory": resume_dir, "run_name": resume_run_name, "only": cli_args.resume_only},
         "resources": {
