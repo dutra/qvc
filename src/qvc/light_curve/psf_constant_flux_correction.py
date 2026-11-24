@@ -155,6 +155,39 @@ def get_bandpass_agn_fraction(
     return np.nan, np.nan, None
 
 
+def reference_total_flux_from_band(mags, magerrs, *, reference_stat: str = "mean") -> float:
+    """Return the reference total relative flux of one band's supplied epochs.
+
+    This is the flux the constant contaminant is scaled from: the
+    inverse-variance-weighted mean (``mean``) or the median of
+    ``10**(-0.4 * mag)`` over the epochs with finite magnitude and error,
+    pooled over surveys and taken before any cross-survey offset (offsets are
+    fitted later in the model). NaN when no epoch is usable.
+    """
+
+    mags = np.asarray(mags, dtype=float)
+    magerrs = np.asarray(magerrs, dtype=float)
+    finite = np.isfinite(mags) & np.isfinite(magerrs)
+    if np.sum(finite) == 0:
+        return np.nan
+    total_flux = mag_to_relative_flux(mags[finite])
+    total_flux_err = magerr_to_relative_fluxerr(mags[finite], magerrs[finite])
+    if reference_stat == "mean":
+        reference_valid = (
+            np.isfinite(total_flux)
+            & np.isfinite(total_flux_err)
+            & (total_flux_err > 0.0)
+        )
+        if np.any(reference_valid):
+            reference_weights = 1.0 / np.square(total_flux_err[reference_valid])
+            return float(
+                np.sum(reference_weights * total_flux[reference_valid])
+                / np.sum(reference_weights)
+            )
+        return np.nan
+    return float(np.nanmedian(total_flux))
+
+
 def subtract_constant_flux_from_band(
     mags,
     magerrs,
@@ -162,12 +195,17 @@ def subtract_constant_flux_from_band(
     agn_fraction_err=0.0,
     *,
     reference_stat: str = "mean",
+    reference_total_flux: float | None = None,
 ):
     """Return a variable-AGN magnitude light curve from total PSF magnitudes.
 
     ``agn_fraction_err`` is retained in the summary as a shared systematic
     uncertainty. It is intentionally not added to the independent per-epoch
     photometric errors.
+
+    ``reference_total_flux`` replaces the reference computed from the
+    supplied epochs (``reference_total_flux_from_band``) by a fixed value,
+    for example the all-epoch mean when only a subset of epochs is fitted.
     """
 
     mags = np.asarray(mags, dtype=float)
@@ -194,22 +232,12 @@ def subtract_constant_flux_from_band(
     total_flux = mag_to_relative_flux(mags[finite])
     total_flux_err = magerr_to_relative_fluxerr(mags[finite], magerrs[finite])
 
-    if reference_stat == "mean":
-        reference_valid = (
-            np.isfinite(total_flux)
-            & np.isfinite(total_flux_err)
-            & (total_flux_err > 0.0)
+    if reference_total_flux is None:
+        reference_total_flux = reference_total_flux_from_band(
+            mags, magerrs, reference_stat=reference_stat
         )
-        if np.any(reference_valid):
-            reference_weights = 1.0 / np.square(total_flux_err[reference_valid])
-            reference_total_flux = float(
-                np.sum(reference_weights * total_flux[reference_valid])
-                / np.sum(reference_weights)
-            )
-        else:
-            reference_total_flux = np.nan
     else:
-        reference_total_flux = float(np.nanmedian(total_flux))
+        reference_total_flux = float(reference_total_flux)
     if (not np.isfinite(reference_total_flux)) or reference_total_flux <= 0.0:
         return corrected_mags, corrected_magerrs, summary
 
@@ -248,8 +276,18 @@ def apply_constant_flux_correction_to_object(
     bands: Iterable[str] | None = None,
     reference_stat: str = "mean",
     fraction: str = DEFAULT_PSF_FRACTION,
+    reference_fluxes: Mapping[str, float] | None = None,
 ):
-    """Return a corrected light-curve object plus a correction summary."""
+    """Return a corrected light-curve object plus a correction summary.
+
+    With ``reference_fluxes`` (band -> reference total relative flux, from
+    ``load_constant_flux_reference_table``) each band's constant contaminant
+    is scaled from that fixed value instead of from the supplied epochs. A
+    band with epochs whose reference is missing, non-finite or not positive
+    is left uncorrected and listed in
+    ``psf_constant_flux_reference_invalid_bands``; the fitter fails the
+    object if such a band is kept in the fit.
+    """
 
     corrected_obj = dict(obj)
     corrected_obj["times"] = {
@@ -272,6 +310,7 @@ def apply_constant_flux_correction_to_object(
     n_corrected_bands = 0
     n_missing_fraction_bands = 0
     total_nonpositive = 0
+    invalid_reference_bands = []
 
     for band in bands:
         if band not in corrected_obj["mags"] or band not in lambda_pivot:
@@ -284,16 +323,29 @@ def apply_constant_flux_correction_to_object(
         if not np.isfinite(agn_fraction):
             n_missing_fraction_bands += 1
             continue
+        fixed_reference = None
+        if reference_fluxes is not None:
+            has_epochs = np.any(
+                np.isfinite(np.asarray(corrected_obj["mags"][band], dtype=float))
+                & np.isfinite(np.asarray(corrected_obj["magerrs"][band], dtype=float))
+            )
+            fixed_reference = float(reference_fluxes.get(str(band), np.nan))
+            if has_epochs and not (np.isfinite(fixed_reference) and fixed_reference > 0.0):
+                invalid_reference_bands.append(str(band))
+                continue
         mags_new, magerrs_new, summary = subtract_constant_flux_from_band(
             corrected_obj["mags"][band],
             corrected_obj["magerrs"][band],
             agn_fraction,
             agn_fraction_err=agn_fraction_err,
             reference_stat=reference_stat,
+            reference_total_flux=fixed_reference,
         )
         corrected_obj["mags"][band] = mags_new
         corrected_obj["magerrs"][band] = magerrs_new
         summary["source_key"] = source_key
+        if reference_fluxes is not None:
+            summary["reference_source"] = "table"
         band_summaries[str(band)] = summary
         n_corrected_bands += 1
         total_nonpositive += int(summary["n_nonpositive_after_subtraction"])
@@ -309,6 +361,10 @@ def apply_constant_flux_correction_to_object(
     corrected_obj["psf_constant_flux_n_bands_corrected"] = int(n_corrected_bands)
     corrected_obj["psf_constant_flux_corrected"] = bool(n_corrected_bands > 0)
     corrected_obj["psf_constant_flux_band_summaries"] = band_summaries
+    if reference_fluxes is not None:
+        corrected_obj["psf_constant_flux_reference_invalid_bands"] = ",".join(
+            invalid_reference_bands
+        )
 
     object_summary = {
         "object_id": normalize_object_id(obj.get("object_id")),
@@ -326,8 +382,15 @@ def apply_constant_flux_correction_to_objects(
     progress_bar: bool = False,
     reference_stat: str = "mean",
     fraction: str = DEFAULT_PSF_FRACTION,
+    reference_table: Mapping[str, Mapping[str, float]] | None = None,
 ):
-    """Apply spectra-informed constant-flux subtraction to a list of objects."""
+    """Apply spectra-informed constant-flux subtraction to a list of objects.
+
+    ``reference_table`` (object id -> band -> reference flux) fixes each
+    band's reference flux; an object missing from it is left uncorrected and
+    marked with ``psf_constant_flux_reference_error`` so that the fitter
+    fails that object (see ``validate_constant_flux_reference``).
+    """
 
     spectra_rows = load_spectra_psf_fractions(spectra_fit_h5s, fraction=fraction)
     corrected_objs = []
@@ -360,10 +423,21 @@ def apply_constant_flux_correction_to_objects(
 
         merged = dict(obj)
         merged.update(spectra_row)
+        reference_fluxes = None
+        if reference_table is not None:
+            reference_fluxes = reference_table.get(oid)
+            if reference_fluxes is None:
+                merged["psf_constant_flux_reference_error"] = (
+                    f"object_id {oid} is missing from the constant-flux reference table."
+                )
+                corrected_objs.append(merged)
+                summary["n_objects_with_spectra"] += 1
+                continue
         corrected_obj, object_summary = apply_constant_flux_correction_to_object(
             merged,
             reference_stat=reference_stat,
             fraction=fraction,
+            reference_fluxes=reference_fluxes,
         )
         corrected_objs.append(corrected_obj)
         summary["n_objects_with_spectra"] += 1
@@ -396,7 +470,9 @@ def apply_constant_flux_correction_to_objects(
                     stats["agn_fractions"].append(float(band_summary["agn_fraction"]))
                 if np.isfinite(band_summary["median_delta_mag"]):
                     stats["abs_delta_mags"].append(float(abs(band_summary["median_delta_mag"])))
-        else:
+        elif not corrected_obj.get("psf_constant_flux_reference_invalid_bands"):
+            # With a reference table, bands left uncorrected for lack of a
+            # valid reference fail this object later in the fitter instead.
             zero_corrected_object_ids.append(oid)
 
     if agn_fractions:
@@ -428,6 +504,64 @@ def apply_constant_flux_correction_to_objects(
         raise ValueError(" ".join(msg_parts))
 
     return corrected_objs, summary
+
+
+CONSTANT_FLUX_REFERENCE_COLUMNS = ("object_id", "band", "reference_total_flux")
+
+
+def load_constant_flux_reference_table(path) -> dict[str, dict[str, float]]:
+    """Read a fixed constant-flux reference table (CSV) into object -> band -> flux.
+
+    Required columns: ``object_id``, ``band`` and ``reference_total_flux``,
+    the total relative flux ``10**(-0.4 * mag)`` the constant contaminant is
+    scaled from, pooled over surveys (see ``reference_total_flux_from_band``).
+    Values are checked when used, per object and kept band.
+    """
+
+    import pandas as pd
+
+    frame = pd.read_csv(
+        path, dtype={"object_id": str, "band": str}, float_precision="round_trip"
+    )
+    missing = [c for c in CONSTANT_FLUX_REFERENCE_COLUMNS if c not in frame.columns]
+    if missing:
+        raise ValueError(
+            f"Constant-flux reference table {path} is missing required column(s) {missing}."
+        )
+    frame["object_id"] = frame["object_id"].map(normalize_object_id)
+    frame["band"] = frame["band"].map(lambda value: str(value).strip())
+    duplicated = frame.duplicated(["object_id", "band"], keep=False)
+    if duplicated.any():
+        pairs = frame.loc[duplicated, ["object_id", "band"]].drop_duplicates()
+        raise ValueError(
+            f"Constant-flux reference table {path} has duplicate (object_id, band) rows: "
+            + ", ".join(f"{o}/{b}" for o, b in pairs.itertuples(index=False))
+        )
+    table: dict[str, dict[str, float]] = {}
+    values = pd.to_numeric(frame["reference_total_flux"], errors="coerce")
+    for object_id, band, value in zip(frame["object_id"], frame["band"], values):
+        table.setdefault(object_id, {})[band] = float(value)
+    return table
+
+
+def validate_constant_flux_reference(obj: Mapping[str, object], bands: Iterable[str]) -> None:
+    """Raise ValueError when a fitted band of ``obj`` had no usable fixed reference."""
+
+    error = obj.get("psf_constant_flux_reference_error")
+    if error:
+        raise ValueError(f"--constant_flux_reference_path: {error}")
+    invalid = [
+        band
+        for band in str(obj.get("psf_constant_flux_reference_invalid_bands", "")).split(",")
+        if band
+    ]
+    kept_invalid = [band for band in bands if band in invalid]
+    if kept_invalid:
+        raise ValueError(
+            "--constant_flux_reference_path: object_id "
+            f"{normalize_object_id(obj.get('object_id'))} has no finite positive "
+            f"reference_total_flux for fitted band(s) {kept_invalid}."
+        )
 
 
 def attach_spectra_psf_fractions_to_objects(
