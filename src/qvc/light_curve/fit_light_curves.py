@@ -111,7 +111,7 @@ from qvc.light_curve.fraction_marginalization import (
     scale_variable_relflux_amplitudes,
     select_fraction_draws_for_bands,
 )
-from qvc.provenance import build_run_record
+from qvc.provenance import build_run_record, fingerprint_path
 from qvc.light_curve.multiband_model_dho_blr_erlang_drw import (
     make_multiband_dho_blr_flux_linearized_erlang_drw_model,
 )
@@ -120,7 +120,9 @@ from qvc.light_curve.psf_constant_flux_correction import (
     PSF_FRACTION_PREFIXES,
     apply_constant_flux_correction_to_objects,
     attach_spectra_psf_fractions_to_objects,
+    load_constant_flux_reference_table,
     print_constant_flux_correction_summary,
+    validate_constant_flux_reference,
 )
 from qvc.light_curve.variability_metrics import compute_variability_metrics_for_cleaned_lc
 
@@ -5776,6 +5778,25 @@ def main():
             "requires --psf-fraction-mode median."
         ),
     )
+    parser.add_argument(
+        "--constant_flux_reference_path",
+        type=str,
+        default=None,
+        help=(
+            "CSV with columns object_id, band, reference_total_flux giving, per "
+            "object and band, the total relative flux 10^(-0.4 mag) that the "
+            "constant flux removed by --subtract_psf_constant_flux is scaled "
+            "from, in place of the mean of the epochs being fitted (pooled over "
+            "surveys, before cross-survey offsets). Build it from the full light "
+            "curves with python -m qvc.light_curve.build_constant_flux_reference "
+            "to fit epoch subsets with the full-light-curve subtraction; a table "
+            "built from the full light curve reproduces the default fit of the "
+            "full light curve. An object fails if it, or a fitted band with "
+            "epochs, has no finite positive value. Requires "
+            "--subtract_psf_constant_flux and --psf-fraction-mode median. "
+            "Default: off (reference from the supplied epochs)."
+        ),
+    )
     args = parser.parse_args()
     try:
         apply_only_light_curve_plot_policy(args)
@@ -5786,6 +5807,13 @@ def main():
         or args.outlier_half_window_days <= 0
     ):
         parser.error("--outlier_half_window_days must be positive")
+    if args.constant_flux_reference_path is not None and (
+        not args.subtract_psf_constant_flux or args.psf_fraction_mode != "median"
+    ):
+        parser.error(
+            "--constant_flux_reference_path requires --subtract_psf_constant_flux "
+            "and --psf-fraction-mode median."
+        )
     args = apply_resume_sample_save_policy(args)
     print("Args:", args)
 
@@ -5820,6 +5848,21 @@ def main():
         )
         print(f"After restframe cut, {len(objs)} objects remain.")
 
+    constant_flux_reference_table = None
+    constant_flux_reference_sha256 = None
+    if args.constant_flux_reference_path is not None:
+        constant_flux_reference_table = load_constant_flux_reference_table(
+            args.constant_flux_reference_path
+        )
+        constant_flux_reference_sha256 = fingerprint_path(
+            args.constant_flux_reference_path
+        ).get("sha256")
+        print(
+            f"Constant-flux reference fluxes from {args.constant_flux_reference_path} "
+            f"(sha256 {constant_flux_reference_sha256}, "
+            f"{len(constant_flux_reference_table)} objects)."
+        )
+
     if args.subtract_psf_constant_flux:
         if not args.spectra_fit_h5:
             raise ValueError("--subtract_psf_constant_flux requires --spectra_fit_h5.")
@@ -5834,6 +5877,7 @@ def main():
                 spectra_fit_h5s=args.spectra_fit_h5,
                 progress_bar=args.progress,
                 fraction=args.psf_fraction,
+                reference_table=constant_flux_reference_table,
             )
             print_constant_flux_correction_summary(correction_summary)
         else:
@@ -5953,6 +5997,17 @@ def main():
             obj |= lc
 
             bands = obj["bands"]
+            if constant_flux_reference_table is not None:
+                validate_constant_flux_reference(obj, bands)
+                obj["constant_flux_reference_path"] = str(args.constant_flux_reference_path)
+                obj["constant_flux_reference_sha256"] = constant_flux_reference_sha256 or ""
+                for band in bands:
+                    summary = obj["psf_constant_flux_band_summaries"].get(band, {})
+                    print(
+                        f"[{oid}] constant-flux reference {band}: "
+                        f"reference_total_flux={summary.get('reference_total_flux', np.nan)} "
+                        f"constant_contaminant_flux={summary.get('constant_contaminant_flux', np.nan)}"
+                    )
             lam_rf = jnp.array([lambda_pivot[b] for b in bands], dtype=float) / (1.0 + float(obj["z"]))
             lam_lya_rf = compute_lam_lya_suppression_rf(bands, obj["z"])
             lambda_center_rf = compute_lambda_center_rf(lam_rf)
@@ -6519,6 +6574,8 @@ def main():
     }
     for index, path in enumerate(args.spectra_fit_h5 or []):
         provenance_inputs[f"spectra_fit_h5_{index}"] = path
+    if args.constant_flux_reference_path is not None:
+        provenance_inputs["constant_flux_reference_path"] = args.constant_flux_reference_path
     provenance_object_id = (
         str(results[0]["object_id"])
         if len(results) == 1 and "object_id" in results[0]
