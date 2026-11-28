@@ -342,6 +342,25 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--fit-method",
+    choices=("optax", "nuts", "optax+nuts"),
+    default=None,
+    help="Joint backend only: passed to the fitter as --fit-method (default: the fitter's own default).",
+)
+parser.add_argument(
+    "--feii-template",
+    default=None,
+    help="Joint backend only: passed to the fitter as --feii-template (default: the fitter's own default).",
+)
+parser.add_argument("--time-limit", default=None, help="SLURM time limit (default: the value set in this script).")
+parser.add_argument("--mem", default=None, help="SLURM memory request (default: the value set in this script).")
+parser.add_argument("--chunk-size", type=int, default=None, help="Objects per array task (default: the value set in this script).")
+parser.add_argument(
+    "--pythonpath",
+    default=None,
+    help="Colon-separated source directories put first on PYTHONPATH in the job (default: none).",
+)
+parser.add_argument(
     "--resume",
     metavar="OLD_RUN_NAME",
     default="",
@@ -374,6 +393,12 @@ fresh_run_options = (
     "--fit-bal",
     "--resume",
     "--resume-only",
+    "--fit-method",
+    "--feii-template",
+    "--time-limit",
+    "--mem",
+    "--chunk-size",
+    "--pythonpath",
 )
 fresh_run_option_was_explicit = any(
     arg == option or arg.startswith(f"{option}=")
@@ -395,6 +420,25 @@ if cli_args.description is None:
     parser.error("--description is required for fresh runs")
 
 fit_script = cli_args.fit_script
+if cli_args.time_limit:
+    time_limit = cli_args.time_limit
+if cli_args.mem:
+    mem = cli_args.mem
+if cli_args.chunk_size:
+    chunk_size = cli_args.chunk_size
+if (cli_args.fit_method or cli_args.feii_template) and fit_script != "fit_spectra_jaxsedfit_joint.py":
+    parser.error("--fit-method and --feii-template need the joint backend")
+extra_fit_args = []
+if cli_args.fit_method:
+    extra_fit_args += ["--fit-method", cli_args.fit_method]
+if cli_args.feii_template:
+    extra_fit_args += ["--feii-template", cli_args.feii_template]
+job_pythonpath = (cli_args.pythonpath or "").strip()
+extra_fit_args_text = " ".join(extra_fit_args)
+pythonpath_lines = (
+    'export PYTHONPATH="' + job_pythonpath + '${PYTHONPATH:+:${PYTHONPATH}}"\nexport PYTHONNOUSERSITE=1'
+    if job_pythonpath else ""
+)
 resume_run_name = cli_args.resume.strip()
 if cli_args.resume_only and not resume_run_name:
     parser.error("--resume-only requires --resume")
@@ -658,6 +702,8 @@ export CACHE_DIR="{cache_dir}"
 export FIG_DIR="{fig_dir}"
 export RESUME_DIR="{resume_dir}"
 export RESUME_RUN_NAME="{resume_run_name}"
+export EXTRA_FIT_ARGS="{extra_fit_args_text}"
+{pythonpath_lines}
 export {PROVENANCE_ENV}="{encoded_submission}"
 
 export TASK_ID="${{SLURM_ARRAY_TASK_ID:-0}}"
@@ -686,6 +732,8 @@ echo "FIG_DIR=$FIG_DIR"
 echo "RESUME_DIR=$RESUME_DIR"
 echo "RESUME_RUN_NAME=$RESUME_RUN_NAME"
 echo "PYTHON_BIN=$PYTHON_BIN"
+echo "EXTRA_FIT_ARGS=$EXTRA_FIT_ARGS"
+echo "PYTHONPATH=${{PYTHONPATH:-}}"
 
 "$PYTHON_BIN" - <<'PY'
 import os
@@ -756,6 +804,7 @@ if fit_script == "fit_spectra.py":
 elif fit_script == "fit_spectra_jaxsedfit_joint.py":
     cmd.extend([
         "--sed-photometry-path", sed_photometry_path,
+        *os.environ.get("EXTRA_FIT_ARGS", "").split(),
         "--progress",
         #"--no-catalog-progress",
     ])
