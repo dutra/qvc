@@ -428,9 +428,6 @@ if cli_args.chunk_size:
     chunk_size = cli_args.chunk_size
 if (cli_args.fit_method or cli_args.feii_template) and fit_script != "fit_spectra_jaxsedfit_joint.py":
     parser.error("--fit-method and --feii-template need the joint backend")
-if cli_args.feii_template and cli_args.resume.strip():
-    # a resume reuses each saved fit's own template; mixing templates in one catalog is not detected downstream
-    parser.error("--feii-template cannot be combined with --resume")
 extra_fit_args = []
 if cli_args.fit_method:
     extra_fit_args += ["--fit-method", cli_args.fit_method]

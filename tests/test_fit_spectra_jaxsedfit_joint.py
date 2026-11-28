@@ -2893,3 +2893,27 @@ def test_run_fit_output_write_errors_remain_fatal(monkeypatch, tmp_path):
     monkeypatch.setattr(joint, 'write_joint_fit_results_hdf5', fail_write)
     with pytest.raises(OSError, match='disk full'):
         joint.run_fit(args)
+
+
+def test_resume_refuses_a_different_feii_template():
+    from types import SimpleNamespace
+
+    import pytest
+
+    from qvc.spectra import fit_spectra_jaxsedfit_joint as joint
+
+    def fitter(name):
+        return SimpleNamespace(config=SimpleNamespace(agn=SimpleNamespace(feii_template=SimpleNamespace(name=name))))
+
+    joint.validate_resume_feii_template_fitter(fitter("BruhweilerVerner08"), "x.h5", SimpleNamespace(feii_template=None))
+    joint.validate_resume_feii_template_fitter(
+        fitter("BruhweilerVerner08+EmpiricalUV"), "x.h5", SimpleNamespace(feii_template="BruhweilerVerner08+EmpiricalUV")
+    )
+    with pytest.raises(joint.IncompatibleFeIITemplateResumeError):
+        joint.validate_resume_feii_template_fitter(
+            fitter("BruhweilerVerner08"), "x.h5", SimpleNamespace(feii_template="BruhweilerVerner08+EmpiricalUV")
+        )
+    with pytest.raises(joint.IncompatibleFeIITemplateResumeError):
+        joint.validate_resume_feii_template_fitter(
+            fitter("BruhweilerVerner08+EmpiricalUV"), "x.h5", SimpleNamespace(feii_template=None)
+        )

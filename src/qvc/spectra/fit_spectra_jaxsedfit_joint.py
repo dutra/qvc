@@ -100,6 +100,25 @@ class IncompatibleBALResumeError(RuntimeError):
     """Raised when a resume bundle disagrees with the active BAL policy."""
 
 
+class IncompatibleFeIITemplateResumeError(RuntimeError):
+    """Raised when a resume bundle was fitted with a different Fe II template."""
+
+
+DEFAULT_FEII_TEMPLATE_NAME = "BruhweilerVerner08"
+
+
+def validate_resume_feii_template_fitter(fitter, path, args):
+    """Require a resume bundle to have the Fe II template requested for this run."""
+    template = getattr(getattr(getattr(fitter, "config", None), "agn", None), "feii_template", None)
+    saved = str(getattr(template, "name", DEFAULT_FEII_TEMPLATE_NAME) or DEFAULT_FEII_TEMPLATE_NAME)
+    expected = str(getattr(args, "feii_template", None) or DEFAULT_FEII_TEMPLATE_NAME)
+    if saved != expected:
+        raise IncompatibleFeIITemplateResumeError(
+            f"Resume bundle {path} was fitted with the Fe II template {saved!r}, "
+            f"but this run uses {expected!r}."
+        )
+
+
 class IncompatibleBalmerContinuumResumeError(RuntimeError):
     """Raised when a resume bundle disagrees with the active BC policy."""
 
@@ -3111,6 +3130,7 @@ def _complete_resumed_fit(rec, args, source_path, fitter):
         args,
         redshift=rec["z"],
     )
+    validate_resume_feii_template_fitter(fitter, source_path, args)
     config = fitter.config
     saved_name = str(config.observation.object_id)
     expected_name = joint_saved_name(rec)
@@ -3293,6 +3313,7 @@ def run_hybrid_fit(rec, args):
         IncompatibleHostCaptureResumeError,
         IncompatibleBALResumeError,
         IncompatibleBalmerContinuumResumeError,
+        IncompatibleFeIITemplateResumeError,
         M2500ReconstructionError,
     ):
         raise
