@@ -3635,12 +3635,13 @@ def parse_args(argv=None):
     parser.add_argument(
         "--feii-template",
         default=None,
-        choices=("BruhweilerVerner08", "BruhweilerVerner08+EmpiricalUV"),
+        choices=("BruhweilerVerner08", "BruhweilerVerner08+EmpiricalUV", "BruhweilerVerner08+EmpiricalUV2200"),
         help=(
             "jaxsedfit Fe II template (default: the library default, BruhweilerVerner08). "
             "BruhweilerVerner08+EmpiricalUV replaces its UV part (< 3300-3500 A) by the "
             "empirical Vestergaard & Wilkes 2001 / Salviander et al. 2007 / Tsuzuki et al. "
-            "2006 template; needs a jaxsedfit with that option."
+            "2006 template; BruhweilerVerner08+EmpiricalUV2200 does so only between 2200 A and "
+            "the hand-over (no Fe II added below 2000 A); both need a jaxsedfit with that option."
         ),
     )
     parser.add_argument("--optax-steps", type=int, default=4000)
