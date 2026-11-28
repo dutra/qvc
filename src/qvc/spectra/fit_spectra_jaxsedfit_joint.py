@@ -1118,6 +1118,7 @@ def build_joint_config(
     """Construct one validated jaxsedfit joint SED+spectrum configuration."""
     from jaxsedfit import (
         AGNConfig,
+        FeIITemplate,
         FilterSet,
         FitConfig,
         GalaxyConfig,
@@ -1221,6 +1222,11 @@ def build_joint_config(
             fit_balmer_continuum=fit_balmer_continuum,
             line_flux_scale_mjy=args.line_flux_scale_mjy,
             custom_components=bal_components,
+            **(
+                {"feii_template": FeIITemplate(name=args.feii_template)}
+                if getattr(args, "feii_template", None)
+                else {}
+            ),
         ),
         likelihood=LikelihoodConfig(
             use_host_capture_model=True,
@@ -3626,6 +3632,17 @@ def parse_args(argv=None):
     parser.add_argument("--spectrum-student-t-df", type=float, default=5.0)
     parser.add_argument("--spectrum-scale-prior-sigma-dex", type=float, default=0.1)
     parser.add_argument("--line-flux-scale-mjy", type=float, default=0.1)
+    parser.add_argument(
+        "--feii-template",
+        default=None,
+        choices=("BruhweilerVerner08", "BruhweilerVerner08+EmpiricalUV"),
+        help=(
+            "jaxsedfit Fe II template (default: the library default, BruhweilerVerner08). "
+            "BruhweilerVerner08+EmpiricalUV replaces its UV part (< 3300-3500 A) by the "
+            "empirical Vestergaard & Wilkes 2001 / Salviander et al. 2007 / Tsuzuki et al. "
+            "2006 template; needs a jaxsedfit with that option."
+        ),
+    )
     parser.add_argument("--optax-steps", type=int, default=4000)
     parser.add_argument("--optax-lr", type=float, default=5e-3)
     parser.add_argument("--nuts-warmup", type=int, default=250)

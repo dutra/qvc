@@ -400,6 +400,21 @@ def test_build_joint_config_uses_current_jaxsedfit_spectral_api(tmp_path):
         aperture_diameter_arcsec=2.0,
     )
     assert config_without_bal.agn.custom_components == ()
+    assert config_without_bal.agn.feii_template.name == "BruhweilerVerner08"
+
+    # Opt-in Fe II template: passed through only when given.
+    args.feii_template = "BruhweilerVerner08+EmpiricalUV"
+    config_empirical_uv, _ = joint.build_joint_config(
+        record,
+        pd.DataFrame(),
+        lam=np.array([3000.0, 4000.0, 5000.0]),
+        flux=np.array([1.0, 1.1, 1.2]),
+        err=np.array([0.1, 0.1, 0.1]),
+        resolving_power=2000.0,
+        args=args,
+        aperture_diameter_arcsec=2.0,
+    )
+    assert config_empirical_uv.agn.feii_template.name == "BruhweilerVerner08+EmpiricalUV"
 
     config_with_invalid_blue_edge, _ = joint.build_joint_config(
         record,
@@ -2038,6 +2053,22 @@ def test_parse_args_bal_is_default_and_no_bal_is_opt_out(tmp_path):
     assert joint.parse_args([*common, "--no-bal"]).fit_bal is False
     # Retain the old opt-in spelling as a hidden compatibility alias.
     assert joint.parse_args([*common, "--fit-bal"]).fit_bal is True
+
+
+def test_parse_args_feii_template_defaults_to_library_default(tmp_path):
+    common = [
+        "--mode", "fit",
+        str(tmp_path / "out.h5"),
+        "--sed-photometry-path", str(tmp_path / "phot.csv"),
+        "--filter_object_id", "1",
+    ]
+    assert joint.parse_args(common).feii_template is None
+    assert (
+        joint.parse_args([*common, "--feii-template", "BruhweilerVerner08+EmpiricalUV"]).feii_template
+        == "BruhweilerVerner08+EmpiricalUV"
+    )
+    with pytest.raises(SystemExit):
+        joint.parse_args([*common, "--feii-template", "unknown"])
 
 
 def test_parse_args_accepts_fit_bal_with_resume(tmp_path):
